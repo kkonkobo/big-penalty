@@ -3,8 +3,6 @@ from pathlib import Path
 
 from jobhunt import desktop
 
-_REAL_CONNECT = socket.socket.connect  # captured before conftest's offline guard replaces it
-
 
 def test_default_data_dir_per_platform(tmp_path):
     assert desktop.default_data_dir("darwin", home=tmp_path, environ={}) == (
@@ -69,12 +67,6 @@ def test_server_serves_ui(tmp_path, monkeypatch):
     from jobhunt import db
 
     monkeypatch.setattr(db, "DB_PATH_OVERRIDE", tmp_path / "t.sqlite3", raising=False)
-
-    def loopback_only(sock, address):
-        assert address[0] == "127.0.0.1", f"unexpected network access to {address}"
-        return _REAL_CONNECT(sock, address)
-
-    monkeypatch.setattr(socket.socket, "connect", loopback_only)
     port = desktop.find_port(0)
     server, thread = desktop.start_server(port)
     try:

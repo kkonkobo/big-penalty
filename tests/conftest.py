@@ -7,6 +7,9 @@ from jobhunt import db
 from jobhunt.config import get_settings
 from jobhunt.models import ContractType, Profile
 
+_REAL_CONNECT = socket.socket.connect
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
@@ -17,7 +20,11 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "firecrawl_api_key", None)
     monkeypatch.setattr(s, "data_dir", tmp_path / "data")
 
-    def offline_connect(*args, **kwargs):
+    def offline_connect(sock, address, *args, **kwargs):
+        # Loopback stays allowed: on Windows, asyncio builds its event-loop wake-up socket pair by connecting
+        # over 127.0.0.1, and the desktop tests talk to a local server. Anything else is real network access.
+        if isinstance(address, tuple) and address and address[0] in _LOOPBACK:
+            return _REAL_CONNECT(sock, address, *args, **kwargs)
         raise AssertionError("Tests must use offline fixtures or mock transports")
 
     monkeypatch.setattr(socket.socket, "connect", offline_connect)
