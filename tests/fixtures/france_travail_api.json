@@ -1,0 +1,22 @@
+{"resultats": [
+ {"id": "123ABCD", "intitule": "Ingénieur systèmes embarqués (H/F)", "description": "Vous concevez des logiciels embarqués temps réel.\nTélétravail partiel possible (2 jours par semaine).",
+  "dateCreation": "2026-11-10T09:12:44.000Z", "dateActualisation": "2026-11-12T08:00:00.000Z",
+  "lieuTravail": {"libelle": "31 - TOULOUSE", "latitude": 43.6, "longitude": 1.44, "codePostal": "31000", "commune": "31555"},
+  "romeCode": "M1805", "romeLibelle": "Études et développement informatique", "appellationlibelle": "Développeur / Développeuse systèmes embarqués",
+  "entreprise": {"nom": "ACME Aéro", "url": "https://www.acme-aero.example"},
+  "typeContrat": "CDI", "typeContratLibelle": "Contrat à durée indéterminée", "natureContrat": "Contrat travail",
+  "experienceLibelle": "Débutant accepté", "experienceExige": "D",
+  "salaire": {"libelle": "Annuel de 40000.0 Euros à 48000.0 Euros sur 12.0 mois"},
+  "alternance": false, "nombrePostes": 1,
+  "contact": {"nom": "RH", "urlPostulation": "https://acme-aero.example/jobs/123"},
+  "origineOffre": {"origine": "1", "urlOrigine": "https://candidat.francetravail.fr/offres/recherche/detail/123ABCD"}},
+ {"id": "124EFGH", "intitule": "Alternance - Technicien mécatronique", "description": "<p>Préparation d'un BTS.</p>",
+  "dateCreation": "2026-11-01T00:00:00.000Z",
+  "lieuTravail": {"libelle": "75 - Paris 15e Arrondissement", "codePostal": "75015"},
+  "entreprise": {"nom": "Robotix"}, "typeContrat": "CDD", "natureContrat": "Contrat apprentissage", "alternance": true,
+  "salaire": {"libelle": "Mensuel de 1200.0 Euros sur 12.0 mois"},
+  "contact": {"courriel": "Pour postuler : rh@robotix.example"},
+  "origineOffre": {"origine": "2", "partenaires": [{"nom": "HELLOWORK", "url": "https://www.hellowork.com/fr-fr/emplois/1.html"}]}},
+ {"id": "125IJKL", "intitule": "Stage ingénieur électronique", "typeContrat": "CDD", "lieuTravail": {"libelle": "69 - Lyon 3e Arrondissement", "codePostal": "69003"},
+  "origineOffre": {"origine": "1"}}
+]}

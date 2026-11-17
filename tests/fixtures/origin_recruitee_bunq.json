@@ -1,0 +1,89 @@
+{
+ "offers": [
+  {
+   "sharing_description": "Be the person who takes bunq to the UK. bunq is building its way into UK banking, and the FCA is watching. We’re applying for an EMI license with a Part 4A permission, while keeping our run-off plan w",
+   "position": 1660,
+   "state_code": "ENG",
+   "created_at": "2026-11-16 14:19:38 UTC",
+   "careers_apply_url": "https://careers.bunq.com/o/senior-compliance-officer/c/new",
+   "guid": "e9vh3",
+   "options_salutation": "off",
+   "updated_at": "2026-11-16 17:25:45 UTC",
+   "locations": [
+    {
+     "id": 39994,
+     "name": "London",
+     "state": "England",
+     "country": "United Kingdom",
+     "city": "London",
+     "translations": {
+      "en": {
+       "name": "London",
+       "city": "London",
+       "postal_code": null,
+       "street": null,
+       "note": null
+      }
+     },
+     "country_code": "GB",
+     "postal_code": null,
+     "state_code": "ENG",
+     "street": null,
+     "note": null
+    }
+   ],
+   "options_cv": "off",
+   "close_at": null,
+   "company_name": "bunq",
+   "experience_code": "experienced",
+   "published_at": "2026-11-16 16:33:49 UTC",
+   "cover_image": null,
+   "sharing_image": null,
+   "dynamic_fields": [],
+   "education_code": "bachelor_degree",
+   "sharing_title": "Senior Compliance Officer",
+   "country": "United Kingdom",
+   "country_code": "GB",
+   "max_hours_per_week": "40",
+   "locations_question_type": "single_choice",
+   "min_hours_per_week": "40",
+   "tags": [],
+   "employment_type_code": "fulltime_permanent",
+   "open_questions": "[{'id': 4507347, 'position': 1, 'options': {}, 'required': True, 'body': 'What country do you currently live in?', 'kind': 'string', 'translations': {'en': {'body': 'What country do you currently live",
+   "translations": "{'en': {'description': '<p><strong>Be the person who takes bunq to the UK.</strong></p><p>bunq is building its way into UK banking, and the FCA is watching. We’re applying for an EMI license with a Pa",
+   "postal_code": null,
+   "mailbox_email": "job.e9vh3@bunq.recruitee.com",
+   "title": "Senior Compliance Officer",
+   "category_code": "banking",
+   "requirements": "<ul><li><p>Fluent in fintech regulation: you’ve answered regulators, filed Form A and written Statements of Responsibilities.</p></li><li><p>A licensing person: you’ve worked on EMI and license applic",
+   "description": "<p><strong>Be the person who takes bunq to the UK.</strong></p><p>bunq is building its way into UK banking, and the FCA is watching. We’re applying for an EMI license with a Part 4A permission, while ",
+   "max_hours": 40,
+   "department": null,
+   "remote": false,
+   "options_title": "off",
+   "location": "London, England, United Kingdom",
+   "locations_question_required": true,
+   "id": 2828933,
+   "location_question_visible": false,
+   "min_hours": 40,
+   "on_site": false,
+   "salary": {
+    "max": null,
+    "min": null,
+    "period": null,
+    "currency": null
+   },
+   "highlight": null,
+   "options_cover_letter": "off",
+   "locations_question": "What is your preferred work location?",
+   "hybrid": true,
+   "options_photo": "off",
+   "slug": "senior-compliance-officer",
+   "options_phone": "required",
+   "status": "published",
+   "careers_url": "https://careers.bunq.com/o/senior-compliance-officer",
+   "state_name": "England",
+   "city": "London"
+  }
+ ]
+}

@@ -1,0 +1,41 @@
+{
+ "total": 1187,
+ "jobPostings": [
+  {
+   "title": "IMS Cloud Engineer",
+   "externalPath": "/job/Jakarta/IMS-Cloud-Engineer_R0297234-1",
+   "locationsText": "Jakarta",
+   "postedOn": "Posted 22 Days Ago",
+   "bulletFields": [
+    "Regular Employee",
+    "R0297234",
+    "16 - IS-IT"
+   ]
+  },
+  {
+   "title": "STAGE - Ingénieur IA et Performance Opérationnelle - F/H",
+   "externalPath": "/job/Cholet/STAGE---STAGE---Ingnieur-IA-et-Performance-Oprationnelle---F-H_R0343373",
+   "locationsText": "Cholet",
+   "postedOn": "Posted 30+ Days Ago",
+   "bulletFields": [
+    "Intern/Trainee (Fixed Term) (Trainee)",
+    "R0343373",
+    "21 - ENGINEERING AND TECHNICAL SPECIALTIES",
+    "Thales SIX GTS France S.A.S."
+   ]
+  },
+  {
+   "title": "STAGE - Projet CDP Stage Ingénieur Développement Logiciel - F/H",
+   "externalPath": "/job/Gennevilliers/STAGE---Projet-CDP-Stage-Ingnieur-Dveloppement-Logiciel---F-H_R0342364",
+   "locationsText": "Gennevilliers",
+   "postedOn": "Posted 30+ Days Ago",
+   "bulletFields": [
+    "Intern/Trainee (Fixed Term) (Trainee)",
+    "R0342364",
+    "16 - IS-IT",
+    "Thales SIX GTS France S.A.S."
+   ]
+  }
+ ],
+ "userAuthenticated": false
+}

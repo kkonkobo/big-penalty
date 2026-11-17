@@ -1,0 +1,49 @@
+{
+ "jobs": [
+  {
+   "id": "40f9c790-bdae-4329-b292-6151862c4b4c",
+   "title": "Freelance Doctor (GP) - Medical Chat & Teleconsultations - Belgium",
+   "department": "Medical Team",
+   "team": "Medical Team",
+   "employmentType": "FullTime",
+   "location": "Anywhere in Belgium",
+   "secondaryLocations": [],
+   "publishedAt": "2026-09-09T13:17:05.420+00:00",
+   "isListed": true,
+   "isRemote": null,
+   "workplaceType": null,
+   "address": {
+    "postalAddress": {
+     "addressCountry": "Belgium"
+    }
+   },
+   "jobUrl": "https://jobs.ashbyhq.com/alan/40f9c790-bdae-4329-b292-6151862c4b4c",
+   "applyUrl": "https://jobs.ashbyhq.com/alan/40f9c790-bdae-4329-b292-6151862c4b4c/application",
+   "descriptionHtml": "<p style=\"min-height:1.5em\">Alan is looking for dedicated GPs in Belgium to help transform Healthcare together! 🌟</p><p style=\"min-height:1.5em\"></p><h1><strong>🐼 Who we are</strong></h1><p style=\"min-height:1.5em\">Alan is not just a health insurance company; we are the health partner, dedicated to ",
+   "descriptionPlain": "Alan is looking for dedicated GPs in Belgium to help transform Healthcare together! 🌟\n\n\n\n\n🐼 WHO WE ARE\n\nAlan is not just a health insurance company; we are the health partner, dedicated to the physical and mental well-being of our members every day. Since our establishment in 2016 in France, we have"
+  },
+  {
+   "id": "d457e0f1-2418-4759-b4ed-e41fdff50bf0",
+   "title": "CTO Founder Associate - internship",
+   "department": "Associates",
+   "team": "Associates",
+   "employmentType": "Intern",
+   "location": "Paris, France",
+   "secondaryLocations": [],
+   "publishedAt": "2026-08-03T08:33:52.099+00:00",
+   "isListed": true,
+   "isRemote": true,
+   "workplaceType": "Hybrid",
+   "address": {
+    "postalAddress": {
+     "addressCountry": "France"
+    }
+   },
+   "jobUrl": "https://jobs.ashbyhq.com/alan/d457e0f1-2418-4759-b4ed-e41fdff50bf0",
+   "applyUrl": "https://jobs.ashbyhq.com/alan/d457e0f1-2418-4759-b4ed-e41fdff50bf0/application",
+   "descriptionHtml": "<h2><strong>Health can’t wait</strong>. </h2><p style=\"min-height:1.5em\">Not for symptoms to get worse. Not for a six‑month appointment. Not for a system to catch up. But that’s exactly how healthcare works today. You wait, until you can’t.</p><p style=\"min-height:1.5em\">Alan exists to end the wait.",
+   "descriptionPlain": "HEALTH CAN’T WAIT. \n\nNot for symptoms to get worse. Not for a six‑month appointment. Not for a system to catch up. But that’s exactly how healthcare works today. You wait, until you can’t.\n\nAlan exists to end the wait.\n\nHealth is a universal right, and we believe this right can only become real when"
+  }
+ ],
+ "apiVersion": "1"
+}

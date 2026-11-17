@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Présélection · {{ profile.name }}{% endblock %}
+{% block content %}
+<div class="row between">
+  <h1>Présélection — <a href="/profiles/{{ profile.id }}">{{ profile.name }}</a></h1>
+  <span class="muted">{% for k, v in counts.items() %}{{ STATUS_LABELS.get(k,k) }} : {{ v }} · {% endfor %}</span>
+</div>
+
+<form class="filters" method="get" hx-get="/profiles/{{ profile.id }}/shortlist" hx-target="#results" hx-select="#results"
+      hx-push-url="true" hx-trigger="change, submit">
+  <label>Score min <input type="number" name="min_score" min="0" max="100" value="{{ f.min_score|int if f.min_score is not none else '' }}" style="width:5em"></label>
+  <label>Contrat
+    <select name="contract_type"><option value="">Tous</option>
+      {% for c in FORM_CONTRACTS %}<option value="{{ c }}" {{ 'selected' if f.contract_type==c }}>{{ CONTRACT_LABELS[c] }}</option>{% endfor %}
+    </select></label>
+  <label>Source
+    <select name="source"><option value="">Toutes</option>
+      {% for s in sources_available %}<option value="{{ s }}" {{ 'selected' if f.source==s }}>{{ labels.get(s, s) }}</option>{% endfor %}
+    </select></label>
+  <label>Fraîcheur
+    <select name="max_age_days"><option value="">Toutes</option>
+      {% for d, l in [(1,'24 h'),(3,'3 jours'),(7,'7 jours'),(14,'14 jours'),(30,'30 jours')] %}
+        <option value="{{ d }}" {{ 'selected' if f.max_age_days==d }}>{{ l }}</option>{% endfor %}
+    </select></label>
+  <label>Statut
+    <select name="status"><option value="">Tous</option>
+      {% for k, l in STATUS_LABELS.items() %}<option value="{{ k }}" {{ 'selected' if f.status==k }}>{{ l }}</option>{% endfor %}
+    </select></label>
+  <label>Tri
+    <select name="sort"><option value="score" {{ 'selected' if f.sort=='score' }}>Score</option>
+      <option value="freshness" {{ 'selected' if f.sort=='freshness' }}>Fraîcheur</option></select></label>
+  <label class="check"><input type="checkbox" name="show_filtered" value="1" {{ 'checked' if f.show_filtered }}> Afficher les offres écartées</label>
+  <noscript><button class="btn" type="submit">Filtrer</button></noscript>
+</form>
+
+<div id="results">
+<form method="post" action="/profiles/{{ profile.id }}/jobs/action" id="sel">
+  <div class="bar">
+    <span>{{ jobs|length }} offre(s)</span>
+    <button class="btn primary" name="action" value="approve" hx-post="/profiles/{{ profile.id }}/jobs/action" hx-include="#sel" hx-vals='{"action":"approve"}'>Approuver la sélection</button>
+    <button class="btn" name="action" value="reject" hx-post="/profiles/{{ profile.id }}/jobs/action" hx-include="#sel" hx-vals='{"action":"reject"}'>Rejeter</button>
+    <button class="btn" name="action" value="shortlist" hx-post="/profiles/{{ profile.id }}/jobs/action" hx-include="#sel" hx-vals='{"action":"shortlist"}'>Présélectionner</button>
+    <button class="btn" name="action" value="reset" hx-post="/profiles/{{ profile.id }}/jobs/action" hx-include="#sel" hx-vals='{"action":"reset"}'>Remettre à « nouveau »</button>
+  </div>
+  <table class="tbl jobs">
+    <thead><tr>
+      <th><input type="checkbox" onclick="document.querySelectorAll('#sel .pick').forEach(c=>c.checked=this.checked)" aria-label="Tout sélectionner"></th>
+      <th>Score</th><th>Poste</th><th>Lieu</th><th>Contrat</th><th>Publiée</th><th>Sources</th><th>Statut</th>
+    </tr></thead>
+    <tbody>
+    {% for j in jobs %}
+      <tr class="job st-{{ j.status }}">
+        <td><input class="pick" type="checkbox" name="job_ids" value="{{ j.id }}"></td>
+        <td><span class="score s{{ ((j.score or 0)//20)|int }}">{{ (j.score or 0)|int }}</span></td>
+        <td>
+          <details>
+            <summary><strong>{{ j.title }}</strong><br><span class="muted">{{ j.company or 'Entreprise non précisée' }}</span></summary>
+            <div class="detail">
+              {% if j.score_json.rationale %}<p class="why">{{ j.score_json.rationale }}
+                <span class="badge src">{{ j.score_json.get('scored_by', j.score_json.get('origin', 'rules')) }}</span>
+                {% if j.score_json.matches_function is defined and j.score_json.origin == 'llm' %}
+                  <span class="badge {{ 'ok' if j.score_json.matches_function else 'warn' }}">{{ 'Correspond à la filière' if j.score_json.matches_function else 'Hors filière' }}</span>{% endif %}
+                {% for fl in j.score_json.flags or [] %}<span class="badge bad">{{ FLAG_LABELS.get(fl, fl) }}</span>{% endfor %}</p>{% endif %}
+              {% if j.salary_text %}<p><strong>Salaire :</strong> {{ j.salary_text }}</p>{% endif %}
+              <div class="links">
+                {% if j.origin_url %}<a class="btn small primary" href="{{ j.origin_url }}" target="_blank" rel="noopener noreferrer">Site de l'entreprise{% if j.origin_ats %} ({{ j.origin_ats }}){% endif %}</a>{% endif %}
+                {% for s in j.sightings %}<a class="btn small" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ labels.get(s.source, s.source) }}</a>{% endfor %}
+              </div>
+              <pre class="desc">{{ j.description or 'Pas de description.' }}</pre>
+            </div>
+          </details>
+        </td>
+        <td>{{ j.location or '—' }}{% if j.remote in ('full','partial') %} <span class="badge">{{ 'télétravail' if j.remote=='full' else 'hybride' }}</span>{% endif %}</td>
+        <td><span class="badge">{{ CONTRACT_LABELS[j.contract_type.value] }}</span></td>
+        <td title="{{ j.posted_at.date() if j.posted_at }}">{{ j.posted_at|ago }}</td>
+        <td>{% for s in j.sources %}<span class="badge src">{{ labels.get(s, s) }}</span>{% endfor %}
+            {% if j.origin_url %}<span class="badge ok" title="{{ j.origin_url|host }}">origine</span>{% endif %}</td>
+        <td><span class="badge st-{{ j.status }}">{{ STATUS_LABELS[j.status] }}</span></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="muted">Aucune offre ne correspond aux filtres. Lancez une recherche depuis la page du profil.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</form>
+</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+{
+ "job": {
+  "slug": "ingenieur-robotique-et-systemes-embarques_issy-les-moulineaux",
+  "ats": "external",
+  "contract_type": "internship",
+  "remote": "no",
+  "published_at": "2026-11-16T19:20:04Z",
+  "description": "<p><strong>Vos missions :</strong>   </p><ul> <li>Exploiter des robots et leurs capteurs pour acquérir des images, des séquences vidéo et des nuages de points LiDAR.</li> <li>Préparer les données en contribuant à la calibration des capteurs, à leur synchronisation et à la localisation des observations.</li> <li>Définir des stratégies d’acquisition adaptées aux zones à observer, puis évaluer la couverture obtenue.</li> <li>Intégrer les acquisitions aux algorithmes de perception afin de détecter les évolutions d’une installation et de contribuer à la mise à jour de son jumeau numérique.</li> <li>Développer et tester une chaîne robotique en Python et/ou C++, avec l’appui d’outils d’intelligence artificielle générative et dans le respect des règles de sécurité</li> </ul>    <p> </p><p></p>",
+  "profile": "<p><span>Description du profil :<br/><br/></span>  <strong>Votre profil :</strong>   </p><ul> <li>Vous préparez un diplôme de niveau Bac+5 en école d’ingénieurs ou à l’université, avec une spécialisation en robotique, automatique, systèmes embarqués ou perception robotique.</li> <li>Ce stage est accessible sans expérience professionnelle préalable. Une première expérience académique ou personnelle en robotique ou en intégration de capteurs constitue un atout.</li> <li>Vous disposez de bonnes bases en programmation Python et/ou C++. Des connaissances en géométrie 3D, localisation, LiDAR ou intégration de capteurs sont appréciées.</li> <li>Vous disposez d’un niveau d’anglais intermédiaire, vous permettant de comprendre une documentation technique et de communiquer dans un environnement professionnel.</li> <li>Vous faites preuve de curiosité, de créativité et de rigueur. Vous appréciez l’expérimentation sur des systèmes physiques, l’analyse méthodique et le travail en équipe.</li> </ul>      <br/><br/><span>Nous proposons :<br/><br/></span><p> </p><p> </p><p></p>",
+  "apply_url": "https://capgemini-service-sas.contactrh.com/jobs/10425/44577222",
+  "salary_min": null,
+  "salary_max": null,
+  "salary_period": null,
+  "salary_currency": null,
+  "office": {
+   "address": "147 Quai du Président Roosevelt, 92130 Issy-les-Moulineaux, France",
+   "local_address": "147 Quai du Président Roosevelt, 92130 Issy-les-Moulineaux, France",
+   "city": "Issy-les-Moulineaux",
+   "latitude": 48.82818,
+   "longitude": 2.26076,
+   "country_code": "FR",
+   "district": "Hauts-de-Seine",
+   "zip_code": "92130",
+   "local_district": "Hauts-de-Seine",
+   "local_city": "Issy-les-Moulineaux"
+  },
+  "key_missions": [],
+  "recruitment_process": null,
+  "name": "Ingénieur(e) robotique et systèmes embarqués",
+  "organization": {
+   "name": "Capgemini",
+   "media_website_url": "https://www.capgemini.com/fr-fr/carrieres/lifeatcapgemini/"
+  }
+ }
+}

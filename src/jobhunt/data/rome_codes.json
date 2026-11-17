@@ -1,0 +1,498 @@
+{
+ "_note": "ROME codes as returned by France Travail offers (ROME 4.0 era) for engineering/tech/industry functions. Keywords are accent-less lowercase; used by jobhunt.sources._rome.lookup_rome.",
+ "codes": [
+  {
+   "code": "M1805",
+   "label": "Développement informatique / systèmes embarqués",
+   "keywords": [
+    "systemes embarques",
+    "embarque",
+    "firmware",
+    "logiciel embarque",
+    "developpeur",
+    "developpement informatique",
+    "c c",
+    "rtos",
+    "microcontroleur",
+    "stm32",
+    "programmation bas niveau",
+    "informaticien"
+   ]
+  },
+  {
+   "code": "M1892",
+   "label": "Architecte systèmes embarqués",
+   "keywords": [
+    "architecte systemes embarques",
+    "architecte embarque",
+    "systemes embarques",
+    "architecture logicielle embarquee"
+   ]
+  },
+  {
+   "code": "M1827",
+   "label": "Ingénieur développement logiciel / DevOps",
+   "keywords": [
+    "developpement logiciel",
+    "ingenieur logiciel",
+    "software engineer",
+    "devops",
+    "developpeur full stack",
+    "developpeur backend",
+    "python",
+    "java"
+   ]
+  },
+  {
+   "code": "M1839",
+   "label": "Architecte système informatique",
+   "keywords": [
+    "architecte systeme",
+    "architecte logiciel",
+    "architecte si"
+   ]
+  },
+  {
+   "code": "M1802",
+   "label": "Ingénieur système / réseau informatique",
+   "keywords": [
+    "ingenieur systemes",
+    "ingenieur reseau",
+    "systemes et reseaux",
+    "administrateur systemes",
+    "ingenieur systeme"
+   ]
+  },
+  {
+   "code": "M1801",
+   "label": "Administration de systèmes d'information",
+   "keywords": [
+    "administrateur systeme",
+    "sysadmin",
+    "administration si",
+    "linux"
+   ]
+  },
+  {
+   "code": "M1815",
+   "label": "Test et validation logiciel",
+   "keywords": [
+    "test logiciel",
+    "validation logiciel",
+    "ingenieur test",
+    "qa",
+    "integration validation",
+    "hil",
+    "tests et validation"
+   ]
+  },
+  {
+   "code": "M1405",
+   "label": "Data scientist",
+   "keywords": [
+    "data scientist",
+    "data science",
+    "machine learning",
+    "analyse de donnees",
+    "big data"
+   ]
+  },
+  {
+   "code": "M1889",
+   "label": "Développeur IA",
+   "keywords": [
+    "intelligence artificielle",
+    "ia",
+    "deep learning",
+    "vision par ordinateur",
+    "computer vision"
+   ]
+  },
+  {
+   "code": "M1856",
+   "label": "Cybersécurité",
+   "keywords": [
+    "cybersecurite",
+    "securite informatique",
+    "securite des systemes",
+    "pentest",
+    "securite embarquee"
+   ]
+  },
+  {
+   "code": "M1804",
+   "label": "Réseaux télécoms",
+   "keywords": [
+    "reseaux telecoms",
+    "telecoms",
+    "telecommunications",
+    "5g",
+    "radio frequence",
+    "rf",
+    "reseaux mobiles"
+   ]
+  },
+  {
+   "code": "M1813",
+   "label": "Intégration applicative / progiciel",
+   "keywords": [
+    "integration applicative",
+    "progiciel",
+    "erp",
+    "sap"
+   ]
+  },
+  {
+   "code": "H1206",
+   "label": "Ingénieur études et développement en industrie",
+   "keywords": [
+    "ingenieur",
+    "ingenieur electronique",
+    "ingenieur mecanique",
+    "mecatronique",
+    "mecatronicien",
+    "automatisme",
+    "automatismes",
+    "robotique",
+    "ingenieur robotique",
+    "aeronautique",
+    "aerospatiale",
+    "spatial",
+    "automobile",
+    "fpga",
+    "electronique",
+    "conception",
+    "r d",
+    "recherche et developpement",
+    "ingenieur etudes",
+    "bureau d etudes",
+    "bureau etudes",
+    "systemes industriels",
+    "electrotechnique",
+    "electricien",
+    "materiaux",
+    "systeme",
+    "ingenieur systeme"
+   ]
+  },
+  {
+   "code": "H1203",
+   "label": "Conception de produits industriels mécaniques",
+   "keywords": [
+    "conception mecanique",
+    "concepteur mecanique",
+    "dessinateur",
+    "cao",
+    "dao",
+    "bureau d etudes mecanique",
+    "catia",
+    "solidworks",
+    "projeteur"
+   ]
+  },
+  {
+   "code": "H1235",
+   "label": "Technicien conception industrielle en mécanique",
+   "keywords": [
+    "technicien bureau d etudes",
+    "technicien conception",
+    "conception industrielle",
+    "technicien mecanique"
+   ]
+  },
+  {
+   "code": "H1209",
+   "label": "Technicien électronique études et développement",
+   "keywords": [
+    "technicien electronique",
+    "technicien developpement electronique",
+    "conception electronique",
+    "carte electronique",
+    "hardware"
+   ]
+  },
+  {
+   "code": "H1210",
+   "label": "Technicien d'analyse et d'essais",
+   "keywords": [
+    "technicien essais",
+    "technicien d essais",
+    "analyse et essais",
+    "banc d essais"
+   ]
+  },
+  {
+   "code": "H1208",
+   "label": "Intervention technique en études et conception (ROME 3, ancien)",
+   "keywords": [
+    "technicien etudes",
+    "intervention technique etudes",
+    "bureau d etudes"
+   ]
+  },
+  {
+   "code": "H1402",
+   "label": "Ingénieur méthodes en industrie",
+   "keywords": [
+    "methodes",
+    "ingenieur methodes",
+    "methodes industrielles",
+    "lean"
+   ]
+  },
+  {
+   "code": "H1407",
+   "label": "Ingénieur industrialisation",
+   "keywords": [
+    "industrialisation",
+    "ingenieur industrialisation",
+    "npi",
+    "process methodes"
+   ]
+  },
+  {
+   "code": "H1404",
+   "label": "Technicien méthodes",
+   "keywords": [
+    "technicien methodes",
+    "ordonnancement"
+   ]
+  },
+  {
+   "code": "H1520",
+   "label": "Ingénieur qualité",
+   "keywords": [
+    "ingenieur qualite",
+    "assurance qualite",
+    "qualite fournisseurs",
+    "quality engineer",
+    "qualite projet"
+   ]
+  },
+  {
+   "code": "H1527",
+   "label": "Ingénieur qualité en industrie",
+   "keywords": [
+    "qualite industrie",
+    "qualite industrielle",
+    "qualite produit",
+    "amdec",
+    "iso 9001"
+   ]
+  },
+  {
+   "code": "H1528",
+   "label": "Qualiticien en industrie",
+   "keywords": [
+    "qualiticien",
+    "technicien qualite",
+    "controle qualite"
+   ]
+  },
+  {
+   "code": "H1504",
+   "label": "Contrôle / test en électronique",
+   "keywords": [
+    "controle qualite",
+    "operateur de test",
+    "test electronique",
+    "metrologie",
+    "controle essai"
+   ]
+  },
+  {
+   "code": "H1302",
+   "label": "Ingénieur HSE en industrie",
+   "keywords": [
+    "hse",
+    "qhse",
+    "hygiene securite environnement",
+    "securite environnement"
+   ]
+  },
+  {
+   "code": "H1102",
+   "label": "Chargé d'affaires / ingénierie d'affaires industrielle",
+   "keywords": [
+    "charge d affaires",
+    "ingenieur d affaires",
+    "chef de projet industriel",
+    "gestion de projet industriel",
+    "pilotage de projet",
+    "project manager",
+    "chef de projet",
+    "ingenierie d affaires"
+   ]
+  },
+  {
+   "code": "H1405",
+   "label": "Responsable supply chain",
+   "keywords": [
+    "supply chain",
+    "responsable supply chain",
+    "approvisionnement"
+   ]
+  },
+  {
+   "code": "H1406",
+   "label": "Ingénieur supply chain",
+   "keywords": [
+    "ingenieur supply chain",
+    "planification",
+    "logistique industrielle",
+    "cadre supply chain"
+   ]
+  },
+  {
+   "code": "H2502",
+   "label": "Ingénieur process de production",
+   "keywords": [
+    "ingenieur process",
+    "process de production",
+    "procedes",
+    "genie des procedes"
+   ]
+  },
+  {
+   "code": "H2507",
+   "label": "Responsable de production",
+   "keywords": [
+    "responsable de production",
+    "chef de production",
+    "responsable d atelier"
+   ]
+  },
+  {
+   "code": "H2605",
+   "label": "Monteur-câbleur en électronique",
+   "keywords": [
+    "cablage",
+    "monteur cableur",
+    "assemblage electronique",
+    "soudure electronique"
+   ]
+  },
+  {
+   "code": "I1302",
+   "label": "Technicien de maintenance en automatismes / mécatronique",
+   "keywords": [
+    "maintenance automatisme",
+    "technicien mecatronique",
+    "technicien automatisme",
+    "systemes automatises",
+    "mecatronique technicien",
+    "technicien robotique"
+   ]
+  },
+  {
+   "code": "I1304",
+   "label": "Maintenance industrielle",
+   "keywords": [
+    "maintenance industrielle",
+    "electromecanicien",
+    "maintenance",
+    "technicien de maintenance"
+   ]
+  },
+  {
+   "code": "I1305",
+   "label": "Technicien d'intégration en électronique",
+   "keywords": [
+    "integration electronique",
+    "technicien integration",
+    "maintenance electronique"
+   ]
+  },
+  {
+   "code": "I1320",
+   "label": "Technicien de systèmes électroniques",
+   "keywords": [
+    "systemes electroniques",
+    "technicien systemes electroniques",
+    "technicien electronique"
+   ]
+  },
+  {
+   "code": "I1326",
+   "label": "Chef d'équipe maintenance",
+   "keywords": [
+    "chef d equipe maintenance",
+    "responsable maintenance"
+   ]
+  },
+  {
+   "code": "I1104",
+   "label": "Ingénieur réseaux / infrastructures",
+   "keywords": [
+    "infrastructures reseaux",
+    "ingenieur infrastructures",
+    "reseaux d infrastructure"
+   ]
+  },
+  {
+   "code": "F1112",
+   "label": "Ingénieur modélisation et simulation",
+   "keywords": [
+    "simulation",
+    "modelisation",
+    "calcul",
+    "elements finis",
+    "cfd",
+    "mesures physiques",
+    "analyse numerique"
+   ]
+  },
+  {
+   "code": "F1113",
+   "label": "Ingénieur efficacité énergétique",
+   "keywords": [
+    "efficacite energetique",
+    "energie",
+    "energies renouvelables",
+    "batteries",
+    "hydrogene"
+   ]
+  },
+  {
+   "code": "F1141",
+   "label": "Ingénieur génie électrique",
+   "keywords": [
+    "genie electrique",
+    "electrique",
+    "electrotechnique",
+    "reseaux electriques",
+    "electronique de puissance"
+   ]
+  },
+  {
+   "code": "F1117",
+   "label": "Ingénieur thermique",
+   "keywords": [
+    "thermique",
+    "thermicien",
+    "cvc",
+    "fluides"
+   ]
+  },
+  {
+   "code": "K2402",
+   "label": "Ingénieur d'études en recherche",
+   "keywords": [
+    "recherche fondamentale",
+    "ingenieur de recherche",
+    "labo",
+    "laboratoire",
+    "doctorant"
+   ]
+  },
+  {
+   "code": "N1301",
+   "label": "Coordination logistique",
+   "keywords": [
+    "logistique",
+    "coordinateur logistique",
+    "supply"
+   ]
+  }
+ ]
+}

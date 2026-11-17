@@ -1,0 +1,127 @@
+[
+  {
+    "query": "stage systèmes embarqués",
+    "source": "wttj",
+    "postings": 4
+  },
+  {
+    "query": "stage firmware",
+    "source": "wttj",
+    "postings": 0
+  },
+  {
+    "query": "stage firmware",
+    "source": "meteojob",
+    "postings": 1
+  },
+  {
+    "query": "stage firmware",
+    "source": "freework",
+    "postings": 0
+  },
+  {
+    "query": "stage firmware",
+    "source": "france_travail",
+    "postings": 0
+  },
+  {
+    "query": "stage firmware",
+    "source": "indeed",
+    "postings": 4
+  },
+  {
+    "query": "alternance mécatronique",
+    "source": "wttj",
+    "postings": 2
+  },
+  {
+    "query": "alternance mécatronique",
+    "source": "meteojob",
+    "postings": 1
+  },
+  {
+    "query": "alternance mécatronique",
+    "source": "freework",
+    "postings": 0
+  },
+  {
+    "query": "alternance mécatronique",
+    "source": "france_travail",
+    "postings": 0
+  },
+  {
+    "query": "alternance mécatronique",
+    "source": "indeed",
+    "postings": 4
+  },
+  {
+    "query": "responsable supply chain",
+    "source": "wttj",
+    "postings": 0
+  },
+  {
+    "query": "responsable supply chain",
+    "source": "meteojob",
+    "postings": 4
+  },
+  {
+    "query": "responsable logistique",
+    "source": "wttj",
+    "postings": 3
+  },
+  {
+    "query": "responsable logistique",
+    "source": "meteojob",
+    "postings": 4
+  },
+  {
+    "query": "développeur web junior",
+    "source": "wttj",
+    "postings": 0
+  },
+  {
+    "query": "développeur web junior",
+    "source": "meteojob",
+    "postings": 1
+  },
+  {
+    "query": "développeur web junior",
+    "source": "freework",
+    "postings": 4
+  },
+  {
+    "query": "développeur React",
+    "source": "wttj",
+    "postings": 2
+  },
+  {
+    "query": "développeur React",
+    "source": "meteojob",
+    "postings": 4
+  },
+  {
+    "query": "infirmier",
+    "source": "wttj",
+    "postings": 4
+  },
+  {
+    "query": "directeur commercial",
+    "source": "wttj",
+    "postings": 2
+  },
+  {
+    "query": "directeur commercial",
+    "source": "meteojob",
+    "postings": 4
+  },
+  {
+    "query": "développeur senior",
+    "source": "wttj",
+    "postings": 1
+  },
+  {
+    "query": "développeur senior",
+    "source": "meteojob",
+    "postings": 4
+  }
+]

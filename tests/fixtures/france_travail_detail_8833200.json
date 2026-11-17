@@ -1,0 +1,65 @@
+{
+ "numeroOffre": "Offre n° 8833200",
+ "intituleOffre": "Ingénieur Qualité Projet - Systèmes Embarqués H/F",
+ "codeRome": "H1520",
+ "appellationRome": "Ingénieur qualité / Ingénieure qualité",
+ "descriptif": "POSTE : Ingénieur Qualité Projet - Systèmes Embarqués H/F\nDESCRIPTION : \nEn tant qu'Ingénieur Qualité Projet, vous serez le garant de la démarche qualité sur l'ensemble du cycle de développement produit, depuis les phases amont jusqu'à la mise en série. Vous jouerez un rôle clé dans la maîtrise des risques, la conformité aux normes et l'animation transverse des équipes projet.\n \nVos missions :\n \n- Piloter la stratégie qualité projet en lien avec les exigences internes et externes\n- Identifier et suivre les risques projet, coordonner les plans d'actions correctifs et préventifs\n- Animer les activités qualité : AMDEC, traçabilité, validation, fiabilité, audits, etc.\n- Assurer la conformité aux référentiels qualité et réglementaires (A-SPICE, IATF 16949, ISO 26262)\n- Encadrer les audits qualité internes et externes\n- Accompagner les chefs de projet et les équipes techniques dans la structuration qualité\n- Contribuer à l'amélioration continue des processus et outils qualité\n- Fédérer les équipes autour des enjeux qualité et fiabilité\n \n\n \n- Poste à pourvoir le plus rapidement possible\n \n#LI-CV2\n \nPROFIL : \n- Diplômé(e) d'un Master 2 ou d'une école d'ingénieur en électronique ou systèmes embarqués\n- Expérience significative (8 ans minimum) dans le secteur automobile sur des projets complexes\n- Maîtrise des normes qualité et sécurité produit : IATF 16949, ISO 9001, ISO 26262, A-SPICE\n- Compétences avérées en gestion des risques, résolution de non-conformités (8D), AMDEC\n- Anglais p",
+ "lieuTravail": {
+  "libelleLieuTravail": "Toulouse",
+  "libelleCommuneLieuTravail": "Toulouse",
+  "codePostalLieuTravail": "31000",
+  "codeDepartementLieuTravail": "31",
+  "syntheseLieuTravail": "31 - Toulouse"
+ },
+ "libelleCodeLieuTravail": "Toulouse (31)",
+ "deplacement": null,
+ "syntheseContrat": "CDI - Contrat travail",
+ "syntheseHoraire": null,
+ "salaire": "Annuel de 40000.0 Euros à 55000.0 Euros",
+ "listeAvantages": [],
+ "qualification": "Cadre",
+ "publicCible": null,
+ "descriptionEntreprise": "Dans le TOP10 des Sociétés de Conseil en Ingénierie en France, le Groupe SCALIAN intervient sur des activités de services en management de projets industriels, supply chain, architecture et développem",
+ "syntheseSecteurActivite": "Activités des sociétés holding",
+ "experienceProfil": {
+  "experience": "8 An(s)",
+  "estUneExperienceIndispensable": true
+ },
+ "experience": {
+  "syntheseExperience": null,
+  "codeExperiencePro": "E"
+ },
+ "flagManqueDeCandidats": null,
+ "listeFormation": null,
+ "listeCompetence": null,
+ "listeSavoirEtre": null,
+ "listeLangue": null,
+ "listePermis": null,
+ "conditionTravailPoste": {
+  "libelleConditionTravail": null,
+  "commentaireConditionTravail": null,
+  "listeLibelleTypeHoraire": [
+   "35H/semaine"
+  ],
+  "listeLibelleConditionExerciceHoraire": null,
+  "flagAccesTravailleursHandicapes": null
+ },
+ "etablissement": {
+  "adresseNonDisponible": false,
+  "libelleEnseigne": "Scalian",
+  "descriptionEtablissement": "",
+  "syntheseSecteurActivite": "",
+  "effectif": null,
+  "urlEntreprise": null,
+  "flagUrlEntrepriseInvalide": false,
+  "flagEntrepriseAdaptee": false
+ },
+ "codeTypeAffichageCoordonneesRecruteur": "V",
+ "listeOperationNationale": [],
+ "logo": null,
+ "flagOffrePartenaireAOM": true,
+ "dateDerniereModification": "14 novembre 2026",
+ "pageEmployeurLibelleBouton": null,
+ "flagHandiEngage": false,
+ "flagTransitionEcologique": false
+}

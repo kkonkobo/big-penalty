@@ -1,0 +1,233 @@
+{
+ "total": 2,
+ "content": [
+  {
+   "id": "58124956",
+   "lastModification": "2026-11-17T06:38:33.446Z",
+   "publicationDate": "2026-11-17T06:38:33.443Z",
+   "mainJob": {
+    "label": "Consultant Project Management Officer (PMO) (H/F)",
+    "id": 200106,
+    "executive": true,
+    "priority": false
+   },
+   "jobs": [
+    {
+     "label": "Consultant Project Management Officer (PMO) (H/F)",
+     "id": 200106,
+     "executive": true,
+     "priority": false
+    }
+   ],
+   "contentLanguage": "fr",
+   "locations": [
+    {
+     "geonameId": 2985034,
+     "admin1": 3012874,
+     "admin1Label": "Île-de-France",
+     "admin1Code": "11",
+     "admin2": 3013657,
+     "admin2Label": "Hauts-de-Seine",
+     "admin2Code": "92",
+     "admin3": 6451978,
+     "admin3Label": "Puteaux",
+     "admin3Code": "92800",
+     "country": 3017382,
+     "countryLabel": "France",
+     "countryCode": "FR",
+     "name": "Puteaux (92)",
+     "lat": 48.88341,
+     "lon": 2.23894,
+     "priority": true,
+     "geonameWoeType": 7,
+     "woeType": 1
+    }
+   ],
+   "contractTypes": [
+    "INDEPEDENT"
+   ],
+   "jobType": [
+    "FULL_TIME"
+   ],
+   "title": "PMO H/F",
+   "description": "<p>Le PMO H/F devra :<br><br>Collecter les données de ressources, produits et projets, s'assurer du respect des bonnes pratiques et de la complétude des données saisies dans les différents outils (WD, ERP, CRM) :</p><p>Projection des capacity planning, des 'reste à faire', et mise en cohérence<br>Consommation des services SaaS des produits Editeurs<br>Consommation d'opex internes<br>Risques et opportunités des projets et produits pouvant impacter le CA ou les coûts<br>Communique auprès de la direction financière les données de facturation et justificatifs associés<br>Assurer le suivi des prestations commandées, engagées et des risques FAE<br><br>Valider les offres commerciales en vérifiant :<br>La conformité des Fiches de Contrôle<br>La qualité des aspects contractuels et économiques des offres commerciales<br><br>Il analyse les timings et le suivi des activités internes :<br>S'assure du bon renseignement des données avant chaque clôture mensuelle<br>Effectue les relances nécessaires auprès des opérationnels<br>Partage son analyse des temps passés<br>Restitue un focus sur les volumes et la nature des activités internes<br><br>Il accompagne les opérationnels :<br>Anime les processus de collecte des données<br>Est en support fonctionnel de l'utilisation des outils WD, ERP Oracle<br>Fait vivre les rapports PowerBI<br>Propose et met en place de nouveaux indicateurs économiques</p><p>Les conditions proposées pour ce poste comprennent :</p><ul><li>Contrat temporaire ;</li><li>Rémun",
+   "profileDescription": "<p>Pour réussir en tant que PMO H/F, vous vous appuyez sur les compétences suivantes :</p><ul><li>Vous maîtrisez les méthodes de suivi de projet, incluant la planification, les jalons et les livrables ;</li><li>Vous savez consolider des données et construire des reportings ;</li><li>Vous utilisez avec rigueur les outils de suivi et la documentation associée (Excel, Power BI, Oracle ERP, Workday) ;</li><li>Vous êtes en mesure de préparer des supports de pilotage clairs ;</li><li>Vous savez identifier, suivre et remonter les risques ainsi que les dépendances ;</li><li>Vous communiquez efficaceme",
+   "reference": "AE4911KE",
+   "externalReference": "JN -112026-7140814-8730",
+   "permanent": false,
+   "mobility": false,
+   "drivingLicence": [],
+   "company": {
+    "id": 645,
+    "name": "Michael Page",
+    "industryField": {
+     "id": 38,
+     "meteojobId": "37",
+     "value": "Recrutement et placement"
+    },
+    "excludedFromMailing": false,
+    "bypassJobApplicationProcess": false
+   },
+   "locality": "Puteaux (92) - Île-de-France",
+   "status": "PUBLISHED",
+   "pushedContractType": false,
+   "experienceInJobRequired": false,
+   "top": false,
+   "recruiter": "Michael Page",
+   "publisher": "Michael Page",
+   "anonymous": false,
+   "url": {
+    "search": "/Emploi-Michael-Page",
+    "logo": "/images/5/4/6/645_IMAGE_SMALL.png?1784537471000",
+    "jobOffer": "/jobs/58124956",
+    "jobOfferShort": "/jobs/58124956",
+    "redirect": "https://www.aplitrak.com/?adid=TVAuNzgyMTAuMTMwNzRAcGFnZWZyYXV0b3Bvc3QuYXBsaXRyYWsuY29t"
+   },
+   "salary": {
+    "currency": "EUR",
+    "from": 142989.0,
+    "to": 168987.0,
+    "period": "ANNUM",
+    "displaySalary": "BETWEEN"
+   },
+   "labels": {
+    "salary": {
+     "id": -1,
+     "value": "142 989 € - 168 987 € par an"
+    },
+    "telework": {
+     "id": 1,
+     "meteojobId": "UNDEFINED",
+     "value": "Télétravail non précisé"
+    },
+    "experienceLevelList": []
+   },
+   "focus": false,
+   "freeOffer": false,
+   "offerPremium": false,
+   "smartFeedsTag": 0,
+   "pushing": 0,
+   "jobCategories": []
+  },
+  {
+   "id": "58130187",
+   "lastModification": "2026-11-17T14:33:00.154Z",
+   "publicationDate": "2026-11-17T14:33:00.151Z",
+   "mainJob": {
+    "label": "Projeteur génie civil (H/F)",
+    "id": 106392,
+    "executive": false,
+    "priority": false
+   },
+   "jobs": [
+    {
+     "label": "Projeteur génie civil (H/F)",
+     "id": 106392,
+     "executive": false,
+     "priority": false
+    }
+   ],
+   "language": [
+    {
+     "lang": "ENGLISH",
+     "level": "FLUENT"
+    }
+   ],
+   "contentLanguage": "fr",
+   "locations": [
+    {
+     "geonameId": 3029276,
+     "admin1": 3012874,
+     "admin1Label": "Île-de-France",
+     "admin1Code": "11",
+     "admin2": 2971090,
+     "admin2Label": "Val-de-Marne",
+     "admin2Code": "94",
+     "admin3": 6455401,
+     "admin3Label": "Cachan",
+     "admin3Code": "94230",
+     "country": 3017382,
+     "countryLabel": "France",
+     "countryCode": "FR",
+     "name": "Cachan (94)",
+     "lat": 48.79632,
+     "lon": 2.33661,
+     "priority": true,
+     "geonameWoeType": 7,
+     "woeType": 1
+    }
+   ],
+   "contractTypes": [
+    "CDI"
+   ],
+   "jobType": [
+    "FULL_TIME"
+   ],
+   "title": "INGENIEUR(E) PROJETS H/F",
+   "description": "<p>LHH Recruitment Solutions, cabinet de conseil en recrutement, intérim spécialisé, management de transition, et évaluation d'expert.e.s, cadres et dirigeant.e.s, recherche pour son client un(e) INGENIEUR(E) PROJETS H/F en CDI et basé sur Cachan (94).</p><p>Rattaché(e) au Directeur Opérationnel, vous serez en charge de :</p><p>- Concevoir les ouvrages répondant au cahier des charges fonctionnel</p><p>- Réaliser des études techniques et des missions d'expertise sur les lignes HT/THT</p><p>- Assurer le contrôle technique et valider les documents émis par les intervenants</p><p>- Gérer la relation technique avec les clients et les partenaires internes/externes</p><p>- Constituer les dossiers travaux et apposer le « Bon pour Exécution »</p><p>- Assister les équipes dans l'exécution des tâches techniques</p><p>- Participer à la validation des choix techniques et aux audits documentaires</p><p>- Suivre les délais de réalisation et effectuer le reporting vers la hiérarchie</p><p>- Proposer des solutions techniques et des variantes</p><p>- Estimer les délais et méthodes de réalisation des ouvrages</p><p>- Participer à l'amélioration continue des pratiques techniques</p>",
+   "profileDescription": "<p>Vous êtes diplômé(e) d'un Master 2 ou d'une école d'ingénieur, spécialisation mécanique ou génie civil (calcul de structures). Une expérience professionnelle d'environ 2 ans dans le domaine est fortement souhaitée pour ce poste. Elle constituera un véritable atout pour contribuer efficacement à nos projets dès votre arrivée.</p><p>Vous disposez d'une bonne capacité d'analyse technique, d'une maîtrise des outils de RDM-CAO, et vous faites preuve de rigueur, d'autonomie, d'adaptabilité et d'un bon esprit d'équipe. Dynamique et opiniâtre, vous êtes à l'aise dans un environnement exigeant. La m",
+   "reference": "AE4920MD",
+   "externalReference": "2120229101",
+   "permanent": false,
+   "mobility": false,
+   "drivingLicence": [
+    "LICENSE_B"
+   ],
+   "company": {
+    "id": 12889,
+    "name": "LHH Recruitment Solutions",
+    "industryField": {
+     "id": 38,
+     "meteojobId": "37",
+     "value": "Recrutement et placement"
+    },
+    "excludedFromMailing": false,
+    "bypassJobApplicationProcess": false
+   },
+   "locality": "Cachan (94) - Île-de-France",
+   "status": "PUBLISHED",
+   "pushedContractType": false,
+   "experienceInJobRequired": false,
+   "top": false,
+   "recruiter": "LHH Recruitment Solutions",
+   "publisher": "LHH Recruitment Solutions",
+   "anonymous": false,
+   "url": {
+    "search": "/Emploi-Lhh-Recruitment-Solutions",
+    "logo": "/images/9/8/8/12889_IMAGE_SMALL.png?1742454283000",
+    "jobOffer": "/jobs/58130187",
+    "jobOfferShort": "/jobs/58130187"
+   },
+   "salary": {
+    "currency": "EUR",
+    "from": 40000.0,
+    "to": 50000.0,
+    "displaySalary": "BETWEEN"
+   },
+   "labels": {
+    "salary": {
+     "id": -1,
+     "value": "40 000 € - 50 000 €"
+    },
+    "telework": {
+     "id": 1,
+     "meteojobId": "UNDEFINED",
+     "value": "Télétravail non précisé"
+    },
+    "experienceLevelList": [
+     {
+      "id": 2,
+      "meteojobId": "ONE_TWO",
+      "value": "1-2 ans"
+     }
+    ]
+   },
+   "focus": false,
+   "freeOffer": false,
+   "offerPremium": false,
+   "smartFeedsTag": 0,
+   "pushing": 0,
+   "jobCategories": []
+  }
+ ]
+}

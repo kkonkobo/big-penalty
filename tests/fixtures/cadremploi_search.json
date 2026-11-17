@@ -1,0 +1,89 @@
+{
+ "total": 2,
+ "jobPostings": [
+  {
+   "id": "156548133176951730",
+   "title": "Technicien Systèmes Embarqués H/F",
+   "url": "/emploi/detail_offre?offreId=156548133176951730",
+   "snippet": "En tant que Technicien SI, vos mission seront les suivantes :    * Étudier et interpréter les plans et schémas de câblage  * Réaliser les installations et désinstallations des équipements embarqués  * Effectuer les paramétrages et mises en service  * Analyser le fonctionnement...",
+   "contract": "CDI",
+   "location": "Montlhery",
+   "originalSource": "mp-legacy",
+   "salary": "29K€ - 32K€",
+   "date": "Publiée il y a 27 jours",
+   "company": {
+    "type": "ENTREPRISE",
+    "name": "Michael Page",
+    "logo": "https://imagedelivery.net/BN-U87wrUjbdYBHZwNH6NA/80e4bbee-21d5-4cef-193d-a959b130e100/logo100",
+    "video": "",
+    "badges": [
+     {
+      "libelle": "Recruteur actif",
+      "type": "RECRUTEUR_ACTIF"
+     }
+    ]
+   },
+   "apply": {
+    "type": "redirection",
+    "hasAlreadyAppliedToCurrentOffer": false
+   },
+   "offerBadges": [
+    {
+     "label": "Populaire",
+     "color": "blue-500",
+     "tooltip": "Cette offre suscite un fort intérêt auprès des candidats"
+    }
+   ],
+   "recruiterBadge": [
+    {
+     "label": "Recruteur actif",
+     "icon": "mdiBullhornOutline",
+     "color": "blue-500",
+     "tooltip": "Cette entreprise recrute intensivement en ce moment"
+    }
+   ]
+  },
+  {
+   "id": "156589596899995046",
+   "title": "Architecte systèmes embarqués H/F)",
+   "url": "/emploi/detail_offre?offreId=156589596899995046",
+   "snippet": " <p></br><strong>LHH Recruitment Solutions</strong>, cabinet de conseil en recrutement d'experts et de cadres, recrute pour son client, société finale industrielle, un(e)<strong> Architecte systèmes embarqués (H/F)</strong> à <u>Toulouse</u> (31), en CDI.</br>Votre rôle sera d...",
+   "contract": "CDI",
+   "location": "Toulouse",
+   "originalSource": "lhh_2025_ce",
+   "salary": "",
+   "date": "Publiée il y a 8 jours",
+   "company": {
+    "type": "ENTREPRISE",
+    "name": "LHH",
+    "logo": "https://lh3.googleusercontent.com/1xI2aaBeTtmy37fzX9XcW0JtWsDtczlMD2jTg8rcjHicDIhhC4ryTznCP63GWI5RiOWPdZHkS1DHf6lkM2HWNFL5uDylxNia=w100-h100",
+    "video": "",
+    "badges": [
+     {
+      "libelle": "Recruteur actif",
+      "type": "RECRUTEUR_ACTIF"
+     }
+    ]
+   },
+   "apply": {
+    "type": "formulaire",
+    "hasAlreadyAppliedToCurrentOffer": false
+   },
+   "offerBadges": [
+    {
+     "label": "Postulez le premier !",
+     "color": "pyrholidon-purple-40",
+     "tooltip": "Soyez parmi les premiers à postuler à cette offre"
+    }
+   ],
+   "recruiterBadge": [
+    {
+     "label": "Recruteur actif",
+     "icon": "mdiBullhornOutline",
+     "color": "blue-500",
+     "tooltip": "Cette entreprise recrute intensivement en ce moment"
+    }
+   ]
+  }
+ ]
+}

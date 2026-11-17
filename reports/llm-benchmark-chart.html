@@ -1,0 +1,35 @@
+<section id="jobhunt-benchmark" data-viz-composition>
+  <div data-viz-container></div>
+  <script type="application/json" data-viz-chart>
+    {
+      "id": "jobhunt-bad-high",
+      "title": "Bad jobs scored 70 or higher",
+      "description": "Lower is better. Each configuration scored 120 profile/job pairs; model-generated gold labels require human review.",
+      "height": 240,
+      "spec": {
+        "type": "horizontalBar",
+        "x": "errors",
+        "y": "configuration",
+        "xLabel": "High-ranked bad jobs (count)",
+        "showValues": true,
+        "showLegend": false,
+        "xDomain": [0, 6],
+        "valueDecimals": 0
+      },
+      "columns": ["configuration", "errors"],
+      "rows": [
+        ["Opus 5.5 · low", 2],
+        ["Opus 5.5 · medium", 0],
+        ["Haiku 5.5 · low", 3],
+        ["GPT-6.1-sol · low", 5],
+        ["GPT-6-luna · low", 4]
+      ]
+    }
+  </script>
+</section>
+<script type="module">
+  import { mountChart } from "https://persistent.oaistatic.com/plugins/visualize/charts/1.2.3/element.js";
+  const root = document.getElementById("jobhunt-benchmark");
+  const config = JSON.parse(root.querySelector("[data-viz-chart]").textContent);
+  mountChart(root.querySelector("[data-viz-container]"), config);
+</script>

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Sources{% endblock %}
+{% block content %}
+<h1>État des sources</h1>
+<p class="muted">Intelligence artificielle :
+  {% if llm_enabled %}<span class="badge ok">clé Anthropic configurée</span>
+  {% else %}<span class="badge warn">pas de clé ANTHROPIC_API_KEY — mode règles</span>{% endif %}
+  {% if run %} · Dernière exécution : {{ run.started_at[:16].replace('T',' ') }} (profil {{ run.profile_id }}, {{ run.status }}){% endif %}</p>
+<table class="tbl">
+  <thead><tr><th>Source</th><th>Type</th><th>Configuration</th><th>Dernière exécution</th><th>Erreurs</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><strong>{{ r.label }}</strong> <small class="muted">{{ r.name }}</small>
+        {% if r.aggregator %}<span class="badge">agrégateur</span>{% endif %}</td>
+      <td>{{ r.kind }}</td>
+      <td>
+        {% if r.missing %}<span class="badge bad">identifiants manquants</span> <code>{{ r.missing|join(", ") }}</code>
+        {% else %}<span class="badge ok">prête</span>{% endif %}
+        {% if not r.enabled %}<span class="badge warn">désactivée par défaut</span>{% endif %}
+        {% if r.requires_login %}<span class="badge warn">connexion requise</span>
+          <br><small>{% for p in profiles %}<code>jobhunt login {{ r.name }} --profile {{ p.id }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</small>{% endif %}
+      </td>
+      <td>{% if r.stat %}{{ r.stat.get('postings', 0) }} annonces · {{ r.stat.get('queries_done',0) }}/{{ r.stat.get('queries_total',0) }} requêtes
+          · {{ r.stat.get('status') }}{% if r.stat.get('skipped_reason') %} ({{ r.stat.skipped_reason }}){% endif %}
+          {% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if r.stat %}{% for e in r.stat.get('errors', [])[:3] %}<div class="err">{{ e }}</div>{% endfor %}
+          {% if r.stat.get('needs_login') %}<span class="badge bad">connexion requise</span>{% endif %}{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">Aucune source installée.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
