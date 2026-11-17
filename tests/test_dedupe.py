@@ -122,13 +122,23 @@ def test_missing_company_requires_url_or_substantial_description():
     assert len(merge_postings([a.model_copy(update={"description": "Join us"}), b.model_copy(update={"description": "Join us"})])[0]) == 2
 
 
-def test_apply_origin_keeps_earliest_publication_in_utc():
+def test_apply_origin_keeps_source_date_and_stores_origin_date_separately():
     job = MergedJob.from_posting(P(posted_at=datetime(2026, 11, 1, 10, tzinfo=UTC)))
     job.changed = False
-    job.apply_origin(P(posted_at=datetime(2026, 11, 1, 11, tzinfo=timezone(timedelta(hours=2)))))
-    assert job.posted_at == datetime(2026, 11, 1, 9, tzinfo=UTC) and job.changed
-    job.apply_origin(P(posted_at=datetime(2026, 11, 2)))
-    assert job.posted_at == datetime(2026, 11, 1, 9, tzinfo=UTC)
+    job.apply_origin(P(origin_url="https://acme.test/j/1", origin_ats="lever", origin_confidence=0.9,
+                       origin_posted_at=datetime(2026, 11, 1, 11, tzinfo=timezone(timedelta(hours=2)))))
+    assert job.posted_at == datetime(2026, 11, 1, 10, tzinfo=UTC) and job.changed
+    assert job.extra["origin_posted_at"] == datetime(2026, 11, 1, 9, tzinfo=UTC).isoformat()
+
+
+def test_apply_origin_does_not_replace_better_origin_and_recompute_repairs_posted_at():
+    job = MergedJob.from_posting(P(posted_at=datetime(2026, 11, 3, tzinfo=UTC)))
+    job.origin_url, job.origin_ats, job.origin_confidence = "https://acme.test/j/1", "lever", 0.9
+    job.apply_origin(P(origin_url="https://other.test/j/2", origin_ats="x", origin_confidence=0.7))
+    assert job.origin_url == "https://acme.test/j/1"
+    job.posted_at = datetime(2026, 10, 1, tzinfo=UTC)  # old run folded an ATS date in
+    job.recompute_posted_at()
+    assert job.posted_at == datetime(2026, 11, 3, tzinfo=UTC)
 
 
 def test_representative_origin_posting_preserves_remote_and_apply_method():

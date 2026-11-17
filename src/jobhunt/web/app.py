@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from jobhunt import db, pipeline
 from jobhunt.config import get_settings
+from jobhunt.freshness import effective_posted_at, is_repost, rank_score
 from jobhunt.models import ContractType, Profile, SearchQuery
 from jobhunt.scoring import FLAG_LABELS
 from jobhunt.sources import registry
@@ -63,6 +64,9 @@ def host(url: str | None) -> str:
 
 templates.env.filters["ago"] = ago
 templates.env.filters["host"] = host
+DATE_SOURCE_LABELS = {"origin": "site de l'entreprise", "source": "date de la source", "first_seen": "première détection", "none": "inconnue"}
+templates.env.globals.update(effective_posted_at=effective_posted_at, is_repost=is_repost, rank_score=rank_score,
+                             DATE_SOURCE_LABELS=DATE_SOURCE_LABELS)
 templates.env.globals.update(
     CONTRACT_LABELS=CONTRACT_LABELS, STATUS_LABELS=STATUS_LABELS, FLAG_LABELS=FLAG_LABELS, FORM_CONTRACTS=FORM_CONTRACTS,
 )
@@ -217,7 +221,7 @@ def _filters(request: Request) -> dict[str, Any]:
     return {
         "min_score": num("min_score"), "contract_type": q.get("contract_type") or None, "source": q.get("source") or None,
         "max_age_days": int(num("max_age_days")) if num("max_age_days") else None, "status": q.get("status") or None,
-        "sort": q.get("sort") if q.get("sort") in ("score", "freshness") else "score",
+        "sort": q.get("sort") if q.get("sort") in ("rank", "score", "freshness") else "rank",
         "show_filtered": q.get("show_filtered") == "1",
     }
 

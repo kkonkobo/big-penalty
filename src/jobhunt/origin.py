@@ -465,8 +465,8 @@ def _workday_posted(s: str | None) -> datetime | None:
         return now
     if "yesterday" in sl:
         return now - timedelta(days=1)
-    m = re.search(r"(\d+)\+?\s*days?", sl)
-    if m and "+" not in sl:
+    m = re.search(r"(\d+)(\+?)\s*days?", sl)
+    if m:  # "30+ Days Ago" is a lower bound: use it as-is (older than any cutoff we apply)
         return now - timedelta(days=int(m.group(1)))
     return None
 
@@ -1207,9 +1207,8 @@ def _apply(p: JobPosting, url: str | None, ats: str | None, conf: float, extra: 
         upd.update(origin_url=url, origin_ats=ats, origin_confidence=conf)
     if extra:
         published = extra.posted_at.replace(tzinfo=extra.posted_at.tzinfo or timezone.utc).astimezone(timezone.utc) if extra.posted_at else None
-        current = p.posted_at.replace(tzinfo=p.posted_at.tzinfo or timezone.utc).astimezone(timezone.utc) if p.posted_at else None
-        if published and (current is None or published <= current):
-            upd["posted_at"] = published
+        if published and "origin_url" in upd:
+            upd["origin_posted_at"] = published
         if not p.description and extra.description:
             upd["description"] = extra.description
     return p.model_copy(update=upd)

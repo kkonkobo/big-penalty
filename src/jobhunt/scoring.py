@@ -39,7 +39,7 @@ def profile_scoring_inputs(profile: Profile) -> dict:
 
 
 def scoring_fingerprint(profile: Profile, job: MergedJob) -> str:
-    inputs = {"version": 2, "profile": profile_scoring_inputs(profile), "job": {
+    inputs = {"version": 3, "profile": profile_scoring_inputs(profile), "job": {
         key: getattr(job, key) for key in (
             "title", "company", "contract_type", "location", "description", "remote", "salary_text",
             "salary_min_eur", "salary_max_eur", "posted_at", "origin_url", "origin_ats", "origin_confidence",
@@ -49,7 +49,10 @@ def scoring_fingerprint(profile: Profile, job: MergedJob) -> str:
 
 
 def invalidate_score(profile: Profile, job: MergedJob) -> None:
-    if job.extra.get("scoring_fingerprint") != scoring_fingerprint(profile, job):
+    stale = job.extra.get("scoring_fingerprint") != scoring_fingerprint(profile, job)
+    # A job dropped by an older, stricter prefilter must be scored again once the rules let it through.
+    unblocked = bool(job.score_json.get("prefiltered")) and prefilter(profile, job) is None
+    if stale or unblocked:
         job.score, job.score_json, job.changed = None, {}, True
 
 
@@ -72,13 +75,7 @@ def prefilter(profile: Profile, job: MergedJob) -> str | None:
     cts = set(profile.contract_types)
     if cts and job.contract_type not in (ContractType.UNKNOWN, ContractType.OTHER) and job.contract_type not in cts:
         return f"Contrat « {job.contract_type.value} » hors des contrats recherchés"
-    if is_junior(profile):
-        if SENIOR_TITLE.search(job.title or ""):
-            return "Intitulé senior pour un profil junior"
-        if job.contract_type not in (ContractType.STAGE, ContractType.ALTERNANCE):
-            yrs = min_years_required(job.description or "")
-            if yrs is not None and yrs >= 4:
-                return f"{yrs} ans d'expérience demandés"
+    # Only contract type is a hard blocker here; seniority/experience is judged by the scorer (soft penalty).
     return None
 
 
@@ -130,7 +127,7 @@ def keyword_score(profile: Profile, job: MergedJob) -> JobScore:
         fit = min(fit, 30)
     if is_junior(profile) and SENIOR_TITLE.search(job.title or ""):
         flags.append("too_senior")
-        fit = min(fit, 25)
+        fit = max(0, fit - 20)
     if not _location_ok(profile, job):
         flags.append("location_mismatch")
         fit = max(0, fit - 15)

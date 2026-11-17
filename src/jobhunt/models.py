@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from jobhunt.freshness import MAX_JOB_AGE_DAYS
+
 
 class ContractType(StrEnum):
     CDI = "cdi"
@@ -37,7 +39,7 @@ class SearchQuery(BaseModel):
     radius_km: int | None = None
     contract_types: list[ContractType] = Field(default_factory=list)  # empty = any
     remote_only: bool = False
-    posted_within_days: int | None = 30
+    posted_within_days: int | None = MAX_JOB_AGE_DAYS
     max_results: int = 50
     language: Literal["fr", "en"] = "fr"
 
@@ -70,6 +72,7 @@ class JobPosting(BaseModel):
     origin_url: str | None = None
     origin_ats: str | None = None  # "greenhouse", "lever", "workday", "careers_site", ...
     origin_confidence: float | None = None  # 0..1
+    origin_posted_at: datetime | None = None  # posting date shown on the origin ATS/careers page, when found
     experience_level: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict, exclude=True)  # source payload for debugging
 

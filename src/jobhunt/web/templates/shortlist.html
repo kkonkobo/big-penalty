@@ -18,8 +18,8 @@
       {% for s in sources_available %}<option value="{{ s }}" {{ 'selected' if f.source==s }}>{{ labels.get(s, s) }}</option>{% endfor %}
     </select></label>
   <label>Fraîcheur
-    <select name="max_age_days"><option value="">Toutes</option>
-      {% for d, l in [(1,'24 h'),(3,'3 jours'),(7,'7 jours'),(14,'14 jours'),(30,'30 jours')] %}
+    <select name="max_age_days"><option value="">Par défaut (14 j)</option>
+      {% for d, l in [(1,'24 h'),(3,'3 jours'),(7,'7 jours'),(14,'14 jours')] %}
         <option value="{{ d }}" {{ 'selected' if f.max_age_days==d }}>{{ l }}</option>{% endfor %}
     </select></label>
   <label>Statut
@@ -27,7 +27,8 @@
       {% for k, l in STATUS_LABELS.items() %}<option value="{{ k }}" {{ 'selected' if f.status==k }}>{{ l }}</option>{% endfor %}
     </select></label>
   <label>Tri
-    <select name="sort"><option value="score" {{ 'selected' if f.sort=='score' }}>Score</option>
+    <select name="sort"><option value="rank" {{ 'selected' if f.sort=='rank' }}>Pertinence (score × fraîcheur)</option>
+      <option value="score" {{ 'selected' if f.sort=='score' }}>Score seul</option>
       <option value="freshness" {{ 'selected' if f.sort=='freshness' }}>Fraîcheur</option></select></label>
   <label class="check"><input type="checkbox" name="show_filtered" value="1" {{ 'checked' if f.show_filtered }}> Afficher les offres écartées</label>
   <noscript><button class="btn" type="submit">Filtrer</button></noscript>
@@ -51,7 +52,7 @@
     {% for j in jobs %}
       <tr class="job st-{{ j.status }}">
         <td><input class="pick" type="checkbox" name="job_ids" value="{{ j.id }}"></td>
-        <td><span class="score s{{ ((j.score or 0)//20)|int }}">{{ (j.score or 0)|int }}</span></td>
+        <td title="Score {{ (j.score or 0)|int }} · rang {{ rank_score(j)|round(1) }} (score × fraîcheur)"><span class="score s{{ ((j.score or 0)//20)|int }}">{{ (j.score or 0)|int }}</span></td>
         <td>
           <details>
             <summary><strong>{{ j.title }}</strong><br><span class="muted">{{ j.company or 'Entreprise non précisée' }}</span></summary>
@@ -72,7 +73,8 @@
         </td>
         <td>{{ j.location or '—' }}{% if j.remote in ('full','partial') %} <span class="badge">{{ 'télétravail' if j.remote=='full' else 'hybride' }}</span>{% endif %}</td>
         <td><span class="badge">{{ CONTRACT_LABELS[j.contract_type.value] }}</span></td>
-        <td title="{{ j.posted_at.date() if j.posted_at }}">{{ j.posted_at|ago }}</td>
+        {% set eff = effective_posted_at(j) %}
+        <td title="{{ eff[0].date() if eff[0] }} · {{ DATE_SOURCE_LABELS.get(eff[1], eff[1]) }}">{{ eff[0]|ago }}{% if is_repost(j) %} <span class="badge warn" title="Annonce republiée : vue pour la première fois avant la date affichée par la source">republiée</span>{% endif %}</td>
         <td>{% for s in j.sources %}<span class="badge src">{{ labels.get(s, s) }}</span>{% endfor %}
             {% if j.origin_url %}<span class="badge ok" title="{{ j.origin_url|host }}">origine</span>{% endif %}</td>
         <td><span class="badge st-{{ j.status }}">{{ STATUS_LABELS[j.status] }}</span></td>

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from jobhunt.config import get_settings
+from jobhunt.freshness import MAX_JOB_AGE_DAYS, effective_posted_at, is_stale, rank_score
 from jobhunt.dedupe import MergedJob, Sighting, canonical_url, reconcile_status
 from jobhunt.models import ContractType, Profile
 
@@ -349,11 +350,17 @@ def set_status(job_ids: list[int], status: str, profile_id: int | None = None) -
 
 def query_jobs(
     profile_id: int, *, min_score: float | None = None, contract_type: str | None = None, source: str | None = None,
-    max_age_days: int | None = None, status: str | None = None, sort: str = "score", show_filtered: bool = False,
+    max_age_days: int | None = None, status: str | None = None, sort: str = "rank", show_filtered: bool = False,
+    include_stale: bool = False,
 ) -> list[MergedJob]:
-    """Filtered, sorted list for the shortlist UI."""
+    """Filtered, sorted list for the shortlist UI.
+
+    Jobs whose effective age exceeds MAX_JOB_AGE_DAYS (+ date tolerance) are hidden, never deleted; `max_age_days`
+    can only narrow that window; `include_stale=True` (internal use only) disables it. Sorts: "rank" (fit x freshness), "score", "freshness".
+    """
     jobs = load_jobs(profile_id)
-    cutoff = now().timestamp() - max_age_days * 86400 if max_age_days else None
+    limit = None if include_stale else min(max_age_days or MAX_JOB_AGE_DAYS, MAX_JOB_AGE_DAYS)  # hard cutoff: never wider
+    ref_now = now()
     out = []
     for j in jobs:
         if not show_filtered and j.score_json.get("prefiltered"):
@@ -366,16 +373,21 @@ def query_jobs(
             continue
         if status and j.status != status:
             continue
-        if cutoff is not None:
-            ref = j.posted_at or j.first_seen
-            if ref and ref.timestamp() < cutoff:
+        if limit is not None:
+            if is_stale(j, limit, ref_now):
                 continue
         out.append(j)
     epoch = datetime(1970, 1, 1, tzinfo=UTC)
+
+    def when(j: MergedJob) -> datetime:
+        return effective_posted_at(j, ref_now)[0] or epoch
+
     if sort == "freshness":
-        out.sort(key=lambda j: (j.posted_at or j.first_seen or epoch, j.score or 0), reverse=True)
+        out.sort(key=lambda j: (when(j), j.score or 0), reverse=True)
+    elif sort == "score":
+        out.sort(key=lambda j: (j.score or 0, when(j)), reverse=True)
     else:
-        out.sort(key=lambda j: (j.score or 0, j.posted_at or j.first_seen or epoch), reverse=True)
+        out.sort(key=lambda j: (rank_score(j, ref_now), when(j)), reverse=True)
     return out
 
 
