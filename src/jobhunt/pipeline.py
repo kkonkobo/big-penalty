@@ -201,8 +201,8 @@ def origin_fingerprint(job: MergedJob) -> str:
 
 
 def _origin_due(job: MergedJob) -> bool:
-    if job.origin_url:
-        return False
+    if job.origin_url:  # already resolved: re-check once to backfill the origin posting date
+        return "origin_date_checked" not in job.extra
     if job.extra.get("origin_fingerprint") != origin_fingerprint(job):
         return True
     try:
@@ -229,6 +229,9 @@ async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: Ru
                                (mod.is_aggregator(job.origin_url) if hasattr(mod, "is_aggregator") else False)):
             job.origin_url, job.origin_ats, job.origin_confidence = None, None, None
             job.extra.pop("origin_fingerprint", None)
+            job.extra.pop("origin_posted_at", None)
+            job.extra.pop("origin_date_checked", None)
+            job.recompute_posted_at()
             job.changed = True
     todo = [j for j in jobs if _origin_due(j)]
     if not todo:
@@ -237,6 +240,9 @@ async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: Ru
         resolved = await resolve([j.to_posting() for j in todo], ctx)
         for j, p in zip(todo, resolved):
             j.apply_origin(p)
+            j.recompute_posted_at()  # repairs rows where an old run folded the ATS date into posted_at
+            if j.origin_url:
+                j.extra["origin_date_checked"] = db.now().isoformat()
             j.extra["origin_attempted_at"] = db.now().isoformat()
             j.extra["origin_fingerprint"] = origin_fingerprint(j)
             j.extra.pop("origin_tried", None)

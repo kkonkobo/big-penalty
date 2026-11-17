@@ -62,7 +62,7 @@ def parse_daily_rate(text: str | None) -> tuple[int | None, int | None]:
     return min(nums[:2]), max(nums[:2])
 
 
-_REL = re.compile(r"il y a\s+(\d+|un|une)\s+(minute|heure|jour|semaine|mois|an)s?", re.I)
+_REL = re.compile(r"il y a\s+(\d+|un|une)\+?\s+(minute|heure|jour|semaine|mois|an)s?", re.I)
 
 
 def parse_relative_fr(text: str | None, now: datetime | None = None) -> datetime | None:

@@ -111,7 +111,7 @@ def test_unchanged_jobs_not_rewritten_and_jobs_scoped_to_profile(profile):
 def test_query_filters_and_sort(profile):
     ps = [post("1", title="A", company="A", score_hint=None) if False else post("1", title="Alpha role", company="A"),
           post("2", title="Beta role", company="B", contract_type=ContractType.STAGE,
-               posted_at=datetime.now(UTC) - timedelta(days=20)),
+               posted_at=datetime.now(UTC) - timedelta(days=10)),
           post("3", "wttj", title="Gamma role", company="C")]
     jobs, _ = merge_postings(ps)
     for j, s in zip(jobs, (50, 90, 10)):
@@ -123,6 +123,7 @@ def test_query_filters_and_sort(profile):
     assert len(db.query_jobs(profile.id, show_filtered=True)) == 3
     assert [j.title for j in db.query_jobs(profile.id, min_score=60)] == ["Beta role"]
     assert [j.title for j in db.query_jobs(profile.id, contract_type="stage")] == ["Beta role"]
+    assert [j.title for j in db.query_jobs(profile.id, sort="score")] == ["Beta role", "Alpha role"]
     assert [j.title for j in db.query_jobs(profile.id, sort="freshness")] == ["Alpha role", "Beta role"]
     assert [j.title for j in db.query_jobs(profile.id, max_age_days=7)] == ["Alpha role"]
     assert db.query_jobs(profile.id, source="wttj") == []
@@ -137,3 +138,24 @@ def test_status_validation_and_runs(profile):
     db.update_run(rid, plan=[{"keywords": "x"}], stats={"sources": {}}, status="done", finished=True)
     r = db.latest_run(profile.id)
     assert r["id"] == rid and r["plan"] == [{"keywords": "x"}] and r["finished_at"]
+
+
+def test_stale_jobs_hidden_by_default_but_kept(profile):
+    jobs, _ = merge_postings([post("1", title="Old role", company="O", posted_at=datetime.now(UTC) - timedelta(days=20)),
+                              post("2", title="New role", company="N")])
+    for j in jobs:
+        j.score = 80
+    db.save_jobs(profile.id, jobs)
+    assert [j.title for j in db.query_jobs(profile.id)] == ["New role"]
+    assert {j.title for j in db.query_jobs(profile.id, include_stale=True)} == {"Old role", "New role"}
+    assert [j.title for j in db.query_jobs(profile.id, max_age_days=30)] == ["New role"]  # can only narrow
+    assert len(db.load_jobs(profile.id)) == 2
+
+
+def test_rank_sort_weighs_freshness(profile):
+    jobs, _ = merge_postings([post("1", title="Fresh ok", company="A"),
+                              post("2", title="Older better", company="B", posted_at=datetime.now(UTC) - timedelta(days=13))])
+    jobs[0].score, jobs[1].score = 70, 80  # 70*1.0 > 80*~0.56
+    db.save_jobs(profile.id, jobs)
+    assert [j.title for j in db.query_jobs(profile.id)] == ["Fresh ok", "Older better"]
+    assert [j.title for j in db.query_jobs(profile.id, sort="score")] == ["Older better", "Fresh ok"]

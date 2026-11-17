@@ -251,3 +251,17 @@ async def test_origin_retry_after_three_days_or_input_change(monkeypatch, profil
     job.extra["company_website"] = "https://new.fr"
     await _resolve_origins([job], context, result)
     assert len(calls) == 5 and "origin_tried" not in job.extra
+
+
+def test_origin_due_backfills_date_once_and_reset_repairs_posted_at():
+    from datetime import UTC, datetime
+    from jobhunt import pipeline
+    from jobhunt.dedupe import MergedJob, Sighting
+    j = MergedJob(title="T", origin_url="https://acme.test/j/1", extra={})
+    assert pipeline._origin_due(j)
+    j.extra["origin_date_checked"] = datetime.now(UTC).isoformat()
+    assert not pipeline._origin_due(j)
+    j.sightings.append(Sighting("s", "1", "u", None, datetime(2026, 11, 3, tzinfo=UTC), {}))
+    j.posted_at = datetime(2026, 10, 1, tzinfo=UTC)
+    j.recompute_posted_at()
+    assert j.posted_at == datetime(2026, 11, 3, tzinfo=UTC)

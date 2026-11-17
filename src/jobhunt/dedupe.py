@@ -257,14 +257,24 @@ class MergedJob:
             apply_method=self.extra.get("apply_method", "unknown"),
         )
 
+    def recompute_posted_at(self) -> None:
+        """posted_at = earliest date given by the sightings (drops any date folded in from an origin page)."""
+        dates = [_utc(s.posted_at) for s in self.sightings if s.posted_at]
+        new = min(dates) if dates else None
+        if new != self.posted_at:
+            self.posted_at, self.changed = new, True
+
     def apply_origin(self, p: JobPosting) -> None:
-        published = _utc(p.posted_at)
-        if published and (self.posted_at is None or published < _utc(self.posted_at)):
-            self.posted_at = published
-            self.changed = True
-        if p.origin_url and p.origin_url != self.origin_url:
+        # posted_at stays the earliest SOURCE date; the origin ATS date lives in extra["origin_posted_at"].
+        if p.origin_url and p.origin_url != self.origin_url and (
+                not self.origin_url or (p.origin_confidence or 0) >= (self.origin_confidence or 0)):
             self.origin_url, self.origin_ats, self.origin_confidence = p.origin_url, p.origin_ats, p.origin_confidence
             self.changed = True
+        if p.origin_posted_at and p.origin_url == self.origin_url:
+            iso = _utc(p.origin_posted_at).isoformat()
+            if self.extra.get("origin_posted_at") != iso:
+                self.extra["origin_posted_at"] = iso
+                self.changed = True
         if p.company_website and not self.extra.get("company_website"):
             self.extra["company_website"] = p.company_website
         if p.description and len(p.description) > len(self.description or ""):

@@ -66,7 +66,7 @@ def parse_relative_date(text: str | None, now: datetime | None = None) -> dateti
         return now
     if "hier" in t:
         return now - timedelta(days=1)
-    m = re.search(r"il y a\s+(\d+)\s*(minute|heure|jour|semaine|mois|an)", t)
+    m = re.search(r"il y a\s+(\d+)\+?\s*(minute|heure|jour|semaine|mois|an)", t)
     if not m:
         return None
     n, unit = int(m.group(1)), m.group(2)

@@ -192,7 +192,8 @@ def test_origin_publication_normalizes_offsets_and_multilocation():
     candidate = origin.Candidate("https://acme.test/jobs/1", "Firmware engineer", "careers_site",
                                  posted_at=datetime(2026, 11, 1, 11, tzinfo=timezone(timedelta(hours=2))))
     resolved = origin._apply(posting(posted_at=old), candidate.url, candidate.ats, 0.9, candidate)
-    assert resolved.posted_at == datetime(2026, 11, 1, 9, tzinfo=UTC)
+    assert resolved.posted_at == old  # source date untouched
+    assert resolved.origin_posted_at == datetime(2026, 11, 1, 9, tzinfo=UTC)
     assert origin.location_match("Paris", origin._ld_location({"jobLocation": [
         {"address": {"addressLocality": "Lyon"}}, {"address": {"addressLocality": "Paris"}}]})) is True
 

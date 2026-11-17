@@ -15,6 +15,7 @@ from tenacity import AsyncRetrying, RetryCallState, RetryError, retry_if_excepti
 
 from jobhunt.config import Settings, get_settings
 from jobhunt.dedupe import MergedJob, strip_accents
+from jobhunt.freshness import MAX_JOB_AGE_DAYS
 from jobhunt.models import ContractType, Profile, SearchQuery
 from jobhunt.scoring import JobScore, keyword_score
 
@@ -79,15 +80,20 @@ PLAN_TASK = """Task: expand the profile into at most {n} diverse job-board searc
 SCORE_TASK = """Task: score each job below against the profile.
 For each job return ref (as given), fit 0-100, matches_function (does the job fall within the function/major the profile describes,
 even if the title differs), a rationale of 1-2 short sentences IN FRENCH, and flags among:
-wrong_contract (contract type not wanted), too_senior (requires clearly more experience than the profile has),
-location_mismatch (not near the wanted locations and not remote), language (requires a language the profile lacks), other.
-Education level: compare the level the job requires (Bac+N, "4e année", "M1", "M2", "stage de fin d'études"/PFE,
-"césure", "assistant ingénieur") with the profile's CURRENT level from education/headline/notes. A job that requires a
-higher level than the profile has (e.g. a 6-month PFE reserved for final-year Bac+5 students when the profile is Bac+4)
-gets flag too_senior and at most 55, unless the posting also accepts the profile's level. A job clearly below the
-profile's level (e.g. "stage ouvrier", Bac+2 technician internship) gets at most 50.
-Scale: 85+ = excellent match, 60-84 = good, 35-59 = partial, <35 = poor. Penalise flags strongly. Never invent facts: if
-the description is missing, say so and score cautiously. Return exactly one entry per job."""
+wrong_contract (contract type not wanted), too_senior (requires clearly more professional EXPERIENCE than the profile has,
+e.g. 5+ years, senior/lead role), location_mismatch (not near the wanted locations and not remote),
+language (the job is clearly conducted in a language the profile lacks), other.
+Requirements in job ads are written by HR and are a WISH LIST, not a filter. The ONLY hard blockers are the contract type
+(wrong_contract) and the location (location_mismatch): penalise those strongly. Everything else (tools, skills, languages
+beyond the basics, education level) is a wish list: weigh function fit first; missing nice-to-have items cost little.
+Education level: compare the level the job asks for (Bac+N, "4e année", "M1", "M2", "stage de fin d'études"/PFE, "césure",
+"assistant ingénieur") with the profile's CURRENT level from education/headline/notes. A gap (e.g. a 6-month PFE reserved
+for Bac+5 when the profile is Bac+4, or a Bac+2 technician internship for a Bac+4 profile) lowers the score MODERATELY,
+roughly 10-20 points depending on how explicit and strict the requirement is, and must be mentioned in the rationale. It must
+NOT cap the score and must NOT by itself set too_senior. A "language" flag is a soft penalty unless the job is clearly
+conducted in a language the profile lacks.
+Scale: 85+ = excellent match, 60-84 = good, 35-59 = partial, <35 = poor. Never invent facts: if the description is
+missing, say so and score cautiously. Return exactly one entry per job."""
 
 
 def profile_text(p: Profile) -> str:
@@ -125,7 +131,7 @@ def build_queries(profile: Profile, planned: list[PlannedQuery], max_queries: in
         return SearchQuery(
             keywords=pq.keywords.strip(), rome_codes=list(dict.fromkeys(pq.rome_codes)), location=loc,
             radius_km=profile.radius_km, contract_types=contracts(pq), remote_only=remote,
-            language=pq.language,
+            language=pq.language, posted_within_days=MAX_JOB_AGE_DAYS,
         )
 
     seen_kw: set[str] = set()
