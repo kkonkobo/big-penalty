@@ -1,0 +1,26 @@
+{"jobs": [
+ {"identifier": {"partner_job_id": "b16a546a-e61f-4028-b5a3-1a7bbfaa4e3d", "id": "6687165396d52b5e01b40954", "partner_label": "offres_emploi_lba"},
+  "workplace": {"name": "Robotix Toulouse", "description": "PME de robotique mobile.", "website": "https://robotix.example", "siret": "12345678900011",
+    "location": {"address": "12 RUE DU TECHNOPOLE 31400 TOULOUSE", "geopoint": {"type": "Point", "coordinates": [1.47, 43.57]}},
+    "brand": "Robotix", "legal_name": "ROBOTIX SAS", "size": "10-19", "domain": {"idcc": 1486, "opco": "OPCO 2i", "naf": {"code": "2811Z", "label": "Fabrication de moteurs et turbines"}}},
+  "apply": {"phone": null, "url": "https://labonnealternance.apprentissage.beta.gouv.fr/emploi/lba/6687165396d52b5e01b40954/robotix", "recipient_id": "abc123"},
+  "contract": {"start": "2026-09-01T00:00:00.000Z", "duration": 24, "type": ["Apprentissage"], "remote": "hybrid", "start_type": "precise_date", "start_is_flexible": false},
+  "offer": {"title": "Alternant ingénieur systèmes embarqués", "desired_skills": ["Rigueur", "Autonomie"], "to_be_acquired_skills": ["Programmer en C sur microcontrôleur"],
+    "access_conditions": ["Bac+3 minimum"], "opening_count": 1, "publication": {"creation": "2026-11-05T10:00:00.000Z", "expiration": "2027-01-05T00:00:00Z"},
+    "rome_codes": ["M1805"], "description": "Développement de firmware pour robots mobiles.", "target_diploma": {"european": "6", "label": "Licence, BUT, autres formations niveau (Bac+3)"},
+    "status": "Active", "to_applicant_questions": null}, "is_delegated": false},
+ {"identifier": {"partner_job_id": "9988", "id": null, "partner_label": "France Travail"},
+  "workplace": {"name": "Boulangerie Dupont", "description": null, "website": null, "siret": null, "location": {"address": "1 PLACE DE LA MAIRIE 31000 TOULOUSE", "geopoint": {"type": "Point", "coordinates": [1.44, 43.6]}}, "brand": null, "legal_name": "DUPONT", "size": null, "domain": {"idcc": null, "opco": null, "naf": null}},
+  "apply": {"phone": "0561000000", "url": "https://candidat.francetravail.fr/offres/recherche/detail/9988", "recipient_id": null},
+  "contract": {"start": null, "duration": null, "type": ["Professionnalisation"], "remote": "onsite", "start_type": null, "start_is_flexible": null},
+  "offer": {"title": "Boulanger en alternance", "desired_skills": [], "to_be_acquired_skills": [], "access_conditions": [], "opening_count": 1, "publication": {"creation": "2026-10-01T00:00:00.000Z", "expiration": null}, "rome_codes": ["D1102"], "description": "Pétrissage.", "target_diploma": null, "status": "Active"}, "is_delegated": false},
+ {"identifier": {"partner_job_id": "1", "id": "x1", "partner_label": "offres_emploi_lba"}, "workplace": {"name": "Pourvue SA", "location": {"address": "1 RUE X 31000 TOULOUSE", "geopoint": {}}, "domain": {}},
+  "apply": {"url": "https://example.org/x1"}, "contract": {"type": ["Apprentissage"]}, "offer": {"title": "Déjà pourvu", "status": "Filled", "description": ""}}
+ ],
+ "recruiters": [
+ {"identifier": {"id": "rec-1"}, "workplace": {"name": "AEROSYS", "description": null, "website": "https://aerosys.example", "siret": "98765432100022",
+    "location": {"address": "5 AVENUE DE L'AERODROME 31700 BLAGNAC", "geopoint": {"type": "Point", "coordinates": [1.39, 43.64]}}, "brand": null, "legal_name": "AEROSYS", "size": "50-99",
+    "domain": {"idcc": 1000, "opco": "OPCO 2i", "naf": {"code": "6201Z", "label": "Programmation informatique"}}},
+  "apply": {"phone": "0561111111", "url": "https://labonnealternance.apprentissage.beta.gouv.fr/recherche-apprentissage?type=lba&itemId=rec-1", "recipient_id": "lba-rec-1"}}
+ ],
+ "warnings": []}

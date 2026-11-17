@@ -1,0 +1,75 @@
+{
+ "slug": "ingenieur-robotique-et-systemes-embarques_issy-les-moulineaux",
+ "name": "Ingénieur(e) robotique et systèmes embarqués",
+ "promoted": false,
+ "profile": "<span>Description du profil :<br><br></span>  <strong>Votre profil :</strong>   <ul> <li>Vous préparez un diplôme de niveau Bac+5 en école d’ingénieurs ou à l’université, avec une spécialisation en robotique, automatique, systèmes embarqués ou perception robotique.</li> <li>Ce stage est accessible sans expérience professionnelle préalable. Une première expérience académique ou personnelle en robotique ou en intégration de capteurs constitue un atout.</li> <li>Vous disposez de bonnes bases en programmation Python et/ou C++. Des connaissances en géométrie 3D, localisation, LiDAR ou intégration de capteurs sont appréciées.</li> <li>Vous disposez d’un niveau d’anglais intermédiaire, vous permettant de comprendre une documentation technique et de communiquer dans un environnement professionnel.</li> <li>Vous faites preuve de curiosité, de créativité et de rigueur. Vous appréciez l’expérimentation sur des systèmes physiques, l’analyse méthodique et le travail en équipe.</li> </ul>      <br><br><span>Nous proposons :<br><br></span><p> </p><p> </p>",
+ "language": "fr",
+ "published_at": "2026-11-16T20:00:00.000+01:00",
+ "website": {
+  "reference": "wttj_fr"
+ },
+ "reference": "CAPGE_9zjd0gM",
+ "organization": {
+  "name": "Capgemini",
+  "slug": "capgemini",
+  "reference": "oGmK9Lp",
+  "size": {
+   "fr": "> 2000 salariés",
+   "en": "> 2,000 employees",
+   "es": "> 2000 empleados",
+   "cs": "> 2 000 zaměstnanců",
+   "sk": "> 2 000 zamestnancov"
+  },
+  "nb_employees": 340000,
+  "has_default_job": false,
+  "website_organization": {
+   "slug": "capgemini"
+  }
+ },
+ "contract_type": "INTERNSHIP",
+ "contract_type_names": {
+  "fr": "Stage",
+  "en": "Internship",
+  "es": "Prácticas",
+  "cs": "Stáž",
+  "sk": "Stáž"
+ },
+ "contract_duration_minimum": 4,
+ "contract_duration_maximum": 6,
+ "has_contract_duration": true,
+ "experience_level_minimum": 0,
+ "has_experience_level_minimum": true,
+ "education_level": "BAC_5",
+ "has_education_level": true,
+ "salary_currency": "EUR",
+ "salary_minimum": 19000,
+ "salary_maximum": 20000,
+ "salary_period": "yearly",
+ "salary_yearly_minimum": null,
+ "has_salary_yearly_minimum": false,
+ "office": {
+  "city": "Issy-Les-Moulineaux",
+  "district": "Hauts-de-Seine",
+  "state": "Ile-de-France",
+  "country": "France",
+  "country_code": "FR"
+ },
+ "offices": [
+  {
+   "city": "Issy-Les-Moulineaux",
+   "district": "Hauts-de-Seine",
+   "state": "Ile-de-France",
+   "country": "France",
+   "country_code": "FR"
+  }
+ ],
+ "department": null,
+ "remote": "no",
+ "_geoloc": [
+  {
+   "lat": 48.82818,
+   "lng": 2.26076
+  }
+ ],
+ "objectID": "4384417"
+}

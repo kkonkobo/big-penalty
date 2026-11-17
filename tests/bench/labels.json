@@ -1,0 +1,731 @@
+{
+  "provenance": "Model-generated labels by implementation agent; NOT human gold. Human review required.",
+  "rules": [
+    "Wrong contract or seniority/degree far above the profile = bad.",
+    "Adjacent function, mild qualification gap or uncertain location = partial.",
+    "Function, contract, location and plausible seniority aligned = good.",
+    "Do not invent qualifications, remote eligibility or missing contract facts."
+  ],
+  "labels": [
+    {
+      "profile": "mechatronics",
+      "job": "job-01",
+      "fit": "bad",
+      "reason": "Stage de fin d’études/M2 explicite, trois années au-dessus de cet étudiant Bac+2 malgré la robotique pertinente."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-02",
+      "fit": "bad",
+      "reason": "Bac+5 et stage de fin d’études requis ; le sujet VLA ne compense pas le niveau d’études incompatible."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-03",
+      "fit": "partial",
+      "reason": "Électronique embarquée à Toulouse pertinente, mais jumeau numérique d’antenne avancé et préparation Bac+5, niveau à confirmer."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-04",
+      "fit": "bad",
+      "reason": "Stage ingénieur de cinq/six mois en navigation temps réel, niveau Bac+5 demandé très au-dessus du Bac+2."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-05",
+      "fit": "partial",
+      "reason": "FPGA et électronique proches du cursus, mais connaissances SATCOM/RFSoC spécialisées non établies dans le profil."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-06",
+      "fit": "bad",
+      "reason": "Excellent domaine embarqué et STM32, mais dernière année d’école/Master 2 explicitement exigée."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-07",
+      "fit": "bad",
+      "reason": "Stage C++ pertinent à Paris mais dernière année/Bac+5 exigée, incompatible avec une deuxième année."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-08",
+      "fit": "bad",
+      "reason": "Banc d’essai mécatronique pertinent mais dernière année de cycle ingénieur Bac+5 explicitement requise."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-09",
+      "fit": "bad",
+      "reason": "Master 2 requis ; conseil en financement de R&D plutôt que pratique de l’embarqué."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-10",
+      "fit": "bad",
+      "reason": "Alternance R&D photonique hors Toulouse/Paris, spécialisation différente et mobilité absente."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-11",
+      "fit": "bad",
+      "reason": "Usinage industriel à Bayeux, loin des lieux souhaités et non orienté programmation embarquée."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-12",
+      "fit": "bad",
+      "reason": "Conception optomécanique Bac+5 explicitement demandée ; écart majeur avec un étudiant Bac+2."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-13",
+      "fit": "bad",
+      "reason": "Ingénieur Qualité Fournisseurs F/H : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-14",
+      "fit": "bad",
+      "reason": "Directeur Supply Chain  H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-15",
+      "fit": "bad",
+      "reason": "Employé qualifié logistique magasin H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-16",
+      "fit": "bad",
+      "reason": "Responsable Back-Office Commercial Appels d'Offres : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-17",
+      "fit": "bad",
+      "reason": "Responsable Logistique - ZRM (F/H) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-18",
+      "fit": "bad",
+      "reason": "Responsable Expertise et Solution Câbles - Lyon (69) H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-19",
+      "fit": "bad",
+      "reason": "RESPONSABLE RÉCEPTION ET LOGISTIQUE MAGASIN APRÈS MIDI : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-20",
+      "fit": "bad",
+      "reason": "Assistant Administratif (f/h) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-21",
+      "fit": "bad",
+      "reason": "Ingénieur de développement logiciel C#.net H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-22",
+      "fit": "bad",
+      "reason": "Consultant BI / Développeur ETL SSIS confirmé F/H : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-23",
+      "fit": "bad",
+      "reason": "Développeur Java H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-24",
+      "fit": "bad",
+      "reason": "Consultant BI / Développeur ETL SSIS confirmé H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-25",
+      "fit": "bad",
+      "reason": "Java Architect - Pantin (93) (H/F) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-26",
+      "fit": "bad",
+      "reason": "Développeur·se Full Stack – Freelance – Québec : contrat freelance et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-27",
+      "fit": "bad",
+      "reason": "Développeur Java React (H/F) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-28",
+      "fit": "bad",
+      "reason": "Développeur Full Stack - Toulouse, France  (H/F) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-29",
+      "fit": "bad",
+      "reason": "INFIRMIER EN SOINS GENERAUX 11 : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-30",
+      "fit": "partial",
+      "reason": "Stage électronique/SAV accessible à Toulouse, mais contrôle et reconditionnement plutôt que firmware ou conception."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-31",
+      "fit": "partial",
+      "reason": "Capteur embarqué C/C++ très pertinent à Toulouse, mais niveau Bac+3 annoncé contre Bac+2 en cours."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-32",
+      "fit": "good",
+      "reason": "Stage robotique/capteurs C++ près de Paris, sans expérience exigée et diplôme ingénieur en préparation, sans dernière année imposée."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-33",
+      "fit": "bad",
+      "reason": "Directeur.trice de campus - Lyon : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-34",
+      "fit": "bad",
+      "reason": "DIRECTEUR DE MAGASIN (H/F) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-35",
+      "fit": "partial",
+      "reason": "Stage robotique pratique près de Paris, mais CAO/SolidWorks et dimensionnement mécanique non documentés dans le profil."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-36",
+      "fit": "bad",
+      "reason": "Technicien de Proximité Itinérant junior F/H : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-37",
+      "fit": "bad",
+      "reason": "Senior Développeur Front-End - Team Poker (H/F) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-38",
+      "fit": "bad",
+      "reason": "Account Executive Cybersécurité H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-39",
+      "fit": "bad",
+      "reason": "Senior Developer Python (H/F) : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "mechatronics",
+      "job": "job-40",
+      "fit": "bad",
+      "reason": "Développeur Fullstack Mid/Senior (React ou Django) - Full remote possible - H/F : contrat cdi et métier non compatibles avec un stage/une alternance en mécatronique."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-01",
+      "fit": "bad",
+      "reason": "Stage - Optimisation de l’exécution de modèles d’IA pour les systèmes robotiques - Industrie - Toulouse : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-02",
+      "fit": "bad",
+      "reason": "Stage - Développement et intégration de modèles VLA pour la robotique autonome - Industrie  - Toulouse : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-03",
+      "fit": "bad",
+      "reason": "STAGE - Ingénieur Systèmes Embarqués - Digital Twin d’un système DBFN pour Antenne spatiale  -F/H : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-04",
+      "fit": "bad",
+      "reason": "STAGE - Ingénieur Systèmes Embarqués pour la Navigation Temps Réel -F/H : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-05",
+      "fit": "bad",
+      "reason": "STAGE - Ingénieur FPGA & Traitement du Signal SATCOM DVB-S2X - F/H : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-06",
+      "fit": "bad",
+      "reason": "Stage - Développement embarqué : Passerelle multiprotocole Zigbee/Thread : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-07",
+      "fit": "bad",
+      "reason": "Stage Ingénieur C++ - génération séquences registres H/F : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-08",
+      "fit": "bad",
+      "reason": "Stage R&D - conception d'un banc d'essai automatisé : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-09",
+      "fit": "bad",
+      "reason": "Stage ou alternance consultant scientifique mécanique F/H : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-10",
+      "fit": "bad",
+      "reason": "Ingénieur(e) R&D : contrat alternance non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-11",
+      "fit": "bad",
+      "reason": "Alternance Technicien d'usinage H/F : contrat alternance non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-12",
+      "fit": "bad",
+      "reason": "Stagiaire Ingénieur Conception Optomécanique : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-13",
+      "fit": "partial",
+      "reason": "Qualité fournisseurs adjacente à la supply chain et Rhône compatible ; normes nucléaires et audit spécialisé à acquérir."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-14",
+      "fit": "good",
+      "reason": "Direction supply chain CDI à Genay, management, planification/achats/ERP et huit ans d’expérience transférables ; secteur médical à confirmer."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-15",
+      "fit": "bad",
+      "reason": "Employé de logistique opérationnelle sans management, niveau beaucoup trop junior pour un responsable expérimenté."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-16",
+      "fit": "partial",
+      "reason": "Management de back-office industriel et processus contractuels à Lyon transférables, mais poste commercial et non logistique."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-17",
+      "fit": "good",
+      "reason": "Responsable logistique en CDI près de Lyon, organisation des flux/réception et animation d’équipe au cœur du profil."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-18",
+      "fit": "bad",
+      "reason": "Expertise commerciale en câbles et matériel électrique, pas un poste de supply chain malgré le titre responsable."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-19",
+      "fit": "good",
+      "reason": "Responsabilité réception/logistique et management de vingt personnes à Gleizé, dans le rayon lyonnais, CDI compatible."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-20",
+      "fit": "bad",
+      "reason": "Assistant administratif RH/paye débutant, hors fonction et niveau de responsabilité recherché."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-21",
+      "fit": "bad",
+      "reason": "Ingénieur de développement logiciel C#.net H/F : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-22",
+      "fit": "bad",
+      "reason": "Consultant BI / Développeur ETL SSIS confirmé F/H : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-23",
+      "fit": "bad",
+      "reason": "Développeur Java H/F : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-24",
+      "fit": "bad",
+      "reason": "Consultant BI / Développeur ETL SSIS confirmé H/F : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-25",
+      "fit": "bad",
+      "reason": "Java Architect - Pantin (93) (H/F) : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-26",
+      "fit": "bad",
+      "reason": "Développeur·se Full Stack – Freelance – Québec : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-27",
+      "fit": "bad",
+      "reason": "Développeur Java React (H/F) : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-28",
+      "fit": "bad",
+      "reason": "Développeur Full Stack - Toulouse, France  (H/F) : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-29",
+      "fit": "bad",
+      "reason": "INFIRMIER EN SOINS GENERAUX 11 : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-30",
+      "fit": "bad",
+      "reason": "Stage – Technicien Électronique / SAV (H/F) : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-31",
+      "fit": "bad",
+      "reason": "Stage : Conception et réalisation d'un capteur de couleur de LED embarqué H/F : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-32",
+      "fit": "bad",
+      "reason": "Ingénieure / Ingénieur robotique et systèmes embarqués - Stage : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-33",
+      "fit": "bad",
+      "reason": "Direction d’un campus de formation avec développement commercial, éloignée de la logistique/supply chain."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-34",
+      "fit": "partial",
+      "reason": "Direction de magasin et pilotage d’équipe transférables à la distribution, mais commerce/centre de profit plutôt que supply chain."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-35",
+      "fit": "bad",
+      "reason": "Stage – Mécanique / Robotique : Conception et industrialisation H/F : contrat stage non recherché ; ce profil veut un CDI."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-36",
+      "fit": "bad",
+      "reason": "Support informatique de proximité junior, ni management logistique ni responsabilité supply chain."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-37",
+      "fit": "bad",
+      "reason": "Senior Développeur Front-End - Team Poker (H/F) : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-38",
+      "fit": "bad",
+      "reason": "Account Executive Cybersécurité H/F : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-39",
+      "fit": "bad",
+      "reason": "Senior Developer Python (H/F) : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "logistics",
+      "job": "job-40",
+      "fit": "bad",
+      "reason": "Développeur Fullstack Mid/Senior (React ou Django) - Full remote possible - H/F : métier technique, informatique ou clinique éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-01",
+      "fit": "bad",
+      "reason": "Stage - Optimisation de l’exécution de modèles d’IA pour les systèmes robotiques - Industrie - Toulouse : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-02",
+      "fit": "bad",
+      "reason": "Stage - Développement et intégration de modèles VLA pour la robotique autonome - Industrie  - Toulouse : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-03",
+      "fit": "bad",
+      "reason": "STAGE - Ingénieur Systèmes Embarqués - Digital Twin d’un système DBFN pour Antenne spatiale  -F/H : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-04",
+      "fit": "bad",
+      "reason": "STAGE - Ingénieur Systèmes Embarqués pour la Navigation Temps Réel -F/H : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-05",
+      "fit": "bad",
+      "reason": "STAGE - Ingénieur FPGA & Traitement du Signal SATCOM DVB-S2X - F/H : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-06",
+      "fit": "bad",
+      "reason": "Stage - Développement embarqué : Passerelle multiprotocole Zigbee/Thread : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-07",
+      "fit": "bad",
+      "reason": "Stage Ingénieur C++ - génération séquences registres H/F : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-08",
+      "fit": "bad",
+      "reason": "Stage R&D - conception d'un banc d'essai automatisé : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-09",
+      "fit": "bad",
+      "reason": "Stage ou alternance consultant scientifique mécanique F/H : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-10",
+      "fit": "bad",
+      "reason": "Ingénieur(e) R&D : contrat alternance non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-11",
+      "fit": "bad",
+      "reason": "Alternance Technicien d'usinage H/F : contrat alternance non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-12",
+      "fit": "bad",
+      "reason": "Stagiaire Ingénieur Conception Optomécanique : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-13",
+      "fit": "bad",
+      "reason": "Ingénieur Qualité Fournisseurs F/H : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-14",
+      "fit": "bad",
+      "reason": "Directeur Supply Chain  H/F : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-15",
+      "fit": "bad",
+      "reason": "Employé qualifié logistique magasin H/F : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-16",
+      "fit": "bad",
+      "reason": "Responsable Back-Office Commercial Appels d'Offres : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-17",
+      "fit": "bad",
+      "reason": "Responsable Logistique - ZRM (F/H) : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-18",
+      "fit": "bad",
+      "reason": "Responsable Expertise et Solution Câbles - Lyon (69) H/F : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-19",
+      "fit": "bad",
+      "reason": "RESPONSABLE RÉCEPTION ET LOGISTIQUE MAGASIN APRÈS MIDI : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-20",
+      "fit": "bad",
+      "reason": "Assistant Administratif (f/h) : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-21",
+      "fit": "bad",
+      "reason": "C# industriel exigeant Bac+5 et au moins cinq ans d’expérience ; incompatible avec un bootcamp junior JavaScript."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-22",
+      "fit": "bad",
+      "reason": "Consultant BI/ETL SSIS confirmé, expertise décisionnelle spécialisée et seniorité au-delà du profil."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-23",
+      "fit": "bad",
+      "reason": "Bac+5 et au moins trois ans de développement Java requis, très au-dessus des six mois du profil."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-24",
+      "fit": "bad",
+      "reason": "Poste BI/SSIS confirmé avec forte expertise ETL ; ni front-end React ni premier emploi accessible."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-25",
+      "fit": "bad",
+      "reason": "Architecte Java Bac+5 avec huit ans minimum et présence à Pantin, incompatible en seniorité et localisation."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-26",
+      "fit": "bad",
+      "reason": "Télétravail réservé aux freelances basés au Québec, avec deux ans React/Node requis ; le profil réside en France."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-27",
+      "fit": "bad",
+      "reason": "Java/React Bac+5 et trois ans d’expérience, localisation Loire-Atlantique sans télétravail intégral confirmé."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-28",
+      "fit": "partial",
+      "reason": "Développement web React/CDI pertinent sans seniorité chiffrée dans le texte, mais Toulouse et télétravail non confirmé hors lieux souhaités."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-29",
+      "fit": "bad",
+      "reason": "INFIRMIER EN SOINS GENERAUX 11 : métier non logiciel éloigné de la fonction recherchée."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-30",
+      "fit": "bad",
+      "reason": "Stage – Technicien Électronique / SAV (H/F) : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-31",
+      "fit": "bad",
+      "reason": "Stage : Conception et réalisation d'un capteur de couleur de LED embarqué H/F : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-32",
+      "fit": "bad",
+      "reason": "Ingénieure / Ingénieur robotique et systèmes embarqués - Stage : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-33",
+      "fit": "bad",
+      "reason": "Direction de campus et vente de formation, sans rapport avec un premier poste de développement web."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-34",
+      "fit": "bad",
+      "reason": "Direction commerciale d’un magasin et gestion d’équipe, hors métier web et hors niveau junior."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-35",
+      "fit": "bad",
+      "reason": "Stage – Mécanique / Robotique : Conception et industrialisation H/F : contrat stage non recherché ; ce profil veut un CDI ou du freelance."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-36",
+      "fit": "partial",
+      "reason": "Support informatique junior à Bordeaux accessible, mais technicien itinérant plutôt que développement web ; reconversion adjacente seulement."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-37",
+      "fit": "bad",
+      "reason": "Développeur front-end senior à Paris, niveau confirmé/senior et présence géographique incompatibles."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-38",
+      "fit": "bad",
+      "reason": "Account Executive cybersécurité : vente et prospection, pas développement logiciel."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-39",
+      "fit": "bad",
+      "reason": "Senior backend Python, conduite de chantiers structurants et travail à Paris, incompatible avec un débutant web."
+    },
+    {
+      "profile": "web-junior",
+      "job": "job-40",
+      "fit": "bad",
+      "reason": "Poste explicitement mid/senior, minimum deux ans et formation ingénieur/forte expertise, malgré React et full remote."
+    }
+  ]
+}

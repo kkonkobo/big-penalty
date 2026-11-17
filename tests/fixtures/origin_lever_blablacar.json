@@ -1,0 +1,46 @@
+[
+ {
+  "additionalPlain": "BlaBlaCar is an equal opportunity employer. We celebrate diversity and are committed to creating an ",
+  "categories": {
+   "commitment": "Permanent",
+   "department": "Engineering",
+   "location": "Paris, France",
+   "team": "Back-end",
+   "allLocations": [
+    "Paris, France"
+   ]
+  },
+  "createdAt": 1790150675664,
+  "descriptionPlain": "About BlaBlaCar\n\nBlaBlaCar is the world’s leading community-based travel app enabling 40 million active members to share rides across 41 countries each year. Its technology matches drivers with empty seats with passengers heading the same way, so they can share the cost of the trip.\n\nBlaBlaCar’s mis",
+  "id": "79578084-f3bc-4aa2-98a5-bc0885bfb8dd",
+  "text": "Confirmed Backend Engineer - Care",
+  "country": "FR",
+  "workplaceType": "hybrid",
+  "openingPlain": "About BlaBlaCar\n\nBlaBlaCar is the world’s leading community-based travel app enabling 40 million active members to share rides across 41 countries each year. Its technology matches drivers with empty seats with passengers heading the same way, so they can share the cost of the trip.\n\nBlaBlaCar’s mission is to be the go-to marketplace for shared travel, bringing carpooling, buses, and trains together in one place. Globally, the BlaBlaCar Group also includes Obilet, the leading online bus ticketing platform in Turkey. By partnering with over 20,000 operators, the Group offers a wide choice of affordable and sustainable transport solutions.\n\nIn 2025, the BlaBlaCar community connected 2.7 million meeting points worldwide and enabled 138 million connections between travelers. Drivers saved 568 million euros by carpooling, and all of the BlaBlaCar Group’s mobility services contributed to avoiding 4 million tonnes of CO2 emissions.\n",
+  "descriptionBodyPlain": "",
+  "hostedUrl": "https://jobs.lever.co/blablacar/79578084-f3bc-4aa2-98a5-bc0885bfb8dd",
+  "applyUrl": "https://jobs.lever.co/blablacar/79578084-f3bc-4aa2-98a5-bc0885bfb8dd/apply"
+ },
+ {
+  "additionalPlain": "BlaBlaCar is an equal opportunity employer. We celebrate diversity and are committed to creating an ",
+  "categories": {
+   "commitment": "Permanent",
+   "department": "Engineering",
+   "location": "Paris, France",
+   "team": "Back-end",
+   "allLocations": [
+    "Paris, France"
+   ]
+  },
+  "createdAt": 1792766879350,
+  "descriptionPlain": "About BlaBlaCar\n\nBlaBlaCar is the world’s leading community-based travel app enabling 40 million active members to share rides across 41 countries each year. Its technology matches drivers with empty seats with passengers heading the same way, so they can share the cost of the trip.\n\nBlaBlaCar’s mis",
+  "id": "4b1d549d-4034-41a1-a697-e0a6572c13eb",
+  "text": "Confirmed Backend Engineer - Train",
+  "country": "FR",
+  "workplaceType": "hybrid",
+  "openingPlain": "About BlaBlaCar\n\nBlaBlaCar is the world’s leading community-based travel app enabling 40 million active members to share rides across 41 countries each year. Its technology matches drivers with empty seats with passengers heading the same way, so they can share the cost of the trip.\n\nBlaBlaCar’s mission is to be the go-to marketplace for shared travel, bringing carpooling, buses, and trains together in one place. Globally, the BlaBlaCar Group also includes Obilet, the leading online bus ticketing platform in Turkey. By partnering with over 20,000 operators, the Group offers a wide choice of affordable and sustainable transport solutions.\n\nIn 2025, the BlaBlaCar community connected 2.7 million meeting points worldwide and enabled 138 million connections between travelers. Drivers saved 568 million euros by carpooling, and all of the BlaBlaCar Group’s mobility services contributed to avoiding 4 million tonnes of CO2 emissions.\n",
+  "descriptionBodyPlain": "Your Mission\nWe are looking for a Software Engineer to join the Train Supply team. The mission is to scale the current BlaBlaCar train distribution in Europe  supporting the expansion of the train supply to new markets and countries.\nAs a backend developer you will work on technical challenges and product feature development from early-stage conception, to development, testing strategy, deployment, and monitoring of new releases.\nBlaBlaCar’s Train GDS stack is a scalable micro service architecture in spring boot 3 started in 2022. It uses REST API to communicate with other backends services in BlaBlaCar and with the suppliers. \nYou will be reporting to Solene, the Engineering Manager of the team, and working with a team of 3 other backend engineers. You will collaborate closely with several engineering teams, data, QA product managers and business developers to build robust and scalable features.\n",
+  "hostedUrl": "https://jobs.lever.co/blablacar/4b1d549d-4034-41a1-a697-e0a6572c13eb",
+  "applyUrl": "https://jobs.lever.co/blablacar/4b1d549d-4034-41a1-a697-e0a6572c13eb/apply"
+ }
+]

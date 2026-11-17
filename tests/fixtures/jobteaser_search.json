@@ -1,0 +1,171 @@
+{
+ "hits": [
+  {
+   "_geoloc": [
+    {
+     "lat": 43.6045,
+     "lng": 1.44424
+    }
+   ],
+   "activated_at": 1791896711,
+   "apply_format": "CV_ONLY",
+   "candidacy_type": "INTERNAL",
+   "company": {
+    "id": "4cbdf19f-f4be-4b42-949d-71e877cceea8",
+    "name": "SCLE-SFE",
+    "business_type": "sme",
+    "description": "Haute technologie dans les réseaux Haute Tension. ",
+    "slug": "47373-scle-sfe",
+    "logo_url": "https://d1guu6n8gz71j.cloudfront.net/system/asset/logos/2194753/logo.png?1560497974",
+    "cse_labels": {
+     "bcorp": false,
+     "egapro": false,
+     "entreprise_a_mission": false,
+     "open_climat": false
+    }
+   },
+   "contract": {
+    "type": {
+     "id": 3,
+     "original_label": "internship"
+    },
+    "duration": [
+     6
+    ],
+    "duration_min": 4,
+    "duration_max": 6
+   },
+   "created_by_student_or_alumni": false,
+   "description": "<p>En 2030, 40% de l’électricité produite sera d’origine renouvelable, transformant en profondeur le réseau électrique. SCLE développe des technologies numériques permettant au réseau électrique de demain d’être plus intelligent, plus flexible et plus performant. Professionnalisme et Esprit d’équipe font partie de nos valeurs. Travailler chez nous, c’est travailler dans une entreprise technique et dynamique à taille humaine tout en bénéficiant de la force et de la pérennité d’un grand groupe. </p><p></p><p><strong>La R&amp;D chez SCLE SFE&nbsp;?</strong> Le service R&amp;D conçoit des calculateurs de contrôle-commande numérique pour les postes haute tension des gestionnaires de réseaux (ENEDIS, RTE et régies). Au sein de la R&amp;D, l’équipe Logiciel Embarqué développe les logiciels des calculateurs composant les systèmes de contrôle commande ainsi que certains outils de test et de développement.</p><p><strong>Votre mission&nbsp;?</strong> Dans le cadre de nos développements des logiciels des calculateurs de protection (PR), les tests et les retours terrain font parfois état de défauts de fonctionnement. Afin de faciliter l'identification et l'analyse des bugs, l'équipe de développ",
+   "exclusive": true,
+   "indexed_at": 1791896711,
+   "job_with_impact": false,
+   "liquidity": {
+    "type": null,
+    "reference": null
+   },
+   "locale": "fr",
+   "locations": [
+    {
+     "city": "Toulouse",
+     "state": "Occitanie",
+     "country": "France",
+     "place_id": "bG9jYWxpdHk6ZnI6Y2l0eTpmdXgxWjN5VkJJNkhPdFRqVmdkak9LVnJiUlU9",
+     "sub_state": "Haute-Garonne",
+     "formatted_address": "Toulouse, Haute-Garonne",
+     "latitude": 43.6045,
+     "longitude": 1.44424
+    }
+   ],
+   "premium": false,
+   "private_offer": true,
+   "publication_time_buckets": {
+    "hour": 1791896400,
+    "day": 1791849600,
+    "week": 1791763200
+   },
+   "publication_type": {
+    "score": 200,
+    "name": "free"
+   },
+   "remote_type": "remote_not_allowed",
+   "remote_type_facet": [
+    ""
+   ],
+   "school_tags": {},
+   "slug": "0c72f746-0586-449c-ba65-af4f0248966c-scle-sfe-stage-n-03-deploiement-d-outils-d-instrumentation-de-code-embarque-h-f",
+   "start_date": "0",
+   "title": "Stage n°03 – Déploiement d’outils d’instrumentation de code embarqué (H/F)",
+   "uuid": "0c72f746-0586-449c-ba65-af4f0248966c",
+   "work_experience_code": "young_graduate",
+   "objectID": "0c72f746-0586-449c-ba65-af4f0248966c"
+  },
+  {
+   "_geoloc": [
+    {
+     "lat": 43.6045,
+     "lng": 1.44424
+    },
+    {
+     "lat": 48.8535,
+     "lng": 2.34839
+    }
+   ],
+   "activated_at": 1793280421,
+   "apply_format": "TEXT",
+   "candidacy_type": "EXTERNAL",
+   "company": {
+    "id": null,
+    "name": "SCALIAN",
+    "business_type": "large",
+    "logo_url": "https://d1guu6n8gz71j.cloudfront.net/system/asset/logos/1072076/logo.png?1510666603"
+   },
+   "contract": {
+    "type": {
+     "id": 3,
+     "original_label": "internship"
+    },
+    "duration": [
+     6
+    ],
+    "duration_min": 6,
+    "duration_max": 6
+   },
+   "created_by_student_or_alumni": true,
+   "description": "<p><strong><em>SCALIAN :</em></strong></p><p><strong><em>Créé en 1989, le groupe Scalian compte plus de 5000 personnes en France et à l’international. Il est organisé en 2 pôles métiers spécialisés dans les Systèmes Numériques et la Performance des Opérations.</em></strong></p><p><strong>Le pôle Systèmes Numériques (DS)</strong> regroupe les expertises du système embarqué et critique, de la testabilité, la simulation, l’informatique scientifique, de l’IoT, du SI et des solutions digitales.</p><p><strong>Le pôle Performance des Opérations</strong> <strong>(OP) </strong>regroupe les expertises du management de projet, de la qualité et de la performance industrielle.</p><p>Afin de mener à bien nos activités de recherche et d’innovation, chaque pôle dispose d’une équipe de recherche et innovation : <strong>le LAB Insights</strong>.</p><p></p><p><strong><em>Le projet de recherche :</em></strong></p><p>L’équipe Lab Insights est à la recherche d’un.e <strong>stagiaire en Systèmes d’information, data/IA, cybersécurité, sciences de gestion et/ou sciences cognitives</strong> (Bac+5), à compter de <strong>mars</strong> <strong>2027</strong> et pour une <strong>durée de 6 mois</strong>.</p><p>",
+   "exclusive": true,
+   "indexed_at": 1793280421,
+   "job_with_impact": false,
+   "liquidity": {
+    "type": null,
+    "reference": null
+   },
+   "locale": "fr",
+   "locations": [
+    {
+     "city": "Toulouse",
+     "state": "Occitanie",
+     "country": "France",
+     "place_id": "bG9jYWxpdHk6ZnI6Y2l0eTpmdXgxWjN5VkJJNkhPdFRqVmdkak9LVnJiUlU9",
+     "sub_state": "Haute-Garonne",
+     "formatted_address": "Toulouse, Haute-Garonne",
+     "latitude": 43.6045,
+     "longitude": 1.44424
+    },
+    {
+     "city": "Paris",
+     "state": "Île-de-France",
+     "country": "France",
+     "place_id": "bG9jYWxpdHk6ZnI6Y2l0eTpmemVIZnJnZDJQekhETTNCZXE0NlUyL3pFMG89",
+     "sub_state": "Paris",
+     "formatted_address": "Paris",
+     "latitude": 48.8535,
+     "longitude": 2.34839
+    }
+   ],
+   "premium": false,
+   "private_offer": true,
+   "publication_time_buckets": {
+    "hour": 1793278800,
+    "day": 1793232000,
+    "week": 1792972800
+   },
+   "publication_type": {
+    "score": 200,
+    "name": "free"
+   },
+   "remote_type": "remote_full_allowed",
+   "remote_type_facet": [
+    "remote_partial",
+    "remote_full"
+   ],
+   "school_tags": {},
+   "slug": "6a76236b-c476-4176-a41a-eb4fd814a8af-scalian-stagiaire-en-innovation-gouvernance-et-gestion-des-risques-ia",
+   "start_date": "2027_03",
+   "title": "Stagiaire en Innovation : gouvernance et gestion des risques - IA",
+   "uuid": "6a76236b-c476-4176-a41a-eb4fd814a8af",
+   "work_experience_code": "young_graduate",
+   "objectID": "6a76236b-c476-4176-a41a-eb4fd814a8af"
+  }
+ ]
+}

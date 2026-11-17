@@ -1,0 +1,47 @@
+[
+  {
+    "id": "mechatronics",
+    "profile": {
+      "name": "Profil fictif mécatronique",
+      "headline": "Étudiant en deuxième année d'école d'ingénieur mécatronique",
+      "education": "Bac+2 en cours, école d'ingénieur, cycle de cinq ans",
+      "experience_years": 0,
+      "interests": ["systèmes embarqués", "programmation bas niveau", "mécatronique"],
+      "skills": ["C", "C++", "STM32", "Arduino", "électronique", "robotique"],
+      "contract_types": ["stage", "alternance"],
+      "locations": ["Toulouse", "Paris"],
+      "languages": ["fr", "en"],
+      "notes": "Stage ou alternance accessible à un étudiant de deuxième année. Pas de CDI."
+    }
+  },
+  {
+    "id": "logistics",
+    "profile": {
+      "name": "Profil fictif logistique",
+      "headline": "Responsable supply chain et logistique avec huit ans d'expérience",
+      "education": "Master logistique et supply chain",
+      "experience_years": 8,
+      "interests": ["supply chain", "management logistique", "approvisionnement", "planification"],
+      "skills": ["SAP", "S&OP", "gestion des stocks", "management d'équipe", "amélioration continue"],
+      "contract_types": ["cdi"],
+      "locations": ["Lyon"],
+      "languages": ["fr", "en"],
+      "notes": "Recherche un poste de responsable, pas un stage ni un poste débutant d'opérateur."
+    }
+  },
+  {
+    "id": "web-junior",
+    "profile": {
+      "name": "Profil fictif développement web",
+      "headline": "Développeur web junior diplômé d'un bootcamp",
+      "education": "Bootcamp développement web, pas de diplôme d'ingénieur",
+      "experience_years": 0.5,
+      "interests": ["développement web", "front-end", "full-stack"],
+      "skills": ["JavaScript", "TypeScript", "React", "Node.js", "HTML", "CSS", "Git"],
+      "contract_types": ["cdi", "freelance"],
+      "locations": ["Bordeaux", "remote"],
+      "languages": ["fr", "en"],
+      "notes": "Premier emploi ou missions junior. Télétravail intégral ou poste autour de Bordeaux, pas de mobilité à Paris."
+    }
+  }
+]

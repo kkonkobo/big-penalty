@@ -1,0 +1,7 @@
+{"totalCount": 2, "resultats": [
+ {"@class": ".ResultatOffreDTO", "id": 1001, "numeroOffre": "170000001W", "intitule": "Ingénieur systèmes embarqués H/F", "nomCommercial": "ACME Aero",
+  "lieuTexte": "Toulouse - 31", "salaireTexte": "45 - 55 k€ brut/an", "datePublication": "2026-11-10T08:00:00.000+0000",
+  "texteOffre": "<p>Vos missions :</p><ul><li>Concevoir</li><li>Tester</li></ul>"},
+ {"@class": ".ResultatOffreDTO", "id": 1002, "numeroOffre": "170000002W", "intitule": "Stage - Ingénieur mécatronique", "nomCommercial": "Robotix",
+  "lieuTexte": "Paris 08 - 75", "salaireTexte": "A négocier", "datePublication": "2026-11-12T08:00:00.000+0000", "texteOffre": "Stage de 6 mois."}
+]}

@@ -1,0 +1,107 @@
+{
+ "offset": 0,
+ "limit": 2,
+ "totalFound": 5065,
+ "content": [
+  {
+   "id": "744000162086259",
+   "name": "SAP Manufacturing Systems Coordinator",
+   "uuid": "ff325a05-b858-4684-a414-9fde9be63599",
+   "jobAdId": "c0eca304-19d2-4d78-ad7c-852b14a06c73",
+   "defaultJobAd": true,
+   "refNumber": "REF300637T",
+   "company": {
+    "identifier": "BoschGroup",
+    "name": "Bosch Group"
+   },
+   "releasedDate": "2026-11-17T14:06:32.794Z",
+   "location": {
+    "city": "Fort Lauderdale",
+    "region": "FL",
+    "country": "us",
+    "address": "601 Northwest 65th Court",
+    "postalCode": "33309",
+    "remote": true,
+    "hybrid": false,
+    "latitude": "26.2077065",
+    "longitude": "-80.1529029",
+    "fullLocation": "Fort Lauderdale, FL, United States"
+   },
+   "industry": {
+    "id": "mechanical_engineering",
+    "label": "Mechanical Or Industrial Engineering"
+   },
+   "department": {},
+   "function": {
+    "id": "manufacturing",
+    "label": "Manufacturing"
+   },
+   "typeOfEmployment": {
+    "id": "permanent",
+    "label": "Full-time"
+   },
+   "experienceLevel": {
+    "id": "associate",
+    "label": "Associate"
+   },
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/BoschGroup/postings/744000162086259",
+   "language": {
+    "code": "en",
+    "label": "English",
+    "labelNative": "English (US)"
+   }
+  },
+  {
+   "id": "744000162085049",
+   "name": "Content Management Support Internship",
+   "uuid": "dec8a367-f8c9-4054-925e-a589213cfc62",
+   "jobAdId": "34a5be2b-8543-4b04-93c6-ebbeff8e6ffd",
+   "defaultJobAd": true,
+   "refNumber": "REF301149X",
+   "company": {
+    "identifier": "BoschGroup",
+    "name": "Bosch Group"
+   },
+   "releasedDate": "2026-11-17T13:59:15.303Z",
+   "location": {
+    "city": "Beograd",
+    "country": "rs",
+    "address": "Omladinskih brigada 90e",
+    "postalCode": "11070",
+    "remote": false,
+    "hybrid": true,
+    "latitude": "44.8222284",
+    "longitude": "20.4114858",
+    "fullLocation": "Beograd, , Serbia"
+   },
+   "industry": {
+    "id": "it_and_services",
+    "label": "Information Technology And Services"
+   },
+   "department": {},
+   "function": {
+    "id": "information_technology",
+    "label": "Information Technology"
+   },
+   "typeOfEmployment": {
+    "id": "permanent",
+    "label": "Full-time"
+   },
+   "experienceLevel": {
+    "id": "internship",
+    "label": "Internship"
+   },
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/BoschGroup/postings/744000162085049",
+   "creator": {
+    "name": "Milica Simić (HRL-Bg1)"
+   },
+   "language": {
+    "code": "en",
+    "label": "English",
+    "labelNative": "English (US)"
+   }
+  }
+ ]
+}

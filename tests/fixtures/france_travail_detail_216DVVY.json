@@ -1,0 +1,71 @@
+{
+ "numeroOffre": "Offre n° 216DVVY",
+ "intituleOffre": "Architecte systèmes embarqués H/F)",
+ "codeRome": "M1839",
+ "appellationRome": "Architecte système informatique",
+ "descriptif": "LHH Recruitment Solutions, cabinet de conseil en recrutement d'experts et de cadres, recrute pour son client, société finale industrielle, un(e) Architecte systèmes embarqués (H/F) à Toulouse (31), en CDI.\n\nVotre rôle sera de définir et piloter les architectures logicielles des futures générations d'IED (Intelligent Electronic Devices) dédiés à la protection et à l'automatisation des réseaux électriques HTA et HTB.\n\nVos sujets principaux seront : l'architecture des systèmes embarqués temps réel critiques / la cohérence entre les besoins utilisateurs, les contraintes normatives et les choix d'architectures / les architectures d'IED IEC 61850 Station Bus et Process Bus / la virtualisation des fonctions de protection et de contrôle-commande / le développement des concepts d'IED virtualisés / Digital Twin appliqué aux postes électriques / l'intégration des exigences cybersécurité des systèmes industriels.\n\nVos missions principales seront les suivantes :\n\n\n - Définir la vision et les orientations techniques des futures plateformes de Protection et de Contrôle Commande ; \n - Analyser les besoins métier, normatifs et technologiques afin de construire des architectures pérennes et évolutives ; \n - Challenger les architectures existantes et identifier les ruptures technologiques créatrices de valeur ; \n - Garantir la cohérence entre les exigences fonctionnelles, les performances temps réel et les contraintes de cybersécurité ;\n - Travailler en étroite collaboration avec les équipes Él",
+ "lieuTravail": {
+  "libelleLieuTravail": "Toulouse",
+  "libelleCommuneLieuTravail": "Toulouse",
+  "codePostalLieuTravail": "31000",
+  "codeDepartementLieuTravail": "31",
+  "syntheseLieuTravail": "31 - Toulouse"
+ },
+ "libelleCodeLieuTravail": "Toulouse (31)",
+ "deplacement": null,
+ "syntheseContrat": "CDI - Contrat travail",
+ "syntheseHoraire": "Non disponible",
+ "salaire": "Salaire selon profil",
+ "listeAvantages": [],
+ "qualification": "Cadre",
+ "publicCible": null,
+ "descriptionEntreprise": null,
+ "syntheseSecteurActivite": "Activités des agences de travail temporaire",
+ "experienceProfil": {
+  "experience": "5 An(s)",
+  "estUneExperienceIndispensable": true
+ },
+ "experience": {
+  "syntheseExperience": null,
+  "codeExperiencePro": "E"
+ },
+ "flagManqueDeCandidats": false,
+ "listeFormation": [],
+ "listeCompetence": [
+  {
+   "libelleCompetence": "Concevoir un logiciel, un système d'informations, une application",
+   "estUneCompetenceIndispensable": false
+  }
+ ],
+ "listeSavoirEtre": [],
+ "listeLangue": [],
+ "listePermis": [],
+ "conditionTravailPoste": {
+  "libelleConditionTravail": null,
+  "commentaireConditionTravail": null,
+  "listeLibelleTypeHoraire": [
+   "35H/semaine",
+   "Travail en journée"
+  ],
+  "listeLibelleConditionExerciceHoraire": null,
+  "flagAccesTravailleursHandicapes": false
+ },
+ "etablissement": {
+  "adresseNonDisponible": false,
+  "libelleEnseigne": "ADECCO",
+  "descriptionEtablissement": "",
+  "syntheseSecteurActivite": "",
+  "effectif": "Non disponible",
+  "urlEntreprise": null,
+  "flagUrlEntrepriseInvalide": false,
+  "flagEntrepriseAdaptee": false
+ },
+ "codeTypeAffichageCoordonneesRecruteur": "N",
+ "listeOperationNationale": [],
+ "logo": null,
+ "flagOffrePartenaireAOM": false,
+ "dateDerniereModification": "09 novembre 2026",
+ "pageEmployeurLibelleBouton": "Découvrir l’employeur",
+ "flagHandiEngage": false,
+ "flagTransitionEcologique": false
+}

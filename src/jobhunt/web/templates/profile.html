@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}{{ profile.name }}{% endblock %}
+{% block content %}
+<div class="row between">
+  <h1>{{ profile.name }}</h1>
+  <div>
+    <a class="btn" href="/profiles/{{ profile.id }}/edit">Modifier</a>
+    <a class="btn primary" href="/profiles/{{ profile.id }}/shortlist">Voir la présélection
+      ({{ counts.values()|sum }})</a>
+  </div>
+</div>
+<p class="lead">{{ profile.headline }}</p>
+<p class="muted">
+  {% for i in profile.interests %}<span class="badge">{{ i }}</span>{% endfor %}
+</p>
+<p class="muted">
+  {% for c in profile.contract_types %}<span class="badge">{{ CONTRACT_LABELS[c.value] }}</span>{% endfor %}
+  {{ profile.locations|join(", ") }}
+</p>
+
+<section class="panel">
+  <h2>Recherche</h2>
+  <form hx-post="/profiles/{{ profile.id }}/search" hx-target="#progress" hx-swap="innerHTML" class="row">
+    <label class="inline">Requêtes max <input name="max_queries" type="number" min="1" max="100" placeholder="25" style="width:5em"></label>
+    <button class="btn primary" type="submit" {% if running %}disabled{% endif %}>Lancer la recherche</button>
+  </form>
+  <div id="progress">{% include "_progress.html" %}</div>
+</section>
+{% endblock %}

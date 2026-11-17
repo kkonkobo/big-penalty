@@ -1,0 +1,39 @@
+<html><body><div><p>Publication :</p>06 novembre 2026 à 11h57<p>Estimation du délai :</p>15 jours</div><div class="project-description break-words">
+        <div class="mb-8">
+          <div class="content [&>p:last-child]:mb-0">
+            <p>AVIMAN — RECHERCHE DÉVELOPPEUR /
+<br />ÉQUIPE D’INGÉNIEURS
+<br />Projet AVIMAN VIRTUAL CPU – GPU – FPGA – AI PRO
+<br />1. Objectif
+<br />Distribuer une plateforme open source de simulation CPU RISC-V, GPU, FPGA et IA/NPU sous deux
+<br />formes : (A) système Linux autonome démarrant sur clé USB ; (B) installation Linux sur PC ou carte à
+<br />microprocesseur compatible. Une base logicielle commune, avec profils matériels et fonctionnalités
+<br />adaptées.
+<br />2. Option A — AVIMAN Live USB (priorité)
+<br />• Image ISO amorçable UEFI x86-64, Secure Boot à étudier ; version ARM64 distincte et spécifique à la
+<br />carte.
+<br />• Linux live, interface graphique français/anglais, assistant IA local, lanceur de simulations et diagnostic
+<br />matériel.
+<br />• Démarrage sans modifier le disque interne par défaut ; mode persistant optionnel et chiffré pour projets,
+<br />configurations et modèles IA.
+<br />• Outils embarqués : QEMU, Verilator, Yosys, Python, compilateurs et bibliothèques compatibles, selon
+<br />licences.
+<br />• Clé USB 3.x 128 Go recommandée pour une première version ; SSD externe USB plus adapté aux gros
+<br />modèles et aux traces.
+<br />• Tests de démarrage sur machines cibles, compatibilité GPU, Wi-Fi, Ethernet et stockage ; procédure de
+<br />restauration de clé.
+<br />3. Option B — Installation sur microprocesseur / carte embarquée
+<br />• Cibles : mini-PC x86-64, cartes ARM64 Linux et, pour étude, cartes RISC-V disposant d’un Linux
+<br />suffisamment mature.
+<br />• Construire des paquets natifs pour chaque architecture ; vérifier les pilotes, l’accélération GPU et les
+<br />bibliothèques IA.
+<br />• Pour un microcontrôleur sans Linux, ne prévoir qu’un agent léger de télémétrie/commande : la
+<br />plateforme complète exige bien plus de RAM et de stockage.
+<br />• Pour une carte RISC-V, privilégier une version réduite : la simulation lourde et les grands modèles IA
+<br />pourront s’exécuter sur un serveur ou PC hôte.
+<br />4. Architecture logicielle
+<br />Démarrage Linux → interface AVIMAN → orchestrateur à permissions limitées → moteurs CPU
+<br />(QEMU/Renode), GPU (Mesa/rendu logiciel), FPGA (Verilator/Yosys) et IA (inférence locale et NPU simulé)
+<br />→ rapports et stockage versionné. L’IA peut proposer des configurations et tests, mais toute action
+<br />sensible demande confirmation.
+<br />5.</div></div></div></body></html>
