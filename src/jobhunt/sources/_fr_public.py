@@ -83,7 +83,7 @@ def parse_fr_date(s: str | None) -> datetime | None:
         return today
     if "hier" in t:
         return today - timedelta(days=1)
-    m = re.search(r"il y a (\d+)\s*(minute|heure|jour|semaine|mois|an)", t)
+    m = re.search(r"il y a (\d+)\+?\s*(minute|heure|jour|semaine|mois|an)", t)
     if m:
         n, unit = int(m.group(1)), m.group(2)
         days = {"minute": 0, "heure": 0, "jour": n, "semaine": 7 * n, "mois": 30 * n, "an": 365 * n}[unit]

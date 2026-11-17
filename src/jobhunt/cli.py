@@ -14,6 +14,7 @@ from rich.table import Table
 
 from jobhunt import db
 from jobhunt.config import get_settings
+from jobhunt.freshness import age_days, is_repost
 from jobhunt.models import ContractType, Profile
 from jobhunt.sources import registry
 
@@ -172,11 +173,13 @@ def rescore(profile_id: int) -> None:
 
 @app.command()
 def shortlist(profile_id: int, min_score: float = 0, limit: int = 40, all: bool = False) -> None:
-    """Affiche les meilleures offres."""
+    """Affiche les meilleures offres (tri score × fraîcheur, offres de plus de 14 jours masquées ; * = republiée)."""
     jobs = [j for j in db.query_jobs(profile_id, min_score=min_score, show_filtered=all)][:limit]
-    t = Table("id", "score", "poste", "entreprise", "lieu", "contrat", "sources", "statut", "origine")
+    t = Table("id", "score", "âge (j)", "poste", "entreprise", "lieu", "contrat", "sources", "statut", "origine")
     for j in jobs:
-        t.add_row(str(j.id), str(int(j.score or 0)), j.title[:50], (j.company or "")[:25], (j.location or "")[:22],
+        age = age_days(j)
+        age_s = "?" if age is None else f"{int(age)}{'*' if is_repost(j) else ''}"
+        t.add_row(str(j.id), str(int(j.score or 0)), age_s, j.title[:50], (j.company or "")[:25], (j.location or "")[:22],
                   j.contract_type.value, "+".join(j.sources), j.status, "oui" if j.origin_url else "")
     console.print(t)
 

@@ -33,7 +33,7 @@ def parse_pub_date(text: str | None, now: datetime | None = None) -> datetime | 
         return None
     now = now or datetime.now(timezone.utc)
     t = text.strip().lower()
-    m = re.search(r"il y a\s+(\d+)\s*(min|h|heure|j|jour|sem)", t)
+    m = re.search(r"il y a\s+(\d+)\+?\s*(min|h|heure|j|jour|sem)", t)
     if m:
         n, u = int(m.group(1)), m.group(2)
         return now - (timedelta(minutes=n) if u == "min" else timedelta(hours=n) if u in ("h", "heure") else

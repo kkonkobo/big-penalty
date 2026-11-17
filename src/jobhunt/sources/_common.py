@@ -230,13 +230,14 @@ def _to_dt(d: Any) -> datetime | None:
     if d is None:
         return None
     if isinstance(d, datetime):
-        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
     if isinstance(d, date):
         return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
     try:
-        return datetime.fromisoformat(str(d)).replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(str(d))
     except ValueError:
         return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def jobspy_job_types(query: SearchQuery) -> str | None:
@@ -276,7 +277,7 @@ async def jobspy_scrape(site: str, query: SearchQuery, *, country: str = "france
         verbose=0,
     )
     if query.posted_within_days:
-        kwargs["hours_old"] = query.posted_within_days * 24
+        kwargs["hours_old"] = (query.posted_within_days + 1) * 24  # 1 day slack: upstream windows are inclusive/rounded; shortlist cuts at the exact limit
     jt = jobspy_job_types(query)
     if jt:
         kwargs["job_type"] = jt

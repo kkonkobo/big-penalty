@@ -1,6 +1,7 @@
 """Offline tests for jobhunt.origin (fixtures are trimmed real API responses)."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -161,7 +162,8 @@ def test_best_match_from_fixture():
 
 def test_workday_posted_and_jsonld():
     assert o._workday_posted("Posted Today") is not None
-    assert o._workday_posted("Posted 30+ Days Ago") is None
+    lb = o._workday_posted("Posted 30+ Days Ago")
+    assert lb is not None and (datetime.now(timezone.utc) - lb).days >= 29
     d = o._workday_posted("Posted 3 Days Ago")
     assert d is not None
     html = '<script type="application/ld+json">{"@context":"x","@graph":[{"@type":"JobPosting","title":"Dev","datePosted":"2026-10-01"}]}</script>'
