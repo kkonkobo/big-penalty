@@ -1,6 +1,6 @@
-# PyInstaller spec. Build from the repo root:  uv run --group package pyinstaller packaging/jobhunt.spec --noconfirm
-# One-folder build (fast start-up). macOS: dist/Jobhunt.app. Windows: dist/Jobhunt/Jobhunt.exe (window, no console)
-# plus jobhunt-cli.exe (same app, with a console, for `jobhunt-cli search 1` and friends).
+# PyInstaller spec. Build from the repo root:  uv run --group package pyinstaller packaging/big_penalty.spec --noconfirm
+# One-folder build (fast start-up). macOS: dist/Big Penalty.app. Windows: dist/Big Penalty/Big Penalty.exe (window, no console)
+# plus big-penalty-cli.exe (same app, with a console, for `big-penalty-cli search 1` and friends).
 # PyInstaller cannot cross-compile: build each OS on that OS (see .github/workflows/build.yml).
 
 import os
@@ -36,27 +36,29 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 common = dict(exclude_binaries=True, upx=False, icon=ICON, target_arch=os.environ.get("JOBHUNT_TARGET_ARCH") or None)
-exes = [EXE(pyz, a.scripts, [], name="Jobhunt", console=False, **common)]
+# UTF-8 mode: the code reads and writes text files without naming an encoding, which on Windows would mean cp1252.
+OPTIONS = [("X utf8=1", None, "OPTION")]
+exes = [EXE(pyz, a.scripts, OPTIONS, name="Big Penalty", console=False, **common)]
 if sys.platform == "win32":
-    exes.append(EXE(pyz, a.scripts, [], name="jobhunt-cli", console=True, **common))
+    exes.append(EXE(pyz, a.scripts, OPTIONS, name="big-penalty-cli", console=True, **common))
 
-coll = COLLECT(*exes, a.binaries, a.datas, name="Jobhunt", upx=False)
+coll = COLLECT(*exes, a.binaries, a.datas, name="Big Penalty", upx=False)
 
 # The patchright driver's Node binary must stay executable after collection.
 if sys.platform != "win32":
-    node = os.path.join(DISTPATH, "Jobhunt", "_internal", "patchright", "driver", "node")
+    node = os.path.join(DISTPATH, "Big Penalty", "_internal", "patchright", "driver", "node")
     if os.path.exists(node):
         os.chmod(node, 0o755)
 
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="Jobhunt.app",
+        name="Big Penalty.app",
         icon=ICON,
-        bundle_identifier="io.github.kkonkobo.jobhunt",
+        bundle_identifier="io.github.kkonkobo.big-penalty",
         version=VERSION,
         info_plist={
-            "CFBundleDisplayName": "Jobhunt",
+            "CFBundleDisplayName": "Big Penalty",
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "LSMinimumSystemVersion": "12.0",

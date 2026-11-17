@@ -4,7 +4,7 @@
 
 Created in [T3 Code](https://t3.codes).
 
-**Desktop app:** Jobhunt also ships as a double-click app for macOS and Windows. See
+**Desktop app:** Big Penalty also ships as a double-click app for macOS and Windows. See
 [packaging/README.md](packaging/README.md) for installing, where keys and data live, and building.
 
 ## LLM providers

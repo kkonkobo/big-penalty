@@ -6,12 +6,12 @@ from jobhunt import desktop
 
 def test_default_data_dir_per_platform(tmp_path):
     assert desktop.default_data_dir("darwin", home=tmp_path, environ={}) == (
-        tmp_path / "Library" / "Application Support" / "Jobhunt"
+        tmp_path / "Library" / "Application Support" / "Big Penalty"
     )
     local = tmp_path / "Local"
-    assert desktop.default_data_dir("win32", home=tmp_path, environ={"LOCALAPPDATA": str(local)}) == local / "Jobhunt"
-    assert desktop.default_data_dir("win32", home=tmp_path, environ={}) == tmp_path / "AppData" / "Local" / "Jobhunt"
-    assert desktop.default_data_dir("linux", home=tmp_path, environ={}) == tmp_path / ".local" / "share" / "jobhunt"
+    assert desktop.default_data_dir("win32", home=tmp_path, environ={"LOCALAPPDATA": str(local)}) == local / "Big Penalty"
+    assert desktop.default_data_dir("win32", home=tmp_path, environ={}) == tmp_path / "AppData" / "Local" / "Big Penalty"
+    assert desktop.default_data_dir("linux", home=tmp_path, environ={}) == tmp_path / ".local" / "share" / "big-penalty"
 
 
 def test_parse_env_file_handles_comments_quotes_export_and_blanks():
@@ -45,11 +45,11 @@ def test_prepare_environment_creates_template_and_loads_without_overriding(tmp_p
 
 
 def test_prepare_environment_defaults_to_user_folder(tmp_path, monkeypatch):
-    monkeypatch.setattr(desktop, "default_data_dir", lambda environ: tmp_path / "Jobhunt")
+    monkeypatch.setattr(desktop, "default_data_dir", lambda environ: tmp_path / "Big Penalty")
     environ: dict[str, str] = {}
     desktop.prepare_environment(environ)
-    assert environ["JOBHUNT_DATA_DIR"] == str(tmp_path / "Jobhunt")
-    assert (tmp_path / "Jobhunt" / ".env").is_file()
+    assert environ["JOBHUNT_DATA_DIR"] == str(tmp_path / "Big Penalty")
+    assert (tmp_path / "Big Penalty" / ".env").is_file()
 
 
 def test_find_port_falls_back_when_preferred_is_busy():
@@ -79,5 +79,5 @@ def test_server_serves_ui(tmp_path, monkeypatch):
 
 def test_spec_and_launcher_exist():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "packaging" / "jobhunt.spec").is_file()
+    assert (root / "packaging" / "big_penalty.spec").is_file()
     assert (root / "packaging" / "launch.py").is_file()

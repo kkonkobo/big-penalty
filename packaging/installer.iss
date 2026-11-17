@@ -1,11 +1,11 @@
-; Windows installer for Jobhunt (Inno Setup 6).
+; Windows installer for Big Penalty (Inno Setup 6).
 ; Build after PyInstaller:  ISCC.exe /DAppVersion=0.1.0 packaging\installer.iss
 ; Running a newer installer over an existing install upgrades it in place: the AppId below
-; identifies the app to Windows and must never change. User data lives in %LOCALAPPDATA%\Jobhunt
+; identifies the app to Windows and must never change. User data lives in %LOCALAPPDATA%\Big Penalty
 ; and is never touched by install, upgrade or uninstall.
 
-#define AppName "Jobhunt"
-#define AppExe "Jobhunt.exe"
+#define AppName "Big Penalty"
+#define AppExe "Big Penalty.exe"
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
@@ -26,7 +26,7 @@ DisableDirPage=auto
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
-OutputBaseFilename=Jobhunt-windows-x64-setup
+OutputBaseFilename=Big-Penalty-windows-x64-setup
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 Compression=lzma2/max
@@ -48,7 +48,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
-Source: "..\dist\Jobhunt\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\Big Penalty\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"

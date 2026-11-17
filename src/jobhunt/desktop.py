@@ -4,13 +4,13 @@ Double-click: starts the web UI on 127.0.0.1 and shows it in a native window (py
 Edge WebView2 on Windows). Closing the window stops everything. If the native window can't start, the UI
 opens in the default browser and a small system dialog keeps the app alive until the user clicks it.
 
-With arguments, the packaged binary behaves like the `jobhunt` CLI (`Jobhunt search 1`, `Jobhunt sources`, ...).
+With arguments, the packaged binary behaves like the `jobhunt` CLI (`Big Penalty search 1`, `Big Penalty sources`, ...).
 `--self-test REPORT.json` checks the bundle without a window; `--self-test-window REPORT.json` opens the native
 window, checks that the UI loaded in it, and closes it. The build pipeline runs both.
 
 Data lives in a per-user folder, never inside the app bundle, so updates keep it:
-  macOS   ~/Library/Application Support/Jobhunt
-  Windows %LOCALAPPDATA%\\Jobhunt
+  macOS   ~/Library/Application Support/Big Penalty
+  Windows %LOCALAPPDATA%\\Big Penalty
 JOBHUNT_DATA_DIR still overrides it. API keys go in `.env` in that folder (a commented template is created).
 """
 
@@ -25,12 +25,12 @@ import threading
 import time
 from pathlib import Path
 
-APP_NAME = "Jobhunt"
+APP_NAME = "Big Penalty"
 DEFAULT_PORT = 8765
 
 ENV_TEMPLATE = """\
-# Jobhunt settings. Fill in the keys you have, then restart Jobhunt.
-# Without any LLM key, Jobhunt still works with rule-based planning and scoring.
+# Big Penalty settings. Fill in the keys you have, then restart Big Penalty.
+# Without any LLM key, Big Penalty still works with rule-based planning and scoring.
 # This file stays on this computer; never share it.
 
 ANTHROPIC_API_KEY=
@@ -56,7 +56,7 @@ def default_data_dir(platform: str = sys.platform, home: Path | None = None, env
         base = environ.get("LOCALAPPDATA")
         return (Path(base) if base else home / "AppData" / "Local") / APP_NAME
     base = environ.get("XDG_DATA_HOME")
-    return (Path(base) if base else home / ".local" / "share") / "jobhunt"
+    return (Path(base) if base else home / ".local" / "share") / "big-penalty"
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -138,7 +138,7 @@ def wait_with_system_dialog(url: str) -> None:
     import webbrowser
 
     webbrowser.open(url)
-    message = f"Jobhunt est ouvert dans votre navigateur :\n{url}\n\nCliquez sur Quitter pour arrêter Jobhunt."
+    message = f"Big Penalty est ouvert dans votre navigateur :\n{url}\n\nCliquez sur Quitter pour arrêter Big Penalty."
     if sys.platform == "win32":
         import ctypes
 
@@ -176,8 +176,11 @@ def self_test(report_path: Path) -> int:
     import asyncio
     import urllib.request
 
-    report: dict[str, object] = {"data_dir": os.environ.get("JOBHUNT_DATA_DIR"), "frozen": bool(getattr(sys, "frozen", False))}
-    ok = True
+    frozen = bool(getattr(sys, "frozen", False))
+    report: dict[str, object] = {
+        "data_dir": os.environ.get("JOBHUNT_DATA_DIR"), "frozen": frozen, "utf8_mode": sys.flags.utf8_mode,
+    }
+    ok = not frozen or sys.flags.utf8_mode == 1  # the bundle must run in UTF-8 mode (see big_penalty.spec)
     server = thread = None
     try:
         port = find_port(0)
