@@ -483,3 +483,137 @@ def test_the_password_label_matches_other_languages(label):
     import unicodedata
     stripped = "".join(c for c in unicodedata.normalize("NFKD", label) if not unicodedata.combining(c)).lower()
     assert re.search(LABEL_RE["account_password"], stripped, re.I)
+
+
+# ------------------------------------------------------------------ answers_lock
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+
+def test_answers_lock_is_reentrant_and_releases(profile):
+    with F.answers_lock(profile.id):
+        with F.answers_lock(profile.id):  # a public function called from inside a wrapped block
+            F.save_answers(profile.id, {"city": "Albi"})
+            assert F.add_trusted_host(profile.id, "jobs.autre-site.test")
+        assert F.get_answer(F.load_answers(profile.id), "city") == "Albi"
+    assert F.answers_lock and F._held == {}
+    with F.answers_lock(profile.id, timeout_s=0.1):  # released: free again
+        pass
+
+
+def test_answers_lock_times_out_with_a_clear_error_when_held_by_another_thread(profile):
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with F.answers_lock(profile.id):
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert held.wait(5)
+    start = time.monotonic()
+    with pytest.raises(ApplyError, match="Fichier de réponses occupé : réessayer"):
+        with F.answers_lock(profile.id, timeout_s=0.3):
+            pass
+    assert 0.25 <= time.monotonic() - start < 3
+    with pytest.raises(ApplyError, match="occupé"):  # the public writers wait the default 10 s: shortened here
+        with F.answers_lock(profile.id, timeout_s=0.05):
+            F.save_answers(profile.id, {"city": "Albi"})
+    release.set()
+    t.join(5)
+    F.save_answers(profile.id, {"city": "Albi"})  # free again
+
+
+def test_a_waiting_writer_gets_the_lock_when_it_is_released(profile):
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with F.answers_lock(profile.id):
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert held.wait(5)
+    threading.Timer(0.2, release.set).start()
+    F.save_answers(profile.id, {"city": "Albi"})  # blocks ~0.2 s, then writes
+    t.join(5)
+    assert F.get_answer(F.load_answers(profile.id), "city") == "Albi"
+
+
+def test_two_threads_writing_different_fields_both_survive(profile):
+    errors = []
+
+    def writer(kind):
+        try:
+            for i in range(40):
+                if kind == "a":
+                    F.save_answers(profile.id, {"city": f"Ville{i}"})
+                    F.save_custom_answers(profile.id, [(f"Question {i} ?", "R")])
+                else:
+                    F.save_answers(profile.id, {"birth_place": f"Lieu{i}"})
+                    F.add_trusted_host(profile.id, f"site{i}.exemple.test")
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(k,)) for k in "ab"]
+    [t.start() for t in threads]
+    [t.join(60) for t in threads]
+    assert not errors
+    data = F.load_answers(profile.id)
+    assert data["city"] == "Ville39" and data["birth_place"] == "Lieu39"
+    assert len(F.custom_answers(profile.id)) == 40 and len(F.trusted_hosts(profile.id)) == 40  # no lost update
+
+
+def test_two_processes_writing_different_fields_both_survive(profile, tmp_path):
+    code = ("import sys\nfrom jobhunt.apply import facts as F\n"
+            "kind, pid = sys.argv[1], int(sys.argv[2])\n"
+            "for i in range(25):\n"
+            "    if kind == 'a':\n        F.save_answers(pid, {'city': f'Ville{i}'}); F.save_custom_answers(pid, [(f'Q{i} ?', 'R')])\n"
+            "    else:\n        F.save_answers(pid, {'birth_place': f'Lieu{i}'}); F.add_trusted_host(pid, f'site{i}.exemple.test')\n")
+    env = {**os.environ, "JOBHUNT_DATA_DIR": str(get_settings().data_dir)}
+    procs = [subprocess.Popen([sys.executable, "-c", code, k, str(profile.id)], env=env, stderr=subprocess.PIPE) for k in "ab"]
+    outs = [p.communicate(timeout=120) for p in procs]
+    assert [p.returncode for p in procs] == [0, 0], [o[1].decode()[-400:] for o in outs]
+    data = F.load_answers(profile.id)
+    assert data["city"] == "Ville24" and data["birth_place"] == "Lieu24"
+    assert len(F.custom_answers(profile.id)) == 25 and len(F.trusted_hosts(profile.id)) == 25
+
+
+def test_temp_files_never_collide_and_stale_ones_are_cleaned(profile):
+    p = F.answers_path(profile.id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    old, fresh = p.with_name("answers.crash1.tmp"), p.with_name("answers.crash2.tmp")
+    old.write_text("x")
+    fresh.write_text("x")
+    long_ago = time.time() - 2 * 3600
+    os.utime(old, (long_ago, long_ago))
+    seen = set()
+    real = os.replace
+
+    def spy(src, dst):
+        seen.add(src)
+        return real(src, dst)
+
+    import os as _os
+    errors = []
+    _os.replace = spy
+    try:
+        def w(i):
+            try:
+                F._write_answers(profile.id, {"city": f"v{i}"})  # deliberately WITHOUT the lock: names must still not collide
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+        ts = [threading.Thread(target=w, args=(i,)) for i in range(20)]
+        [t.start() for t in ts]
+        [t.join(30) for t in ts]
+    finally:
+        _os.replace = real
+    assert not errors and len(seen) == 20  # twenty distinct temp names
+    assert not old.exists() and fresh.exists()  # only the stale leftover is removed
+    assert F.load_answers(profile.id)["city"].startswith("v")
+    assert sorted(x.name for x in p.parent.glob("answers.*.tmp")) == ["answers.crash2.tmp"]

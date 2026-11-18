@@ -1277,3 +1277,45 @@ def test_cli_resolve_many(profile, master, tmp_path):
     assert r.exit_code == 0 and "1 candidature(s) marquée(s) comme envoyée(s)." in r.output
     assert store.get_application(ids[2]).status == "submitted"
     assert CliRunner().invoke(cli, ["apply", "resolve-many", "--sent"]).exit_code != 0
+
+
+# ------------------------------------------------------------------ send_selected forwards its bindings to run
+async def test_send_selected_forwards_the_expected_revision_and_destination_to_run(profile, master, tmp_path, monkeypatch):
+    j1, a1 = new_app(profile, master, tmp_path, 1)
+    j2, a2 = new_app(profile, master, tmp_path, 2)
+    seen = {}
+    real = service.run
+
+    async def spy(app_id, **kw):
+        seen[app_id] = {k: kw.get(k) for k in ("expected_rev", "expected_origin", "_lock_held")}
+        return await real(app_id, **kw)
+
+    monkeypatch.setattr(service, "run", spy)
+    stub_engine(monkeypatch, RunResult(status="submitted", message="ok"))
+    revs = {a1.id: a1.current_rev, a2.id: a2.current_rev}
+    origins = {a1.id: service.origin_digest(j1.origin_url), a2.id: service.origin_digest(j2.origin_url)}
+    runs = await service.send_selected([a1.id, a2.id], pool=FakePool(), expected_revs=revs, expected_origins=origins)
+    assert [r.status for r in runs] == ["submitted", "submitted"]
+    assert seen == {a1.id: {"expected_rev": 1, "expected_origin": origins[a1.id], "_lock_held": True},
+                    a2.id: {"expected_rev": 1, "expected_origin": origins[a2.id], "_lock_held": True}}
+    seen.clear()
+    _, a3 = new_app(profile, master, tmp_path, 3)
+    await service.send_selected([a3.id], pool=FakePool())  # nothing to bind: nothing forwarded
+    assert seen[a3.id]["expected_rev"] is None and seen[a3.id]["expected_origin"] is None
+
+
+async def test_a_change_between_the_early_check_and_the_run_is_caught_by_run_itself(profile, master, tmp_path, monkeypatch):
+    j, a = new_app(profile, master, tmp_path, 1)
+    calls = stub_engine(monkeypatch, RunResult(status="submitted", message="ok"))
+    real = service._bound_problems
+
+    def late_change(app, job, rev, origin):
+        out = real(app, job, rev, origin)  # the early check passes ...
+        with db.connect() as c:  # ... then the link changes before the run starts
+            c.execute("UPDATE jobs SET origin_url='https://evil.exemple.test/job' WHERE id=?", (job.id,))
+        return out
+
+    monkeypatch.setattr(service, "_bound_problems", lambda *a_, **k: late_change(*a_, **k) if a_[2] is not None else real(*a_, **k))
+    runs = await service.send_selected([a.id], pool=FakePool(), expected_revs={a.id: a.current_rev},
+                                       expected_origins={a.id: service.origin_digest(j.origin_url)})
+    assert runs[0].status == "blocked" and "le lien de l'offre a changé depuis l'affichage" in runs[0].message and not calls

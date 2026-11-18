@@ -51,6 +51,7 @@ class Settings(BaseModel):
     apply_prepare_min_score: float = 60  # JOBHUNT_APPLY_PREPARE_MIN_SCORE: the daily run prepares a CV for jobs at/above it
     apply_prepare_daily_cap: int = 15  # JOBHUNT_APPLY_PREPARE_DAILY_CAP
     apply_max_steps: int = 12  # JOBHUNT_APPLY_MAX_STEPS: pages per run
+    apply_cv_retries: int = 2  # JOBHUNT_APPLY_CV_RETRIES: automatic CV regenerations per application when the revision has blocking errors
     apply_captcha_wait_s: float = 180  # JOBHUNT_APPLY_CAPTCHA_WAIT_S: a VISIBLE browser keeps the page open this long for a CAPTCHA
     headless: bool = False  # headful by default: lets a human solve CAPTCHAs and looks like a real user
     min_delay_s: float = 2.0  # per-domain minimum delay between requests
@@ -124,6 +125,7 @@ def get_settings() -> Settings:
         apply_prepare_daily_cap=int(env("JOBHUNT_APPLY_PREPARE_DAILY_CAP") or 15),
         apply_max_steps=int(env("JOBHUNT_APPLY_MAX_STEPS") or 12),
         apply_captcha_wait_s=float(env("JOBHUNT_APPLY_CAPTCHA_WAIT_S") or 180),
+        apply_cv_retries=int(env("JOBHUNT_APPLY_CV_RETRIES") or 2),
         headless=env("JOBHUNT_HEADLESS", "0") == "1",
     )
     for d in (s.browser_profiles_dir, s.cache_dir):

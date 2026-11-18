@@ -186,6 +186,10 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE application_runs ADD COLUMN approved_by TEXT;
     """,
+    # 9: how many times the automatic pass regenerated the application's CV because its revision had blocking errors.
+    """
+    ALTER TABLE applications ADD COLUMN auto_regens INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 

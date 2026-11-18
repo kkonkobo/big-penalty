@@ -616,7 +616,9 @@ async def _send_each(app_ids: list[int], *, headless, on_progress, pool, planner
                             on_progress(app_id, res)
                         continue
                 res = await run(app_id, mode="submit", trigger="user", headless=headless, pool=shared.get(), planner=planner,
-                                llm=shared_llm.get(), verifier=verifier, _lock_held=True)
+                                llm=shared_llm.get(), verifier=verifier, _lock_held=True,
+                                expected_rev=None if expected_revs is None else expected_revs.get(app_id, -1),
+                                expected_origin=None if expected_origins is None else expected_origins.get(app_id, ""))
             except ApplyError:
                 continue
             runs.append(res)
@@ -802,8 +804,23 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
         except SendLocked:
             summary.errors.append("Un autre envoi est en cours : aucun envoi automatique cette fois-ci")
             emit(f"Candidatures : {summary.errors[-1]}")
+        async def regenerate(app: Application, job) -> Application | None:
+            """A new revision for a draft whose current one has blocking errors (or no PDF): at most `apply_cv_retries` times per
+            application (counted in the database), within the preparation cap of the pass. None = give up."""
+            if apply_store.auto_regens(app.id) >= s.apply_cv_retries or budget[0] >= s.apply_prepare_daily_cap:
+                return None
+            budget[0] += 1
+            apply_store.bump_auto_regens(app.id)
+            try:
+                new = await cvs.prepare_application(profile_id, job.id, shared_llm.get())
+            except (CVError, LLMError) as e:
+                summary.errors.append(f"{job.company or 'entreprise'} — {job.title} : {e}")
+                return None
+            summary.prepared += 1
+            return new
+
         order = [j for j in cands if j.id in apps] + [j for j in cands if j.id not in apps]  # existing CVs first
-        total, attempts = len(order), 0
+        total, budget = len(order), [0]  # budget[0]: CVs generated this pass (first versions and regenerations)
         for n, job in enumerate(order, 1):
             if limit is not None and summary.sent >= limit:
                 emit(f"Limite de {limit} envoi{'s' if limit > 1 else ''} atteinte : fin de la passe")
@@ -811,10 +828,10 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
             tag = f"[{n}/{total}] {job.company or 'entreprise'} — {job.title}"
             try:
                 if job.id not in apps:
-                    if attempts >= s.apply_prepare_daily_cap:
+                    if budget[0] >= s.apply_prepare_daily_cap:
                         emit(f"Plafond de {s.apply_prepare_daily_cap} CV préparés atteint : fin de la passe")
                         break
-                    attempts += 1
+                    budget[0] += 1
                     try:
                         apps[job.id] = await cvs.prepare_application(profile_id, job.id, shared_llm.get())
                         summary.prepared += 1
@@ -824,7 +841,7 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
                         emit(f"{tag} : bloquée (CV non préparé : {e})")
                         continue
                 await _auto_one(apps[job.id], job, tag, summary, emit, lock_held=lock_held, pool=shared_pool, llm=shared_llm,
-                                planner=planner, verifier=verifier, headless=headless, attended=attended, min_score=min_score)
+                                planner=planner, verifier=verifier, headless=headless, attended=attended, min_score=min_score, regenerate=regenerate)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - one application never stops the pass
@@ -847,7 +864,7 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
 
 
 async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit, *, lock_held: bool, pool: _Pool, llm: _Llm,
-                    planner, verifier, headless: bool, attended: bool, min_score: float | None) -> None:
+                    planner, verifier, headless: bool, attended: bool, min_score: float | None, regenerate=None) -> None:
     """One application of the automatic pass: checks, auto-approval, the send itself and its progress line."""
     s = get_settings()
     app = cvstore.get_application(app.id) or app  # someone else (the web portal, the user) may have moved it since the pass began
@@ -874,9 +891,18 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : bloquée (offre modifiée entre-temps)")
         return
     job = live
-    if app.status == "draft" and app.errors:
+    def broken(a: Application) -> bool:
+        return a.status == "draft" and (bool(a.errors) or cvs.safe_pdf(a) is None)
+
+    while broken(app) and regenerate is not None:  # blocking errors / no PDF: a fresh revision may be clean (bounded retries)
+        new = await regenerate(app, job)
+        if new is None:
+            break
+        app = new
+        emit(f"{tag} : CV régénéré (erreurs bloquantes), nouvel essai")
+    if broken(app):
         summary.to_fix += 1
-        emit(f"{tag} : à corriger ({len(app.errors)} erreur(s) bloquante(s) dans le CV)")
+        emit(f"{tag} : à corriger ({len(app.errors)} erreur(s) bloquante(s) dans le CV)" if app.errors else f"{tag} : à corriger (PDF absent)")
         return
     threshold = max(s.apply_auto_min_score, min_score or 0)
     if app.status == "draft" and (job.score or 0) >= threshold:

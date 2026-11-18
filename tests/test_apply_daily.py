@@ -614,3 +614,90 @@ def test_pause_reason_labels():
     assert service.pause_reason_label(ApplyRun(**base, status="needs_human", message="Un CAPTCHA")) == "CAPTCHA"
     assert service.pause_reason_label(ApplyRun(**base, status="needs_human", message="Création de compte impossible")) == "compte"
     assert service.pause_reason_label(ApplyRun(**base, status="blocked", result=RunResult(status="blocked", untrusted_host="x.test"))) == "site non approuvé"
+
+
+# ------------------------------------------------------------------ automatic CV regeneration
+def error_then_clean(env, job, bad_first):
+    """Fake `prepare_application`: the first `bad_first` generations carry a blocking error, the next ones are clean."""
+    state = {"calls": 0}
+
+    async def prepare(profile_id, job_id, llm=None):
+        state["calls"] += 1
+        env.prepared.append(job_id)
+        env.flags[job_id] = [ERROR] if state["calls"] <= bad_first else []
+        return env.draft(db.get_job(job_id))
+
+    return state, prepare
+
+
+async def test_a_cv_with_blocking_errors_is_regenerated_then_approved_and_sent_in_the_same_pass(env, profile, monkeypatch):
+    job = env.job(1)
+    state, prepare = error_then_clean(env, job, bad_first=1)
+    monkeypatch.setattr(cvs, "prepare_application", prepare)
+    s, lines = await daily(profile)
+    assert state["calls"] == 2 and s.prepared == 2 and s.sent == 1 and s.to_fix == 0
+    assert any(line == "[1/1] Société 1 — Stage numéro 1 : CV régénéré (erreurs bloquantes), nouvel essai" for line in lines)
+    app = store.find_application(profile.id, job.id)
+    assert app.current_rev == 2 and app.status == "submitted" and app.approved_by == "auto"
+    assert astore.auto_regens(app.id) == 1
+
+
+async def test_a_cv_still_blocked_after_the_retries_is_left_to_fix(env, profile, monkeypatch):
+    job = env.job(1)
+    state, prepare = error_then_clean(env, job, bad_first=99)
+    monkeypatch.setattr(cvs, "prepare_application", prepare)
+    s, lines = await daily(profile)
+    assert state["calls"] == 3 and s.to_fix == 1 and s.sent == 0 and not env.runs  # 1 generation + 2 retries (the default)
+    app = store.find_application(profile.id, job.id)
+    assert astore.auto_regens(app.id) == 2 and app.status == "draft"
+    assert sum("CV régénéré" in line for line in lines) == 2 and any("à corriger" in line for line in lines)
+    s, _ = await daily(profile)  # the counter persists: no more automatic regenerations on the next pass
+    assert state["calls"] == 3 and s.to_fix == 1
+
+
+async def test_the_retry_count_is_a_setting_and_regenerations_use_the_preparation_cap(env, profile, monkeypatch):
+    job = env.job(1)
+    state, prepare = error_then_clean(env, job, bad_first=99)
+    monkeypatch.setattr(cvs, "prepare_application", prepare)
+    monkeypatch.setattr(get_settings(), "apply_cv_retries", 0)
+    s, _ = await daily(profile)
+    assert state["calls"] == 1 and s.to_fix == 1  # retries switched off
+    env2 = [env.job(2, 70)]
+    monkeypatch.setattr(get_settings(), "apply_cv_retries", 5)
+    monkeypatch.setattr(get_settings(), "apply_prepare_daily_cap", 3)
+    state["calls"] = 0
+    s, _ = await daily(profile)
+    assert state["calls"] <= 3  # generations and regenerations share the cap
+
+
+async def test_a_regeneration_that_raises_is_recorded_and_the_pass_goes_on(env, profile, monkeypatch):
+    j1, j2 = env.job(1, 95), env.job(2, 90)
+    calls = {"n": 0}
+
+    async def prepare(profile_id, job_id, llm=None):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the regeneration of job 1
+            raise LLMError("openai: timeout")
+        env.flags[job_id] = [ERROR] if job_id == j1.id else []
+        env.prepared.append(job_id)
+        return env.draft(db.get_job(job_id))
+
+    monkeypatch.setattr(cvs, "prepare_application", prepare)
+    s, lines = await daily(profile)
+    assert s.to_fix == 1 and s.sent == 1 and any("timeout" in e for e in s.errors)
+
+
+def test_the_cv_retries_setting_is_read_from_the_environment(monkeypatch):
+    from jobhunt import config
+
+    monkeypatch.delenv("JOBHUNT_APPLY_CV_RETRIES", raising=False)
+    assert config.get_settings.__wrapped__().apply_cv_retries == 2
+    monkeypatch.setenv("JOBHUNT_APPLY_CV_RETRIES", "4")
+    assert config.get_settings.__wrapped__().apply_cv_retries == 4
+
+
+def test_auto_regens_counter_is_atomic_and_per_application(profile, master, tmp_path):
+    a = make_app(profile, make_job(profile, title="Un", company="A", url="https://c.exemple.test/1"), tmp_path, master_hash=master.content_hash)
+    b = make_app(profile, make_job(profile, title="Deux", company="B", url="https://c.exemple.test/2"), tmp_path, master_hash=master.content_hash)
+    assert astore.auto_regens(a.id) == 0 and astore.bump_auto_regens(a.id) == 1 and astore.bump_auto_regens(a.id) == 2
+    assert astore.auto_regens(b.id) == 0 and astore.auto_regens(9999) == 0

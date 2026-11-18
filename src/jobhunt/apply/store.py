@@ -209,6 +209,22 @@ def outstanding_attempt(application_id: int) -> ApplyRun | None:
     return _from_row(r) if r else None
 
 
+def auto_regens(application_id: int) -> int:
+    """How many times the automatic pass regenerated this application's CV for blocking errors."""
+    with connect() as c:
+        r = c.execute("SELECT auto_regens FROM applications WHERE id=?", (application_id,)).fetchone()
+    return int(r["auto_regens"]) if r else 0
+
+
+def bump_auto_regens(application_id: int) -> int:
+    """+1 on the counter (atomic); returns the new value."""
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("UPDATE applications SET auto_regens = auto_regens + 1 WHERE id=?", (application_id,))
+        r = c.execute("SELECT auto_regens FROM applications WHERE id=?", (application_id,)).fetchone()
+    return int(r["auto_regens"]) if r else 0
+
+
 def sent_run(application_id: int) -> ApplyRun | None:
     """The run recorded as THE sending attempt of the application (`applications.sent_run_id`), if any."""
     with connect() as c:

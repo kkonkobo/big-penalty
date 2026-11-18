@@ -6,9 +6,15 @@ The account password is NEVER in the sheet (the engine reads it from the keychai
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import functools
 import hashlib
 import os
 import re
+import tempfile
+import threading
+import time
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Literal
@@ -20,6 +26,7 @@ from pydantic import BaseModel
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.types import Fact, FactSheet
 from jobhunt.config import get_settings
+from jobhunt.filelock import try_lock, unlock
 from jobhunt.cv.master import Master
 from jobhunt.dedupe import MergedJob
 from jobhunt.models import ContractType, Profile
@@ -56,15 +63,98 @@ def _norm_question(q: str) -> str:
 norm_question = _norm_question  # public: how two question labels are compared (accents, case, punctuation ignored)
 
 
+_held_lock = threading.Lock()
+_held: dict[int, list] = {}   # profile id -> [owner, depth] of the lock this process holds (re-entrancy registry)
+
+
+def _owner() -> tuple[int, int]:
+    """Who is asking: the thread and, inside asyncio, the task (so the same task may re-enter, another one may not)."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return threading.get_ident(), id(task) if task is not None else 0
+
+
+@contextlib.contextmanager
+def answers_lock(profile_id: int, *, timeout_s: float = 10.0):
+    """Exclusive lock on the profile's answers (`data/profiles/<pid>/answers.lock`, `jobhunt.filelock`: flock on macOS / Linux,
+    msvcrt on Windows), shared by threads, tasks and processes. BLOCKING: polls every 20 ms for up to `timeout_s`, then raises
+    ApplyError("Fichier de réponses occupé : réessayer"). Re-entrant for the same thread / task (a per-process registry keyed
+    by profile id), so the public read-modify-write functions can call each other and a caller can wrap several calls:
+    `with answers_lock(pid): load -> compare -> save -> read back`. The OS drops the lock if the process dies."""
+    owner = _owner()
+    with _held_lock:
+        held = _held.get(profile_id)
+        reentered = held is not None and held[0] == owner
+        if reentered:
+            held[1] += 1
+    if reentered:
+        try:
+            yield
+        finally:
+            with _held_lock:
+                held[1] -= 1
+        return
+    path = answers_path(profile_id).with_name("answers.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while not try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise ApplyError("Fichier de réponses occupé : réessayer")
+            time.sleep(0.02)
+        with _held_lock:
+            _held[profile_id] = [owner, 1]
+        try:
+            yield
+        finally:
+            with _held_lock:
+                _held.pop(profile_id, None)
+            unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _locked(fn):
+    """The function reads, modifies and writes the answers: it holds `answers_lock(profile_id)` for its whole duration."""
+    @functools.wraps(fn)
+    def wrapper(profile_id, *args, **kwargs):
+        with answers_lock(profile_id):
+            return fn(profile_id, *args, **kwargs)
+    return wrapper
+
+
+STALE_TMP_S = 3600
+
+
 def _write_answers(profile_id: int, data: dict) -> None:
-    """Atomic YAML round trip (temp file + replace); comments of the original file may be lost."""
+    """Atomic YAML write: a UNIQUE temp file in the same folder (two writers never share a name), fsync, `os.replace`.
+    Temp files left by a crash are harmless and removed on the next write once they are older than an hour. Comments of the
+    original file may be lost. Callers hold `answers_lock`."""
     p = answers_path(profile_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100, default_flow_style=False), encoding="utf-8")
-    os.replace(tmp, p)
+    for old in p.parent.glob("answers.*.tmp"):
+        with contextlib.suppress(OSError):
+            if time.time() - old.stat().st_mtime > STALE_TMP_S:
+                old.unlink()
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=p.parent, prefix="answers.", suffix=".tmp", delete=False) as f:
+            tmp = f.name
+            f.write(yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100, default_flow_style=False))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+        raise
 
 
+@_locked
 def save_custom_answers(profile_id: int, pairs: list[tuple[str, str]]) -> None:
     """Append (or update, same normalized question) `custom` entries; every other key is kept (comments may be lost)."""
     data = load_answers(profile_id)
@@ -98,6 +188,7 @@ def trusted_hosts(profile_id: int) -> list[str]:
     return list(dict.fromkeys(h for h in (valid_host(x) if isinstance(x, str) else None for x in (raw if isinstance(raw, list) else [])) if h))
 
 
+@_locked
 def add_trusted_host(profile_id: int, host: str) -> str:
     """Add `host` (validated, lowercased) to `trusted_hosts`; returns it. Raises ApplyError for anything but a hostname."""
     h = valid_host(host)
@@ -244,6 +335,7 @@ def _set_path(data: dict, path: str, value: str) -> None:
     node[keys[-1]] = value
 
 
+@_locked
 def save_answers(profile_id: int, values: dict[str, str]) -> None:
     """Store the given answers (`path` -> text) in ONE atomic write. A path absent from `values` is left alone; an empty
     value REMOVES the key (unknown, not empty), except for a date widget whose stored text is not a complete date (legacy
@@ -282,6 +374,7 @@ def _custom_entry(data: dict, custom_id_: str) -> dict | None:
     return next((c for c in raw if isinstance(c, dict) and custom_id(str(c.get("question") or "")) == custom_id_), None)
 
 
+@_locked
 def delete_custom_answer(profile_id: int, custom_id_: str, previous: str) -> bool:
     """Remove the custom answer `custom_id_` only if its stored answer is still `previous` (what the page displayed).
     False (nothing written) when it changed or disappeared meanwhile."""
@@ -294,6 +387,7 @@ def delete_custom_answer(profile_id: int, custom_id_: str, previous: str) -> boo
     return True
 
 
+@_locked
 def update_custom_answer(profile_id: int, custom_id_: str, answer: str, previous: str) -> bool:
     """Replace the answer of `custom_id_` (stripped, 500 characters max) only if the stored answer is still `previous`.
     False (nothing written) when it changed or disappeared meanwhile. An empty answer raises ApplyError (use delete)."""
@@ -309,6 +403,7 @@ def update_custom_answer(profile_id: int, custom_id_: str, answer: str, previous
     return True
 
 
+@_locked
 def remove_trusted_host(profile_id: int, host: str) -> bool:
     """Remove a host from `trusted_hosts`; True when it was there. Other entries are untouched."""
     h = valid_host(host)
