@@ -159,3 +159,24 @@ def test_rank_sort_weighs_freshness(profile):
     db.save_jobs(profile.id, jobs)
     assert [j.title for j in db.query_jobs(profile.id)] == ["Fresh ok", "Older better"]
     assert [j.title for j in db.query_jobs(profile.id, sort="score")] == ["Older better", "Fresh ok"]
+
+
+def test_non_sighting_save_keeps_last_seen_and_sighting_seen_at(profile):
+    job = MergedJob.from_posting(post())
+    db.save_jobs(profile.id, [job])
+    old = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    with db.connect() as c:
+        c.execute("UPDATE jobs SET last_seen=?", (old,))
+        c.execute("UPDATE sightings SET seen_at=?", (old,))
+    [loaded] = db.load_jobs(profile.id)
+    loaded.score, loaded.origin_url, loaded.changed = 55, "https://ats.test/j/1", True  # rescore / origin-only update
+    db.save_jobs(profile.id, [loaded])
+    with db.connect() as c:
+        assert c.execute("SELECT last_seen FROM jobs").fetchone()[0] == old
+        assert c.execute("SELECT seen_at FROM sightings").fetchone()[0] == old
+    [loaded] = db.load_jobs(profile.id)
+    loaded.add(post())  # a real sighting
+    db.save_jobs(profile.id, [loaded])
+    with db.connect() as c:
+        assert c.execute("SELECT last_seen FROM jobs").fetchone()[0] > old
+        assert c.execute("SELECT seen_at FROM sightings").fetchone()[0] > old

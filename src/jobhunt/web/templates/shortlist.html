@@ -6,6 +6,12 @@
   <span class="muted">{% for k, v in counts.items() %}{{ STATUS_LABELS.get(k,k) }} : {{ v }} · {% endfor %}</span>
 </div>
 
+<nav class="tabs">
+  <a href="/profiles/{{ profile.id }}/shortlist" class="{{ '' if f.new_only else 'on' }}">Toutes les offres</a>
+  <a href="/profiles/{{ profile.id }}/shortlist?new=1" class="{{ 'on' if f.new_only }}">Nouveautés du jour
+    <span class="badge {{ 'ok' if overview.new }}">{{ overview.new }}</span></a>
+</nav>
+
 <form class="filters" method="get" hx-get="/profiles/{{ profile.id }}/shortlist" hx-target="#results" hx-select="#results"
       hx-push-url="true" hx-trigger="change, submit">
   <label>Score min <input type="number" name="min_score" min="0" max="100" value="{{ f.min_score|int if f.min_score is not none else '' }}" style="width:5em"></label>
@@ -30,6 +36,7 @@
     <select name="sort"><option value="rank" {{ 'selected' if f.sort=='rank' }}>Pertinence (score × fraîcheur)</option>
       <option value="score" {{ 'selected' if f.sort=='score' }}>Score seul</option>
       <option value="freshness" {{ 'selected' if f.sort=='freshness' }}>Fraîcheur</option></select></label>
+  {% if f.new_only %}<input type="hidden" name="new" value="1">{% endif %}
   <label class="check"><input type="checkbox" name="show_filtered" value="1" {{ 'checked' if f.show_filtered }}> Afficher les offres écartées</label>
   <noscript><button class="btn" type="submit">Filtrer</button></noscript>
 </form>
@@ -80,10 +87,11 @@
         <td><span class="badge st-{{ j.status }}">{{ STATUS_LABELS[j.status] }}</span></td>
       </tr>
     {% else %}
-      <tr><td colspan="8" class="muted">Aucune offre ne correspond aux filtres. Lancez une recherche depuis la page du profil.</td></tr>
+      <tr><td colspan="8" class="muted">{% if f.new_only %}Aucune nouveauté aujourd'hui avec ces filtres.{% else %}Aucune offre ne correspond aux filtres. Lancez une recherche depuis la page du profil.{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </form>
+{% if overview.expired %}<p class="muted small expired-note">{{ overview.expired }} offre(s) expirée(s) masquée(s) (plus revues depuis {{ expire_days }} jours).</p>{% endif %}
 </div>
 {% endblock %}

@@ -82,3 +82,46 @@ def test_profile_edit_invalidates_scores_without_losing_decisions(client, profil
     client.post(f"/profiles/{profile.id}", data={**FORM, "contract_types": ["cdi"], "experience_years": "5"})
     loaded = db.get_job(job.id)
     assert loaded.score is None and loaded.score_json == {} and loaded.status == "rejected"
+
+
+# ---------------------------------------------------------------- planification
+@pytest.fixture
+def sched_client(client, monkeypatch, tmp_path):
+    from jobhunt.web import app as webapp
+    from test_schedule import Runner
+
+    runner = Runner()
+    monkeypatch.setattr(webapp, "SCHEDULE_KW", dict(repo=tmp_path, home=tmp_path, runner=runner, uid=501,
+                                                      check_platform=False))
+    client.runner = runner
+    return client
+
+
+def test_schedule_page_not_installed(sched_client):
+    html = sched_client.get("/schedule").text
+    assert "Activer (07:30)" in html and "Planification" in html
+    assert "/schedule" in sched_client.get("/sources").text  # nav link
+    r = sched_client.post("/schedule/install", follow_redirects=True)
+    assert "Planification activée" in r.text and "07:30" in r.text and "Lancer maintenant" in r.text
+
+
+def test_schedule_add_remove_run(sched_client):
+    sched_client.post("/schedule/install")
+    r = sched_client.post("/schedule/add", data={"time": "19:00"}, follow_redirects=True)
+    assert "19:00" in r.text and "Heure 19:00 ajoutée" in r.text
+    r = sched_client.post("/schedule/remove", data={"time": "07:30"}, follow_redirects=True)
+    assert "retirée" in r.text
+    r = sched_client.post("/schedule/remove", data={"time": "19:00"}, follow_redirects=True)
+    assert "uninstall" in r.text  # last time refused
+    r = sched_client.post("/schedule/add", data={"time": "99:99"}, follow_redirects=True)
+    assert "heure invalide" in r.text
+    r = sched_client.post("/schedule/run", follow_redirects=True)
+    assert "Recherche lancée, résultats dans ~25 min." in r.text
+    assert any(c[1] == "kickstart" for c in sched_client.runner.calls)
+    r = sched_client.post("/schedule/uninstall", follow_redirects=True)
+    assert "Activer (07:30)" in r.text
+
+
+def test_schedule_run_when_not_installed_shows_error(sched_client):
+    r = sched_client.post("/schedule/run", follow_redirects=True)
+    assert "big-penalty daily" in r.text

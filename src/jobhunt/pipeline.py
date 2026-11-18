@@ -59,6 +59,7 @@ class RunResult:
     errors: list[str] = field(default_factory=list)
     llm_enabled: bool = False
     llm_stats: dict[str, Any] = field(default_factory=dict)
+    sources_ok: list[str] = field(default_factory=list)  # sources that completed with no error/challenge/block
     stage: str = "pending"
 
     def stats_dict(self) -> dict[str, Any]:
@@ -148,6 +149,12 @@ async def _run_source(name: str, src: Source, queries: list[SearchQuery], ctx: S
             stat.status = "error"
             return
     stat.status = "error" if stat.errors and stat.postings == 0 else "done"
+
+
+def _source_ok(stat: SourceStat) -> bool:
+    """Fully checked: finished, no error at all (0 postings without error is fine; a challenge, login wall,
+    timeout, exception or abandonment is not)."""
+    return stat.status == "done" and not stat.errors and not stat.needs_login
 
 
 async def _enrich_details(postings: list[JobPosting], chosen: dict[str, Source], ctx: SourceContext,
@@ -256,8 +263,9 @@ async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: Ru
 
 async def run_search(
     profile_id: int, *, sources: list[str] | None = None, max_queries: int | None = None,
-    progress: ProgressCb | None = None, llm: LLMClient | None = None,
+    progress: ProgressCb | None = None, llm: LLMClient | None = None, headless: bool | None = None,
 ) -> RunResult:
+    """`headless` overrides the browser setting for this run only (None = JOBHUNT_HEADLESS / settings)."""
     profile = db.get_profile(profile_id)
     if profile is None:
         raise ValueError(f"profil {profile_id} introuvable")
@@ -280,7 +288,7 @@ async def run_search(
         await _emit(progress, result, event="stage")
         try:
             from jobhunt.browser import BrowserPool
-            browser = BrowserPool()  # cheap: no browser is launched until a source asks for a context
+            browser = BrowserPool(headless=headless)  # cheap: no browser is launched until a source asks for a context
         except Exception as e:  # noqa: BLE001
             log.info("browser unavailable: %s", e)
         ctx = SourceContext(profile_id=profile_id, browser=browser)
@@ -289,6 +297,7 @@ async def run_search(
             _run_source(n, s, result.plan, ctx, result, postings, progress) for n, s in chosen.items()
         ))
         result.raw_postings = len(postings)
+        result.sources_ok = sorted(n for n in chosen if _source_ok(result.sources[n]))
         db.update_run(result.run_id, stats=result.stats_dict())
         postings = await _enrich_details(postings, chosen, ctx, result)
 

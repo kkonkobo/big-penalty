@@ -8,7 +8,8 @@ A date later than `first_seen` is impossible for a genuine posting (we saw it be
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Collection, Iterable
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from jobhunt.dedupe import MergedJob
@@ -22,6 +23,9 @@ REPOST_TOLERANCE = timedelta(days=1)
 # exceeds the limit by more than this tolerance (a "14 days" job dated at midnight is still 14.x days old).
 AGE_TOLERANCE_DAYS = 1.0
 UNKNOWN_AGE_DAYS = 7.0  # no usable date at all: neutral-ish weight
+EXPIRE_AFTER_DAYS = 7  # a job not seen for this long is hidden (never deleted) if all its sources were checked since ...
+EXPIRY_RUN_WINDOW_DAYS = 2  # ... but only judged by completed runs that finished this recently
+PARIS = ZoneInfo("Europe/Paris")
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -92,3 +96,46 @@ def freshness_weight(age: float | None) -> float:
 
 def rank_score(job: MergedJob, now: datetime | None = None) -> float:
     return (job.score or 0) * freshness_weight(age_days(job, now))
+
+
+def start_of_today_paris(now: datetime | None = None) -> datetime:
+    """Midnight (Europe/Paris) of the current Paris day, as an aware UTC datetime."""
+    local = (_utc(now) or datetime.now(UTC)).astimezone(PARIS)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+
+
+def new_cutoff(latest_completed_run_started_at: datetime | None, now: datetime | None = None) -> datetime:
+    """A job first seen at or after this instant is "new": the earlier of the start of today (Paris) and the start
+    of the profile's latest completed run (so a run that started just before midnight, or a catch-up after
+    several days without a run, still reports everything it found)."""
+    today = start_of_today_paris(now)
+    run = _utc(latest_completed_run_started_at)
+    return min(today, run) if run else today
+
+
+def is_new(job: MergedJob, latest_completed_run_started_at: datetime | None = None, now: datetime | None = None) -> bool:
+    """"New today": first seen since `new_cutoff` and not a repost of an older posting."""
+    first_seen = _utc(job.first_seen)
+    if first_seen is None or first_seen < new_cutoff(latest_completed_run_started_at, now):
+        return False
+    return not is_repost(job, now)
+
+
+def is_expired(job: MergedJob, now: datetime | None = None) -> bool:
+    """last_seen older than EXPIRE_AFTER_DAYS (necessary, not sufficient: see `expired_by_runs`)."""
+    last_seen = _utc(job.last_seen)
+    return last_seen is not None and (_utc(now) or datetime.now(UTC)) - last_seen > timedelta(days=EXPIRE_AFTER_DAYS)
+
+
+def expired_by_runs(job: MergedJob, now: datetime | None, runs: Iterable[tuple[datetime, Collection[str]]]) -> bool:
+    """A job is expired only if it was not seen for EXPIRE_AFTER_DAYS AND every source it was sighted on completed
+    without error in some run that started after its last sighting. `runs` = (started_at, sources_ok) of the profile's
+    completed runs from the last EXPIRY_RUN_WINDOW_DAYS. Sources that failed or were not queried never expire a job."""
+    if not is_expired(job, now):
+        return False
+    last_seen = _utc(job.last_seen)
+    sources = job.sources
+    if not sources:
+        return False
+    runs = [(_utc(started), ok) for started, ok in runs]
+    return all(any(started is not None and started > last_seen and s in ok for started, ok in runs) for s in sources)

@@ -122,6 +122,8 @@ class Sighting:
     apply_url: str | None = None
     posted_at: datetime | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    seen_at: datetime | None = None  # persisted last-seen instant (db-owned)
+    seen_now: bool = False  # transient: sighted by the current search (db bumps seen_at only then)
 
 
 @dataclass
@@ -152,6 +154,7 @@ class MergedJob:
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     changed: bool = True  # needs saving
+    sighted: bool = False  # transient: sighted by the current search (db bumps last_seen only then)
 
     def __post_init__(self) -> None:
         if not self.dedupe_key:
@@ -189,15 +192,18 @@ class MergedJob:
 
     def add(self, p: JobPosting) -> None:
         self.changed = True
+        self.sighted = True
         sid = (p.source, p.source_id)
         existing = next((s for s in self.sightings if (s.source, s.source_id) == sid), None)
         if existing:
+            existing.seen_now = True
             existing.url = p.url or existing.url
             existing.apply_url = p.apply_url or existing.apply_url
             existing.posted_at = _utc(p.posted_at) or existing.posted_at
             existing.raw = p.raw or existing.raw
         else:
-            self.sightings.append(Sighting(p.source, p.source_id, p.url, p.apply_url, _utc(p.posted_at), p.raw))
+            self.sightings.append(Sighting(p.source, p.source_id, p.url, p.apply_url, _utc(p.posted_at), p.raw,
+                                           seen_now=True))
         if not self.title:
             self.title = p.title.strip()
         self.company = self.company or (p.company or None)
@@ -230,6 +236,9 @@ class MergedJob:
         for s in other.sightings:
             if (s.source, s.source_id) not in self.identity_ids():
                 self.sightings.append(s)
+        self.sighted = self.sighted or other.sighted
+        if other.last_seen and (self.last_seen is None or _utc(other.last_seen) > _utc(self.last_seen)):
+            self.last_seen = other.last_seen
         self.changed = True
         self.company = self.company or other.company
         self.location = self.location or other.location

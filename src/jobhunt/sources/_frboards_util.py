@@ -183,7 +183,7 @@ async def safe_goto(pool, page, url: str, *, wait_until: str = "domcontentloaded
     await human_pause(0.8, 1.8)
     if not await page_is_challenge(page):
         return
-    if pool.settings.headless:
+    if pool.headless:
         raise ChallengeRequired(f"bot challenge on {url}; rerun with JOBHUNT_HEADLESS=0 and solve it")
     deadline = time.monotonic() + challenge_timeout_s
     while time.monotonic() < deadline:
