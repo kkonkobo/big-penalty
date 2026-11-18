@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import plistlib
-import fcntl
 import re
 import shlex
 import subprocess
@@ -28,6 +27,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from jobhunt.filelock import try_lock, unlock
 
 LABEL = "com.bigpenalty.daily"
 DEFAULT_TIME = "07:30"
@@ -204,11 +205,10 @@ def is_running(data_dir: Path | None = None, repo: Path | None = None) -> bool:
     except OSError:
         return False
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError:
+        if not try_lock(fd, shared=True):
             return True
-        return False  # closing the fd below drops our shared lock
+        unlock(fd)
+        return False
     finally:
         os.close(fd)
 

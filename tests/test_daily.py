@@ -106,8 +106,8 @@ def test_no_profiles_is_a_noop():
 
 def _hold_lock_in_subprocess(path):
     """A real other process holding the flock until its stdin closes."""
-    code = ("import fcntl,os,sys;fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT);"
-            "fcntl.flock(fd,fcntl.LOCK_EX);os.write(fd,b'123 other run\\n');print('ok',flush=True);sys.stdin.read()")
+    code = ("import os,sys;from jobhunt.filelock import try_lock;fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT);"
+            "assert try_lock(fd);os.write(fd,b'123 other run\\n');print('ok',flush=True);sys.stdin.read()")
     proc = subprocess.Popen([sys.executable, "-c", code, str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     assert proc.stdout.readline().strip() == "ok"
     return proc

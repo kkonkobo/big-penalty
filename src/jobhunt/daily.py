@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
 import subprocess
 import sys
@@ -19,6 +18,7 @@ from typing import Any, Awaitable, Callable, Iterator, Mapping
 
 from jobhunt import db
 from jobhunt.config import get_settings
+from jobhunt.filelock import try_lock, unlock
 from jobhunt.freshness import age_days
 
 LOCK_NAME = "daily.lock"
@@ -35,7 +35,7 @@ class DailyLocked(Exception):
 # ---------------------------------------------------------------- lock
 @contextmanager
 def daily_lock(data_dir: Path | None = None, now: datetime | None = None) -> Iterator[Path]:
-    """Exclusive non-blocking flock on the persistent file data/daily.lock (never unlinked: no takeover race).
+    """Exclusive non-blocking lock (jobhunt.filelock: flock, or a byte lock on Windows) on the persistent file data/daily.lock (never unlinked: no takeover race).
 
     The kernel drops the lock when the process exits, however it dies, so there is no stale-lock logic. The file
     content (pid, start time) is for diagnostics only. Raises DailyLocked if another process holds it.
@@ -43,16 +43,18 @@ def daily_lock(data_dir: Path | None = None, now: datetime | None = None) -> Ite
     path = (data_dir or get_settings().data_dir) / LOCK_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    locked = False
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise DailyLocked(f"un autre `jobhunt daily` est déjà en cours ({path})") from None
+        if not try_lock(fd):
+            raise DailyLocked(f"un autre `jobhunt daily` est déjà en cours ({path})")
+        locked = True
         os.ftruncate(fd, 0)
         os.write(fd, f"{os.getpid()} {(now or datetime.now().astimezone()).isoformat()}\n".encode())
         yield path
     finally:
-        os.close(fd)  # releases the flock; the file stays
+        if locked:
+            unlock(fd)
+        os.close(fd)  # the file stays
 
 
 # ---------------------------------------------------------------- summary

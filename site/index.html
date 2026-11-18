@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Big Penalty · Les offres d'emploi fraîches, triées pour vous</title>
+<meta name="description" content="Big Penalty cherche les offres sur une vingtaine de sites d'emploi français, garde les plus récentes et les classe selon votre profil. Pour Windows et macOS.">
+<link rel="icon" type="image/png" href="/assets/icon-128.png">
+<meta property="og:title" content="Big Penalty">
+<meta property="og:description" content="Les offres d'emploi fraîches, triées pour vous. Pour Windows et macOS.">
+<meta property="og:image" content="/assets/screenshot.jpg">
+<style>
+  :root {
+    --bg: #0c0b0a; --card: #1c1917; --line: #2c2724;
+    --text: #f2efec; --muted: #a8a29e; --accent: #ea580c; --accent-hover: #f97316; --ok: #86efac;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  a { color: #fdba74; }
+  a:hover { color: #fed7aa; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+  header { display: flex; align-items: center; gap: 12px; padding: 22px 0; }
+  header img { width: 36px; height: 36px; }
+  header strong { font-size: 17px; }
+  header a { margin-left: auto; font-size: 14px; color: var(--muted); text-decoration: none; }
+  header a:hover { color: var(--text); }
+
+  .hero { text-align: center; padding: 56px 0 40px; }
+  .hero img.icon { width: 112px; height: 112px; }
+  h1 { font-size: clamp(34px, 6vw, 54px); line-height: 1.1; margin: 20px 0 14px; letter-spacing: -0.02em; text-wrap: balance; }
+  .lead { font-size: clamp(17px, 2.4vw, 20px); color: var(--muted); max-width: 640px; margin: 0 auto 32px; text-wrap: pretty; }
+
+  .buttons { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 12px; text-align: left;
+    padding: 13px 22px; border-radius: 12px; text-decoration: none;
+    background: var(--card); color: var(--text); border: 1px solid #3a3330;
+    transition: background .15s, border-color .15s, transform .15s;
+  }
+  .btn:hover { background: #292421; color: var(--text); transform: translateY(-1px); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  .btn svg { width: 24px; height: 24px; flex: none; fill: currentColor; }
+  .btn b { display: block; font-size: 16px; line-height: 1.25; }
+  .btn small { display: block; font-size: 12.5px; opacity: .8; line-height: 1.3; }
+  .meta { margin-top: 18px; font-size: 14px; color: var(--muted); min-height: 22px; }
+  .meta a { color: var(--muted); }
+  .meta.alt { margin-top: 4px; font-size: 13px; min-height: 0; }
+
+  .shot { margin: 24px 0 72px; }
+  .shot img {
+    display: block; width: 100%; height: auto; border-radius: 14px;
+    border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(0, 0, 0, .55);
+  }
+  .shot figcaption { margin-top: 12px; font-size: 13px; color: #78716c; text-align: center; }
+
+  h2 { font-size: 26px; letter-spacing: -0.01em; margin: 0 0 22px; }
+  .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-bottom: 72px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+  .card h3 { margin: 0 0 8px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  .card code { font-size: 13.5px; color: var(--text); background: #292421; padding: 1px 5px; border-radius: 5px; }
+
+  .install { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 72px; }
+  .install ol { margin: 0; padding-left: 20px; color: var(--muted); font-size: 15px; }
+  .install li { margin: 6px 0; }
+  .install li b, .install li i { color: var(--text); font-style: normal; font-weight: 600; }
+  .install .update { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  .install .update b, .install .update i { color: var(--text); font-style: normal; font-weight: 600; }
+  .note { margin: 0 0 22px; color: var(--muted); font-size: 15px; max-width: 760px; }
+
+  footer { border-top: 1px solid var(--line); padding: 26px 0 40px; color: var(--muted); font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 20px; }
+  footer span:first-child { margin-right: auto; }
+  @media (prefers-reduced-motion: reduce) { .btn { transition: none; } .btn:hover { transform: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="/assets/icon-128.png" alt="" width="36" height="36">
+    <strong>Big Penalty</strong>
+    <a href="https://github.com/kkonkobo/big-penalty">Code source</a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <img class="icon" src="/assets/icon-256.png" alt="" width="112" height="112">
+      <h1>Les offres d'emploi fraîches, triées pour vous</h1>
+      <p class="lead">Big Penalty cherche sur une vingtaine de sites d'emploi français en une fois, écarte les doublons et les offres trop anciennes, puis classe le reste selon votre profil et prépare un CV adapté à chaque offre.</p>
+
+      <div class="buttons">
+        <a class="btn" id="dl-windows" href="/download/windows">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5 10.5 4.4v7.1H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7.1L3 18.5zm8.5 0H21V21l-9.5-1.3z"/></svg>
+          <span><b>Télécharger pour Windows</b><small>Installateur · Windows 10 et 11</small></span>
+        </a>
+        <a class="btn" id="dl-mac" href="/download/mac">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9H4V6a1 1 0 0 1 1-1zM2 17h20v1a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/></svg>
+          <span><b>Télécharger pour Mac</b><small>Apple Silicon (M1 et suivants) · macOS 12+</small></span>
+        </a>
+        <a class="btn" id="dl-mac-intel" href="/download/mac-intel">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4h2v8.2l3.3-3.3 1.4 1.4L12 16l-5.7-5.7 1.4-1.4 3.3 3.3zM5 18h14v2H5z"/></svg>
+          <span><b>Mac Intel</b><small>Mac d'avant 2020</small></span>
+        </a>
+      </div>
+      <p class="meta" id="meta"></p>
+      <p class="meta alt">Installation impossible sur votre PC ? <a href="/download/windows-portable">Version portable pour Windows (.zip)</a>, sans installation.</p>
+    </section>
+
+    <figure class="shot">
+      <img src="/assets/screenshot.jpg" width="1600" height="950" alt="La présélection de Big Penalty : des offres de stage en systèmes embarqués, chacune avec un score, le lieu, le contrat, la date de publication et les sites où elle a été trouvée.">
+      <figcaption>Présélection d'un profil de démonstration.</figcaption>
+    </figure>
+
+    <h2>Ce que fait l'application</h2>
+    <div class="features">
+      <div class="card"><h3>Une recherche, une vingtaine de sites</h3><p>LinkedIn, Indeed, Welcome to the Jungle, HelloWork, APEC, France Travail, JobTeaser et d'autres, interrogés d'un coup à partir de votre profil.</p></div>
+      <div class="card"><h3>Classées selon votre profil</h3><p>Chaque offre reçoit un score et une explication. Les compétences demandées comptent comme des souhaits, pas comme des conditions : seuls le contrat et le lieu écartent une offre.</p></div>
+      <div class="card"><h3>Les plus récentes d'abord</h3><p>Les offres de plus de 14 jours sont écartées et les plus fraîches remontent. Les offres republiées sont signalées.</p></div>
+      <div class="card"><h3>Sans doublons</h3><p>La même offre vue sur plusieurs sites n'apparaît qu'une fois, avec tous les sites où elle a été trouvée.</p></div>
+      <div class="card"><h3>Le site de l'entreprise</h3><p>Quand il existe, le lien vers l'offre sur le site de l'entreprise est retrouvé, pour postuler à la source.</p></div>
+      <div class="card"><h3>Un CV adapté à chaque offre</h3><p>À partir de votre CV, l'application prépare pour chaque offre un CV d'une page reformulé avec les mots-clés de l'annonce, pour passer les filtres automatiques. Diplômes, dates et employeurs restent exacts, et une liste « Préparation entretien » indique ce qu'il faudra savoir défendre.</p></div>
+      <div class="card"><h3>Les nouveautés du jour</h3><p>Lancez la recherche quand vous voulez ou programmez-la une ou plusieurs fois par jour (sur Mac). L'onglet « Nouveautés du jour » montre ce qui est apparu depuis la dernière recherche.</p></div>
+      <div class="card"><h3>Tout reste sur votre ordinateur</h3><p>Pas de compte. Vos profils et vos offres restent en local. Le score et les CV par IA utilisent vos propres clés Anthropic ou OpenAI ; sans clé, le score se fait par des règles.</p></div>
+    </div>
+
+    <h2>Installation</h2>
+    <p class="note">L'application n'est pas signée par un certificat payant : Windows et macOS affichent un avertissement au premier lancement. Voici comment le passer. <b style="color:var(--text)">Google Chrome</b> doit être installé : la recherche s'en sert pour consulter les sites d'emploi.</p>
+    <div class="install">
+      <div class="card">
+        <h3>Windows</h3>
+        <ol>
+          <li>Lancez le fichier téléchargé, <b>Big-Penalty-windows-x64-setup.exe</b>.</li>
+          <li>Si <i>Windows a protégé votre ordinateur</i> s'affiche : <b>Informations complémentaires</b>, puis <b>Exécuter quand même</b>.</li>
+          <li>Suivez les étapes. Aucun mot de passe administrateur n'est nécessaire.</li>
+          <li>Ouvrez <b>Big Penalty</b> depuis le menu Démarrer ou le Bureau.</li>
+        </ol>
+        <p class="update"><b>Mise à jour :</b> lancez simplement le nouvel installateur. Il remplace l'ancienne version ; vos profils et vos offres sont conservés.</p>
+      </div>
+      <div class="card">
+        <h3>macOS</h3>
+        <ol>
+          <li>Ouvrez le fichier téléchargé, puis glissez <b>Big Penalty</b> dans <i>Applications</i>.</li>
+          <li>Ouvrez l'application une première fois : macOS la bloque.</li>
+          <li>Allez dans <i>Réglages Système › Confidentialité et sécurité</i>, puis cliquez <b>Ouvrir quand même</b>. Sur macOS 14 ou plus ancien, un clic droit sur l'application puis <b>Ouvrir</b> suffit.</li>
+        </ol>
+        <p class="update"><b>Mise à jour :</b> glissez la nouvelle version dans <i>Applications</i> et remplacez l'ancienne.</p>
+      </div>
+      <div class="card">
+        <h3>Clés d'IA (facultatif)</h3>
+        <ol>
+          <li>Au premier lancement, l'application crée un fichier <b>.env</b> dans son dossier de données :<br>
+            Mac : <code>~/Library/Application Support/Big Penalty</code><br>
+            Windows : <code>%LOCALAPPDATA%\Big Penalty</code></li>
+          <li>Ouvrez-le avec un éditeur de texte et collez votre clé après <b>ANTHROPIC_API_KEY=</b> ou <b>OPENAI_API_KEY=</b>.</li>
+          <li>Redémarrez Big Penalty.</li>
+        </ol>
+        <p class="update">Ce fichier reste sur votre ordinateur. Ne le partagez pas.</p>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <span>Big Penalty</span>
+    <a href="https://github.com/kkonkobo/big-penalty/releases">Toutes les versions</a>
+    <a href="https://github.com/kkonkobo/big-penalty/issues">Signaler un problème</a>
+  </footer>
+</div>
+
+<script>
+  // Put the visitor's own platform first and make it the primary button.
+  (function () {
+    var ua = navigator.userAgent, platform = navigator.platform || "";
+    var key = /Win/i.test(platform) || /Windows/i.test(ua) ? "dl-windows"
+            : /Mac/i.test(platform) && !/iPhone|iPad/i.test(ua) ? "dl-mac" : null;
+    if (!key) return;
+    var button = document.getElementById(key);
+    button.classList.add("primary");
+    button.parentNode.insertBefore(button, button.parentNode.firstChild);
+  })();
+
+  // Show the current version and date. The download links work without this.
+  fetch("https://api.github.com/repos/kkonkobo/big-penalty/releases/latest")
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+    .then(function (release) {
+      var date = new Date(release.published_at).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
+      var sizes = {};
+      release.assets.forEach(function (a) { sizes[a.name] = Math.round(a.size / 1048576) + " Mo"; });
+      var meta = document.getElementById("meta");
+      meta.textContent = "Version " + release.tag_name.replace(/^v/, "") + " · " + date + " · ";
+      var link = document.createElement("a");
+      link.href = release.html_url;
+      link.textContent = "notes de version";
+      meta.appendChild(link);
+      [["dl-windows", "Big-Penalty-windows-x64-setup.exe"], ["dl-mac", "Big-Penalty-macos-arm64.zip"], ["dl-mac-intel", "Big-Penalty-macos-intel.zip"]]
+        .forEach(function (pair) {
+          var small = document.querySelector("#" + pair[0] + " small");
+          if (sizes[pair[1]]) small.textContent += " · " + sizes[pair[1]];
+        });
+    })
+    .catch(function () {});
+</script>
+</body>
+</html>
