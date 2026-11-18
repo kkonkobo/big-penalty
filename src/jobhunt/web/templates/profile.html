@@ -1,30 +1,33 @@
 {% extends "base.html" %}
 {% block title %}{{ profile.name }}{% endblock %}
 {% block content %}
-<div class="row between">
-  <h1>{{ profile.name }}</h1>
+<div class="page-head">
   <div>
-    <a class="btn" href="/profiles/{{ profile.id }}/edit">Modifier</a>
+    <h1>{{ profile.name }}</h1>
+    <p class="lead">{{ profile.headline }}</p>
+  </div>
+  <div class="row">
+    <a class="btn" href="/profiles/{{ profile.id }}/edit">Modifier le profil</a>
     <a class="btn" href="/profiles/{{ profile.id }}/cv">CV maître</a>
-    <a class="btn primary" href="/profiles/{{ profile.id }}/shortlist">Voir la présélection
-      ({{ counts.values()|sum }})</a>
+    <a class="btn primary" href="/profiles/{{ profile.id }}/shortlist">Voir les offres</a>
   </div>
 </div>
-<p class="lead">{{ profile.headline }}</p>
-<p class="muted">
-  {% for i in profile.interests %}<span class="badge">{{ i }}</span>{% endfor %}
-</p>
-<p class="muted">
-  {% for c in profile.contract_types %}<span class="badge">{{ CONTRACT_LABELS[c.value] }}</span>{% endfor %}
-  {{ profile.locations|join(", ") }}
-</p>
+
+<dl class="facts wide">
+  <div><dt>Contrats</dt><dd>{% for c in profile.contract_types %}{{ CONTRACT_LABELS[c.value] }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}</dd></div>
+  <div><dt>Lieux</dt><dd>{{ profile.locations|join(", ") or '—' }}</dd></div>
+  {% if profile.interests %}<div class="span"><dt>Centres d'intérêt</dt><dd>{% for i in profile.interests %}<span class="tag">{{ i }}</span>{% endfor %}</dd></div>{% endif %}
+</dl>
 
 <section class="panel">
-  <h2>Recherche</h2>
-  <form hx-post="/profiles/{{ profile.id }}/search" hx-target="#progress" hx-swap="innerHTML" class="row">
-    <label class="inline">Requêtes max <input name="max_queries" type="number" min="1" max="100" placeholder="25" style="width:5em"></label>
-    <button class="btn primary" type="submit" {% if running %}disabled{% endif %}>Lancer la recherche</button>
-  </form>
+  <div class="panel-head plain">
+    <h2>Recherche</h2>
+    <form hx-post="/profiles/{{ profile.id }}/search" hx-target="#progress" hx-swap="innerHTML" class="row">
+      <label class="inline muted">Requêtes max. <input name="max_queries" type="number" min="1" max="100" placeholder="25" class="w-num"></label>
+      <button class="btn primary" type="submit" {% if running %}disabled{% endif %}>Lancer la recherche</button>
+    </form>
+  </div>
+  <p class="muted small">Une recherche complète prend 20 à 30 minutes. Elle tourne aussi automatiquement chaque jour (<a href="/schedule">planification</a>).</p>
   <div id="progress">{% include "_progress.html" %}</div>
 </section>
 {% endblock %}

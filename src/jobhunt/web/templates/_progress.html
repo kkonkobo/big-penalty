@@ -1,59 +1,73 @@
-<div {% if running %}hx-get="/profiles/{{ profile.id }}/progress" hx-trigger="every 1500ms" hx-target="#progress" hx-swap="innerHTML"{% endif %}>
+<div class="progress" {% if running %}hx-get="/profiles/{{ profile.id }}/progress" hx-trigger="every 1500ms" hx-target="#progress" hx-swap="innerHTML"{% endif %}>
 {% if result or running %}
-  <p>
-    {% if running %}<span class="badge warn">En cours</span>
+  <p class="runline">
+    {% if running %}<span class="spinner" aria-hidden="true"></span><strong>En cours</strong> ·
       {{ {'plan':'Planification des requêtes','search':'Recherche sur les sources','dedupe':'Dédoublonnage','origin':'Recherche des sites d\'origine','score':'Évaluation des offres'}.get(stage, 'Démarrage') }}…
-    {% elif error %}<span class="badge bad">Erreur</span> {{ error }}
-    {% else %}<span class="badge ok">Terminée</span>
-      {{ result.unique_jobs or 0 }} offres uniques ({{ result.raw_postings or 0 }} annonces brutes, {{ result.new_jobs or 0 }} nouvelles).
-      <a href="/profiles/{{ profile.id }}/shortlist">Voir la présélection</a>
+    {% elif error %}<span class="tag bad">Erreur</span> {{ error }}
+    {% else %}<span class="tag ok">Terminée</span>
+      <span><strong>{{ result.unique_jobs or 0 }}</strong> offres uniques ({{ result.raw_postings or 0 }} annonces brutes, {{ result.new_jobs or 0 }} nouvelles).
+      <a href="/profiles/{{ profile.id }}/shortlist?new=1">Voir les nouveautés</a></span>
     {% endif %}
   </p>
   {% if result and not result.llm_enabled %}
-  <p class="muted">Aucun fournisseur IA configuré : plan et scores calculés par règles (moins précis).</p>
+  <p class="muted small">Aucun fournisseur IA configuré : plan et scores calculés par règles (moins précis).</p>
   {% endif %}
   {% if result and result.llm_stats %}
-  <p class="muted">IA : {% for task, task_calls in result.llm_stats.get('calls', [])|selectattr('status', 'equalto', 'ok')|groupby('task') %}
-    {% for provider, calls in task_calls|groupby('provider') %}<span class="badge src">{{ task }} · {{ provider }} × {{ calls|length }}</span>{% endfor %}
+  <p class="muted small">IA : {% for task, task_calls in result.llm_stats.get('calls', [])|selectattr('status', 'equalto', 'ok')|groupby('task') %}
+    {% for provider, calls in task_calls|groupby('provider') %}{{ task }} · {{ provider }} × {{ calls|length }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not loop.last %} ; {% endif %}
   {% endfor %}</p>
   {% endif %}
   {% if sources %}
-  <table class="tbl">
-    <thead><tr><th>Source</th><th>État</th><th>Requêtes</th><th>Annonces</th><th>Erreurs</th></tr></thead>
-    <tbody>
-    {% for name, s in sources.items() %}
-      <tr>
-        <td>{{ labels.get(name, name) }}</td>
-        <td>{% set st = s.status %}
-          <span class="badge {{ 'ok' if st=='done' else 'bad' if st=='error' else 'warn' if st=='running' else '' }}">
-          {{ {'pending':'En attente','running':'En cours','done':'Terminé','error':'Erreur','skipped':'Ignorée'}.get(st, st) }}</span>
-          {% if s.skipped_reason %}<small class="muted">{{ s.skipped_reason }}</small>{% endif %}
-          {% if s.needs_login %}<small>Connexion requise : <code>jobhunt login {{ name }} --profile {{ profile.id }}</code></small>{% endif %}</td>
-        <td>{{ s.queries_done or 0 }}/{{ s.queries_total or 0 }}</td>
-        <td>{{ s.postings or 0 }}</td>
-        <td>{% for e in (s.errors or [])[:3] %}<div class="err">{{ e }}</div>{% endfor %}
-            {% if (s.errors or [])|length > 3 %}<small class="muted">+{{ s.errors|length - 3 }} autres</small>{% endif %}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
+  {% set vals = sources.values()|list %}
+  {% set n_ok = vals|selectattr('status', 'equalto', 'done')|list|length %}
+  {% set n_err = vals|selectattr('status', 'equalto', 'error')|list|length %}
+  {% set n_skip = vals|selectattr('status', 'equalto', 'skipped')|list|length %}
+  {% set n_run = vals|length - n_ok - n_err - n_skip %}
+  <details class="srcs" {% if running %}open{% endif %}>
+    <summary>Sources : <strong>{{ n_ok }}</strong> terminée{{ 's' if n_ok > 1 }}
+      {%- if n_run %} · <strong>{{ n_run }}</strong> en cours ou en attente{% endif %}
+      {%- if n_err %} · <strong class="t-bad">{{ n_err }} en erreur</strong>{% endif %}
+      {%- if n_skip %} · {{ n_skip }} ignorée{{ 's' if n_skip > 1 }}{% endif %}</summary>
+    <table class="tbl">
+      <thead><tr><th>Source</th><th>État</th><th class="num">Requêtes</th><th class="num">Annonces</th><th>Erreurs</th></tr></thead>
+      <tbody>
+      {% for name, s in sources.items() %}
+        <tr>
+          <td>{{ labels.get(name, name) }}</td>
+          <td>{% set st = s.status %}
+            <span class="tag {{ 'ok' if st=='done' else 'bad' if st=='error' else 'warn' if st=='running' else '' }}">
+            {{ {'pending':'En attente','running':'En cours','done':'Terminé','error':'Erreur','skipped':'Ignorée'}.get(st, st) }}</span>
+            {% if s.skipped_reason %}<div class="muted small">{{ s.skipped_reason }}</div>{% endif %}
+            {% if s.needs_login %}<div class="small">Connexion requise : <code>jobhunt login {{ name }} --profile {{ profile.id }}</code></div>{% endif %}</td>
+          <td class="num">{{ s.queries_done or 0 }}/{{ s.queries_total or 0 }}</td>
+          <td class="num">{{ s.postings or 0 }}</td>
+          <td>{% for e in (s.errors or [])[:3] %}<div class="err clamp" title="{{ e }}">{{ e }}</div>{% endfor %}
+              {% if (s.errors or [])|length > 3 %}<small class="muted">+{{ s.errors|length - 3 }} autres</small>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
   {% endif %}
   {% if result and result.errors %}
-    <details><summary>{{ result.errors|length }} avertissement(s)</summary>
+    <details class="srcs"><summary>{{ result.errors|length }} avertissement(s)</summary>
       <ul>{% for e in result.errors %}<li class="err">{{ e }}</li>{% endfor %}</ul></details>
   {% endif %}
 {% endif %}
 {% if plan %}
-  <details {% if running %}open{% endif %}><summary>Plan de recherche ({{ plan|length }} requêtes)</summary>
+  <details class="srcs" {% if running %}open{% endif %}><summary>Plan de recherche ({{ plan|length }} requêtes)</summary>
   <table class="tbl">
     <thead><tr><th>Mots-clés</th><th>Lieu</th><th>Contrats</th><th>Langue</th><th>ROME</th></tr></thead>
     <tbody>
     {% for q in plan %}
       <tr><td>{{ q.keywords }}</td><td>{{ 'télétravail' if q.remote_only else (q.location or 'France') }}</td>
-        <td>{% for c in q.contract_types %}<span class="badge">{{ CONTRACT_LABELS[c.value] }}</span>{% endfor %}</td>
+        <td>{% for c in q.contract_types %}{{ CONTRACT_LABELS[c.value] }}{% if not loop.last %}, {% endif %}{% endfor %}</td>
         <td>{{ q.language }}</td><td>{{ q.rome_codes|join(", ") }}</td></tr>
     {% endfor %}
     </tbody>
   </table></details>
+{% endif %}
+{% if not result and not running and not plan %}
+  <p class="muted">Aucune recherche pour ce profil. Lancez-en une pour remplir la liste des offres.</p>
 {% endif %}
 </div>

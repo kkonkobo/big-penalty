@@ -1,0 +1,55 @@
+{% set eff = effective_posted_at(j) %}{% set app = applications.get(j.id) %}
+<tr class="job st-{{ j.status }}" id="job-{{ j.id }}">
+  <td class="c-pick"><input class="pick" type="checkbox" name="job_ids" value="{{ j.id }}" aria-label="Sélectionner « {{ j.title }} »"></td>
+  <td class="c-score" title="Score {{ (j.score or 0)|int }} · rang {{ rank_score(j)|round(1) }} (score × fraîcheur)"><span class="score s{{ ((j.score or 0)//20)|int }}">{{ (j.score or 0)|int }}</span></td>
+  <td class="c-main">
+    <details>
+      <summary>
+        <span class="job-title">{{ j.title }}</span>
+        <span class="job-co">{{ j.company or 'Entreprise non précisée' }}</span>
+        <span class="job-meta">
+          <span>{{ j.location or 'Lieu non précisé' }}{% if j.remote in ('full','partial') %} ({{ 'télétravail' if j.remote=='full' else 'hybride' }}){% endif %}</span>
+          <span>{{ CONTRACT_LABELS[j.contract_type.value] }}</span>
+          <span title="{{ eff[0].date() if eff[0] }} · {{ DATE_SOURCE_LABELS.get(eff[1], eff[1]) }}">{{ eff[0]|ago }}{% if is_repost(j) %} <span class="tag warn" title="Annonce republiée : vue pour la première fois avant la date affichée par la source">republiée</span>{% endif %}</span>
+          <span>{% for s in j.sources %}{{ labels.get(s, s) }}{% if not loop.last %}, {% endif %}{% endfor %}{% if j.origin_url %} <span class="tag ok" title="{{ j.origin_url|host }}">site de l'entreprise</span>{% endif %}</span>
+        </span>
+      </summary>
+      <div class="detail">
+        {% if j.score_json.rationale %}<div class="why"><p>{{ j.score_json.rationale }}</p>
+          <p class="tags">
+            {% if j.score_json.matches_function is defined and j.score_json.origin == 'llm' %}
+              <span class="tag {{ 'ok' if j.score_json.matches_function else 'warn' }}">{{ 'Correspond à la filière' if j.score_json.matches_function else 'Hors filière' }}</span>{% endif %}
+            {% for fl in j.score_json.flags or [] %}<span class="tag bad">{{ FLAG_LABELS.get(fl, fl) }}</span>{% endfor %}
+            <span class="muted small">évalué par {{ j.score_json.get('scored_by', j.score_json.get('origin', 'rules')) }}</span></p></div>{% endif %}
+        {% if j.salary_text %}<p><strong>Salaire :</strong> {{ j.salary_text }}</p>{% endif %}
+        <div class="links">
+          {% if j.origin_url|http_url %}<a class="btn small primary" href="{{ j.origin_url|http_url }}" target="_blank" rel="noopener noreferrer">Site de l'entreprise{% if j.origin_ats %} ({{ j.origin_ats }}){% endif %}<svg class="ic"><use href="#i-out"/></svg></a>{% endif %}
+          {% for s in j.sightings %}{% if s.url|http_url %}<a class="btn small" href="{{ s.url|http_url }}" target="_blank" rel="noopener noreferrer">{{ labels.get(s.source, s.source) }}<svg class="ic"><use href="#i-out"/></svg></a>{% endif %}{% endfor %}
+        </div>
+        <pre class="desc">{{ j.description or 'Pas de description.' }}</pre>
+      </div>
+    </details>
+  </td>
+  <td class="c-act">
+    <div class="acts">
+      {% if j.status in ('new', 'shortlisted') %}
+        {% if j.status == 'shortlisted' %}<span class="tag">Présélectionné</span>{% endif %}
+        <button type="button" class="btn icon ok" title="Approuver" aria-label="Approuver « {{ j.title }} »"
+          hx-post="/profiles/{{ profile.id }}/jobs/action" hx-vals='{"action":"approve","job_id":"{{ j.id }}"}' hx-params="action,job_id"
+          hx-target="closest tr" hx-swap="outerHTML"><svg class="ic"><use href="#i-check"/></svg></button>
+        <button type="button" class="btn icon bad" title="Rejeter" aria-label="Rejeter « {{ j.title }} »"
+          hx-post="/profiles/{{ profile.id }}/jobs/action" hx-vals='{"action":"reject","job_id":"{{ j.id }}"}' hx-params="action,job_id"
+          hx-target="closest tr" hx-swap="outerHTML"><svg class="ic"><use href="#i-x"/></svg></button>
+      {% else %}
+        <span class="tag {{ 'ok' if j.status in ('approved', 'applied') else '' }}">{{ STATUS_LABELS[j.status] }}</span>
+        <button type="button" class="btn icon" title="Remettre à « nouveau »" aria-label="Remettre « {{ j.title }} » à nouveau"
+          hx-post="/profiles/{{ profile.id }}/jobs/action" hx-vals='{"action":"reset","job_id":"{{ j.id }}"}' hx-params="action,job_id"
+          hx-target="closest tr" hx-swap="outerHTML"><svg class="ic"><use href="#i-undo"/></svg></button>
+      {% endif %}
+    </div>
+    {% if j.status != 'rejected' %}
+      {% if app %}<a class="btn small cv" href="/applications/{{ app.id }}"><svg class="ic"><use href="#i-doc"/></svg>CV : {{ APPLICATION_LABELS[app.status] }}</a>
+      {% else %}<button class="btn small cv" type="submit" form="cvprep" formaction="/jobs/{{ j.id }}/application"><svg class="ic"><use href="#i-doc"/></svg>Préparer le CV</button>{% endif %}
+    {% endif %}
+  </td>
+</tr>
