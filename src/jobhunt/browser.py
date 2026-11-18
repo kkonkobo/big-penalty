@@ -136,8 +136,12 @@ class BrowserPool:
             )
             if site.startswith(("apply-", "applydry-")):  # a service worker could answer / fetch around the apply request guard
                 kwargs["service_workers"] = "block"
+            # French UI everywhere: without these, some ATS (Talentsoft, Workday) rendered in Italian or German from the
+            # system language, and their buttons / field labels were not recognised.
+            kwargs["extra_http_headers"] = {"Accept-Language": "fr-FR,fr;q=0.9,en;q=0.6"}
+            kwargs["args"] = ["--lang=fr-FR", "--accept-lang=fr-FR,fr,en"]
             if not headless:
-                kwargs["args"] = list(window_args())
+                kwargs["args"] += list(window_args())
                 # Keep Chrome's own sandbox: without this the driver adds --no-sandbox and every window shows the yellow
                 # "unsupported command-line flag" banner (and runs less safely).
                 kwargs["chromium_sandbox"] = True

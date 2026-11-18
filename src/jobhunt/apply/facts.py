@@ -483,6 +483,15 @@ def phone_variants(phone: str | None) -> list[str]:
     return [v for v in dict.fromkeys(out) if v != (phone or "").strip()]
 
 
+def linkedin_full_url(url: str | None) -> str | None:
+    """`linkedin.com/in/x`, `www.linkedin.com/in/x`, `http://…` -> `https://www.linkedin.com/in/x` (None when not a LinkedIn URL)."""
+    u = (url or "").strip()
+    if not u:
+        return None
+    m = re.match(r"^(?:https?://)?(?:[a-z]{2,3}\.)?(?:www\.)?linkedin\.com/(.+)$", u, re.I)
+    return f"https://www.linkedin.com/{m.group(1)}" if m else None
+
+
 def linkedin_variants(url: str | None) -> list[str]:
     bare = re.sub(r"^(?:https?://)?(?:www\.)?", "", (url or "").strip()).rstrip("/")
     if not bare:
@@ -531,7 +540,12 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
         label_re=LABEL_RE["last_name"])
     add("email", "Adresse e-mail", email, exact=True, label_re=LABEL_RE["email"])
     add("phone", "Téléphone", phone, exact=True, variants=phone_variants(phone), label_re=LABEL_RE["phone"])
-    add("linkedin", "Profil LinkedIn", linkedin, exact=True, variants=linkedin_variants(linkedin), label_re=LABEL_RE["linkedin"])
+    # Forms validate this field as a URL ("Veuillez entrer une url LinkedIn valide" on a real site when the scheme was
+    # missing): the value typed is always the full https URL; the shorter spellings stay as accepted variants.
+    full_linkedin = linkedin_full_url(linkedin)
+    add("linkedin", "Profil LinkedIn", full_linkedin or linkedin, exact=True,
+        variants=[v for v in dict.fromkeys(([linkedin] if linkedin else []) + linkedin_variants(linkedin)) if v != (full_linkedin or linkedin)],
+        label_re=LABEL_RE["linkedin"])
     for key, label in (("civility", "Civilité"), ("gender", "Genre"), ("birth_date", "Date de naissance"),
                        ("nationality", "Nationalité"), ("address", "Adresse postale"), ("postal_code", "Code postal"),
                        ("city", "Ville"), ("country", "Pays"), ("driving_licence", "Permis de conduire"),

@@ -148,11 +148,15 @@ OBSERVE_S = 12.0         # after a post-data click: how long the engine only obs
 OBSERVE_POLL_S = 2.0     # re-snapshot interval of that observation
 FILE_OPENER_RE = re.compile(r"(?:choisir|choose|select|selectionner|parcourir|browse|joindre|telecharger|televerser|upload|importer|deposer|ajouter|attach|add)\b"
                             r".{0,20}\b(?:fichier|file|document|cv|resume|curriculum|piece)|^\s*(?:parcourir|browse)")  # folded label of a button that opens a file dialog
-UPLOAD_CONFIRM_RE = re.compile(r"^\s*(?:ajouter|add|attach|joindre|telecharger|televerser|upload|importer|charger|envoyer le fichier)\b")
+UPLOAD_CONFIRM_RE = re.compile(r"^\s*(?:ajouter|add|attach|joindre|telecharger|televerser|upload|importer|charger|envoyer le fichier|aggiungi|carica|allega|"
+                               r"hinzufugen|hochladen|anhangen|anadir|adjuntar|subir|cargar|adicionar|anexar|toevoegen|uploaden)\b")
+NEXT_OR_SEND_RE = re.compile(r"postuler|envoyer|soumettre|valider|confirmer|terminer|finish|enregistrer|save|suivant|continuer|next|continue|submit|apply|send|"
+                             r"weiter|senden|avanti|siguiente|seguinte|volgende|inviare|enviar|\bok\b")
 SIGNUP_LINK_RE = re.compile(r"creer (?:un|votre|mon) compte|s'?inscrire|inscription|nouveau candidat|pas encore de compte|create (?:an )?account|sign ?up|"
                             r"register|new user|konto erstellen|registrieren|nouvel utilisateur|premiere visite")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer")
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
+PRE_STEP_CAP = 8         # pure pre-data steps (cookie banner, open_form, account pages) that do not use the max_steps budget
 SECRET_LOG = "•••"
 AUTO_SUBMIT_NOTE = "soumission automatique bloquée"
 NO_SHOT_NOTE = "capture désactivée après saisie du mot de passe"
@@ -301,13 +305,27 @@ _NEAR_FILE_JS = r"""(e) => {
   }
   return null;
 }"""
-# Is the container of this button holding a file input with a selected file? (an "Ajouter" upload-confirm button)
+# The button's small container (within 4 ancestors): does it hold a file input with a selected file, and nothing else to fill?
 _ATTACH_JS = r"""(e) => {
   for (let p = e.parentElement, i = 0; p && i < 4; p = p.parentElement, i++) {
     const fs = [...p.querySelectorAll('input[type=file]')];
-    if (fs.length) return fs.some((x) => x.files && x.files.length > 0);
+    if (!fs.length) continue;
+    const others = [...p.querySelectorAll('input,select,textarea')].filter((x) => x.tagName !== 'INPUT'
+      || !['file', 'hidden', 'button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes((x.getAttribute('type') || 'text').toLowerCase()));
+    return {filled: fs.some((x) => x.files && x.files.length > 0), small: !['FORM', 'BODY', 'MAIN', 'HTML'].includes(p.tagName) && others.length === 0};
   }
-  return false;
+  return {filled: false, small: false};
+}"""
+# fallback: the only file input of the control's form (else of its frame) - or the only one that accepts pdf / is named like a CV field
+_ANY_FILE_JS = r"""(e) => {
+  const pick = (list) => {
+    if (list.length === 1) return list[0];
+    const good = list.filter((x) => /pdf/i.test(x.getAttribute('accept') || '') || /cv|resume|curriculum|file|document|upload/i.test((x.name || '') + ' ' + (x.id || '')));
+    return good.length === 1 ? good[0] : null;
+  };
+  const f = e.form || e.closest('form');
+  if (f) { const r = pick([...f.querySelectorAll('input[type=file]')]); if (r) return r; }
+  return pick([...e.ownerDocument.querySelectorAll('input[type=file]')]);
 }"""
 _QUOTES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u00b4": "'"})
 
@@ -415,6 +433,8 @@ class _Validated:
     click: tuple[FormField, str] | None = None
     questions: list[Question] = dc_field(default_factory=list)
     notes: list[str] = dc_field(default_factory=list)
+    upload_failed: str = ""   # label of the question when an upload of the step was dropped / failed (no click in that step)
+    upload_refs: set[str] = dc_field(default_factory=set)
 
 
 class _Dispatched(Exception):
@@ -533,6 +553,10 @@ class _Run:
         self.account_known = account_known   # host -> does the credential store hold an account for it (None: not told to the planner)
         self.login_unknown_try = False       # a login was attempted on a host without a known account
         self.uploaded = False                # a file was set by the engine in this run
+        self.uploaded_files: list[tuple[str, str, str]] = []  # (host, normalized label, file name stem in lowercase) of every upload done
+        self.attach_done = False             # an upload-confirm click was made
+        self.consumed = 0                    # steps used against max_steps (pure pre-data steps are free within PRE_STEP_CAP)
+        self.pre_steps = 0
         self.attach_pending = False          # an "Ajouter"-style upload-confirm button was just clicked
         self.last_click_rec: tuple[str, str] | None = None  # (url, normalized label) of the last unguarded click made
         self.page_data = False      # the live page holds candidate data in the form of the clicked control (saved draft...)
@@ -821,6 +845,19 @@ class _Run:
             return False  # unusable restriction: fail closed
 
     @staticmethod
+    def _upload_question(op: str) -> str:
+        return ("CV" if op == "upload_cv" else "Lettre de motivation") + " (dépôt du fichier impossible sur ce site)"
+
+    def _file_satisfied(self, f: FormField, snap: PageSnapshot) -> bool:
+        """A file field the engine already uploaded to (same host, same label) whose input the page cleared after the attach click,
+        or whose file name the page now lists: the field counts as filled for the rest of the run."""
+        if f.kind != "file":
+            return False
+        host, label = self._host(), _norm(_label(f))
+        text = fold(snap.text)
+        return any(h == host and lb == label and (self.attach_done or stem in text) for h, lb, stem in self.uploaded_files)
+
+    @staticmethod
     def _dial_option(f: FormField, fact: Fact) -> int:
         """Index of the option whose dial code ("+33" in "France (+33)") is the longest prefix of the candidate's international phone."""
         digits = {re.sub(r"\D", "", v) for v in [fact.value or "", *fact.variants] if (v or "").strip().startswith("+")}
@@ -844,7 +881,12 @@ class _Run:
         drop = lambda why, ask=True: self._drop(v, f, why, ask)  # noqa: E731
         op, k = a.op, f.kind
         if op in ("upload_cv", "upload_letter"):
+            if k == "file" and self._file_satisfied(f, snap):
+                return drop("fichier déjà déposé dans cette candidature", ask=False)
             if k not in ("file", "button", "link") or (k != "file" and not FILE_OPENER_RE.search(fold(f.label))):
+                if op == "upload_cv" or f.required:
+                    v.upload_failed = v.upload_failed or self._upload_question(op)
+                    v.upload_refs.add(f.ref)
                 return drop("envoi de fichier sur un champ qui n'est pas un fichier")
             if op == "upload_letter" and not f.required:
                 return drop("lettre facultative : ignorée")
@@ -993,6 +1035,9 @@ class _Run:
                     it.basis = (a.basis.strip() or (f"déduit du fait « {it.fact.label} »" if it.fact else "déduit du profil"))[:200]
                 kept.append(it)
             else:
+                if a.op in ("upload_cv", "upload_letter") and (a.op == "upload_cv" or f.required):
+                    v.upload_failed = v.upload_failed or self._upload_question(a.op)
+                    v.upload_refs.add(f.ref)
                 why = {"contradiction": "contredit un fait connu", "hard_fact": "fait dur inconnu : jamais deviné"}.get(
                     verdicts.get(f.ref, ""), "")
                 self._drop(v, f, "réponse non étayée par le fait cité" + (f" ({why})" if why else ""))
@@ -1002,10 +1047,9 @@ class _Run:
         """Re-classify a click as `submit` when the planner understates what the button does."""
         has_file = any(x.kind == "file" for x in snap.fields)
         has_pw = any(x.kind == "password" for x in snap.fields)
-        # "Looks like an application form": we entered data, there is an upload, or several inputs of which at least one
-        # already holds a value (a pre-filled profile). Empty search / login boxes on an ad page do not count.
-        inputs = [x for x in snap.fields if x.kind not in ("button", "link")]
-        formlike = self.touched or self.page_data or has_file or (len(inputs) >= 3 and any(x.value.strip() and x.kind in PROFILE_KINDS for x in inputs))
+        # "Holds the application": we entered data in this run, a file is selected, or the page / frame holds the candidate's OWN
+        # identity (`page_data`, see _identity_needles). Unrelated inputs that have values (filters, search boxes) never count.
+        formlike = self.touched or self.page_data or any(x.kind == "file" and x.value.strip() for x in snap.fields)
         final = bool(SUBMIT_RE.search(f.label)) and not NAV_RE.search(f.label)
         if role == "cookies" and COOKIE_RE.fullmatch(f.label.strip()) and not SUBMIT_RE.search(f.label):
             return role
@@ -1163,7 +1207,15 @@ class _Run:
             chooser = await fci.value
             await chooser.set_files(str(path))
         except Exception as e:
-            raise _Skip("sélecteur de fichier non ouvert") from e
+            # no chooser opened (the click is NOT repeated): any file input of the same form / frame that looks like the CV one
+            any_input = None
+            with contextlib.suppress(Exception):
+                any_input = (await el.evaluate_handle(_ANY_FILE_JS)).as_element()
+            if any_input is None:
+                raise _Skip("sélecteur de fichier non ouvert") from e
+            await any_input.set_input_files(str(path))
+            if await any_input.evaluate("x => x.files.length") != 1:
+                raise _Skip("fichier non retenu par la page") from e
         self.uploaded = True
 
     async def _type(self, loc: Locator, f: FormField, text: str) -> None:
@@ -1521,7 +1573,9 @@ class _Run:
 
     async def _loop(self) -> RunResult:
         idle = 0
-        for n in range(1, self.max_steps + 1):
+        while self.consumed < self.max_steps:
+            n = len(self.steps) + 1
+            self.consumed += 1
             await self._settle()
             if self.blocked_requests:  # a page script navigated by itself after the last step
                 return self._auto_submit_result(self.steps[-1] if self.steps else None)
@@ -1566,6 +1620,11 @@ class _Run:
             plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                            history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
+            if (self.pre_steps < PRE_STEP_CAP and not self.touched and not self.app_touched
+                    and (kind == "job_page" or kind in ACCOUNT_KINDS
+                         or (plan.actions and all(a.op == "click" and a.click_role == "cookies" for a in plan.actions)))):
+                self.pre_steps += 1   # a pure pre-data step (cookie banner, open_form, account page): the budget is for the application
+                self.consumed -= 1
             if plan.note:
                 log.note = f"{log.note}; {self._r(plan.note[:300])}"
             errors = any(f.error for f in snap.fields)
@@ -1637,6 +1696,9 @@ class _Run:
                     v.notes.append(f"{_label(it.field)} : {e}")
                     if it.field.required:
                         v.questions.append(_question(it.field))
+                    if it.act.op in ("upload_cv", "upload_letter"):
+                        v.upload_failed = v.upload_failed or self._upload_question(it.act.op)
+                        v.upload_refs.add(it.field.ref)
                     shown = None
                 except _Dirty as e:
                     v.notes.append(f"{_label(it.field)} : {e}")
@@ -1648,8 +1710,13 @@ class _Run:
                     v.notes.append(f"{_label(it.field)} : échec ({type(e).__name__})")
                     if it.field.required:
                         v.questions.append(_question(it.field))
+                    if it.act.op in ("upload_cv", "upload_letter"):
+                        v.upload_failed = v.upload_failed or self._upload_question(it.act.op)
+                        v.upload_refs.add(it.field.ref)
                     shown = None
                 if shown is not None:
+                    if it.act.op in ("upload_cv", "upload_letter"):
+                        self.uploaded_files.append((self._host(), _norm(_label(it.field)), fold(Path(shown).stem)))
                     handled.add(it.field.ref)
                     self.chosen.add((_norm(_label(it.field)), it.field.kind))
                     log.filled.append(FilledField(label=self._r(_label(it.field)), op=it.act.op, fact=it.used or it.act.fact,
@@ -1659,6 +1726,12 @@ class _Run:
             if self.mode == "dry_run" and self.blocked_requests:
                 await self._shot(log)
                 return self._auto_submit_result(log)
+            if v.upload_failed:  # a file that could not be put on the site: nothing is clicked in this step (nothing was sent)
+                log.note = self._r("; ".join(([log.note] if log.note else []) + v.notes))[:900]
+                await self._shot(log)
+                q = Question(label=v.upload_failed, kind="file")
+                qs = [x for x in v.questions if x.ref not in v.upload_refs] + [q]  # (the upload's own question is replaced by this one)
+                return self._end("needs_input", "Informations manquantes : " + ", ".join(x.label for x in qs) + ".", qs)
             if dirty:  # a wrong radio may be selected and cannot be undone: nothing else happens in this step (no click)
                 log.note = self._r("; ".join(([log.note] if log.note else []) + v.notes))[:900]
                 await self._shot(log)
@@ -1681,9 +1754,11 @@ class _Run:
                 if self.page_data and plan.page_kind not in ACCOUNT_KINDS:
                     self.app_touched = True
             attach = False
-            if v.click and self.uploaded and UPLOAD_CONFIRM_RE.search(fold(v.click[0].label)) and live is not None:
-                try:  # the button that ATTACHES the file just chosen (same container as a file input holding a file): not a navigation
-                    attach = bool(await live.evaluate(_ATTACH_JS))
+            if v.click and self.uploaded and live is not None and v.click[0].kind in ("button", "link"):
+                lab = fold(v.click[0].label)
+                try:  # the button that ATTACHES the file just chosen: in the small container of a file input holding a file
+                    ai = await live.evaluate(_ATTACH_JS)
+                    attach = bool(ai["filled"]) and (bool(UPLOAD_CONFIRM_RE.search(lab)) or (bool(ai["small"]) and not NEXT_OR_SEND_RE.search(lab)))
                 except Exception:
                     attach = False
             if attach:
@@ -1711,7 +1786,8 @@ class _Run:
                 target = v.click[0].form if v.click else ""
                 mine = [f for f in snap.fields if not target or not f.form or f.form == target]
                 questions += [_question(f) for f in mine if f.required and f.kind not in ("button", "link")
-                              and f.ref not in handled and _is_empty(f) and not (self.mode == "dry_run" and f.kind == "password")]
+                              and f.ref not in handled and _is_empty(f) and not (self.mode == "dry_run" and f.kind == "password")
+                              and not self._file_satisfied(f, snap)]
                 questions += [_question(f) for f in mine if f.required and f.kind in ("select", "radio") and f.value.strip()
                               and f.ref not in handled and (_norm(_label(f)), f.kind) not in self.chosen
                               and not _dial_selector(f, snap)]  # pre-selected: not ours (dial codes excepted)
@@ -1738,11 +1814,11 @@ class _Run:
             idle = 0
             field, planned = v.click
             if v.click and not attach and self.last_click_rec == (urldefrag(self.page.url).url, _norm(field.label)):
-                loop_sig = [f for f in snap.fields if f.kind not in ("button", "link") and f.ref not in handled
+                loop_sig = [f for f in snap.fields if f.kind not in ("button", "link") and f.ref not in handled and not self._file_satisfied(f, snap)
                             and (f.error or (f.required and _is_empty(f) and (not field.form or not f.form or f.form == field.form)))]
                 if loop_sig:  # the same click on the same page with the same problem still showing: stop instead of burning the steps
-                    q = _question(loop_sig[0])
-                    return self._end("needs_input", f"Informations manquantes : {q.label}.", [q])
+                    qs = [_question(f) for f in loop_sig]  # every field still in error / empty, by name
+                    return self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in qs) + ".", qs)
             if self.mode == "dry_run" and not attach and not self._dry_may_click(field, role, snap):  # type: ignore[arg-type]
                 return self._dry_end(plan, field, role, planned)  # type: ignore[arg-type]
             if self.mode == "dry_run":  # "post-data" is decided from the PAGE too: a pre-filled form must not be submitted
@@ -1807,6 +1883,7 @@ class _Run:
                     self.click_form = await target.evaluate(_FORM_INFO_JS)  # type: ignore[union-attr]
             if attach:
                 self.attach_pending = True
+                self.attach_done = True
             else:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:

@@ -85,3 +85,8 @@ def test_system_prompt_states_the_account_upload_dial_and_aggregator_rules():
     for needle in ("ANY field of kind `password` is `account_password`", "`account_exists`", "do NOT fill the login form", "CHOISIR UN FICHIER",
                    "only attaches it", "Indicatif de pays", "aggregator"):
         assert needle in flat
+
+
+def test_system_prompt_states_the_imported_profile_rule():
+    flat = " ".join(SYSTEM.split())
+    assert "imported from the CV" in flat and "fill them, do not click again" in flat

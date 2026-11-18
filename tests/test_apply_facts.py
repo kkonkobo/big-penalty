@@ -42,8 +42,10 @@ def test_identity_facts_are_exact_and_name_is_split(profile):
     assert val(s, "email") == "camille@example.test" and val(s, "phone") == "+33 6 00 00 00 00"
     assert all(s.get(k).exact for k in ("full_name", "first_name", "last_name", "email", "phone", "linkedin", "account_email"))
     assert s.get("phone").variants == ["+33600000000", "0600000000", "06 00 00 00 00"]
-    assert s.get("linkedin").variants == ["www.linkedin.com/in/camille-example", "https://linkedin.com/in/camille-example",
-                                          "https://www.linkedin.com/in/camille-example"]
+    # typed as a full URL (forms validate it); the shorter spellings are accepted variants
+    assert val(s, "linkedin") == "https://www.linkedin.com/in/camille-example"
+    assert s.get("linkedin").variants == ["linkedin.com/in/camille-example", "www.linkedin.com/in/camille-example",
+                                          "https://linkedin.com/in/camille-example"]
 
 
 def test_name_split_multiple_tokens_and_answers_override(profile):

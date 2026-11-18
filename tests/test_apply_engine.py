@@ -326,7 +326,7 @@ async def test_letter_is_requested_once_and_only_for_required_fields(page, serve
     assert await page.evaluate("document.getElementById('opt').files.length") == 0
     # no letter available -> question, no click
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="letter", max_steps=2)
-    assert res.status == "needs_input" and {q.label for q in res.questions} == {"Lettre de motivation", "Message au recruteur"}
+    assert res.status == "needs_input" and {q.label for q in res.questions} == {"Lettre de motivation (dépôt du fichier impossible sur ce site)", "Message au recruteur"}
 
 
 # ------------------------------------------------------------------ unit
@@ -2757,3 +2757,146 @@ async def test_the_dial_code_matching_the_phone_is_chosen_and_code_backed(page, 
     plan = deduce_plan(lambda s: act(s, r"Indicatif", "select", "phone", "Belgique (+32)"))
     await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="dial", verifier=None)
     assert await page.input_value("#d") == "fr"
+
+
+# ================================================================== second real automatic batch
+UNRELATED_AD = ('<div><label for=a>Lieu</label><input id=a name=lieu value="France"><label for=b>Métier</label><input id=b name=metier value="technicien">'
+                '<label for=c>Contrat</label><input id=c name=contrat value="alternance"></div>'
+                '<button type="button" onclick="location.href=\'{dest}\'">{label}</button>')
+
+
+@pytest.mark.parametrize("label", ["Apply", "Postuler", "Je postule"])
+async def test_apply_on_an_ad_page_with_unrelated_input_values_is_a_plain_open_form_click(page, server, fast, cv_pdf, tmp_path, label):
+    calls: list[str] = []
+
+    async def gate():
+        calls.append("gate")
+        return []
+
+    async def on_nav():
+        calls.append("nav")
+
+    async def on_submit():
+        calls.append("submit")
+    await serve(page, "adpage3", UNRELATED_AD.format(dest="/login_after", label=label))
+    await serve(page, "login_after", '<h1>Connexion</h1><label for=e>E-mail</label><input id=e type=email><label for=p>Mot de passe</label><input id=p type=password>'
+                                     '<button type="button">Se connecter</button>')
+    plan = lambda snap: StepPlan(page_kind="job_page", actions=[act(snap, rf"^{label}$", "click", role="open_form")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="email_verification")]), tmp_path, cv_pdf, mode="submit", start="adpage3",
+                   before_submit=gate, on_submit_click=on_submit, on_nav_click=on_nav, max_steps=3)
+    assert res.steps[0].clicked == label and calls == [] and res.submit_clicked is False and "reclassé" not in res.steps[0].note
+    assert page.url.endswith("/login_after")
+
+
+# ------------------------------------------------------------------ 2. no navigation click after a failed upload
+NO_CHOOSER_NEXT = ('<form onsubmit="return false"><h3>CV</h3><button type=button>CHOISIR UN FICHIER</button>'
+                   '<button type="submit" onclick="document.body.dataset.n=(+document.body.dataset.n||0)+1">SUIVANT</button></form>')
+
+
+@pytest.mark.parametrize("target", [r"CHOISIR UN FICHIER", r"^Prénom$"])
+async def test_a_failed_or_dropped_upload_stops_the_step_before_any_navigation_click(page, server, fast, cv_pdf, tmp_path, target):
+    html = NO_CHOOSER_NEXT.replace("<h3>CV</h3>", "<h3>CV</h3><label for=pn>Prénom</label><input id=pn name=pn>")
+    await serve(page, "upfail", html)
+    calls: list[str] = []
+
+    async def nav():
+        calls.append("nav")
+    plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, target, "upload_cv"), act(snap, r"SUIVANT", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="upfail", mode="submit", on_nav_click=nav, max_steps=3)
+    assert await page.evaluate("document.body.dataset.n") is None and calls == []
+    assert res.status == "needs_input" and not res.submit_clicked
+    assert [q.label for q in res.questions] == ["CV (dépôt du fichier impossible sur ce site)"]
+
+
+async def test_a_styled_button_falls_back_to_the_only_file_input_that_looks_like_the_cv(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "twofiles", '<form><section><h3>CV</h3><button type=button>CHOISIR UN FICHIER</button></section>'
+                                  '<input type=file name=photo accept="image/*" hidden><input type=file name=cv_file accept=".pdf" hidden id=cvf></form>')
+    plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"CHOISIR UN FICHIER", "upload_cv")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="twofiles", max_steps=1)
+    assert await page.evaluate("document.getElementById('cvf').files.length") == 1 and res.steps[0].filled
+
+
+# ------------------------------------------------------------------ 3. an attach button whatever its language
+def attach_page(label, extra=""):
+    return ('<div id=blk><label for=cv>CV</label><input type=file id=cv name=cv>' + extra +
+            f'<button type="button" onclick="document.getElementById(\'e\').style.display=\'block\'">{label}</button>'
+            '<p class="error" id=e style="display:none">Le fichier est invalide</p></div><button type="button">Continuer</button>')
+
+
+@pytest.mark.parametrize("label", ["Aggiungi", "Hinzufügen", "Añadir", "Toevoegen", "Xyzzy"])
+async def test_an_attach_button_is_recognised_in_any_language(page, server, fast, cv_pdf, tmp_path, label):
+    await serve(page, "attachx", attach_page(label))
+    calls: list[str] = []
+
+    async def nav():
+        calls.append("nav")
+    up = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^CV", "upload_cv", kind="file")])  # noqa: E731
+    add = lambda snap: StepPlan(page_kind="form", actions=[act(snap, rf"^{label}$", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([up, add, StepPlan(page_kind="form")]), tmp_path, cv_pdf, start="attachx", mode="submit",
+                   on_nav_click=nav, max_steps=4)
+    assert res.steps[1].clicked == label and calls == [] and res.status == "needs_input" and not res.submit_clicked
+
+
+async def test_a_button_in_a_container_with_other_inputs_or_a_next_label_is_not_an_attach_click(page, server, fast, cv_pdf, tmp_path):
+    calls: list[str] = []
+
+    async def nav():
+        calls.append("nav")
+
+    async def final():
+        calls.append("final")
+    for label, extra in (("Xyzzy", '<input type=text name=other aria-label="Autre">'), ("Continuer", "")):
+        calls.clear()
+        await serve(page, "attachy", attach_page(label, extra))
+        up = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^CV", "upload_cv", kind="file")])  # noqa: E731
+        click = lambda snap: StepPlan(page_kind="form", actions=[act(snap, rf"^{label}$", "click", role="next")])  # noqa: E731
+        await go(page, server, ScriptedPlanner([up, click, StepPlan(page_kind="form")]), tmp_path, cv_pdf, start="attachy", mode="submit",
+                 on_nav_click=nav, on_submit_click=final, max_steps=3)
+        assert len(calls) == 1, label   # recorded as a possible send ("final" for an unknown label, "nav" for "Continuer")
+
+
+# ------------------------------------------------------------------ 4. the page clears the file input after "Ajouter"
+CLEARING = ('<div><label for=cv>Votre CV :</label><input type=file id=cv name=cv required>'
+            '<button type="button" onclick="var i=document.getElementById(\'cv\');var li=document.createElement(\'li\');li.textContent=i.files[0].name;'
+            'document.getElementById(\'lst\').appendChild(li);i.value=\'\'">Ajouter</button><ul id=lst></ul></div>'
+            '<button type="button" onclick="document.body.dataset.next=1">Continuer</button>')
+
+
+async def test_a_required_file_field_cleared_by_the_page_after_the_attach_click_counts_as_satisfied(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "clearing", CLEARING)
+    up = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Votre CV", "upload_cv", kind="file")])  # noqa: E731
+    add = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Ajouter$", "click", role="next")])  # noqa: E731
+    nxt = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Continuer$", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([up, add, nxt, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="clearing", mode="submit",
+                   max_steps=5)
+    assert res.steps[2].clicked == "Continuer" and await page.evaluate("document.body.dataset.next") == "1"
+    assert res.status != "needs_input"
+
+
+async def test_a_planner_asking_to_upload_again_to_a_satisfied_field_is_ignored(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "clearing", CLEARING)
+    up = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Votre CV", "upload_cv", kind="file")])  # noqa: E731
+    add = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Ajouter$", "click", role="next")])  # noqa: E731
+    again = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Votre CV", "upload_cv", kind="file"), act(snap, r"^Continuer$", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([up, add, again, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="clearing", mode="submit", max_steps=5)
+    assert res.steps[2].clicked == "Continuer" and not res.steps[2].filled
+
+
+# ------------------------------------------------------------------ 5. the budget is spent on the application
+async def test_pre_data_steps_do_not_use_the_application_budget_within_their_cap(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "openers", '<button type="button">Postuler</button>')
+    click = lambda snap: StepPlan(page_kind="job_page", actions=[act(snap, r"Postuler", "click", role="open_form")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([click] * 5 + [StepPlan(page_kind="closed")]), tmp_path, cv_pdf, start="openers", max_steps=2)
+    assert res.status == "blocked" and len(res.steps) == 6
+    res = await go(page, server, ScriptedPlanner([click]), tmp_path, cv_pdf, start="openers", max_steps=2)
+    assert res.status == "failed" and "Trop d'étapes" in res.message and len(res.steps) == 10   # 8 free pre-data steps + the budget of 2
+
+
+# ------------------------------------------------------------------ 6. the loop question names every field in error
+async def test_the_loop_question_names_all_the_fields_in_error(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "twoerr", '<form onsubmit="return false"><label for=a>Prénom</label><input id=a name=a><span class="error" id=ea style="display:none">Requis</span>'
+                                '<label for=b>Nom</label><input id=b name=b><span class="error" id=eb style="display:none">Requis</span>'
+                                '<button type="button" onclick="document.getElementById(\'ea\').style.display=\'inline\';document.getElementById(\'eb\').style.display=\'inline\'">SUIVANT</button></form>')
+    plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"SUIVANT", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="twoerr", mode="submit", max_steps=8)
+    assert res.status == "needs_input" and {q.label for q in res.questions} == {"Prénom", "Nom"} and "Prénom" in res.message and "Nom" in res.message
