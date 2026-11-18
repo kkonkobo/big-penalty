@@ -3,6 +3,7 @@
 import plistlib
 import shlex
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,10 +14,15 @@ from typer.testing import CliRunner
 from jobhunt import schedule
 from jobhunt.cli import app
 
+# launchd scheduling only installs on macOS (schedule._require_macos). These tests check the macOS plist and the
+# /bin/sh wrapper it runs, which use POSIX paths and a POSIX shell, so they don't apply on Windows.
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="launchd plist and /bin/sh wrapper are macOS-only")
+
 REPO = Path("/Volumes/SSD/Dev/big-penalty")
 HOME = Path("/Users/test")
 
 
+@posix_only
 def test_plist_content_for_default_time():
     plist = plistlib.loads(schedule.build_plist(REPO, ["07:30"], home=HOME))
     assert plist["Label"] == "com.bigpenalty.daily"
@@ -29,6 +35,7 @@ def test_plist_content_for_default_time():
     assert plist["RunAtLoad"] is False
 
 
+@posix_only
 def test_wrapper_command_skips_quietly_when_repo_missing(tmp_path):
     cmd = schedule.build_shell_command(REPO)
     assert cmd == ("[ -d /Volumes/SSD/Dev/big-penalty ] || exit 0; cd /Volumes/SSD/Dev/big-penalty && "
@@ -39,6 +46,7 @@ def test_wrapper_command_skips_quietly_when_repo_missing(tmp_path):
     assert res.returncode == 0 and res.stdout == "" and res.stderr == ""
 
 
+@posix_only
 def test_wrapper_command_quotes_paths_with_spaces():
     cmd = schedule.build_shell_command(Path("/Volumes/My SSD/job hunt"))
     assert shlex.split(cmd)[:4] == ["[", "-d", "/Volumes/My SSD/job hunt", "]"]
@@ -145,6 +153,7 @@ def test_uninstall_fails_and_keeps_plist_when_still_loaded(tmp_path):
     assert path.exists()
 
 
+@posix_only
 def test_wrapper_redirects_output_into_data_logs(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
