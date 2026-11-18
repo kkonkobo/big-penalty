@@ -1,0 +1,11 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Candidature</title></head>
+<body><h1>Votre candidature</h1>
+<form method="post" action="/apply">
+ <label for="fn">Ville *</label><input id="fn" name="city_field">
+ <label for="exp">Années d'expérience *</label><input id="exp" name="experience">
+ <label for="av">Disponible à partir de *</label><input id="av" name="available" placeholder="JJ/MM/AAAA">
+ <label for="av2">Mois de début *</label><input id="av2" name="available_month" placeholder="MM/AAAA">
+ <label for="q">Êtes-vous autorisé à travailler en France ? *</label>
+ <select id="q" name="auth" required><option value="">Choisir...</option><option value="o">Oui</option><option value="n">Non</option></select>
+ <button type="submit">Envoyer ma candidature</button>
+</form></body></html>

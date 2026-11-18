@@ -152,3 +152,77 @@ def test_today_page_summarises_each_profile(client):
     pid = int(client.post("/profiles", data=FORM, follow_redirects=False).headers["location"].rsplit("/", 1)[1])
     page = client.get("/").text
     assert "Aujourd'hui" in page and f'href="/profiles/{pid}/shortlist' in page and "CV à valider" in page
+
+
+# ------------------------------------------------------------------ CSRF / origin guard (app-wide middleware)
+class TestOriginGuard:
+    """The strict production rules: conftest relaxes them for the other tests, this class turns them back on."""
+    URL = "/profiles"
+
+    @pytest.fixture(autouse=True)
+    def strict(self, monkeypatch):
+        from jobhunt.web import app as webapp
+
+        monkeypatch.setattr(webapp, "REQUIRE_ORIGIN_EVIDENCE", True)
+
+    def post(self, client, headers=None, **kw):
+        return client.post(self.URL, data=FORM, headers=headers or {}, follow_redirects=False, **kw)
+
+    def test_a_write_without_origin_evidence_is_refused(self, client):
+        r = self.post(client)  # curl / a script: neither Origin nor Sec-Fetch-Site
+        assert r.status_code == 403 and "refusée" in r.text and db.list_profiles() == []
+
+    def test_same_origin_write_is_accepted(self, client):
+        assert self.post(client, {"Origin": "http://testserver"}).status_code == 303
+        assert self.post(client, {"Sec-Fetch-Site": "same-origin"}).status_code == 303
+
+    @pytest.mark.parametrize("host", ["127.0.0.1:8765", "localhost:8765", "localhost", "[::1]:8765", "[::1]", "127.0.0.1"])
+    def test_loopback_hosts_are_accepted_for_reads_and_writes(self, client, host):
+        assert client.get("/", headers={"Host": host}).status_code == 200
+        assert self.post(client, {"Host": host, "Origin": f"http://{host}"}).status_code == 303
+
+    @pytest.mark.parametrize("host", ["evil.example.test", "evil.example.test:8765", "127.0.0.1.evil.test", "192.168.1.20:8765", ""])
+    def test_foreign_host_is_refused_on_get_and_post(self, client, host):
+        r = client.get("/", headers={"Host": host})  # DNS rebinding reads (CV PDFs, screenshots) too
+        assert r.status_code == 403 and "refusée" in r.text
+        r = self.post(client, {"Host": host, "Origin": f"http://{host}", "Sec-Fetch-Site": "same-origin"})
+        assert r.status_code == 403 and db.list_profiles() == []
+
+    def test_testserver_is_not_allowed_without_the_test_hook(self, client, monkeypatch):
+        from jobhunt.web import app as webapp
+
+        monkeypatch.setattr(webapp, "EXTRA_ALLOWED_HOSTS", set())
+        assert client.get("/").status_code == 403
+        assert client.get("/", headers={"Host": "127.0.0.1:8765"}).status_code == 200
+
+    def test_cross_origin_post_is_refused(self, client):
+        host = {"Host": "127.0.0.1:8765"}
+        for origin in ("http://evil.example.test", "http://127.0.0.1:9999", "https://127.0.0.1:8765", "http://localhost:8765", "null", ""):
+            assert self.post(client, {**host, "Origin": origin}).status_code == 403, origin
+        assert db.list_profiles() == []
+        assert self.post(client, {**host, "Origin": "http://127.0.0.1:8765"}).status_code == 303
+
+    @pytest.mark.parametrize("site, code", [("same-origin", 303), ("none", 403), ("cross-site", 403), ("same-site", 403)])
+    def test_sec_fetch_site(self, client, site, code):
+        assert self.post(client, {"Sec-Fetch-Site": site}).status_code == code
+
+    def test_a_cross_site_signal_beats_a_matching_origin(self, client):
+        assert self.post(client, {"Origin": "http://testserver", "Sec-Fetch-Site": "cross-site"}).status_code == 403
+
+    def test_safe_methods_only_need_a_good_host(self, client):
+        assert client.get("/", headers={"Origin": "http://evil.example.test", "Sec-Fetch-Site": "cross-site"}).status_code == 200
+        assert client.head("/", headers={"Sec-Fetch-Site": "cross-site"}).status_code in (200, 405)
+        assert client.options("/", headers={"Host": "evil.example.test"}).status_code == 403
+
+    def test_other_methods_are_filtered_too(self, client):
+        assert client.delete("/profiles/1", headers={"Origin": "http://evil.example.test"}).status_code == 403
+        assert client.put("/profiles/1", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+        assert client.delete("/profiles/1").status_code == 403  # no evidence at all
+
+    def test_extra_hosts_from_the_environment(self, client, monkeypatch):
+        assert self.post(client, {"Host": "mac.lan:8765", "Origin": "http://mac.lan:8765"}).status_code == 403
+        monkeypatch.setenv("JOBHUNT_WEB_ALLOWED_HOSTS", "mac.lan, Other.Example.test")
+        assert client.get("/", headers={"Host": "mac.lan:8765"}).status_code == 200
+        assert self.post(client, {"Host": "mac.lan:8765", "Origin": "http://mac.lan:8765"}).status_code == 303
+        assert self.post(client, {"Host": "other.example.test", "Sec-Fetch-Site": "same-origin"}).status_code == 303
+        assert self.post(client, {"Host": "mac.lan:8765", "Origin": "http://evil.example.test"}).status_code == 403

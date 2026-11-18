@@ -1,0 +1,20 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Candidature - Exemple SA</title>
+<style>.file-btn{display:inline-block;border:1px solid #333;padding:4px}.hidden-file{position:absolute;opacity:0;width:1px;height:1px}</style></head>
+<body><h1>Votre candidature</h1>
+<form method="post" action="/apply" enctype="multipart/form-data">
+ <label for="fn">Prénom *</label><input id="fn" name="first_name" required>
+ <label>Nom (obligatoire) <input name="last_name" required></label>
+ <div><label for="em">E-mail *</label><input type="email" id="em" name="email" required></div>
+ <div><label for="tel">Téléphone</label><input type="tel" id="tel" name="phone" placeholder="+33 6 12 34 56 78" aria-required="true"></div>
+ <label for="sit">Situation *</label>
+ <select id="sit" name="situation" required><option value="">Choisir...</option><option value="alt">Alternance</option><option value="stage">Stage</option></select>
+ <fieldset><legend>Êtes-vous disponible immédiatement ? *</legend>
+  <label><input type="radio" name="dispo" value="oui" required> Oui</label>
+  <label><input type="radio" name="dispo" value="non"> Non</label></fieldset>
+ <span class="file-btn" onclick="document.getElementById('cv').click()">Joindre mon CV *</span>
+ <label for="cv" class="sr" style="position:absolute;left:-9999px">Curriculum vitae (PDF) *</label>
+ <input type="file" id="cv" name="cv" accept=".pdf" class="hidden-file" required>
+ <label><input type="checkbox" name="rgpd" required> J'accepte le traitement de mes données personnelles (RGPD) *</label>
+ <label><input type="checkbox" name="newsletter"> Je souhaite recevoir la newsletter et les offres partenaires</label>
+ <button type="submit">Envoyer ma candidature</button>
+</form></body></html>

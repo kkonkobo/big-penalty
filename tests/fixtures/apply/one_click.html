@@ -1,0 +1,26 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Candidature en un clic</title></head>
+<body><h1>Candidature en un clic</h1>
+<oc-form id="oc">
+  <span slot="consent">J'accepte la politique de confidentialité</span>
+</oc-form>
+<oc-field id="phone" aria-label="Téléphone mobile"></oc-field>
+<div id="plain"><input type="checkbox" id="nl"><span>Je souhaite recevoir la newsletter</span></div>
+<script>
+// web components with OPEN shadow roots, like the ATS this fixture reproduces: 80 inputs, 45 row buttons, and the real
+// "Envoyer" button last (inside the shadow root)
+customElements.define('oc-form', class extends HTMLElement {
+  connectedCallback() {
+    const r = this.attachShadow({mode: 'open'});
+    let h = '<form method="post" action="/apply">';
+    for (let i = 1; i <= 80; i++) h += '<div><label for="t' + i + '">Champ ' + i + '</label><input id="t' + i + '" name="c' + i + '"></div>';
+    for (let i = 1; i <= 44; i++) h += '<button type="button">' + (i % 2 ? 'Modifier' : 'Supprimer') + ' ligne ' + i + '</button>';
+    h += '<button type="button">Ajouter une ligne</button>';
+    h += '<div><input type="checkbox" id="consent" required><slot name="consent"></slot></div>';
+    h += '<div class="actions"><button type="submit">Envoyer</button></div></form>';
+    r.innerHTML = h;
+  }
+});
+customElements.define('oc-field', class extends HTMLElement {
+  connectedCallback() { this.attachShadow({mode: 'open'}).innerHTML = '<input type="tel" name="phone">'; }
+});
+</script></body></html>

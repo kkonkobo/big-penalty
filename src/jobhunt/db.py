@@ -131,6 +131,61 @@ MIGRATIONS: list[str] = [
             SELECT MAX(id) FROM applications WHERE status != 'withdrawn' GROUP BY profile_id, job_id);
     CREATE UNIQUE INDEX idx_applications_active ON applications(profile_id, job_id) WHERE status != 'withdrawn';
     """,
+    # 4: milestone 2b (apply on the origin ATS): who approved, when it was sent, and one row per dry-run / submit run.
+    """
+    ALTER TABLE applications ADD COLUMN approved_by TEXT;
+    ALTER TABLE applications ADD COLUMN submitted_at TEXT;
+    CREATE TABLE application_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+        rev INTEGER NOT NULL,
+        mode TEXT NOT NULL,
+        trigger TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        result_json TEXT,
+        out_dir TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+    );
+    CREATE INDEX idx_runs_app ON application_runs(application_id, id);
+    """,
+    # 5: crash-safe "possibly sent" bookkeeping: click time of a run, the URL an application was sent to, and one
+    # reservation per attempted send (consumes the daily cap and blocks duplicates until a human releases it).
+    """
+    ALTER TABLE application_runs ADD COLUMN submit_clicked_at TEXT;
+    ALTER TABLE applications ADD COLUMN sent_origin_url TEXT;
+    CREATE TABLE apply_reservations (
+        id INTEGER PRIMARY KEY,
+        profile_id INTEGER NOT NULL,
+        application_id INTEGER NOT NULL,
+        run_id INTEGER NOT NULL,
+        trigger TEXT NOT NULL,
+        role_key TEXT NOT NULL,
+        url_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        released_at TEXT
+    );
+    CREATE INDEX idx_reservations_profile ON apply_reservations(profile_id, released_at);
+    CREATE INDEX idx_reservations_app ON apply_reservations(application_id);
+    """,
+    # 6: durable record of navigation clicks (a pending reservation exists from the first click that follows entered data),
+    # and the pid of the process driving a run (a live owner is never taken over).
+    """
+    ALTER TABLE application_runs ADD COLUMN nav_clicked_at TEXT;
+    ALTER TABLE application_runs ADD COLUMN pid INTEGER;
+    ALTER TABLE apply_reservations ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+    """,
+    # 7: which run was the sending attempt of an application (set when it is recorded as submitted, also by a manual
+    # confirmation): the answers deduced in THAT run are the ones to prepare for the interview.
+    """
+    ALTER TABLE applications ADD COLUMN sent_run_id INTEGER;
+    """,
+    # 8: who approved the application when a run started ("auto" / "user"): approved_by is cleared when an attempt ends
+    # unconfirmed, and "it was not sent" re-approves automatically only what the tool had approved itself.
+    """
+    ALTER TABLE application_runs ADD COLUMN approved_by TEXT;
+    """,
 ]
 
 

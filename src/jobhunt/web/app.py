@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ import secrets
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -34,6 +35,64 @@ HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
 app = FastAPI(title="Big Penalty")
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+# ---- CSRF / DNS-rebinding guard. EVERY request (GET too: CV PDFs and screenshots are served) must carry a loopback Host (or one
+# listed in JOBHUNT_WEB_ALLOWED_HOSTS); every write needs positive same-origin evidence.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+EXTRA_ALLOWED_HOSTS: set[str] = set()  # hook for tests only (conftest adds Starlette's "testserver"); empty in production
+REQUIRE_ORIGIN_EVIDENCE = True         # False ONLY in tests: their clients post without Origin / Sec-Fetch-Site
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def allowed_hosts() -> frozenset[str]:
+    """Loopback names plus the comma-separated JOBHUNT_WEB_ALLOWED_HOSTS (for someone serving on another interface)."""
+    extra = {h.strip().lower() for h in os.environ.get("JOBHUNT_WEB_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    return LOOPBACK_HOSTS | extra | {h.lower() for h in EXTRA_ALLOWED_HOSTS}
+
+
+def _host_port(netloc: str, scheme: str) -> tuple[str, int | None]:
+    """"[::1]:8765" -> ("::1", 8765); the default port of the scheme when absent."""
+    try:
+        u = urlparse("//" + netloc.strip())
+        return (u.hostname or "").lower(), u.port or _DEFAULT_PORTS.get(scheme)
+    except ValueError:
+        return "", None
+
+
+def request_refusal(method: str, headers, scheme: str) -> str | None:
+    """French reason why a request must be refused (None = OK): foreign Host header (any method); for a write (anything but
+    GET / HEAD / OPTIONS) also no positive same-origin evidence: an `Origin` equal to the request's own scheme + host + port,
+    or `Sec-Fetch-Site: same-origin` (a missing, `null`, cross-origin or cross-site signal is refused)."""
+    host, port = _host_port(headers.get("host", ""), scheme)
+    if not host or host not in allowed_hosts():
+        return "Requête refusée : adresse non autorisée."
+    if method.upper() in _SAFE_METHODS:
+        return None
+    fetch_site = headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site != "same-origin":
+        return "Requête refusée : requête provenant d'un autre site."
+    origin = headers.get("origin")
+    if origin is not None:
+        o = urlparse(origin)
+        try:
+            o_host, o_port = (o.hostname or "").lower(), o.port or _DEFAULT_PORTS.get(o.scheme)
+        except ValueError:
+            o_host, o_port = "", None
+        if o.scheme != scheme or o_host != host or o_port != port:
+            return "Requête refusée : origine différente."
+    elif fetch_site is None and REQUIRE_ORIGIN_EVIDENCE:
+        return "Requête refusée : origine inconnue."
+    return None
+
+
+@app.middleware("http")
+async def origin_guard(request: Request, call_next):
+    reason = request_refusal(request.method, request.headers, request.url.scheme)
+    if reason:
+        return PlainTextResponse(reason, status_code=403)
+    return await call_next(request)
+
 
 CONTRACT_LABELS = {
     "cdi": "CDI", "cdd": "CDD", "interim": "Intérim", "alternance": "Alternance", "stage": "Stage",
@@ -138,6 +197,22 @@ def render(request: Request, name: str, **ctx: Any) -> HTMLResponse:
 
 
 # ------------------------------------------------------------ profiles
+def _send_board(pid: int) -> dict[str, Any]:
+    """Sending queue of a profile for the daily view: what waits for the user first, then what was sent today."""
+    from jobhunt.apply import service as apply_service
+    from jobhunt.freshness import start_of_today_paris
+
+    try:
+        items = apply_service.queue(pid)
+    except Exception:  # noqa: BLE001 - the daily view must still render
+        log.exception("apply queue failed")
+        items = []
+    today = start_of_today_paris()
+    by = {b: [i for i in items if i.bucket == b] for b in ("to_validate", "paused", "failed", "sent")}
+    by["sent_today"] = [i for i in by["sent"] if i.app.submitted_at and i.app.submitted_at >= today]
+    return by
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     """Daily view: what is new since the last search, what to triage, which CVs wait for approval."""
@@ -154,6 +229,7 @@ def index(request: Request):
             "picks": (new_jobs or to_triage)[:6], "picks_are_new": bool(new_jobs),
             "drafts": [a for a in cvstore.list_applications(p.id) if a.status == "draft"],
             "run": run, "failing": [source_labels().get(n, n) for n, s in src.items() if s.get("status") == "error"],
+            "sends": _send_board(p.id),
         })
     try:
         st = sched.status(tail=1, **SCHEDULE_KW)
@@ -485,9 +561,17 @@ def application_page(request: Request, app_id: int, f: str | None = None):
     except cvs.CVError as e:
         master, error = None, error or str(e)
     eligible, reasons = cvs.is_eligible(a)
+    try:
+        from jobhunt.apply import service as apply_service  # noqa: PLC0415
+
+        inferred = apply_service.inferred_answers(a.id)
+    except Exception:  # noqa: BLE001 - the page must still render
+        log.exception("inferred answers failed")
+        inferred = []
     return render(request, "application.html", a=a, job=job, master=master, labels=source_labels(), notice=notice, error=error,
                   checked={n.lower() for g in a.tailored.skill_groups for n in g.items}, eligible=eligible,
-                  not_eligible_reasons=reasons, revisions=cvstore.list_revisions(a.id), fit=a.fit_notes)
+                  not_eligible_reasons=reasons, revisions=cvstore.list_revisions(a.id), fit=a.fit_notes,
+                  apply_item=apply_routes.queue_item(a.id), apply_inferred=inferred)
 
 
 @app.get("/applications/{app_id}/preview", response_class=HTMLResponse)
@@ -657,3 +741,8 @@ async def master_cv_import(pid: int, file: UploadFile):
     n = len(res.unverified) + len(res.disputed)
     return _flash(f"/profiles/{pid}/cv", notice="CV importé, en attente de confirmation."
                   + (f" {n} élément(s) contesté(s) à vérifier." if n else ""))
+
+
+from jobhunt.web import apply_routes  # noqa: E402 - needs `app` and `templates` defined above
+
+apply_routes.install(app, templates)

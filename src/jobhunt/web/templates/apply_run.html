@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Envoi · {{ a.company if a else 'Exécution' }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ APPLY_MODE_LABELS.get(run.mode, run.mode) }}{% if a %} · {{ a.company or 'Entreprise non précisée' }}{% endif %}</h1>
+    <p class="muted">{% if a %}{{ a.job_title or '' }} · {% endif %}<span class="tag {{ APPLY_RUN_CLASS.get(run.status, '') }}">{{ APPLY_RUN_LABELS.get(run.status, run.status) }}</span></p>
+  </div>
+  <div class="row">
+    <a class="btn" href="/apply">Retour aux envois</a>
+    {% if a %}<a class="btn" href="/applications/{{ a.id }}">Voir la candidature</a>{% endif %}
+    {% if can_send %}
+    <form method="post" action="/apply/send" onsubmit="return confirm('Envoyer 1 candidature sur le site de l\'entreprise ?')">
+      <input type="hidden" name="app_id" value="{{ a.id }}"><input type="hidden" name="rev_{{ a.id }}" value="{{ run.rev }}"><input type="hidden" name="origin_{{ a.id }}" value="{{ origin_sha }}">
+      <button class="btn primary">Envoyer cette candidature</button></form>
+    {% endif %}
+  </div>
+</div>
+{% if run.mode == 'dry_run' and run.status == 'ready' %}<div class="notice">Formulaire rempli, rien n'a été envoyé</div>{% endif %}
+
+<dl class="facts wide">
+  <div><dt>Mode</dt><dd>{{ APPLY_MODE_LABELS.get(run.mode, run.mode) }}</dd></div>
+  <div><dt>Déclenchement</dt><dd>{{ triggers.get(run.trigger, run.trigger) }}</dd></div>
+  <div><dt>Début</dt><dd>{{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</dd></div>
+  <div><dt>Fin</dt><dd>{% if run.finished_at %}{{ run.finished_at.strftime('%d/%m/%Y %H:%M') }}{% else %}en cours{% endif %}</dd></div>
+  <div><dt>Version du CV</dt><dd>{{ run.rev }}</dd></div>
+  {% if run.result and run.result.untrusted_host %}<div class="span"><dt>Site non approuvé</dt><dd>{{ run.result.untrusted_host }}</dd></div>{% endif %}
+  {% if run.message %}<div class="span"><dt>Message</dt><dd>{{ run.message }}</dd></div>{% endif %}
+</dl>
+
+{% for s in steps %}
+<section class="panel flush" id="step-{{ loop.index0 }}">
+  <div class="panel-head">
+    <h3>Étape {{ loop.index }} · {{ kinds.get(s.page_kind, s.page_kind) }}</h3>
+    {% if s.url|http_url %}<span class="muted small">{{ s.url|host }}</span>{% endif %}
+  </div>
+  {% if s.filled %}
+  <table class="tbl">
+    <thead><tr><th>Champ</th><th>Valeur saisie</th><th>Source</th></tr></thead>
+    <tbody>{% for f in s.filled %}
+      <tr><td>{{ f.label }}</td><td>{{ f.value }}{% if f.inferred %} <span class="tag warn">déduite</span>{% endif %}</td>
+        <td class="muted small">{{ f.fact or '—' }}{% if f.inferred and f.basis %}<div>{{ f.basis }}</div>{% endif %}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="panel-empty muted">Aucun champ rempli sur cette page.</p>{% endif %}
+  <div class="panel-foot">
+    {% if s.clicked %}<p class="small">Bouton cliqué : <strong>{{ s.clicked }}</strong></p>{% endif %}
+    {% if s.note %}<p class="muted small">{{ s.note }}</p>{% endif %}
+    {% if s.screenshot %}
+    <a href="/apply/runs/{{ run.id }}/shots/{{ loop.index0 }}" target="_blank" rel="noopener"><img class="shot" loading="lazy"
+       src="/apply/runs/{{ run.id }}/shots/{{ loop.index0 }}" alt="Capture de l'étape {{ loop.index }}"></a>
+    {% endif %}
+  </div>
+</section>
+{% else %}
+<p class="muted">Aucune étape enregistrée pour cette exécution.</p>
+{% endfor %}
+<style>
+  .panel.flush + .panel.flush{margin-top:1rem}
+  .shot{display:block;max-width:100%;max-height:22rem;border:1px solid var(--line);border-radius:var(--r)}
+</style>
+{% endblock %}

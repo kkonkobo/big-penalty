@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% from "_apply_card.html" import status_box with context %}
+{% block title %}Envois{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Envois</h1>
+    <p class="muted">Les offres dont le fit est de {{ settings.apply_auto_min_score|round|int }} ou plus sont envoyées automatiquement quand l'envoi automatique est activé
+      (au plus {{ settings.apply_daily_cap }} par jour) ; les autres attendent ici votre accord.
+      {% if settings.apply_auto %}<span class="tag ok">Envoi automatique : activé</span>{% else %}<span class="tag">Envoi automatique : désactivé</span>{% endif %}</p>
+    {% set counts = [] %}
+    {% if groups.failed %}{% set _ = counts.append(groups.failed|length ~ ' à vérifier') %}{% endif %}
+    {% if groups.paused %}{% set _ = counts.append(groups.paused|length ~ ' en pause') %}{% endif %}
+    {% if groups.to_validate %}{% set _ = counts.append(groups.to_validate|length ~ (' prêtes' if groups.to_validate|length > 1 else ' prête')) %}{% endif %}
+    {% if sent_total %}{% set _ = counts.append(sent_today ~ (' envoyée aujourd\'hui' if sent_today < 2 else ' envoyées aujourd\'hui')) %}{% set _ = counts.append(sent_total ~ ' au total') %}{% endif %}
+    {% if counts %}<p id="queue-counts"><strong>{{ counts|join(' · ') }}</strong></p>{% endif %}
+  </div>
+  <div class="row">{% for p in profiles if not profile_id or p.id == profile_id %}
+    <a class="btn" href="/profiles/{{ p.id }}/answers">Réponses aux formulaires{% if profiles|length > 1 and not profile_id %} · {{ p.name }}{% endif %}</a>{% endfor %}</div>
+</div>
+{% if profiles|length > 1 %}
+<nav class="tabs" aria-label="Profil">
+  <a href="/apply" {% if not profile_id %}aria-current="page"{% endif %}>Tous les profils</a>
+  {% for p in profiles %}<a href="/apply?profile={{ p.id }}" {% if profile_id == p.id %}aria-current="page"{% endif %}>{{ p.name }}</a>{% endfor %}
+</nav>
+{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+{% for e in errors %}<div class="error-box">{{ e }}</div>{% endfor %}
+{{ status_box(status) }}
+
+{% if groups.failed %}
+<section class="panel flush" id="failed">
+  <div class="panel-head"><h3>Échecs et envois à vérifier <span class="count">{{ groups.failed|length }}</span></h3></div>
+  <table class="tbl"><tbody>
+  {% for it in groups.failed %}
+    <tr>
+      <td><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
+        <div class="muted small">{{ it.app.job_title or '' }}</div></td>
+      <td>{% if it.app.status == 'failed' %}
+        <p class="alert"><svg class="ic"><use href="#i-alert"/></svg><span>Envoi non confirmé : vérifier sur le site de l'entreprise</span></p>
+        {% endif %}
+        {% set shown = it.outstanding or it.last_run %}
+        {% if shown %}<span class="muted small">{{ shown.message }}</span> <a class="small" href="/apply/runs/{{ shown.id }}">voir l'essai</a>{% endif %}</td>
+      <td>{% if it.app.status == 'failed' %}{% if it.outstanding %}
+        <form method="post" action="/applications/{{ it.app.id }}/apply/resolve" onsubmit="return confirm('Confirmer : cette candidature a bien été envoyée sur le site de l\'entreprise ?')">
+          <input type="hidden" name="run_id" value="{{ it.outstanding.id }}"><input type="hidden" name="sent" value="1"><button class="btn small">Elle a bien été envoyée</button></form>
+        <form method="post" action="/applications/{{ it.app.id }}/apply/resolve" onsubmit="return confirm('Confirmer : cette candidature n\'a PAS été envoyée ? Elle redeviendra un brouillon à approuver de nouveau.')">
+          <input type="hidden" name="run_id" value="{{ it.outstanding.id }}"><input type="hidden" name="sent" value="0"><button class="btn small">Elle n'a pas été envoyée, réessayer plus tard</button></form>
+        {% endif %}
+        {% elif it.selectable %}
+        <form method="post" action="/apply/send" onsubmit="return confirm('Envoyer 1 candidature sur le site de l\'entreprise ?')">
+          <input type="hidden" name="app_id" value="{{ it.app.id }}"><input type="hidden" name="rev_{{ it.app.id }}" value="{{ it.app.current_rev }}"><input type="hidden" name="origin_{{ it.app.id }}" value="{{ it.origin_sha }}">
+          <button class="btn small">Réessayer</button></form>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody></table>
+</section>
+{% endif %}
+
+{% for it in groups.paused %}{% if loop.first %}
+<section class="panel flush" id="paused">
+  <div class="panel-head"><h3>En pause <span class="count">{{ groups.paused|length }}</span></h3></div>
+  <div class="stack">
+{% endif %}
+    <div class="card">
+      <p><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
+        <span class="muted">{{ it.app.job_title or '' }}</span>
+        {% if it.last_run %}<a class="small" href="/apply/runs/{{ it.last_run.id }}">voir l'essai</a>{% endif %}</p>
+      {% if it.pause_reason == 'input' %}
+      <p><a class="btn small" href="/profiles/{{ it.app.profile_id }}/answers">Compléter mes réponses</a></p>
+      <form method="post" action="/applications/{{ it.app.id }}/apply/answers" class="form">
+        <input type="hidden" name="run_id" value="{{ it.last_run.id }}"><input type="hidden" name="origin" value="{{ it.origin_sha }}">
+        <p class="muted small">Le formulaire pose des questions auxquelles l'outil ne peut pas répondre seul. Vos réponses sont gardées pour les prochains formulaires.</p>
+        {% for q in it.questions %}
+        <label>{{ q.label }}
+          <input type="hidden" name="q_{{ loop.index0 }}" value="{{ q.label }}">
+          {% if q.options %}
+          <select name="a_{{ loop.index0 }}"><option value="">Choisir…</option>{% for o in q.options %}<option>{{ o }}</option>{% endfor %}</select>
+          {% else %}<input name="a_{{ loop.index0 }}" {{ 'required' if q.required }}>{% endif %}
+        </label>
+        {% endfor %}
+        <div><button class="btn">Enregistrer et reprendre</button></div>
+      </form>
+      {% elif it.pause_reason == 'email' %}
+      <p>{{ it.last_run.message if it.last_run and it.last_run.message else "Le site a envoyé un e-mail de vérification : cliquer sur le lien qu'il contient." }}</p>
+      <form method="post" action="/applications/{{ it.app.id }}/apply/resume">
+        <input type="hidden" name="run_id" value="{{ it.last_run.id }}"><input type="hidden" name="mode" value="{{ it.last_run.mode }}"><input type="hidden" name="rev" value="{{ it.last_run.rev }}"><input type="hidden" name="origin" value="{{ it.origin_sha }}">
+        <button class="btn">J'ai cliqué sur le lien, reprendre</button></form>
+      {% elif it.pause_reason == 'host' %}
+      <p>Le formulaire de {{ it.app.company or 'cette entreprise' }} est hébergé sur <strong>{{ it.untrusted_host }}</strong>. Faire confiance à ce site ?</p>
+      <p class="muted small">Ce n'est ni le site de l'offre ni un service de recrutement connu : rien n'a été saisi ni envoyé. Si vous faites confiance à ce site, l'outil pourra y remplir le formulaire (et, pour un envoi, y envoyer votre candidature).</p>
+      <form method="post" action="/applications/{{ it.app.id }}/apply/trust">
+        <input type="hidden" name="run_id" value="{{ it.last_run.id }}"><input type="hidden" name="host" value="{{ it.untrusted_host }}"><input type="hidden" name="origin" value="{{ it.origin_sha }}">
+        <button class="btn">Faire confiance à {{ it.untrusted_host }} et reprendre</button></form>
+      {% else %}
+      <p>Un CAPTCHA doit être résolu à la main. « Reprendre dans une fenêtre » rouvre le site : la fenêtre reste ouverte environ {{ [1, (settings.apply_captcha_wait_s / 60)|round|int]|max }} minute{{ 's' if (settings.apply_captcha_wait_s / 60)|round|int > 1 }}, puis l'essai s'arrête s'il n'est pas résolu.</p>
+      <form method="post" action="/applications/{{ it.app.id }}/apply/resume">
+        <input type="hidden" name="run_id" value="{{ it.last_run.id }}"><input type="hidden" name="mode" value="{{ it.last_run.mode }}"><input type="hidden" name="rev" value="{{ it.last_run.rev }}"><input type="hidden" name="origin" value="{{ it.origin_sha }}">
+        <button class="btn">Reprendre dans une fenêtre</button></form>
+      {% endif %}
+    </div>
+{% if loop.last %}
+  </div>
+</section>
+{% endif %}{% endfor %}
+
+{% set tv = groups.to_validate %}
+<form method="post" action="/apply/send" id="send-form">
+<section class="panel flush" id="to-validate">
+  <div class="panel-head">
+    <h3>À valider <span class="count">{{ tv|length }}</span></h3>
+    {% if tv %}<label class="check small"><input type="checkbox" id="sel-all" aria-label="Tout sélectionner"> Tout sélectionner</label>{% endif %}
+  </div>
+  {% if tv %}
+  <table class="tbl">
+    <thead><tr><th></th><th>Offre</th><th class="num">Fit</th><th class="num">Âge</th><th>Site de l'entreprise</th><th>CV</th><th></th></tr></thead>
+    <tbody>
+    {% for it in tv %}
+      <tr>
+        <td>{% if it.selectable %}<input type="checkbox" name="app_id" value="{{ it.app.id }}" aria-label="Sélectionner {{ it.app.company or '' }}">
+          <input type="hidden" name="rev_{{ it.app.id }}" value="{{ it.app.current_rev }}"><input type="hidden" name="origin_{{ it.app.id }}" value="{{ it.origin_sha }}">{% endif %}</td>
+        <td><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
+          <div class="muted small">{{ it.app.job_title or 'Offre ' ~ it.app.job_id }}</div>
+          {% if it.auto %}<span class="tag src">automatique</span>{% endif %}
+          {% if not it.selectable %}<span class="tag warn" {% if it.problems %}title="{{ it.problems|join(' ; ') }}"{% endif %}>non envoyable</span>{% endif %}</td>
+        <td class="num">{{ it.score|round|int if it.score is not none else '—' }}</td>
+        <td class="num">{% if it.age_days is not none %}{{ it.age_days|round|int }} j{% else %}—{% endif %}</td>
+        <td>{% if it.origin_url|http_url %}<a href="{{ it.origin_url|http_url }}" target="_blank" rel="noopener noreferrer">{{ it.origin_host or (it.origin_url|host) }}<svg class="ic"><use href="#i-out"/></svg></a>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td><a href="/applications/{{ it.app.id }}/pdf">PDF</a></td>
+        <td>{% if it.selectable %}<button class="btn small" formaction="/applications/{{ it.app.id }}/apply/dry-run">Essai à blanc</button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="panel-foot row between">
+    <span class="muted small">Chaque envoi se fait sur le site de l'entreprise, avec le CV approuvé.</span>
+    <button class="btn primary" id="send-btn" disabled>Envoyer les 0 sélectionnées</button>
+  </div>
+  {% else %}
+  <p class="panel-empty muted">Rien à valider. Les candidatures prêtes apparaissent ici ; préparez un CV depuis la liste des offres.</p>
+  {% endif %}
+</section>
+</form>
+
+
+{% if groups.sending %}
+<section class="panel flush" id="sending">
+  <div class="panel-head"><h3>En cours <span class="count">{{ groups.sending|length }}</span></h3></div>
+  <ul class="plain-list">{% for it in groups.sending %}
+    <li><a href="/applications/{{ it.app.id }}"><span>{{ it.app.company or 'Entreprise non précisée' }} · {{ it.app.job_title or '' }}</span></a></li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+
+{% if groups.blocked %}
+<section class="panel flush" id="blocked">
+  <div class="panel-head"><h3>Bloquées <span class="count">{{ groups.blocked|length }}</span></h3></div>
+  <table class="tbl"><tbody>
+  {% for it in groups.blocked %}
+    <tr>
+      <td><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
+        <div class="muted small">{{ it.app.job_title or '' }}</div></td>
+      <td><ul class="plain-list">{% for p in it.problems %}<li><span>{{ p }}</span></li>{% else %}<li><span class="muted">Raison non précisée</span></li>{% endfor %}</ul></td>
+      <td><a class="btn small" href="/applications/{{ it.app.id }}">Corriger le CV</a></td>
+    </tr>
+  {% endfor %}
+  </tbody></table>
+</section>
+{% endif %}
+
+{% if groups.sent %}
+<section class="panel flush" id="sent">
+  <div class="panel-head"><h3>Envoyées <span class="count">{{ sent_total }}</span></h3>
+    {% if sent_total > groups.sent|length %}<span class="muted small">{{ groups.sent|length }} plus récentes affichées</span>{% endif %}</div>
+  <table class="tbl"><thead><tr><th>Offre</th><th>Site de destination</th><th>Envoyée le</th><th></th></tr></thead><tbody>
+  {% for it in groups.sent %}
+    <tr>
+      <td><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
+        <div class="muted small">{{ it.app.job_title or '' }}</div></td>
+      <td>{{ sent_hosts.get(it.app.id) or '—' }}</td>
+      <td>{% if it.app.submitted_at %}{{ it.app.submitted_at.strftime('%d/%m/%Y %H:%M') }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if it.last_run %}<a href="/apply/runs/{{ it.last_run.id }}">Voir l'envoi</a>{% endif %}
+        {% set n = inferred_counts.get(it.app.id, 0) %}{% if n and it.last_run %}<div><a class="small" href="/apply/runs/{{ it.last_run.id }}">{{ n }} réponse{{ 's' if n > 1 }} déduite{{ 's' if n > 1 }}</a></div>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody></table>
+</section>
+{% endif %}
+
+<style>
+  #apply-status + #send-form, #send-form + .panel, .panel.flush + .panel.flush {margin-top:1rem}
+  #paused .stack{padding:1rem 1.1rem}
+</style>
+<script>
+(function () {
+  var f = document.getElementById('send-form'); if (!f) return;
+  var boxes = [].slice.call(f.querySelectorAll('input[name=app_id]'));
+  var all = document.getElementById('sel-all'), btn = document.getElementById('send-btn');
+  function count() { return boxes.filter(function (b) { return b.checked; }).length; }
+  function update() {
+    var k = count();
+    if (btn) { btn.disabled = k === 0; btn.textContent = k === 1 ? 'Envoyer la candidature sélectionnée' : 'Envoyer les ' + k + ' sélectionnées'; }
+    if (all) { all.checked = k > 0 && k === boxes.length; all.disabled = boxes.length === 0; }
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', update); });
+  if (all) all.addEventListener('change', function () { boxes.forEach(function (b) { b.checked = all.checked; }); update(); });
+  f.addEventListener('submit', function (e) {
+    if (e.submitter && e.submitter.hasAttribute('formaction')) return;  // dry run: nothing is sent
+    var k = count();
+    if (!k || !confirm('Envoyer ' + k + ' candidature(s) sur les sites des entreprises ?')) e.preventDefault();
+  });
+  update();
+})();
+</script>
+{% endblock %}

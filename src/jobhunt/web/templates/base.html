@@ -29,6 +29,7 @@
     <a href="/profiles/{{ solo.id }}/shortlist" {% if path.endswith('/shortlist') %}aria-current="page"{% endif %}>Offres</a>
     {% endif %}
     <a href="/applications" {% if path.startswith('/applications') or path.startswith('/jobs/') %}aria-current="page"{% endif %}>Candidatures</a>
+    <a href="/apply" {% if path.startswith('/apply') %}aria-current="page"{% endif %}>Envois</a>
     {% if solo %}
     <a href="/profiles/{{ solo.id }}" {% if path.startswith('/profiles/') and not path.endswith('/shortlist') %}aria-current="page"{% endif %}>Profil et recherche</a>
     {% endif %}

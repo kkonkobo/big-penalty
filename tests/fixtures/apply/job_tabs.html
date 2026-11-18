@@ -1,0 +1,13 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Technicien - Exemple SA</title>
+<style>.tab{display:none}.tab.on{display:block}.btn{display:inline-block;padding:6px;border:1px solid #333}</style></head>
+<body><h1>Technicien mécatronique</h1>
+<nav><a class="menu-btn" href="/a">Accueil</a><a class="btn" href="/b">Nos métiers</a>
+  <a role="button" href="#apply" onclick="show('apply');return false">Je suis intéressé(e)</a>
+  <a class="cta-primary" href="/form">Découvrir l'entreprise</a></nav>
+<section class="tab on" id="desc"><p>Description du poste.</p></section>
+<section class="tab" id="apply"><div class="wrap"><div class="inner">
+ <form method="post" action="/apply" enctype="multipart/form-data">
+  <label for="cv">Votre CV *</label><input type="file" id="cv" name="cv">
+  <button type="submit">Envoyer ma candidature</button></form></div></div></section>
+<script>function show(id){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id===id));}</script>
+</body></html>

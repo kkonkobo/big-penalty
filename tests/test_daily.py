@@ -213,3 +213,70 @@ def test_cli_daily_exit_codes(monkeypatch, report, code):
 def test_cli_daily_unknown_profile(monkeypatch):
     monkeypatch.setenv("JOBHUNT_NO_NOTIFY", "1")
     assert CliRunner().invoke(app, ["daily", "999"]).exit_code == 2
+
+
+# ------------------------------------------------------------------ applications step
+def apply_summary(pid, **kw):
+    from jobhunt.apply.service import ApplySummary
+    return ApplySummary(profile_id=pid, **kw)
+
+
+def test_apply_step_summary_line_log_and_notification(profile):
+    seen = []
+
+    async def apply(pid):
+        seen.append(pid)
+        return apply_summary(pid, prepared=4, sent=2, waiting=3, paused=1, failed=0)
+
+    report, out, notes = run(search=fake_search({profile.id: [(80, "Stage A")]}), apply=apply)
+    assert seen == [profile.id] and report.profiles[0].apply.sent == 2
+    assert "Candidatures : 2 envoyées, 3 en attente de validation, 1 en pause, 0 échec" in out
+    assert notes == [("Big Penalty", "1 nouvelle offre, 1 ≥70, 2 candidatures envoyées, 3 à valider")]
+    log = (get_settings().data_dir / "logs" / "daily-2026-11-17.log").read_text()
+    assert "cv=4 envoyees=2 attente=3 pause=1 echecs=0" in log
+
+
+def test_apply_step_runs_even_when_the_search_failed_and_never_fails_the_run(profile):
+    calls = []
+
+    async def apply(pid):
+        calls.append(pid)
+        raise RuntimeError("boom")
+
+    report, out, notes = run(search=fake_search(fail={profile.id}), apply=apply)
+    assert calls == [profile.id] and report.profiles[0].error == "boom" and report.profiles[0].apply is None
+    assert any("étape ignorée (RuntimeError)" in line for line in out) and report.failed
+
+    async def ok(pid):
+        return apply_summary(pid, waiting=1)
+
+    report, out, _ = run(search=fake_search(fail={profile.id}), apply=ok)
+    assert any(line.startswith("Candidatures : 0 envoyée") for line in out) and "ERREUR — boom" in out[0]
+
+
+def test_injected_search_alone_never_runs_the_real_apply(profile, monkeypatch):
+    from jobhunt.apply import service
+
+    async def boom(*a, **k):
+        raise AssertionError("the real apply step must not run when `search` is injected")
+    monkeypatch.setattr(service, "daily_apply", boom)
+    report, out, notes = run(search=fake_search({profile.id: [(80, "Stage A")]}))
+    assert report.profiles[0].apply is None and not any(line.startswith("Candidatures") for line in out)
+    assert notes == [("Big Penalty", "1 nouvelle offre, 1 ≥70")]
+
+
+def test_default_search_comes_with_the_real_apply_step(profile, monkeypatch):
+    from jobhunt import pipeline
+    from jobhunt.apply import service
+
+    async def daily_apply(pid, *, emit=print, **kw):
+        emit("(daily_apply appelé)")
+        return apply_summary(pid, sent=1)
+
+    monkeypatch.setattr(pipeline, "run_search", fake_search({profile.id: [(80, "Stage A")]}))
+    monkeypatch.setattr(service, "daily_apply", daily_apply)
+    report, out, _ = run()  # off by default (JOBHUNT_APPLY_DAILY): the daily run only searches
+    assert "(daily_apply appelé)" not in out and report.profiles[0].apply is None
+    monkeypatch.setattr(get_settings(), "apply_daily", True)
+    report, out, _ = run()
+    assert "(daily_apply appelé)" in out and report.profiles[0].apply.sent == 1

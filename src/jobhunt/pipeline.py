@@ -59,6 +59,8 @@ class RunResult:
     errors: list[str] = field(default_factory=list)
     llm_enabled: bool = False
     llm_stats: dict[str, Any] = field(default_factory=dict)
+    linkedin_detail_calls: int = 0  # LinkedIn detail calls (paid provider) of this run
+    linkedin_links: int = 0  # employer apply links recovered by them
     sources_ok: list[str] = field(default_factory=list)  # sources that completed with no error/challenge/block
     stage: str = "pending"
 
@@ -323,7 +325,11 @@ async def run_search(
         await _score_jobs(profile, jobs, llm, result, progress)
         result.llm_stats = getattr(llm, "stats", {})
         result.errors.extend(e for e in llm.errors if e not in result.errors)
-        db.save_jobs(profile_id, jobs)
+        if await _linkedin_second_pass(jobs, ctx, result):
+            jobs, removed = consolidate(jobs)
+            db.save_jobs(profile_id, jobs, removed=removed)
+        else:
+            db.save_jobs(profile_id, jobs)
 
         result.stage = "done"
         db.update_run(result.run_id, stats=result.stats_dict(), status="done", finished=True)
@@ -405,3 +411,340 @@ async def _score_jobs(profile, jobs: list[MergedJob], llm: LLMClient, result: Ru
         await _emit(cb, result, event="score_batch", done=done, total=len(batches))
 
     await asyncio.gather(*(one(b) for b in batches))
+
+
+# --------------------------------------------------------------------------------------------
+# Re-resolve the origin (company's own posting) of jobs that are already stored
+# --------------------------------------------------------------------------------------------
+
+@dataclass
+class OriginRow:
+    job_id: int | None
+    company: str
+    title: str
+    score: float
+    before: str  # "missing" | "aggregator" | "low"
+    found: bool
+    via: str = ""
+    reason: str = ""  # origin.REASON_LABELS key when not found
+    detail: str = ""  # host / best candidate host (conf): never a full URL, never personal data
+    host: str = ""  # host of the new origin when found
+    has_apply_url: bool = True
+    trace: list[str] = field(default_factory=list)  # ladder trace (company/title/host only), see origin.Trace
+
+
+@dataclass
+class OriginReport:
+    profile_id: int
+    min_score: float
+    total: int = 0  # stored jobs at or above min_score
+    with_origin_before: int = 0
+    with_origin_after: int = 0
+    tried: int = 0
+    found: int = 0
+    cleared: int = 0  # stored aggregator links removed and not replaced
+    refetched: int = 0  # sightings whose detail page was fetched again to look for an apply link
+    apply_urls_found: int = 0
+    li_calls: int = 0  # LinkedIn detail provider: calls / employer links / Easy Apply / closed / cost / failures
+    li_links: int = 0
+    li_easy: int = 0
+    li_closed: int = 0
+    li_cost: float = 0.0
+    li_failures: int = 0
+    dry_run: bool = False
+    rows: list[OriginRow] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def by_via(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in self.rows:
+            if r.found:
+                out[r.via or "inconnu"] = out.get(r.via or "inconnu", 0) + 1
+        return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+    def by_reason(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in self.rows:
+            if not r.found:
+                out[r.reason or "no_candidate"] = out.get(r.reason or "no_candidate", 0) + 1
+        return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+def origin_status(job: MergedJob, force: bool = False) -> str | None:
+    """Why a stored job must be resolved again: "missing" | "aggregator" | "low" (only with force) | None."""
+    from jobhunt import origin as origin_mod
+
+    if not job.origin_url:
+        return "missing"
+    if not is_http_url(job.origin_url) or origin_mod.is_aggregator(job.origin_url):
+        return "aggregator"
+    if force and (job.origin_confidence or 0.0) < origin_mod.MIN_CONFIDENCE:
+        return "low"
+    return None
+
+
+def _best_apply_url(job: MergedJob) -> str | None:
+    from jobhunt import origin as origin_mod
+
+    urls = [u for u in [*(s.apply_url for s in job.sightings), job.apply_url] if u]
+    return next((u for u in urls if not origin_mod.is_aggregator(u)), urls[0] if urls else None)
+
+
+async def _refetch_apply_urls(jobs: list[MergedJob], ctx: SourceContext, report: OriginReport, skip_sources: tuple[str, ...] = ()) -> None:
+    """Sightings stored without apply_url (LinkedIn guest pages, ...): fetch their detail page again, with the source's own
+    pacing, to pick up the off-site apply link / company website. One source at a time, sources in parallel."""
+    reg = registry()
+    by_source: dict[str, list[tuple[MergedJob, Any]]] = {}
+    for job in jobs:
+        for sighting in job.sightings:
+            if (not sighting.apply_url and sighting.source in reg and sighting.source not in skip_sources
+                    and not reg[sighting.source].requires_credentials):
+                by_source.setdefault(sighting.source, []).append((job, sighting))
+
+    async def run(name: str, entries: list[tuple[MergedJob, Any]]) -> None:
+        src = reg[name]()
+        for offset, (job, sighting) in enumerate(entries):
+            if offset:
+                await asyncio.sleep(src.detail_delay_s)
+            base = job.to_posting().model_copy(update={"source": sighting.source, "source_id": sighting.source_id,
+                                                      "url": sighting.url, "apply_url": None, "origin_url": None})
+            try:
+                enriched = await asyncio.wait_for(src.fetch_details(base.model_copy(deep=True), ctx), DETAIL_TIMEOUT_S)
+            except Exception as error:  # noqa: BLE001
+                report.errors.append(f"Détails {name}: {type(error).__name__}")
+                continue
+            report.refetched += 1
+            if enriched.apply_url and is_http_url(enriched.apply_url):
+                sighting.apply_url = enriched.apply_url
+                job.apply_url = job.apply_url or enriched.apply_url
+                report.apply_urls_found += 1
+                job.changed = True
+            if enriched.apply_method not in ("unknown", None) and not job.extra.get("apply_method"):
+                job.extra["apply_method"] = enriched.apply_method
+                job.changed = True
+            if enriched.company_website and not job.extra.get("company_website"):
+                job.extra["company_website"] = enriched.company_website
+                job.changed = True
+            if enriched.description and len(enriched.description) > len(job.description or ""):
+                job.description = enriched.description
+                job.changed = True
+
+    await asyncio.gather(*(run(n, e) for n, e in by_source.items()))
+
+
+async def reresolve_origins(
+    profile_id: int, *, min_score: float = 50.0, limit: int | None = None, force: bool = False, dry_run: bool = False,
+    refetch: bool = True, headless: bool | None = True, progress: Callable[[int, int], Any] | None = None,
+    detail_runner: Any = None,
+) -> OriginReport:
+    """Run the origin resolver again on stored jobs >= min_score whose origin is missing, is a job-board link
+    (cleared when it cannot be replaced) or, with `force`, is below the confidence threshold. The miss cache and the
+    3-day back-off are ignored. `dry_run` computes the report without writing anything."""
+    from jobhunt import origin as origin_mod
+
+    if db.get_profile(profile_id) is None:
+        raise ValueError(f"profil {profile_id} introuvable")
+    report = OriginReport(profile_id=profile_id, min_score=min_score, dry_run=dry_run)
+    jobs = db.load_jobs(profile_id)
+    eligible = [j for j in jobs if (j.score or 0) >= min_score]
+    report.total = len(eligible)
+    report.with_origin_before = sum(1 for j in eligible if origin_status(j) is None)
+    todo = sorted((j for j in eligible if origin_status(j, force)), key=lambda j: -(j.score or 0))
+    if limit:
+        todo = todo[:limit]
+    report.tried = len(todo)
+    if not todo:
+        report.with_origin_after = report.with_origin_before
+        return report
+    before = {id(j): origin_status(j, force) or "missing" for j in todo}
+    for job in todo:
+        if before[id(job)] == "aggregator":
+            job.origin_url, job.origin_ats, job.origin_confidence = None, None, None
+            for key in ("origin_fingerprint", "origin_posted_at", "origin_date_checked", "origin_via"):
+                job.extra.pop(key, None)
+            job.recompute_posted_at()
+            job.changed = True
+
+    browser = None
+    try:
+        from jobhunt.browser import BrowserPool
+        browser = BrowserPool(headless=headless)
+    except Exception as e:  # noqa: BLE001
+        log.info("browser unavailable: %s", e)
+    ctx = SourceContext(profile_id=profile_id, browser=browser)
+    done = 0
+
+    def tick(_res) -> None:
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, len(todo))
+
+    try:
+        if refetch:
+            from jobhunt.sources import linkedin_detail as ld
+
+            provider = detail_runner is not None or ld.enabled(get_settings().linkedin_detail_cmd)
+            if provider:
+                stats = await enrich_linkedin_jobs(todo, runner=detail_runner, retry_checked=force)
+                report.li_calls, report.li_links, report.li_easy = stats.calls, stats.links, stats.easy
+                report.li_closed, report.li_cost, report.li_failures = stats.closed, stats.cost, stats.failures
+                report.apply_urls_found += stats.links
+            await _refetch_apply_urls(todo, ctx, report, skip_sources=("linkedin",) if provider else ())
+        postings = []
+        for job in todo:
+            posting = origin_posting(job)
+            if not posting.apply_url or origin_mod.is_aggregator(posting.apply_url):
+                posting = posting.model_copy(update={"apply_url": _best_apply_url(job)})
+            posting = _with_provenance(job, posting)
+            postings.append(posting)
+        results = await origin_mod.resolve_origins_detailed(postings, ctx, use_cache=False, on_done=tick)
+    finally:
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    stamp = db.now().isoformat()
+    for job, res, posting in zip(todo, results, postings):
+        job.apply_origin(res.posting)
+        job.recompute_posted_at()
+        found = bool(res.posting.origin_url) and job.origin_url == res.posting.origin_url
+        if found:
+            job.extra["origin_via"] = res.via or "inconnu"
+            job.extra["origin_date_checked"] = stamp
+        else:
+            job.extra.pop("origin_via", None)
+        job.extra["origin_attempted_at"] = stamp
+        job.extra["origin_fingerprint"] = origin_fingerprint(job)
+        job.extra.pop("origin_tried", None)
+        job.changed = True
+        if not found and before[id(job)] == "aggregator":
+            report.cleared += 1
+        reason, detail = (res.reason, res.detail) if not found else ("", "")
+        report.rows.append(OriginRow(
+            job_id=job.id, company=job.company or "", title=job.title, score=float(job.score or 0),
+            before=before[id(job)], found=found, via=res.via if found else "", reason=reason, detail=detail,
+            host=origin_mod._host(job.origin_url or "") if found else "",
+            has_apply_url=bool(posting.apply_url), trace=list(res.trace)))
+    report.found = sum(1 for r in report.rows if r.found)
+    report.with_origin_after = sum(1 for j in eligible if origin_status(j) is None)
+    if not dry_run:
+        merged, removed = consolidate(jobs)
+        db.save_jobs(profile_id, merged, removed=removed)
+    return report
+
+
+# --------------------------------------------------------------------------------------------
+# LinkedIn detail provider (employer apply link of "apply on company website" jobs)
+# --------------------------------------------------------------------------------------------
+
+@dataclass
+class LinkedInStats:
+    calls: int = 0
+    links: int = 0
+    easy: int = 0
+    closed: int = 0
+    cost: float = 0.0
+    failures: int = 0
+
+
+def _with_provenance(job: MergedJob, posting: JobPosting) -> JobPosting:
+    """Mark an apply URL that came from LinkedIn's "apply on company website" field (see origin.Resolver.direct)."""
+    if job.extra.get("apply_source") == "linkedin_offsite" and posting.apply_url and \
+            posting.apply_url == job.extra.get("linkedin_apply_url"):
+        return posting.model_copy(update={"raw": {**(posting.raw or {}), "apply_source": "linkedin_offsite"}})
+    return posting
+
+
+def origin_posting(job: MergedJob) -> JobPosting:
+    return _with_provenance(job, job.to_posting())
+
+
+async def enrich_linkedin_jobs(jobs: list[MergedJob], *, runner: Any = None, max_calls: int | None = None,
+                               retry_checked: bool = False) -> LinkedInStats:
+    """For jobs whose LinkedIn sightings have no apply_url, ask the detail provider for the employer link. Stores the link
+    on the sighting/job, `company_website`, `apply_method` (external/easy_apply), `linkedin_state` and, for a closed
+    job, `closed_at_source` (never deletes it). Never raises."""
+    from jobhunt.sources import linkedin_detail as ld
+
+    targets: list[tuple[MergedJob, Any]] = []
+    for job in jobs:
+        if job.apply_url or any(s.apply_url for s in job.sightings):
+            continue
+        if not retry_checked and job.extra.get("linkedin_state"):
+            continue
+        sighting = next((s for s in job.sightings if s.source == "linkedin" and ld.ID_RE.match(str(s.source_id))), None)
+        if sighting is not None:
+            targets.append((job, sighting))
+    if max_calls is not None:
+        targets = targets[:max(0, max_calls)]
+    stats = LinkedInStats()
+    if not targets:
+        return stats
+    ld.reset_usage()
+    details = await asyncio.gather(*(ld.fetch_job_detail(s.source_id, runner=runner) for _, s in targets))
+    for (job, sighting), d in zip(targets, details):
+        if d is None:
+            continue
+        job.extra["linkedin_state"] = d.state
+        if d.state == "closed":
+            job.extra["closed_at_source"] = True
+            stats.closed += 1
+        elif d.state == "listed":
+            job.extra.pop("closed_at_source", None)
+        if d.apply_url:
+            sighting.apply_url = d.apply_url
+            job.apply_url = job.apply_url or d.apply_url
+            job.extra.update(apply_method="external", apply_source="linkedin_offsite", linkedin_apply_url=d.apply_url)
+            stats.links += 1
+        elif d.easy_apply:
+            job.extra["apply_method"] = "easy_apply"
+            stats.easy += 1
+        if d.company_website and not job.extra.get("company_website"):
+            job.extra["company_website"] = d.company_website
+        job.changed = True
+    stats.calls, stats.cost, stats.failures = ld.USAGE.calls, round(ld.USAGE.cost, 6), ld.USAGE.failures
+    return stats
+
+
+def _store_origin(job: MergedJob, p: JobPosting) -> None:
+    job.apply_origin(p)
+    job.recompute_posted_at()
+    if job.origin_url:
+        job.extra["origin_date_checked"] = db.now().isoformat()
+    job.extra["origin_attempted_at"] = db.now().isoformat()
+    job.extra["origin_fingerprint"] = origin_fingerprint(job)
+    job.extra.pop("origin_tried", None)
+    job.changed = True
+
+
+async def _linkedin_second_pass(jobs: list[MergedJob], ctx: SourceContext, result: RunResult) -> bool:
+    """Runs AFTER scoring (the search resolves origins before scoring, so the detail provider, which costs money, is only
+    called for jobs that matter): jobs at/above `apply_prepare_min_score` that come only from LinkedIn sightings without
+    an apply link get their detail fetched (cap `linkedin_detail_max_per_run`), then a small second origin pass runs for
+    the jobs that gained a link. Returns True when something changed."""
+    from jobhunt.sources import linkedin_detail as ld
+
+    settings = get_settings()
+    cap = settings.linkedin_detail_max_per_run
+    if cap <= 0 or not ld.enabled(settings.linkedin_detail_cmd):
+        return False
+    cand = [j for j in jobs if (j.score or 0) >= settings.apply_prepare_min_score and not j.origin_url and j.sightings
+            and all(s.source == "linkedin" for s in j.sightings)]
+    cand.sort(key=lambda j: -(j.score or 0))
+    try:
+        stats = await enrich_linkedin_jobs(cand, max_calls=cap)
+        result.linkedin_detail_calls, result.linkedin_links = stats.calls, stats.links
+        got = [j for j in cand if j.apply_url and j.extra.get("apply_source") == "linkedin_offsite" and not j.origin_url]
+        if got:
+            mod = importlib.import_module("jobhunt.origin")
+            resolved = await mod.resolve_origins([origin_posting(j) for j in got], ctx)
+            for j, p in zip(got, resolved):
+                _store_origin(j, p)
+        return stats.calls > 0
+    except Exception as e:  # noqa: BLE001
+        log.warning("linkedin detail pass failed: %s", e)
+        result.errors.append(f"Détails LinkedIn: {type(e).__name__}: {e}")
+        return False

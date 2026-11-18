@@ -14,7 +14,7 @@ Score on function fit and realistic eligibility (contract, level, location); don
 ## Setup
 ```
 cd /Volumes/SSD/Dev/big-penalty && . ./env.sh     # always; keeps caches on the SSD, loads .env (keys, never commit)
-uv run pytest -q                                  # 441 tests
+uv run pytest -q                                  # ~1350 tests (~4.5 min: the apply engine tests drive a real headless browser)
 uv run jobhunt search 1 -n 10                     # headful browser by default; JOBHUNT_HEADLESS=1 for headless
 uv run jobhunt rescore 1                          # rescore stored jobs after profile/prompt change
 uv run jobhunt serve                              # http://127.0.0.1:8765
@@ -92,10 +92,51 @@ code from master ids; domain restricted to words of the ad), `tailored.py` (data
 - Master per candidate: `identity.stage_qualifier` in master.yaml; a re-import keeps it. `applications.job_id` has no foreign key on purpose.
 - Not done: cover letter, auto-approval function (eligibility already accepts an approved revision).
 
-## Next: milestone 2b = apply on the origin ATS
-Open the company's own ATS page (`origin_url`, `origin_ats`) with the approved CV of the application (only if `service.is_eligible`; PDF = revision path), autofill (Greenhouse/Lever/Workday/
-SmartRecruiters/…) using the profile + master identity, human solves CAPTCHAs, final submit confirmed by the user, then set
-`applications.status` = submitted (or failed) and the job status = applied. Account creation on ATSs is automatic (see milestone 2 decisions).
+## Milestone 2b: apply on the company's own site / ATS (branch `auto-apply`, not committed yet; automatic sending OFF)
+Package `src/jobhunt/apply/`: `types.py` (shared contract), `snapshot.py` (page -> fields/labels/options/buttons, frames + open shadow roots),
+`planner.py` (ONE LLM call per step: fields -> fact keys), `answer_check.py` (derivation rules, hard-fact matcher, LLM answer verifier),
+`engine.py` (the step loop and every guardrail on what is typed / clicked), `facts.py` (known-facts catalogue from the Profile, the master and
+`data/profiles/<pid>/answers.yaml`), `accounts.py` (ATS passwords: OS credential store via `keyring`, local JSON fallback, export/import),
+`policy.py` (who may be sent), `store.py` (`application_runs`, `apply_reservations`), `service.py` (orchestration, queue, daily pass),
+`letter.py` (cover letter only when a form requires one). Web: `web/apply_routes.py` + `apply_queue.html` ("Envois"), `apply_run.html`, `_apply_card.html`.
+```
+uv run big-penalty apply list [-p PROFILE]        # the sending queue (same as the web page /apply)
+uv run big-penalty apply dry-run APP_ID           # fill the FIRST form page on the real site, send nothing; screenshots in data/applications/<job>/runs/<run>/
+uv run big-penalty apply send APP_ID...           # the user's OK: approve + send (visible browser by default)
+uv run big-penalty apply answer APP_ID            # answer the questions of a paused run (saved in answers.yaml `custom`, reused everywhere)
+uv run big-penalty apply resolve APP_ID --sent/--not-sent   # settle an "envoi non confirmé"
+uv run big-penalty apply trust PROFILE_ID HOST    # allow a form hosted on a site that is neither the company's nor a known ATS
+uv run big-penalty apply auto PROFILE_ID          # what the daily run does (prepare CVs, auto-approve, send if switched on)
+uv run big-penalty apply accounts | accounts-export FILE | accounts-import FILE | accounts-delete HOST EMAIL
+```
+- **Switches (all off by default)**: `JOBHUNT_APPLY_DAILY=1` = the daily run prepares CVs for fresh jobs scoring >= `JOBHUNT_APPLY_PREPARE_MIN_SCORE` (60)
+  and auto-approves clean ones; `JOBHUNT_APPLY_AUTO=1` = it also SENDS those >= `JOBHUNT_APPLY_AUTO_MIN_SCORE` (60), at most `JOBHUNT_APPLY_DAILY_CAP` (10)
+  per Paris day. Below the threshold an application waits on the "Envois" page for the user's OK ("Envoyer les N sélectionnées").
+- **Who may be sent** (`policy.submit_problems`): approved exact revision + intact PDF + confirmed unchanged master; real company link (not an aggregator);
+  job <= 14.0 days, not rejected/applied; no duplicate (same company + role, same origin URL, incl. reservations and `sent_origin_url`); no unresolved earlier attempt.
+  Automatic trigger additionally: `service.is_eligible` (a manual override never auto-sends; `cvs.auto_approve` never bypasses blocking errors), score, cap,
+  known age, not expired, `origin_confidence` >= 0.6. One send at a time across processes (`data/apply-send.lock`).
+- **Answers (autonomy policy, user decision 2026-11-17)**: identity facts are typed verbatim by code, only into fields whose visible label fits
+  (`facts.LABEL_RE`). Everything else goes through an independent LLM verifier (`supported | plausible | contradiction | hard_fact`). When no fact answers a
+  REQUIRED question the planner DEDUCES a plausible answer; whatever code cannot back is recorded as `FilledField.inferred` and shown to the candidate as
+  "Réponses déduites (à connaître avant l'entretien)". Only unknown HARD FACTS pause (`answer_check.is_hard_fact`: birth date, nationality, address, ID / bank
+  numbers, driving licence, disability, work authorization, current salary). The candidate's explicit answers (`custom:` in answers.yaml) win over everything.
+- **Dry run** is structurally unable to send: once any data is entered there is no click at all, every document navigation of the context is aborted, nothing is
+  entered on account pages, pages go to about:blank at the end. So it only tests the first form page. Residual limit: an XHR/fetch fired by a page's own change handler.
+- **Real send**: policy gate (`before_submit`) at the start of each step and before every click after data entry; destination binding (`host_allowed`: the job's
+  registrable domain, a known ATS host, or a host the user trusted); a durable reservation BEFORE any click that may send (`nav_clicked_at` / `submit_clicked_at`);
+  `submitted` needs the form gone + explicit receipt wording + the planner's verdict, anything else after such a click = "envoi non confirmé" (application `failed`,
+  never retried until the user resolves it). Passwords never reach the LLM, logs, DB or screenshots (no screenshot after a password was typed).
+- **Pauses** (bucket `paused` on /apply): unknown hard fact (`needs_input`), e-mail verification link (`needs_email`), visible CAPTCHA (`needs_human`, resume in a
+  visible window), untrusted host. Headful windows open on the Mac's built-in display (`browser.window_args`, `JOBHUNT_WINDOW_SCREEN` / `JOBHUNT_WINDOW_POSITION`).
+- **Web guard**: `origin_guard` in `web/app.py` (loopback Host on every request; writes need same-origin evidence). DB migrations 4-7.
+- **Supervised dry runs so far** (2026-11-17/18, nothing sent): complete on a company careers site, Recruitee, a Teamtailor-style site and an in-house ATS;
+  Talentsoft stops at the account page (accounts are created only on a real send); a Phenom/Workday flow reaches the form but pauses on address fields;
+  SmartRecruiters showed a DataDome CAPTCHA after repeated visits. Reviewed three times by Codex (findings fixed each time); a fourth review is in progress.
+- **Not done**: dedicated adapters (Workday, Talentsoft, SmartRecruiters), e-mail verification via IMAP, better origin resolution for jobs whose only link is a
+  job board (16 board hosts were added to `origin.AGGREGATOR_DOMAINS`), a real send (waits for the user's OK on the dry-run screenshots).
+- **Known issue found on 2026-11-18**: the 07:30 launchd run failed with `operation not permitted` on the SSD (macOS privacy: `/bin/zsh` needs Full Disk Access or
+  Removable Volumes access). Until the user grants it, the scheduled search does not run.
 
 ## Freshness (done in this PR)
 - Hard cutoff **14 days** (`MAX_JOB_AGE_DAYS` in `src/jobhunt/freshness.py`): searches request ≤14 days where the source
@@ -122,8 +163,8 @@ SmartRecruiters/…) using the profile + master identity, human solves CAPTCHAs,
 3. ~~Wish-list scoring~~ done (see Scoring rules). Rescore after any prompt change.
 4. Bugs: Jobijoba redirect URL with a contact-form-7 shortcode crashes origin resolution; 115 jobs with contract `unknown`;
    mis-parsed companies (e.g. "STATION F").
-5. **Milestone 2**: 2a tailored CV = done (see above); 2b = autofill on the origin ATS with the approved CV (Greenhouse/Lever/Workday/SmartRecruiters/…),
-   human solves CAPTCHAs, final submit confirmed by the user.
+5. **Milestone 2**: 2a tailored CV = done; 2b = built on branch `auto-apply` (see above): next are the user's OK on the dry runs, a first supervised send,
+   then ATS adapters and switching `JOBHUNT_APPLY_DAILY` / `JOBHUNT_APPLY_AUTO` on.
 6. Coverage: La Bonne Alternance API token (best alternance source); APEC/Cadremploi need a headful run.
 7. Bench labels (`tests/bench/labels.json`) still assume Bac+2 — relabel before re-benchmarking.
 

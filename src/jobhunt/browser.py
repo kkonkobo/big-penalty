@@ -12,8 +12,13 @@ Design (personal, low-volume use):
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import os
 import random
+import re
+import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,6 +46,33 @@ CHALLENGE_MARKERS = (
     "/checkpoint/challenge",  # LinkedIn
     "authwall",  # LinkedIn logged-out wall
 )
+
+
+_BUILTIN_JXA = """ObjC.import('AppKit'); ObjC.import('CoreGraphics');
+var s = $.NSScreen.screens, h0 = s.objectAtIndex(0).frame.size.height, out = '';
+for (var i = 0; i < s.count; i++) { var sc = s.objectAtIndex(i), f = sc.frame;
+  var id = sc.deviceDescription.objectForKey('NSScreenNumber').unsignedIntValue;
+  if ($.CGDisplayIsBuiltin(id)) out = [f.origin.x, h0 - (f.origin.y + f.size.height), f.size.width, f.size.height].join(','); }
+out"""
+
+
+@functools.lru_cache(maxsize=1)
+def window_args() -> tuple[str, ...]:
+    """Chrome flags placing a headful window. JOBHUNT_WINDOW_POSITION="x,y" wins; otherwise (macOS, default
+    JOBHUNT_WINDOW_SCREEN=builtin) the window opens on the Mac's built-in display, so automated windows do not pop up on
+    an external monitor. JOBHUNT_WINDOW_SCREEN=any, another OS, no built-in display or any error: Chrome decides."""
+    pos = os.environ.get("JOBHUNT_WINDOW_POSITION", "").strip()
+    if re.fullmatch(r"-?\d+,-?\d+", pos):
+        return (f"--window-position={pos}",)
+    if sys.platform != "darwin" or os.environ.get("JOBHUNT_WINDOW_SCREEN", "builtin").strip().lower() != "builtin":
+        return ()
+    try:
+        out = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", _BUILTIN_JXA], capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+        x, y, w, h = (int(float(v)) for v in out.split(","))
+    except Exception:  # noqa: BLE001 - placement is a comfort feature, never a failure
+        return ()
+    return (f"--window-position={x + 20},{y + 40}", f"--window-size={min(1280, w - 40)},{min(1000, h - 80)}")
 
 
 class DomainPacer:
@@ -101,6 +133,10 @@ class BrowserPool:
                 locale="fr-FR",
                 timezone_id="Europe/Paris",
             )
+            if site.startswith(("apply-", "applydry-")):  # a service worker could answer / fetch around the apply request guard
+                kwargs["service_workers"] = "block"
+            if not headless:
+                kwargs["args"] = list(window_args())
             try:
                 ctx = await self._pw.chromium.launch_persistent_context(channel="chrome", **kwargs)
             except Exception as e:  # Chrome not installed -> bundled Chromium

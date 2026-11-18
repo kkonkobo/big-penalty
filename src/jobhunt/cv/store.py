@@ -22,10 +22,12 @@ from jobhunt.db import _dt, _iso, connect, now
 
 APPLICATION_STATUSES = ("draft", "approved", "submitted", "failed", "withdrawn")
 # draft -> approved; approved -> draft (edit); draft/approved -> withdrawn; withdrawn -> draft ("restaurer").
+# failed = a send attempt that may or may not have gone through; a human settles it: failed -> submitted ("bien envoyée")
+# or failed -> draft ("pas envoyée", approve again).
 TRANSITIONS: dict[str, set[str]] = {
     "draft": {"approved", "withdrawn"},
     "approved": {"draft", "withdrawn", "submitted", "failed"},
-    "failed": {"draft", "withdrawn"},
+    "failed": {"draft", "withdrawn", "submitted"},
     "submitted": set(),
     "withdrawn": {"draft"},
 }
@@ -50,6 +52,9 @@ class Application(BaseModel):
     approved_sha256: str | None = None
     approved_at: datetime | None = None
     approval_override: bool = False  # approved by hand despite blocking errors: never auto-eligible
+    approved_by: str | None = None  # "user" | "auto" (who approved the current approval)
+    submitted_at: datetime | None = None
+    sent_origin_url: str | None = None  # canonical URL the application was sent to (kept when the job row disappears)
     tailored: TailoredCV  # UNTRIMMED content of the current revision
     flags: list[Flag] = Field(default_factory=list)
     verifier: VerifierReport | None = None
@@ -90,6 +95,7 @@ def _from_row(r) -> Application:
         id=r["id"], profile_id=r["profile_id"], job_id=r["job_id"], job_title=r["job_title"], company=r["company"],
         status=r["status"], current_rev=r["current_rev"], approved_rev=r["approved_rev"], approved_sha256=r["approved_sha256"],
         approved_at=_dt(r["approved_at"]), approval_override=bool(r["approval_override"]),
+        approved_by=r["approved_by"], submitted_at=_dt(r["submitted_at"]), sent_origin_url=r["sent_origin_url"],
         tailored=TailoredCV.model_validate_json(r["r_tailored"] or r["tailored_json"]),
         flags=[Flag.model_validate(f) for f in json.loads(r["r_flags"] or r["flags_json"] or "[]")],
         verifier=VerifierReport.model_validate(verifier) if verifier else None,
@@ -189,7 +195,7 @@ def add_revision(*, profile_id: int, job_id: int, job_title: str | None, company
                  pdf_path, sha, fit_notes.model_dump_json(), master_hash, ts))
             c.execute(
                 "UPDATE applications SET current_rev=?, status='draft', approved_rev=NULL, approved_sha256=NULL,"
-                " approved_at=NULL, approval_override=0, notes=NULL, tailored_json=?, flags_json=?, cv_path=?,"
+                " approved_at=NULL, approval_override=0, approved_by=NULL, notes=NULL, tailored_json=?, flags_json=?, cv_path=?,"
                 " job_title=COALESCE(?, job_title), company=COALESCE(?, company), ats=COALESCE(?, ats), updated_at=? WHERE id=?",
                 (rev, tailored.model_dump_json(), _flags_json(flags), pdf_path, job_title, company, ats, ts, aid))
     except sqlite3.IntegrityError as e:
@@ -203,31 +209,40 @@ def add_revision(*, profile_id: int, job_id: int, job_title: str | None, company
     return get_application(aid)  # type: ignore[return-value]
 
 
+def tx_set_status(c: sqlite3.Connection, app_id: int, new: str, *, base_rev: int | None = None) -> None:
+    """`set_status` inside the caller's transaction (BEGIN IMMEDIATE already issued by the caller)."""
+    if new not in APPLICATION_STATUSES:
+        raise ValueError(f"statut invalide : {new!r}")
+    row = c.execute("SELECT status, current_rev FROM applications WHERE id=?", (app_id,)).fetchone()
+    if row is None:
+        raise CVError("Candidature introuvable")
+    if base_rev is not None and row["current_rev"] != base_rev:
+        raise StaleRevision("Le CV a changé entre-temps : rouvrir la page et recommencer")
+    if new not in TRANSITIONS[row["status"]]:
+        raise TransitionError(f"Passage « {row['status']} » → « {new} » impossible")
+    try:
+        c.execute("UPDATE applications SET status=?, updated_at=?,"
+                  " approved_rev=CASE WHEN ?='approved' THEN approved_rev ELSE NULL END,"
+                  " approved_sha256=CASE WHEN ?='approved' THEN approved_sha256 ELSE NULL END,"
+                  " approval_override=CASE WHEN ?='approved' THEN approval_override ELSE 0 END,"
+                  " approved_by=CASE WHEN ?='approved' THEN approved_by ELSE NULL END WHERE id=?",
+                  (new, _iso(now()), new, new, new, new, app_id))
+    except sqlite3.IntegrityError as e:
+        raise TransitionError("Une autre candidature active existe déjà pour cette offre") from e
+
+
 def set_status(app_id: int, new: str, *, base_rev: int | None = None) -> Application:
     """Enforce the status transitions. Leaving 'approved' clears the approval."""
     if new not in APPLICATION_STATUSES:
         raise ValueError(f"statut invalide : {new!r}")
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        row = c.execute("SELECT status, current_rev FROM applications WHERE id=?", (app_id,)).fetchone()
-        if row is None:
-            raise CVError("Candidature introuvable")
-        if base_rev is not None and row["current_rev"] != base_rev:
-            raise StaleRevision("Le CV a changé entre-temps : rouvrir la page et recommencer")
-        if new not in TRANSITIONS[row["status"]]:
-            raise TransitionError(f"Passage « {row['status']} » → « {new} » impossible")
-        try:
-            c.execute("UPDATE applications SET status=?, updated_at=?,"
-                      " approved_rev=CASE WHEN ?='approved' THEN approved_rev ELSE NULL END,"
-                      " approved_sha256=CASE WHEN ?='approved' THEN approved_sha256 ELSE NULL END,"
-                      " approval_override=CASE WHEN ?='approved' THEN approval_override ELSE 0 END WHERE id=?",
-                      (new, _iso(now()), new, new, new, app_id))
-        except sqlite3.IntegrityError as e:
-            raise TransitionError("Une autre candidature active existe déjà pour cette offre") from e
+        tx_set_status(c, app_id, new, base_rev=base_rev)
     return get_application(app_id)  # type: ignore[return-value]
 
 
-def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_errors: bool = False) -> Application:
+def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_errors: bool = False,
+                     approved_by: str = "user") -> Application:
     """Approve EXACTLY `rev`: it must be the current revision, its PDF must exist and hash to the stored sha256."""
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
@@ -249,6 +264,87 @@ def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_e
         if errors:
             note = f"Approuvé à la main malgré {len(errors)} erreur(s) de vérification (jamais éligible à l'envoi automatique)."
         c.execute("UPDATE applications SET status='approved', approved_rev=?, approved_sha256=?, approved_at=?,"
-                  " approval_override=?, notes=?, updated_at=? WHERE id=?",
-                  (rev, r["pdf_sha256"], _iso(now()), 1 if errors else 0, note, _iso(now()), app_id))
+                  " approval_override=?, approved_by=?, notes=?, updated_at=? WHERE id=?",
+                  (rev, r["pdf_sha256"], _iso(now()), 1 if errors else 0, approved_by, note, _iso(now()), app_id))
     return get_application(app_id)  # type: ignore[return-value]
+
+
+def tx_mark_submitted(c: sqlite3.Connection, app_id: int, rev: int, *, sent_origin_url: str | None = None) -> None:
+    """approved -> submitted inside the caller's transaction. Raises before writing anything."""
+    a = c.execute("SELECT status, current_rev, approved_rev FROM applications WHERE id=?", (app_id,)).fetchone()
+    if a is None:
+        raise CVError("Candidature introuvable")
+    if a["current_rev"] != rev or (a["status"] == "approved" and a["approved_rev"] != rev):
+        raise StaleRevision("Le CV a changé entre-temps : la version envoyée n'est plus la version approuvée")
+    if a["status"] != "approved" or "submitted" not in TRANSITIONS[a["status"]]:
+        raise TransitionError("Seule une candidature approuvée peut être marquée comme envoyée")
+    ts = _iso(now())
+    c.execute("UPDATE applications SET status='submitted', submitted_at=?, sent_origin_url=COALESCE(?, sent_origin_url),"
+              " updated_at=? WHERE id=?", (ts, sent_origin_url, ts, app_id))
+
+
+def mark_submitted(app_id: int, rev: int, *, sent_origin_url: str | None = None) -> Application:
+    """approved -> submitted, atomically: the application must be approved on exactly `rev`, which must be the current revision."""
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        tx_mark_submitted(c, app_id, rev, sent_origin_url=sent_origin_url)
+    return get_application(app_id)  # type: ignore[return-value]
+
+
+def tx_mark_sent_after_failure(c: sqlite3.Connection, app_id: int, *, sent_origin_url: str | None = None) -> None:
+    a = c.execute("SELECT status FROM applications WHERE id=?", (app_id,)).fetchone()
+    if a is None:
+        raise CVError("Candidature introuvable")
+    if a["status"] != "failed":
+        raise TransitionError("Seule une candidature en échec peut être confirmée comme envoyée")
+    ts = _iso(now())
+    c.execute("UPDATE applications SET status='submitted', submitted_at=?, sent_origin_url=COALESCE(?, sent_origin_url),"
+              " notes=NULL, updated_at=? WHERE id=?", (ts, sent_origin_url, ts, app_id))
+
+
+def mark_sent_after_failure(app_id: int, *, sent_origin_url: str | None = None) -> Application:
+    """failed -> submitted: a human checked the company's site and the application HAD been sent."""
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        tx_mark_sent_after_failure(c, app_id, sent_origin_url=sent_origin_url)
+    return get_application(app_id)  # type: ignore[return-value]
+
+
+def mark_failed(app_id: int, note: str) -> Application:
+    """approved -> failed with a French note (the approval is cleared like on any exit from 'approved')."""
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        a = c.execute("SELECT status FROM applications WHERE id=?", (app_id,)).fetchone()
+        if a is None:
+            raise CVError("Candidature introuvable")
+        if "failed" not in TRANSITIONS[a["status"]]:
+            raise TransitionError(f"Passage « {a['status']} » → « failed » impossible")
+        c.execute("UPDATE applications SET status='failed', approved_rev=NULL, approved_sha256=NULL, approval_override=0,"
+                  " approved_by=NULL, notes=?, updated_at=? WHERE id=?", (note, _iso(now()), app_id))
+    return get_application(app_id)  # type: ignore[return-value]
+
+
+def tx_force_failed(c: sqlite3.Connection, app_id: int, note: str) -> None:
+    a = c.execute("SELECT status FROM applications WHERE id=?", (app_id,)).fetchone()
+    if a is None:
+        raise CVError("Candidature introuvable")
+    if a["status"] in ("submitted", "withdrawn"):
+        raise TransitionError(f"Passage « {a['status']} » → « failed » impossible")
+    c.execute("UPDATE applications SET status='failed', approved_rev=NULL, approved_sha256=NULL, approval_override=0,"
+              " approved_by=NULL, notes=?, updated_at=? WHERE id=?", (note, _iso(now()), app_id))
+
+
+def force_failed(app_id: int, note: str) -> Application:
+    """Any state but submitted / withdrawn -> failed. For a possibly-sent attempt whose application was edited meanwhile (so
+    `mark_failed` cannot apply): it must still stop being sendable and wait for a human."""
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        tx_force_failed(c, app_id, note)
+    return get_application(app_id)  # type: ignore[return-value]
+
+
+def set_cover_letter(app_id: int, path: str | Path | None) -> None:
+    """Record the cover-letter PDF of the application's CURRENT revision (it lives beside that revision's PDF)."""
+    with connect() as c:
+        c.execute("UPDATE applications SET cover_letter_path=?, updated_at=? WHERE id=?",
+                  (str(path) if path else None, _iso(now()), app_id))

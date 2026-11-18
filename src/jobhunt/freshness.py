@@ -88,6 +88,13 @@ def is_stale(job: MergedJob, limit_days: float = MAX_JOB_AGE_DAYS, now: datetime
     return age is not None and age > limit_days + AGE_TOLERANCE_DAYS
 
 
+def over_age_limit(job: MergedJob, limit_days: float = MAX_JOB_AGE_DAYS, now: datetime | None = None) -> bool | None:
+    """STRICT age check (no AGE_TOLERANCE_DAYS): True when the effective age exceeds `limit_days`, None when it is unknown.
+    Used before sending an application; the shortlist keeps its 1-day tolerance (`is_stale`)."""
+    age = age_days(job, now)
+    return None if age is None else age > limit_days
+
+
 def freshness_weight(age: float | None) -> float:
     """1.0 today, 0.7 at 7 days, 0.55 at 14 days, tending to WEIGHT_FLOOR."""
     a = UNKNOWN_AGE_DAYS if age is None else max(0.0, age)

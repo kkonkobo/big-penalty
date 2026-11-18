@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Réponses aux formulaires{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Réponses aux formulaires</h1>
+    <p class="muted">L'outil déduit seul les réponses ordinaires d'un formulaire ; il ne s'arrête que pour les informations ci-dessous quand elles sont inconnues.
+      Les renseigner une fois supprime ces pauses pour toutes les candidatures de {{ profile.name }}.</p>
+  </div>
+  <div class="row">
+    <a class="btn" href="/profiles/{{ profile.id }}">Retour au profil</a>
+    <a class="btn" href="/apply?profile={{ profile.id }}">Envois</a>
+  </div>
+</div>
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+{% for e in errors %}<div class="error-box">{{ e }}</div>{% endfor %}
+{% if resumable %}
+<section class="panel" id="resumable">
+  <div class="panel-head plain"><h2>Candidatures en pause <span class="count">{{ resumable|length }}</span></h2></div>
+  <form method="post" action="/profiles/{{ profile.id }}/answers/resume">
+    <table class="tbl">
+      <thead><tr><th>Offre</th><th>Action</th><th>Site</th></tr></thead>
+      <tbody>
+      {% for it in resumable %}
+        <tr>
+          <td><input type="hidden" name="app_id" value="{{ it.app.id }}"><input type="hidden" name="run_{{ it.app.id }}" value="{{ it.last_run.id }}">
+            <input type="hidden" name="rev_{{ it.app.id }}" value="{{ it.last_run.rev }}"><input type="hidden" name="mode_{{ it.app.id }}" value="{{ it.last_run.mode }}">
+            <input type="hidden" name="origin_{{ it.app.id }}" value="{{ it.origin_sha }}">
+            <strong>{{ it.app.company or 'Entreprise non précisée' }}</strong><div class="muted small">{{ it.app.job_title or '' }}</div></td>
+          <td>{{ mode_labels.get(it.last_run.mode, it.last_run.mode) }}</td>
+          <td>{{ it.origin_host or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p><button class="btn small">Reprendre les {{ resumable|length }} candidature{{ 's' if resumable|length > 1 }} en pause</button></p>
+  </form>
+</section>
+{% endif %}
+
+<form method="post" action="/profiles/{{ profile.id }}/answers" class="stack">
+{% if pending %}
+<section class="panel" id="pending">
+  <div class="panel-head plain"><h2>Questions en attente <span class="count">{{ pending|length }}</span></h2></div>
+  <p class="muted small">Ces questions ont arrêté un envoi. Vos réponses sont gardées pour tous les prochains formulaires.</p>
+  <div class="form">
+    {% for p in pending %}
+    <label>{{ p.q.label }}
+      <input type="hidden" name="pql_{{ p.i }}" value="{{ p.q.label }}">
+      {% if p.q.options %}
+      <select name="pqa_{{ p.i }}"><option value="">Choisir…</option>{% for o in p.q.options %}<option>{{ o }}</option>{% endfor %}</select>
+      {% else %}<input name="pqa_{{ p.i }}" maxlength="500">{% endif %}
+      <small>{{ p.app.company or 'Entreprise non précisée' }} · {{ p.app.job_title or '' }}</small></label>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% for sec in sections %}
+<section class="panel" id="section-{{ loop.index }}">
+  <div class="panel-head plain"><h2>{{ sec.title }}</h2></div>
+  <div class="form">
+    {% for r in sec.rows %}{% set f = r.f %}
+    <label>{{ f.label }}
+      {% if f.widget == 'select' %}
+      <select name="{{ r.name }}">{% for o in f.options %}<option value="{{ o }}" {% if o == r.value %}selected{% endif %}>{{ o or 'Non renseigné' }}</option>{% endfor %}
+        {% if r.extra_option %}<option value="{{ r.stored }}" selected>{{ r.stored }}</option>{% endif %}</select>
+      {% elif f.widget == 'date' %}
+      <input type="date" name="{{ r.name }}" value="{{ r.value }}">
+      {% elif f.widget == 'textarea' %}
+      <textarea name="{{ r.name }}" rows="3" maxlength="{{ f.max_len }}">{{ r.value }}</textarea>
+      {% else %}
+      <input name="{{ r.name }}" maxlength="{{ f.max_len }}" value="{{ r.value }}" placeholder="{{ f.placeholder }}">
+      {% endif %}
+      <input type="hidden" name="prev_{{ r.name[4:] }}" value="{{ r.value }}">
+      {% if r.legacy %}<small>Valeur enregistrée : « {{ r.stored }} ». Elle est conservée tant que vous ne choisissez pas de date.</small>{% endif %}
+      {% if f.help %}<small>{{ f.help }}</small>{% endif %}
+      {% if f.path == 'country' and not r.value %}<small>Suggestion : {{ country_suggestion }}</small>{% endif %}</label>
+    {% endfor %}
+  </div>
+</section>
+{% endfor %}
+
+<section class="panel" id="custom">
+  <div class="panel-head plain"><h2>Autres réponses enregistrées <span class="count">{{ custom|length }}</span></h2></div>
+  {% if custom %}
+  <div class="form">
+    {% for c in custom %}
+    <label>{{ c.question }}
+      <input type="hidden" name="caprev_{{ c.id }}" value="{{ c.answer }}">
+      <span class="row"><input name="ca_{{ c.id }}" maxlength="500" value="{{ c.answer }}">
+        <button class="btn quiet-bad small" formaction="/profiles/{{ profile.id }}/answers/custom/{{ c.id }}/delete" formnovalidate
+          onclick="return confirm('Retirer cette réponse enregistrée ?')">Retirer</button></span></label>
+    {% endfor %}
+  </div>
+  {% else %}<p class="panel-empty muted">Aucune pour l'instant : les réponses données à une question en pause apparaissent ici.</p>{% endif %}
+</section>
+
+<section class="panel" id="hosts">
+  <div class="panel-head plain"><h2>Sites de confiance <span class="count">{{ hosts|length }}</span></h2></div>
+  {% if hosts %}
+  <ul class="plain-list">
+    {% for h in hosts %}
+    <li class="row between"><span>{{ h }}</span>
+      <button class="btn quiet-bad small" formaction="/profiles/{{ profile.id }}/answers/hosts/remove" formnovalidate name="host" value="{{ h }}"
+        onclick="return confirm('Ne plus faire confiance à ce site ?')">Retirer</button></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="panel-empty muted">Aucun site ajouté : l'outil n'écrit que sur le site de l'offre et sur les sites de recrutement connus.</p>{% endif %}
+</section>
+
+<div class="row"><button class="btn primary" type="submit">Enregistrer les réponses</button></div>
+</form>
+{% endblock %}

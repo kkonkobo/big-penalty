@@ -1,0 +1,9 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Candidature</title></head>
+<body><h1>Votre candidature</h1>
+<form id="f">
+ <label for="fn">Prénom *</label><input id="fn" name="first_name">
+ <label for="ln">Nom *</label><input id="ln" name="last_name">
+ <label for="em">E-mail *</label><input type="email" id="em" name="email">
+ <button type="submit" onclick="event.preventDefault(); const i = document.getElementById('em'); i.setAttribute('aria-invalid','true'); i.setAttribute('aria-describedby','e1'); document.getElementById('e1').textContent = 'Adresse refusée par le serveur'">Envoyer ma candidature</button>
+ <span id="e1"></span>
+</form></body></html>
