@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
 from jobhunt.config import get_settings
-from jobhunt.freshness import MAX_JOB_AGE_DAYS, effective_posted_at, is_stale, rank_score
+from jobhunt.freshness import (EXPIRY_RUN_WINDOW_DAYS, MAX_JOB_AGE_DAYS, effective_posted_at, expired_by_runs, is_new, is_stale,
+                               rank_score)
 from jobhunt.dedupe import MergedJob, Sighting, canonical_url, reconcile_status
 from jobhunt.models import ContractType, Profile
 
@@ -230,6 +231,31 @@ def latest_run(profile_id: int | None = None) -> dict[str, Any] | None:
     return _run_row(r) if r else None
 
 
+def latest_completed_run(profile_id: int) -> dict[str, Any] | None:
+    """Most recent run of the profile that finished with status "done" (not running, cancelled or failed)."""
+    with connect() as c:
+        r = c.execute("SELECT * FROM runs WHERE profile_id=? AND status='done' ORDER BY id DESC LIMIT 1",
+                      (profile_id,)).fetchone()
+    return _run_row(r) if r else None
+
+
+def recent_ok_runs(profile_id: int, as_of: datetime | None = None) -> list[tuple[datetime, set[str]]]:
+    """(started_at, sources_ok) of the profile's completed runs finished within EXPIRY_RUN_WINDOW_DAYS.
+    Runs recorded without `sources_ok` (older versions) yield an empty set: no source counts as checked."""
+    cutoff = (as_of or now()) - timedelta(days=EXPIRY_RUN_WINDOW_DAYS)
+    with connect() as c:
+        rows = c.execute("SELECT * FROM runs WHERE profile_id=? AND status='done' AND finished_at IS NOT NULL",
+                         (profile_id,)).fetchall()
+    out = []
+    for r in rows:
+        started, finished = _dt(r["started_at"]), _dt(r["finished_at"])
+        if started is None or finished is None or finished < cutoff or finished > (as_of or now()):
+            continue
+        ok = (_run_row(r)["stats"] or {}).get("sources_ok")
+        out.append((started, set(ok) if isinstance(ok, list) else set()))
+    return out
+
+
 # ---------------------------------------------------------------- jobs
 def _job_from_row(r: sqlite3.Row, sightings: list[Sighting]) -> MergedJob:
     return MergedJob(
@@ -252,7 +278,7 @@ def _sightings_by_job(c: sqlite3.Connection, job_ids: list[int]) -> dict[int, li
         for s in c.execute(f"SELECT * FROM sightings WHERE job_id IN ({q}) ORDER BY id", chunk):
             out[s["job_id"]].append(
                 Sighting(s["source"], s["source_id"], s["url"], s["apply_url"], _dt(s["posted_at"]),
-                         _json_object(s["raw"]))
+                         _json_object(s["raw"]), seen_at=_dt(s["seen_at"]))
             )
     return out
 
@@ -314,20 +340,27 @@ def save_jobs(profile_id: int, jobs: list[MergedJob], *, removed: list[MergedJob
                 c.execute(
                     "UPDATE jobs SET dedupe_key=?, title=?, company=?, location=?, contract_type=?, remote=?,"
                     " salary_text=?, salary_min_eur=?, salary_max_eur=?, description=?, posted_at=?, apply_url=?,"
-                    " origin_url=?, origin_ats=?, origin_confidence=?, extra=?, score=?, score_json=?, last_seen=?,"
+                    " origin_url=?, origin_ats=?, origin_confidence=?, extra=?, score=?, score_json=?,"
+                    " last_seen=CASE WHEN ? THEN ? ELSE COALESCE(MAX(last_seen, ?), last_seen) END,"  # only a sighting bumps it
                     " status=CASE WHEN ? THEN ? ELSE status END WHERE id=? AND profile_id=?",
-                    (*vals, ts, bool(duplicates), j.status, j.id, profile_id),
+                    (*vals, j.sighted, ts, _iso(j.last_seen), bool(duplicates), j.status, j.id, profile_id),
                 )
+                if j.sighted:
+                    j.last_seen = now()
             for s in j.sightings:
                 c.execute(
                     "INSERT INTO sightings(job_id, source, source_id, url, apply_url, posted_at, raw, seen_at)"
                     " VALUES (?,?,?,?,?,?,?,?)"
                     " ON CONFLICT(job_id, source, source_id) DO UPDATE SET url=excluded.url,"
-                    " apply_url=excluded.apply_url, posted_at=excluded.posted_at, raw=excluded.raw, seen_at=excluded.seen_at",
+                    " apply_url=excluded.apply_url, posted_at=excluded.posted_at, raw=excluded.raw,"
+                    " seen_at=CASE WHEN ? THEN excluded.seen_at ELSE MAX(sightings.seen_at, excluded.seen_at) END",
                     (j.id, s.source, s.source_id, s.url, s.apply_url, _iso(s.posted_at),
-                     _raw_json(s.raw) if s.raw else None, ts),
+                     _raw_json(s.raw) if s.raw else None, ts if s.seen_now else (_iso(s.seen_at) or ts), s.seen_now),
                 )
+                if s.seen_now:
+                    s.seen_at, s.seen_now = now(), False
             j.changed = False
+            j.sighted = False
         for j in removed:
             if j.id is not None:
                 c.execute("DELETE FROM jobs WHERE id=? AND profile_id=?", (j.id, profile_id))
@@ -351,19 +384,31 @@ def set_status(job_ids: list[int], status: str, profile_id: int | None = None) -
 def query_jobs(
     profile_id: int, *, min_score: float | None = None, contract_type: str | None = None, source: str | None = None,
     max_age_days: int | None = None, status: str | None = None, sort: str = "rank", show_filtered: bool = False,
-    include_stale: bool = False,
+    include_stale: bool = False, new_only: bool = False, include_expired: bool = False,
+    as_of: datetime | None = None,
 ) -> list[MergedJob]:
     """Filtered, sorted list for the shortlist UI.
 
     Jobs whose effective age exceeds MAX_JOB_AGE_DAYS (+ date tolerance) are hidden, never deleted; `max_age_days`
     can only narrow that window; `include_stale=True` (internal use only) disables it. Sorts: "rank" (fit x freshness), "score", "freshness".
+    `new_only` keeps the "new today" jobs (see freshness.is_new). Jobs not seen for EXPIRE_AFTER_DAYS are hidden
+    (status untouched) when every source they were seen on was checked OK by a run since, unless `include_expired`. `as_of` = clock (tests).
     """
     jobs = load_jobs(profile_id)
     limit = None if include_stale else min(max_age_days or MAX_JOB_AGE_DAYS, MAX_JOB_AGE_DAYS)  # hard cutoff: never wider
-    ref_now = now()
+    ref_now = as_of or now()
+    runs = [] if include_expired else recent_ok_runs(profile_id, ref_now)
+    run_started = None
+    if new_only:
+        run = latest_completed_run(profile_id)
+        run_started = _dt(run["started_at"]) if run else None
     out = []
     for j in jobs:
         if not show_filtered and j.score_json.get("prefiltered"):
+            continue
+        if not include_expired and expired_by_runs(j, ref_now, runs):
+            continue
+        if new_only and not is_new(j, run_started, ref_now):
             continue
         if min_score is not None and (j.score or 0) < min_score:
             continue
@@ -389,6 +434,24 @@ def query_jobs(
     else:
         out.sort(key=lambda j: (rank_score(j, ref_now), when(j)), reverse=True)
     return out
+
+
+def shortlist_overview(profile_id: int, as_of: datetime | None = None) -> dict[str, int]:
+    """Counts for the shortlist header, over the default view (no prefiltered, no >14-day, no expired jobs):
+    `new` = new today, `expired` = jobs hidden only because they were not seen for EXPIRE_AFTER_DAYS."""
+    ref_now = as_of or now()
+    run = latest_completed_run(profile_id)
+    run_started = _dt(run["started_at"]) if run else None
+    runs = recent_ok_runs(profile_id, ref_now)
+    new = expired = 0
+    for j in load_jobs(profile_id):
+        if j.score_json.get("prefiltered") or is_stale(j, MAX_JOB_AGE_DAYS, ref_now):
+            continue
+        if expired_by_runs(j, ref_now, runs):
+            expired += 1
+        elif is_new(j, run_started, ref_now):
+            new += 1
+    return {"new": new, "expired": expired}
 
 
 def job_counts(profile_id: int) -> dict[str, int]:

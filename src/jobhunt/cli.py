@@ -1,10 +1,11 @@
-"""Command line: `jobhunt serve | sources | profile-add | search | shortlist | login`."""
+"""Command line: `jobhunt serve | sources | profile-add | search | daily | schedule | shortlist | new | login`."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
+from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -18,7 +19,7 @@ from jobhunt.freshness import age_days, is_repost
 from jobhunt.models import ContractType, Profile
 from jobhunt.sources import registry
 
-app = typer.Typer(help="jobhunt: recherche d'emploi multi-sources (France).", no_args_is_help=True)
+app = typer.Typer(help="Big Penalty (jobhunt) : recherche d'emploi multi-sources (France).", no_args_is_help=True)
 console = Console()
 
 
@@ -171,17 +172,142 @@ def rescore(profile_id: int) -> None:
         console.print(f"[yellow]! {e}[/yellow]")
 
 
-@app.command()
-def shortlist(profile_id: int, min_score: float = 0, limit: int = 40, all: bool = False) -> None:
-    """Affiche les meilleures offres (tri score × fraîcheur, offres de plus de 14 jours masquées ; * = republiée)."""
-    jobs = [j for j in db.query_jobs(profile_id, min_score=min_score, show_filtered=all)][:limit]
+def _jobs_table(jobs) -> Table:
     t = Table("id", "score", "âge (j)", "poste", "entreprise", "lieu", "contrat", "sources", "statut", "origine")
     for j in jobs:
         age = age_days(j)
         age_s = "?" if age is None else f"{int(age)}{'*' if is_repost(j) else ''}"
         t.add_row(str(j.id), str(int(j.score or 0)), age_s, j.title[:50], (j.company or "")[:25], (j.location or "")[:22],
                   j.contract_type.value, "+".join(j.sources), j.status, "oui" if j.origin_url else "")
-    console.print(t)
+    return t
+
+
+@app.command()
+def shortlist(profile_id: int, min_score: float = 0, limit: int = 40, all: bool = False) -> None:
+    """Affiche les meilleures offres (tri score × fraîcheur, offres de plus de 14 jours masquées ; * = republiée)."""
+    console.print(_jobs_table(db.query_jobs(profile_id, min_score=min_score, show_filtered=all)[:limit]))
+
+
+@app.command("new")
+def new_jobs(profile_id: int, limit: int = 40) -> None:
+    """Nouveautés du jour (vues pour la première fois depuis minuit ou depuis la dernière recherche), triées par pertinence."""
+    if db.get_profile(profile_id) is None:
+        raise typer.BadParameter(f"profil {profile_id} introuvable")
+    jobs = db.query_jobs(profile_id, new_only=True)
+    console.print(_jobs_table(jobs[:limit]))
+    console.print(f"{len(jobs)} nouvelle(s) offre(s), dont {sum(1 for j in jobs if (j.score or 0) >= 70)} ≥ 70.")
+
+
+@app.command()
+def daily(profile_ids: Annotated[Optional[list[int]], typer.Argument(help="défaut : tous les profils")] = None) -> None:
+    """Recherche quotidienne (sans fenêtre de navigateur) de chaque profil, puis résumé des nouveautés du jour.
+
+    Un verrou (data/daily.lock) empêche deux exécutions simultanées ; journal dans data/logs/daily-AAAA-MM-JJ.log ;
+    notification macOS à la fin (désactivable avec JOBHUNT_NO_NOTIFY=1). Code de sortie ≠ 0 seulement en cas d'erreur réelle.
+    """
+    from jobhunt.daily import run_daily
+
+    try:
+        report = run_daily(profile_ids or None, emit=lambda line: console.print(line, markup=False, highlight=False))
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from None
+    if report.failed:
+        raise typer.Exit(1)
+
+
+schedule_app = typer.Typer(help="Planification quotidienne via launchd (macOS), plusieurs heures par jour possibles.",
+                           no_args_is_help=True)
+app.add_typer(schedule_app, name="schedule")
+
+
+def _sched_call(fn, *args, **kw):
+    from jobhunt import schedule as sched
+
+    try:
+        return fn(*args, **kw)
+    except sched.ScheduleError as e:
+        console.print(f"Erreur : {e}", markup=False)
+        raise typer.Exit(1) from None
+
+
+def _print_times(times: list[str]) -> None:
+    console.print("Heures : " + ", ".join(times) + " (rattrapage au réveil si le Mac dormait).", markup=False)
+
+
+@schedule_app.command("install")
+def schedule_install(
+    time: Annotated[Optional[list[str]], typer.Option("--time", help="HH:MM, répétable (défaut 07:30)")] = None,
+) -> None:
+    """Installe l'agent launchd (remplace l'existant)."""
+    from jobhunt import schedule as sched
+
+    times = _sched_call(sched.normalize_times, time or [sched.DEFAULT_TIME])
+    path = _sched_call(sched.install, times)
+    console.print(f"Installé : {path}", markup=False)
+    _print_times(times)
+
+
+@schedule_app.command("set")
+def schedule_set(times: Annotated[list[str], typer.Argument(help="HH:MM [HH:MM ...]")]) -> None:
+    """Remplace toutes les heures (installe si besoin)."""
+    from jobhunt import schedule as sched
+
+    norm = _sched_call(sched.normalize_times, times)
+    _sched_call(sched.set_times, norm)
+    _print_times(norm)
+
+
+@schedule_app.command("add")
+def schedule_add(time: str) -> None:
+    """Ajoute une heure."""
+    from jobhunt import schedule as sched
+
+    _print_times(_sched_call(sched.add_time, time))
+
+
+@schedule_app.command("remove")
+def schedule_remove(time: str) -> None:
+    """Retire une heure (la dernière : utiliser uninstall)."""
+    from jobhunt import schedule as sched
+
+    _print_times(_sched_call(sched.remove_time, time))
+
+
+@schedule_app.command("run")
+def schedule_run() -> None:
+    """Lance une recherche maintenant via launchd (retourne immédiatement)."""
+    from jobhunt import schedule as sched
+
+    _sched_call(sched.run_now)
+    console.print("Recherche lancée (~25 min par profil). Suivi : `big-penalty schedule status`.", markup=False)
+
+
+@schedule_app.command("uninstall")
+def schedule_uninstall() -> None:
+    """Désinstalle l'agent et supprime le plist."""
+    from jobhunt import schedule as sched
+
+    console.print("Désinstallé." if _sched_call(sched.uninstall) else "Rien à désinstaller.", markup=False)
+
+
+@schedule_app.command("status")
+def schedule_status() -> None:
+    """État : chargé, heures, prochain passage, exécution en cours, dernier journal."""
+    from jobhunt import schedule as sched
+
+    st = _sched_call(sched.status)
+    console.print(f"Fichier plist : {'présent' if st.installed else 'absent'} · agent : {'chargé' if st.loaded else 'non chargé'}",
+                  markup=False)
+    if st.times:
+        nxt = f" · prochain passage : {st.next_run:%Y-%m-%d %H:%M}" if st.loaded and st.next_run else ""
+        console.print(f"Heures : {', '.join(st.times)}{nxt}", markup=False)
+    console.print("Exécution : " + ("en cours" if st.running else "aucune en cours"), markup=False)
+    if st.last_log:
+        console.print(f"Dernier journal ({st.last_log.name}) :", markup=False)
+        for line in st.log_tail or []:
+            console.print("  " + line, markup=False, highlight=False)
+    else:
+        console.print("Aucun journal pour l'instant.", markup=False)
 
 
 @app.command()

@@ -63,12 +63,17 @@ class DomainPacer:
 
 
 class BrowserPool:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, *, headless: bool | None = None):
         self.settings = settings or get_settings()
+        self.headless_override = headless  # per-run override (daily run): never mutates the shared settings
         self.pacer = DomainPacer(self.settings.min_delay_s, self.settings.max_delay_s)
         self._pw: Playwright | None = None
         self._contexts: dict[tuple[int, str], BrowserContext] = {}
         self._lock = asyncio.Lock()
+
+    @property
+    def headless(self) -> bool:
+        return self.settings.headless if self.headless_override is None else self.headless_override
 
     def has_session(self, profile_id: int, site: str) -> bool:
         if (profile_id, site) in self._contexts:
@@ -88,7 +93,7 @@ class BrowserPool:
                 return self._contexts[key]
             if self._pw is None:
                 self._pw = await async_playwright().start()
-            headless = self.settings.headless if headless is None else headless
+            headless = self.headless if headless is None else headless
             kwargs = dict(
                 user_data_dir=str(self.profile_dir(profile_id, site)),
                 headless=headless,
@@ -119,7 +124,7 @@ class BrowserPool:
         await page.goto(url, wait_until=wait_until, timeout=60_000)
         await human_pause(0.6, 1.8)
         if await is_challenge(page):
-            if self.settings.headless:
+            if self.headless:
                 raise ChallengeRequired(f"bot challenge on {url}; rerun with JOBHUNT_HEADLESS=0 and solve it")
             log.warning("Challenge on %s — solve it in the browser window (waiting %ss)", url, challenge_timeout_s)
             deadline = time.monotonic() + challenge_timeout_s

@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -16,8 +16,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from jobhunt import db, pipeline
+from jobhunt import schedule as sched
 from jobhunt.config import get_settings
-from jobhunt.freshness import effective_posted_at, is_repost, rank_score
+from jobhunt.freshness import EXPIRE_AFTER_DAYS, effective_posted_at, is_repost, rank_score
 from jobhunt.models import ContractType, Profile, SearchQuery
 from jobhunt.scoring import FLAG_LABELS
 from jobhunt.sources import registry
@@ -25,7 +26,7 @@ from jobhunt.sources import registry
 log = logging.getLogger("jobhunt.web")
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
-app = FastAPI(title="jobhunt")
+app = FastAPI(title="Big Penalty")
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 CONTRACT_LABELS = {
@@ -222,7 +223,7 @@ def _filters(request: Request) -> dict[str, Any]:
         "min_score": num("min_score"), "contract_type": q.get("contract_type") or None, "source": q.get("source") or None,
         "max_age_days": int(num("max_age_days")) if num("max_age_days") else None, "status": q.get("status") or None,
         "sort": q.get("sort") if q.get("sort") in ("rank", "score", "freshness") else "rank",
-        "show_filtered": q.get("show_filtered") == "1",
+        "show_filtered": q.get("show_filtered") == "1", "new_only": q.get("new") == "1",
     }
 
 
@@ -232,6 +233,7 @@ def shortlist(request: Request, pid: int):
     f = _filters(request)
     jobs = db.query_jobs(pid, **f)
     return render(request, "shortlist.html", profile=p, jobs=jobs, f=f, labels=source_labels(), counts=db.job_counts(pid),
+                  overview=db.shortlist_overview(pid), expire_days=EXPIRE_AFTER_DAYS,
                   sources_available=sorted({s for j in db.load_jobs(pid, with_sightings=True) for s in j.sources}))
 
 
@@ -266,3 +268,56 @@ def sources_page(request: Request):
         })
     return render(request, "sources.html", rows=rows, run=run, profiles=db.list_profiles(),
                   llm_enabled=bool(settings.anthropic_api_key), settings=settings)
+
+
+# ------------------------------------------------------------ planification
+# Module-level indirection: tests set SCHEDULE_KW (runner, home, repo, uid, check_platform) to avoid real launchctl.
+SCHEDULE_KW: dict[str, Any] = {}
+
+
+def _schedule_redirect(notice: str | None = None, error: str | None = None) -> RedirectResponse:
+    q = f"?notice={quote(notice)}" if notice else f"?error={quote(error or '')}"
+    return RedirectResponse("/schedule" + q, status_code=303)
+
+
+def _schedule_action(fn, ok: str) -> RedirectResponse:
+    try:
+        fn()
+    except sched.ScheduleError as e:
+        return _schedule_redirect(error=str(e))
+    return _schedule_redirect(notice=ok)
+
+
+@app.get("/schedule", response_class=HTMLResponse)
+def schedule_page(request: Request, notice: str | None = None, error: str | None = None):
+    try:
+        st, err = sched.status(tail=10, **SCHEDULE_KW), error
+    except sched.ScheduleError as e:
+        st, err = None, error or str(e)
+    return render(request, "schedule.html", st=st, notice=notice, error=err, default_time=sched.DEFAULT_TIME)
+
+
+@app.post("/schedule/install")
+def schedule_install():
+    return _schedule_action(lambda: sched.install(sched.DEFAULT_TIME, **SCHEDULE_KW),
+                            f"Planification activée ({sched.DEFAULT_TIME}).")
+
+
+@app.post("/schedule/add")
+def schedule_add(time: str = Form(...)):
+    return _schedule_action(lambda: sched.add_time(time, **SCHEDULE_KW), f"Heure {time} ajoutée.")
+
+
+@app.post("/schedule/remove")
+def schedule_remove(time: str = Form(...)):
+    return _schedule_action(lambda: sched.remove_time(time, **SCHEDULE_KW), f"Heure {time} retirée.")
+
+
+@app.post("/schedule/uninstall")
+def schedule_uninstall():
+    return _schedule_action(lambda: sched.uninstall(**SCHEDULE_KW), "Planification désactivée.")
+
+
+@app.post("/schedule/run")
+def schedule_run():
+    return _schedule_action(lambda: sched.run_now(**SCHEDULE_KW), "Recherche lancée, résultats dans ~25 min.")

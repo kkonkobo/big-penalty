@@ -265,3 +265,69 @@ def test_origin_due_backfills_date_once_and_reset_repairs_posted_at():
     j.posted_at = datetime(2026, 10, 1, tzinfo=UTC)
     j.recompute_posted_at()
     assert j.posted_at == datetime(2026, 11, 3, tzinfo=UTC)
+
+
+async def test_sources_ok_records_only_fully_checked_sources(monkeypatch, profile):
+    patch_registry(monkeypatch)
+    res = await run_search(profile.id, llm=FakeLLM())
+    # failed (broken), login wall (needslogin) and skipped sources are never "ok"
+    assert res.sources_ok == ["boarda", "boardb"]
+    assert db.latest_run(profile.id)["stats"]["sources_ok"] == ["boarda", "boardb"]
+
+
+async def test_source_with_no_results_but_no_error_is_ok(monkeypatch, profile):
+    reg = patch_registry(monkeypatch, ["boarda"])
+
+    class Empty(reg["boarda"]):
+        name = "empty"
+
+        async def search(self, query, ctx):
+            return []
+
+    reg["empty"] = Empty
+    res = await run_search(profile.id, llm=FakeLLM())
+    assert res.sources_ok == ["boarda", "empty"]
+
+
+async def test_search_resighting_bumps_last_seen_but_rescore_does_not(monkeypatch, profile):
+    from datetime import UTC, datetime, timedelta
+
+    from jobhunt.pipeline import rescore
+
+    patch_registry(monkeypatch, ["boarda", "boardb"])
+    llm = FakeLLM()
+    await run_search(profile.id, llm=llm)
+    old = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    with db.connect() as c:
+        c.execute("UPDATE jobs SET last_seen=?", (old,))
+        c.execute("UPDATE sightings SET seen_at=?", (old,))
+    # rescore (even after a profile change invalidating scores) must not look like a sighting
+    p = profile.model_copy(update={"headline": "Autre titre", "skills": ["Rust"]})
+    db.save_profile(p)
+    await rescore(profile.id, llm=llm)
+    with db.connect() as c:
+        assert {r[0] for r in c.execute("SELECT last_seen FROM jobs")} == {old}
+        assert {r[0] for r in c.execute("SELECT seen_at FROM sightings")} == {old}
+    # a real search that sees the jobs again bumps both
+    await run_search(profile.id, llm=llm)
+    with db.connect() as c:
+        assert all(r[0] > old for r in c.execute("SELECT last_seen FROM jobs"))
+        assert all(r[0] > old for r in c.execute("SELECT seen_at FROM sightings"))
+
+
+async def test_run_search_headless_is_explicit_and_leaves_settings_alone(monkeypatch, profile):
+    from jobhunt.config import get_settings
+
+    patch_registry(monkeypatch, ["boarda"])
+    seen = []
+
+    class Spy(BoardA):
+        async def search(self, query, ctx):
+            seen.append(ctx.browser.headless)
+            return []
+
+    monkeypatch.setattr("jobhunt.pipeline.registry", lambda: {"boarda": Spy})
+    monkeypatch.setattr(get_settings(), "headless", False)
+    await run_search(profile.id, llm=FakeLLM(), headless=True)
+    await run_search(profile.id, llm=FakeLLM())
+    assert seen[0] is True and seen[-1] is False and get_settings().headless is False
