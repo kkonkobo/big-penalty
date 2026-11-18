@@ -1,0 +1,29 @@
+@page { size: A4; margin: 0; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #fff; }
+body { font-family: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", "Segoe UI", sans-serif; color: #202124;
+       -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.page { width: 210mm; padding: 12mm 14mm 10mm 14mm; font-size: calc(8.8pt * var(--scale, 1)); line-height: 1.36; }
+header { display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; }
+header .id { flex: 1; min-width: 0; padding-top: 1mm; }
+h1 { margin: 0; font-size: 2.95em; line-height: 1.05; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; color: #202124; }
+.headline { margin-top: 1.5mm; font-size: 1.22em; color: #163a5f; }
+.contact { margin-top: 1.8mm; font-size: .9em; color: #62666b; }
+.contact .sep { color: #163a5f; padding: 0 .35em; }
+.photo { width: 22.5mm; height: 28mm; object-fit: cover; object-position: center top; flex: none; }
+hr { border: 0; border-top: .25mm solid #9aa1a9; margin: 3.5mm 0 2.6mm; }
+.summary { margin: 0; font-style: italic; color: #62666b; text-align: justify; font-size: 1.08em; line-height: 1.42; }
+h2 { margin: 4.2mm 0 1.8mm; padding-bottom: .9mm; font-size: 1.18em; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+     color: #163a5f; border-bottom: .2mm solid #dde1e6; }
+.skill { margin: 0 0 1.1mm; }
+.skill b, .item b, .lang b { font-weight: 700; }
+.dot { color: #163a5f; font-size: .85em; padding: 0 .3em; }
+.entry { margin-bottom: 2.2mm; }
+.entry .line { display: flex; justify-content: space-between; gap: 4mm; font-weight: 700; }
+.entry .date { color: #163a5f; white-space: nowrap; }
+.entry .ctx { font-style: italic; color: #62666b; margin-top: .2mm; }
+.entry .details { margin-top: .6mm; }
+ul { margin: 1mm 0 0; padding: 0; list-style: none; }
+li { position: relative; padding-left: 3.6mm; margin-bottom: .9mm; }
+li::before { content: ""; position: absolute; left: .4mm; top: .62em; width: 1.2mm; height: 1.2mm; background: #163a5f; }
+.lang { margin: 0 0 .8mm; }

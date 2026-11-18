@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Préparation du CV{% endblock %}
+{% block content %}
+{% if running %}<meta http-equiv="refresh" content="3">{% endif %}
+<h1>Préparation du CV — {{ job.title }}</h1>
+<p class="muted">{{ job.company or 'Entreprise non précisée' }}</p>
+<div class="panel">
+{% if running %}
+  <p class="lead"><span class="spinner"></span>Génération du CV sur mesure en cours (30 à 60 secondes)…</p>
+  <p class="muted">L'IA reformule votre expérience réelle avec le vocabulaire de l'annonce, puis les faits sont vérifiés et le PDF d'une page est produit.
+     Cette page se met à jour toute seule.</p>
+{% elif error %}
+  <div class="error-box">La génération a échoué : {{ error }}</div>
+  <form method="post" action="/jobs/{{ job.id }}/application"><button class="btn primary">Réessayer</button>
+    <a class="btn" href="/profiles/{{ job.profile_id }}/shortlist">Retour à la présélection</a></form>
+{% endif %}
+</div>
+{% endblock %}

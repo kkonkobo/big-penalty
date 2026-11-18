@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Candidatures{% endblock %}
+{% block content %}
+<h1>Candidatures</h1>
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+<table class="tbl">
+  <thead><tr><th>#</th><th>Poste</th><th>Entreprise</th><th>Profil</th><th>Statut</th><th>Vérifications</th><th>Mis à jour</th><th>PDF</th></tr></thead>
+  <tbody>
+  {% for a in applications %}
+    <tr>
+      <td><a href="/applications/{{ a.id }}">{{ a.id }}</a></td>
+      <td><a href="/applications/{{ a.id }}"><strong>{{ a.job_title or 'Offre ' ~ a.job_id }}</strong></a></td>
+      <td>{{ a.company or '—' }}</td>
+      <td>{{ profiles[a.profile_id].name if a.profile_id in profiles else a.profile_id }}</td>
+      <td><span class="badge {{ 'ok' if a.status in ('approved','submitted') else ('bad' if a.status=='failed' else '') }}">{{ APPLICATION_LABELS.get(a.status, a.status) }}</span></td>
+      <td>{% if a.errors %}<span class="badge bad">{{ a.errors|length }} erreur(s)</span>{% endif %}
+          {% if a.warnings %}<span class="badge warn">{{ a.warnings|length }} à vérifier</span>{% endif %}
+          {% if not a.flags %}<span class="badge ok">OK</span>{% endif %}</td>
+      <td>{{ a.updated_at|ago }}</td>
+      <td>{% if a.cv_path %}<a class="btn small" href="/applications/{{ a.id }}/pdf">Télécharger</a>{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="muted">Aucune candidature. Ouvrez la présélection d'un profil et cliquez « Préparer le CV ».</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

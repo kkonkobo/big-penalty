@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>CV - {{ identity.name }}</title>
+<style>{% include "cv/cv.css" %}</style>
+</head>
+<body>
+<div class="page" id="cv-page" style="--scale: {{ cv.font_scale }}">
+  <header>
+    <div class="id">
+      <h1>{{ identity.name }}</h1>
+      <div class="headline">{{ cv.headline }}</div>
+      {% set contact = [identity.phone, identity.email, identity.linkedin]|select|list %}
+      {% if contact %}<div class="contact">{% for c in contact %}{% if not loop.first %}<span class="sep">•</span>{% endif %}{{ c }}{% endfor %}</div>{% endif %}
+    </div>
+    {% if photo %}<img class="photo" src="{{ photo }}" alt="">{% endif %}
+  </header>
+  <hr>
+  {% if cv.summary %}<p class="summary">{{ cv.summary }}</p>{% endif %}
+
+  {% if cv.skill_groups %}
+  <h2>Compétences</h2>
+  {% for g in cv.skill_groups %}
+  <p class="skill"><b>{{ g.label }}</b><span class="dot">•</span>{{ g.items|map("trim", " .")|join(", ") }}.</p>
+  {% endfor %}
+  {% endif %}
+
+  {% if cv.projects %}
+  <h2>Projets</h2>
+  {% for p in cv.projects %}
+  <div class="entry">
+    <div class="line"><span>{{ p.title }}</span><span class="date">{{ p.dates }}</span></div>
+    {% if p.context %}<div class="ctx">{{ p.context }}</div>{% endif %}
+    <ul>{% for b in p.bullets %}<li>{% if b.label %}<b>{{ b.label }} :</b> {% endif %}{{ b.text }}</li>{% endfor %}</ul>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if cv.education %}
+  <h2>Formation</h2>
+  {% for e in cv.education %}
+  <div class="entry">
+    <div class="line"><span>{{ e.title }}</span><span class="date">{{ e.dates }}</span></div>
+    {% if e.school %}<div class="ctx">{{ e.school }}</div>{% endif %}
+    {% if e.details %}<div class="details">{{ e.details }}</div>{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if cv.languages %}
+  <h2>Langues</h2>
+  {% for l in cv.languages %}<p class="lang"><b>{{ l.name }}</b>{% if l.level %}<span class="dot">•</span>{{ l.level }}{% endif %}</p>{% endfor %}
+  {% endif %}
+</div>
+</body>
+</html>

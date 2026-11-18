@@ -53,7 +53,7 @@
   <table class="tbl jobs">
     <thead><tr>
       <th><input type="checkbox" onclick="document.querySelectorAll('#sel .pick').forEach(c=>c.checked=this.checked)" aria-label="Tout sélectionner"></th>
-      <th>Score</th><th>Poste</th><th>Lieu</th><th>Contrat</th><th>Publiée</th><th>Sources</th><th>Statut</th>
+      <th>Score</th><th>Poste</th><th>Lieu</th><th>Contrat</th><th>Publiée</th><th>Sources</th><th>Statut</th><th>CV</th>
     </tr></thead>
     <tbody>
     {% for j in jobs %}
@@ -71,8 +71,8 @@
                 {% for fl in j.score_json.flags or [] %}<span class="badge bad">{{ FLAG_LABELS.get(fl, fl) }}</span>{% endfor %}</p>{% endif %}
               {% if j.salary_text %}<p><strong>Salaire :</strong> {{ j.salary_text }}</p>{% endif %}
               <div class="links">
-                {% if j.origin_url %}<a class="btn small primary" href="{{ j.origin_url }}" target="_blank" rel="noopener noreferrer">Site de l'entreprise{% if j.origin_ats %} ({{ j.origin_ats }}){% endif %}</a>{% endif %}
-                {% for s in j.sightings %}<a class="btn small" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ labels.get(s.source, s.source) }}</a>{% endfor %}
+                {% if j.origin_url|http_url %}<a class="btn small primary" href="{{ j.origin_url|http_url }}" target="_blank" rel="noopener noreferrer">Site de l'entreprise{% if j.origin_ats %} ({{ j.origin_ats }}){% endif %}</a>{% endif %}
+                {% for s in j.sightings %}{% if s.url|http_url %}<a class="btn small" href="{{ s.url|http_url }}" target="_blank" rel="noopener noreferrer">{{ labels.get(s.source, s.source) }}</a>{% endif %}{% endfor %}
               </div>
               <pre class="desc">{{ j.description or 'Pas de description.' }}</pre>
             </div>
@@ -85,13 +85,16 @@
         <td>{% for s in j.sources %}<span class="badge src">{{ labels.get(s, s) }}</span>{% endfor %}
             {% if j.origin_url %}<span class="badge ok" title="{{ j.origin_url|host }}">origine</span>{% endif %}</td>
         <td><span class="badge st-{{ j.status }}">{{ STATUS_LABELS[j.status] }}</span></td>
+        <td>{% set app = applications.get(j.id) %}{% if app %}<a class="btn small" href="/applications/{{ app.id }}">CV : {{ APPLICATION_LABELS[app.status] }}</a>
+          {% else %}<button class="btn small" type="submit" form="cvprep" formaction="/jobs/{{ j.id }}/application">Préparer le CV</button>{% endif %}</td>
       </tr>
     {% else %}
-      <tr><td colspan="8" class="muted">{% if f.new_only %}Aucune nouveauté aujourd'hui avec ces filtres.{% else %}Aucune offre ne correspond aux filtres. Lancez une recherche depuis la page du profil.{% endif %}</td></tr>
+      <tr><td colspan="9" class="muted">{% if f.new_only %}Aucune nouveauté aujourd'hui avec ces filtres.{% else %}Aucune offre ne correspond aux filtres. Lancez une recherche depuis la page du profil.{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </form>
+<form id="cvprep" method="post" hidden></form>
 {% if overview.expired %}<p class="muted small expired-note">{{ overview.expired }} offre(s) expirée(s) masquée(s) (plus revues depuis {{ expire_days }} jours).</p>{% endif %}
 </div>
 {% endblock %}

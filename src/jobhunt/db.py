@@ -79,6 +79,58 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_sightings_job ON sightings(job_id);
     """,
+    # 2: tailored CV applications. job_id has NO foreign key on purpose: consolidating duplicate jobs deletes job rows
+    # and must never fail or wipe an application (job title/company are snapshotted).
+    """
+    CREATE TABLE applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+        job_id INTEGER NOT NULL,
+        job_title TEXT,
+        company TEXT,
+        status TEXT NOT NULL DEFAULT 'draft',
+        tailored_json TEXT NOT NULL DEFAULT '{}',
+        flags_json TEXT NOT NULL DEFAULT '[]',
+        cv_path TEXT,
+        cover_letter_path TEXT,
+        ats TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        notes TEXT
+    );
+    CREATE INDEX idx_applications_job ON applications(profile_id, job_id);
+    """,
+    # 3: immutable CV revisions + approval bound to a revision. applications.tailored_json/flags_json/cv_path stay as a
+    # mirror of the current revision. Existing applications get revision 1 (old, mutable PDF path, no hash, no verifier:
+    # never eligible, they must be regenerated). At most one non-withdrawn application per (profile, job).
+    """
+    ALTER TABLE applications ADD COLUMN current_rev INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE applications ADD COLUMN approved_rev INTEGER;
+    ALTER TABLE applications ADD COLUMN approved_sha256 TEXT;
+    ALTER TABLE applications ADD COLUMN approved_at TEXT;
+    ALTER TABLE applications ADD COLUMN approval_override INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE application_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+        rev INTEGER NOT NULL,
+        tailored_json TEXT NOT NULL,
+        flags_json TEXT NOT NULL DEFAULT '[]',
+        verifier_json TEXT,
+        pdf_path TEXT,
+        pdf_sha256 TEXT,
+        fit_notes_json TEXT NOT NULL DEFAULT '{}',
+        master_hash TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(application_id, rev)
+    );
+    INSERT INTO application_revisions(application_id, rev, tailored_json, flags_json, pdf_path, created_at)
+        SELECT id, 1, tailored_json, flags_json, cv_path, created_at FROM applications;
+    UPDATE applications SET current_rev = 1;
+    UPDATE applications SET status = 'withdrawn'
+        WHERE status != 'withdrawn' AND id NOT IN (
+            SELECT MAX(id) FROM applications WHERE status != 'withdrawn' GROUP BY profile_id, job_id);
+    CREATE UNIQUE INDEX idx_applications_active ON applications(profile_id, job_id) WHERE status != 'withdrawn';
+    """,
 ]
 
 
@@ -114,10 +166,38 @@ def _raw_json(raw: dict[str, Any]) -> str | None:
     return encoded if len(encoded) <= 20000 else "{}"
 
 
+def _statements(script: str) -> Iterator[str]:
+    """Split a migration script into statements (no triggers in our migrations, so `;` at end of a complete statement)."""
+    buf = ""
+    for line in script.splitlines(keepends=True):
+        buf += line
+        if sqlite3.complete_statement(buf):
+            if buf.strip():
+                yield buf
+            buf = ""
+    if buf.strip():
+        yield buf
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    v = conn.execute("PRAGMA user_version").fetchone()[0]
-    for i in range(v, len(MIGRATIONS)):
-        conn.executescript("BEGIN;" + MIGRATIONS[i] + f"PRAGMA user_version = {i + 1};COMMIT;")
+    """Take the write lock BEFORE reading user_version: concurrent startups serialize and the second one sees the
+    finished schema instead of replaying the migrations. Each run is one transaction (DDL and user_version roll back together)."""
+    previous = conn.isolation_level
+    conn.isolation_level = None  # explicit transaction control
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            v = conn.execute("PRAGMA user_version").fetchone()[0]
+            for i in range(v, len(MIGRATIONS)):
+                for stmt in _statements(MIGRATIONS[i]):
+                    conn.execute(stmt)
+                conn.execute(f"PRAGMA user_version = {i + 1}")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.isolation_level = previous
 
 
 @contextmanager

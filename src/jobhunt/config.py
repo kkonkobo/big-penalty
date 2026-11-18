@@ -29,6 +29,13 @@ class Settings(BaseModel):
     planner_model: str = "claude-opus-5-5"
     scoring_model: str = "claude-opus-5-5"
     writer_model: str = "claude-opus-5-5"
+    cv_model: str = "claude-opus-5-5"  # CV import + tailoring (JOBHUNT_CV_MODEL, defaults to the planner model)
+    cv_effort: str = "medium"
+    # CV data (master CV, job ad, tailored text) may be sent to the next provider when the first one fails.
+    # JOBHUNT_CV_ALLOW_FAILOVER=0 keeps it with the FIRST enabled provider only (the verifier then uses it too).
+    cv_allow_failover: bool = True
+    # Overall deadline of ONE structured() call (all retries + provider failover), seconds (JOBHUNT_LLM_DEADLINE_S).
+    llm_deadline_s: float = 180.0
     headless: bool = False  # headful by default: lets a human solve CAPTCHAs and looks like a real user
     min_delay_s: float = 2.0  # per-domain minimum delay between requests
     max_delay_s: float = 6.0
@@ -54,6 +61,14 @@ class Settings(BaseModel):
     def cache_dir(self) -> Path:
         return self.data_dir / "cache"
 
+    @property
+    def profiles_dir(self) -> Path:
+        return self.data_dir / "profiles"
+
+    @property
+    def applications_dir(self) -> Path:
+        return self.data_dir / "applications"
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -78,6 +93,10 @@ def get_settings() -> Settings:
         planner_model=env("JOBHUNT_PLANNER_MODEL", "claude-opus-5-5"),
         scoring_model=env("JOBHUNT_SCORING_MODEL", "claude-opus-5-5"),
         writer_model=env("JOBHUNT_WRITER_MODEL", "claude-opus-5-5"),
+        cv_model=env("JOBHUNT_CV_MODEL") or env("JOBHUNT_PLANNER_MODEL", "claude-opus-5-5"),
+        cv_effort=env("JOBHUNT_CV_EFFORT", "medium"),
+        cv_allow_failover=env("JOBHUNT_CV_ALLOW_FAILOVER", "1").strip().lower() not in ("0", "false", "no", "off"),
+        llm_deadline_s=float(env("JOBHUNT_LLM_DEADLINE_S") or 180),
         headless=env("JOBHUNT_HEADLESS", "0") == "1",
     )
     for d in (s.browser_profiles_dir, s.cache_dir):

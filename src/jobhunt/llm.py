@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -27,7 +28,11 @@ REMOTE_WORDS = {"remote", "teletravail", "télétravail", "full remote", "a dist
 
 
 class LLMError(Exception):
-    pass
+    """`code` is a short machine code (never model output or document text) safe to show in the UI."""
+
+    def __init__(self, message: str = "", *, code: str = "error"):
+        super().__init__(message)
+        self.code = code
 
 
 class LLMRefusal(LLMError):
@@ -274,13 +279,13 @@ class AnthropicProvider:
                         output_config={"effort": effort},
                     )
         except anthropic.RateLimitError as e:
-            raise LLMError(f"Limite de débit Anthropic atteinte après {self.max_attempts} essais: {e}") from e
+            raise LLMError(f"Limite de débit Anthropic atteinte après {self.max_attempts} essais", code="rate_limit") from e
         except anthropic.APIConnectionError as e:
-            raise LLMError(f"Connexion à l'API Anthropic impossible: {e}") from e
+            raise LLMError("Connexion à l'API Anthropic impossible", code="connection") from e
         except anthropic.APIStatusError as e:
-            raise LLMError(f"Erreur API Anthropic {e.status_code}: {getattr(e, 'message', e)}") from e
-        except (ValueError, anthropic.APIResponseValidationError) as e:
-            raise LLMError(f"Réponse structurée Anthropic invalide: {e}") from e
+            raise LLMError(f"Erreur API Anthropic {e.status_code}", code=f"http_{e.status_code}") from e
+        except (ValueError, anthropic.APIResponseValidationError) as e:  # never embed e: it may quote the model output
+            raise LLMError("Réponse structurée Anthropic invalide", code="invalid_response") from e
         u = getattr(resp, "usage", None)
         if u is not None:
             self.usage["calls"] += 1
@@ -306,6 +311,13 @@ class AnthropicProvider:
             system_text=PROFILE_SYSTEM.format(profile=profile_text(profile)),
             user_text=PLAN_TASK.format(n=max_queries), effort=self.settings.planner_effort, max_tokens=4000,
         )
+
+    # ---- generic structured call (CV import / tailoring)
+    async def structured(self, model_cls: type[T], *, system_text: str, user_text: str, max_tokens: int = 8000) -> T:
+        if not self.enabled:
+            raise LLMError(f"{self.name}: clé absente")
+        return await self._parse(model_cls, model=self.settings.cv_model, system_text=system_text, user_text=user_text,
+                                 effort=self.settings.cv_effort, max_tokens=max_tokens)
 
     # ---- scorer
     async def score(self, profile: Profile, jobs: list[MergedJob]) -> ScoreBatch:
@@ -355,6 +367,7 @@ class OpenAIProvider(AnthropicProvider):
             "anthropic_api_key": None,
             "planner_model": settings.openai_planner_model, "scoring_model": settings.openai_scoring_model,
             "planner_effort": settings.openai_planner_effort, "scoring_effort": settings.openai_scoring_effort,
+            "cv_model": settings.openai_planner_model, "cv_effort": settings.openai_planner_effort,
         })
         super().__init__(provider_settings, client, **kwargs)
 
@@ -385,11 +398,11 @@ class OpenAIProvider(AnthropicProvider):
                         max_output_tokens=max_tokens, store=False, **options,
                     )
         except openai.APIStatusError as exc:
-            raise LLMError(f"Erreur API OpenAI {exc.status_code}") from exc
+            raise LLMError(f"Erreur API OpenAI {exc.status_code}", code=f"http_{exc.status_code}") from exc
         except openai.APIConnectionError as exc:
-            raise LLMError("Connexion à l'API OpenAI impossible (délai ou réseau)") from exc
+            raise LLMError("Connexion à l'API OpenAI impossible (délai ou réseau)", code="connection") from exc
         except (ValueError, openai.APIResponseValidationError) as exc:
-            raise LLMError("Réponse structurée OpenAI invalide") from exc
+            raise LLMError("Réponse structurée OpenAI invalide", code="invalid_response") from exc
         usage = response.usage
         if usage:
             self.usage["calls"] += 1
@@ -490,6 +503,65 @@ class FailoverLLM:
                          rationale=by_ref[index].rationale, flags=by_ref[index].flags,
                          origin="llm", scored_by=provider).clamp()
                 if index in by_ref else keyword_score(profile, job) for index, job in enumerate(jobs)]
+
+    def _cv_providers(self, prefer: str | None) -> list[LLMProvider]:
+        """Providers allowed to receive CV data, in call order. `prefer` moves one provider first (verifier: a different
+        model than the tailor). With JOBHUNT_CV_ALLOW_FAILOVER=0 only the first enabled provider (configured order) is used
+        and `prefer` is ignored: the CV never reaches a provider the user did not rank first."""
+        usable = [p for p in self.providers if p.enabled and hasattr(p, "structured")]
+        if not self.settings.cv_allow_failover:
+            return usable[:1]
+        if prefer:
+            usable.sort(key=lambda p: 0 if p.name == prefer else 1)  # stable: keeps the configured order otherwise
+        return usable
+
+    @staticmethod
+    def _code(exc: BaseException) -> str:
+        if isinstance(exc, LLMError):
+            return exc.code
+        if isinstance(exc, anthropic.RateLimitError | openai.RateLimitError):
+            return "rate_limit"
+        if isinstance(exc, anthropic.APIConnectionError | openai.APIConnectionError | TimeoutError):
+            return "connection"
+        if isinstance(exc, anthropic.APIStatusError | openai.APIStatusError):
+            return f"http_{exc.status_code}"
+        return "error"
+
+    async def structured_ex(self, model_cls: type[T], *, system_text: str, user_text: str, max_tokens: int = 8000,
+                            prefer: str | None = None) -> tuple[dict[str, str], T]:
+        """One structured call with provider failover and ONE overall deadline (settings.llm_deadline_s, retries and
+        failover included). Returns ({"provider", "model"}, output). No rule-based fallback: raises LLMError with a short
+        sanitized message (provider names + codes, never model output or document text)."""
+        providers = self._cv_providers(prefer)
+        tried: list[str] = []
+        try:
+            async with asyncio.timeout(self.settings.llm_deadline_s):
+                for provider in providers:
+                    started = perf_counter()
+                    try:
+                        output = await provider.structured(model_cls, system_text=system_text, user_text=user_text,
+                                                           max_tokens=max_tokens)
+                    except (LLMError, anthropic.APIError, openai.APIError, RetryError, TimeoutError) as exc:
+                        code = self._code(exc.last_attempt.exception() if isinstance(exc, RetryError) and exc.last_attempt else exc)
+                        tried.append(f"{provider.name}: {code}")
+                        self.errors.append(f"{provider.name}: {code}")
+                        self.calls.append({"task": "structured", "provider": provider.name, "status": "error",
+                                           "latency_s": round(perf_counter() - started, 4)})
+                        continue
+                    self.calls.append({"task": "structured", "provider": provider.name, "status": "ok",
+                                       "latency_s": round(perf_counter() - started, 4)})
+                    model = getattr(getattr(provider, "settings", None), "cv_model", "") or ""
+                    return {"provider": provider.name, "model": model}, output
+        except TimeoutError:
+            self.errors.append("deadline")
+            raise LLMError(f"Délai dépassé ({self.settings.llm_deadline_s:.0f} s) pour l'appel IA", code="deadline") from None
+        detail = "; ".join(tried) or "aucun fournisseur IA configuré"
+        raise LLMError(f"Appel IA impossible ({detail})", code="unavailable")
+
+    async def structured(self, model_cls: type[T], *, system_text: str, user_text: str, max_tokens: int = 8000) -> T:
+        """`structured_ex` without the provider info."""
+        _, output = await self.structured_ex(model_cls, system_text=system_text, user_text=user_text, max_tokens=max_tokens)
+        return output
 
     async def check(self) -> list[dict[str, Any]]:
         results = []
