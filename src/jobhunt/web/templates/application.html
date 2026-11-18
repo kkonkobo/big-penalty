@@ -1,19 +1,25 @@
 {% extends "base.html" %}
 {% block title %}CV · {{ a.job_title }}{% endblock %}
 {% block content %}
-<div class="row between">
-  <h1>CV — {{ a.job_title or 'Offre ' ~ a.job_id }}</h1>
-  <span><span class="muted small">version {{ a.current_rev }}</span> <span class="badge {{ 'ok' if a.status in ('approved','submitted') else '' }}">{{ APPLICATION_LABELS.get(a.status, a.status) }}</span>
-    <a class="btn small" href="/applications">Toutes les candidatures</a></span>
+<div class="page-head">
+  <div>
+    <h1>{{ a.job_title or 'Offre ' ~ a.job_id }}</h1>
+    <p class="muted">{{ a.company or 'Entreprise non précisée' }}{% if job %}{% if job.location %} · {{ job.location }}{% endif %} · {{ CONTRACT_LABELS[job.contract_type.value] }}{% endif %}
+      · <span class="tag {{ 'ok' if a.status in ('approved','submitted') else '' }}">{{ APPLICATION_LABELS.get(a.status, a.status) }}</span>
+      <span class="small">version {{ a.current_rev }}</span></p>
+  </div>
+  <div class="row">
+    <a class="btn" href="/applications">Toutes les candidatures</a>
+    {% if job and job.origin_url|http_url %}<a class="btn" href="{{ job.origin_url|http_url }}" target="_blank" rel="noopener noreferrer">Postuler sur le site de l'entreprise<svg class="ic"><use href="#i-out"/></svg></a>{% endif %}
+  </div>
 </div>
-<p class="muted">{{ a.company or 'Entreprise non précisée' }}{% if job %} · {{ job.location or '' }} · {{ CONTRACT_LABELS[job.contract_type.value] }}{% endif %}</p>
 {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
 {% if a.notes %}<div class="error-box pre-wrap">{{ a.notes }}</div>{% endif %}
 
 <div class="cvpage">
   <div>
     <div class="cvframe"><iframe src="/applications/{{ a.id }}/preview" title="Aperçu du CV"></iframe></div>
-    <div class="row" style="margin-top:.6rem">
+    <div class="row cv-actions">
       {% if a.cv_path %}<a class="btn primary" href="/applications/{{ a.id }}/pdf">Télécharger le PDF</a>{% endif %}
       <form method="post" action="/jobs/{{ a.job_id }}/application" onsubmit="return confirm('Régénérer le CV ? Les modifications seront perdues.')">
         <input type="hidden" name="regenerate" value="1"><button class="btn">Régénérer</button></form>
@@ -25,19 +31,19 @@
       {% if fit.font_scale < 1 %}police à {{ (fit.font_scale * 100)|round|int }} % ; {% endif %}{{ fit.dropped_bullets|length }} point(s) et {{ fit.dropped_projects|length }} projet(s) retirés du PDF.</p>{% endif %}
   </div>
 
-  <div>
+  <div class="stack">
     <div class="card">
       <h2>Vérification des faits</h2>
-      {% if not a.flags %}<p class="badge ok">Aucun problème détecté</p>{% endif %}
+      {% if not a.flags %}<p><span class="tag ok">Aucun problème détecté</span></p>{% endif %}
       <p class="muted small">Vérification IA :
         {% if a.verifier and a.verifier.ran %}{{ 'réussie' if a.verifier.passed else 'échec' }} ({{ a.verifier.provider }}{% if a.verifier.model %}, {{ a.verifier.model }}{% endif %})
         {% else %}non effectuée{% endif %}</p>
-      <p class="small">{% if eligible %}<span class="badge ok">Éligible à l'envoi automatique</span>
-        {% else %}<span class="badge warn">Pas éligible à l'envoi automatique</span> <span class="muted">{{ not_eligible_reasons|join(' ; ') }}</span>{% endif %}</p>
+      <p class="small">{% if eligible %}<span class="tag ok">Éligible à l'envoi automatique</span>
+        {% else %}<span class="tag warn">Pas éligible à l'envoi automatique</span> <span class="muted">{{ not_eligible_reasons|join(' ; ') }}</span>{% endif %}</p>
       {% for f in a.errors %}<div class="flag error"><strong>Erreur</strong> — {{ f.message }} <span class="loc">{{ f.location }}</span></div>{% endfor %}
       {% for f in a.warnings %}<div class="flag warning"><strong>À vérifier</strong> — {{ f.message }} <span class="loc">{{ f.location }}</span></div>{% endfor %}
 
-      <form method="post" action="/applications/{{ a.id }}/approve" class="row" style="margin-top:.8rem">
+      <form method="post" action="/applications/{{ a.id }}/approve" class="row approve-row">
         <input type="hidden" name="rev" value="{{ a.current_rev }}">
         {% if a.errors %}<label class="check"><input type="checkbox" name="ignore" value="1" id="ignore"
             onchange="document.getElementById('approve-btn').disabled=!this.checked"> Ignorer et approuver ({{ a.errors|length }} erreur(s))</label>{% endif %}
@@ -46,21 +52,21 @@
       </form>
     </div>
 
-    <div class="card" style="margin-top:1rem">
+    <div class="card">
       <h2>Adéquation avec l'annonce</h2>
-      <p><strong>Mots-clés couverts :</strong> {% for k in a.tailored.matched_keywords %}<span class="badge ok">{{ k }}</span>{% else %}—{% endfor %}</p>
+      <p><strong>Mots-clés couverts :</strong> {% for k in a.tailored.matched_keywords %}<span class="tag ok">{{ k }}</span>{% else %}—{% endfor %}</p>
       <p><strong>Mots-clés ajoutés</strong> <span class="muted">(demandés par l'annonce, absents du CV maître) :</span><br>
-         {% for g in a.tailored.gaps %}<span class="badge warn">{{ g }}</span>{% else %}Aucun{% endfor %}</p>
+         {% for g in a.tailored.gaps %}<span class="tag warn">{{ g }}</span>{% else %}Aucun{% endfor %}</p>
     </div>
 
-    <div class="card" style="margin-top:1rem">
+    <div class="card">
       <h2>Préparation entretien</h2>
       <p class="muted small">Ce que ce CV affirme au-delà du CV maître. Autorisé, mais à savoir défendre en entretien.</p>
       {% for f in a.preps %}<div class="flag prep"><strong>{{ f.term or f.message }}</strong>{% if f.hint %} — {{ f.hint }}{% endif %} <span class="loc">{{ f.location }}</span></div>
       {% else %}<p>Rien à préparer : tout est tiré du CV maître.</p>{% endfor %}
     </div>
 
-    <form method="post" action="/applications/{{ a.id }}/update" class="card editform" style="margin-top:1rem">
+    <form method="post" action="/applications/{{ a.id }}/update" class="card editform">
       <h2>Modifier le CV</h2>
       <input type="hidden" name="rev" value="{{ a.current_rev }}">
       <label>Titre<input type="text" name="headline" value="{{ a.tailored.headline }}"></label>
@@ -84,18 +90,18 @@
         {% endfor %}{% endif %}
         {% set known = [] %}{% if master %}{% for g in master.skill_groups %}{% for item in g.items %}{% set _ = known.append(item|lower) %}{% endfor %}{% endfor %}{% endif %}
         {% for g in a.tailored.skill_groups %}{% for item in g.items %}{% if item|lower not in known %}
-          <label class="check"><span class="badge bad">hors profil</span><input type="checkbox" name="skillx" value="{{ item }}" checked> {{ item }}</label>
+          <label class="check"><span class="tag bad">hors profil</span><input type="checkbox" name="skillx" value="{{ item }}" checked> {{ item }}</label>
         {% endif %}{% endfor %}{% endfor %}
       </fieldset>
       <button class="btn primary">Mettre à jour</button>
     </form>
 
-    <div class="card" style="margin-top:1rem">
+    <div class="card">
       <h2>Versions</h2>
       {% for r in revisions %}<p class="small">Version {{ r.rev }} · {{ r.created_at|ago }} · {{ 'PDF' if r.has_pdf else 'sans PDF' }} · {{ r.errors }} erreur(s){% if r.rev == a.current_rev %} <strong>(courante)</strong>{% endif %}</p>{% endfor %}
     </div>
 
-    <div class="card" style="margin-top:1rem">
+    <div class="card">
       <h2>Annonce</h2>
       {% if job %}
         <p><strong>{{ job.title }}</strong> — {{ job.company or '' }}</p>

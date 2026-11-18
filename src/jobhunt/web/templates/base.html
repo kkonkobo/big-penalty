@@ -8,13 +8,32 @@
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 16 16"><path d="M5.5 3.5L2.5 6.5l3 3M2.75 6.5H9.5a4 4 0 010 8H7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-out" viewBox="0 0 16 16"><path d="M9 2.75h4.25V7M13 3L7.5 8.5M11.5 9.5v3.25a.75.75 0 01-.75.75h-7.5a.75.75 0 01-.75-.75v-7.5a.75.75 0 01.75-.75H6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 16 16"><path d="M9.25 1.75H4.5a1 1 0 00-1 1v10.5a1 1 0 001 1h7a1 1 0 001-1V5L9.25 1.75zM9 2v3.25h3.25M5.75 8.5h4.5M5.75 11h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 2.25l6 10.5H2L8 2.25z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.3" r=".85" fill="currentColor"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h9.5M9 4.5L12.5 8 9 11.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+{% set path = request.url.path %}
+{% set solo = nav_profiles[0] if nav_profiles|length == 1 else None %}
 <header class="top">
   <a class="brand" href="/">Big Penalty</a>
-  <nav>
-    <a href="/">Profils</a>
-    <a href="/sources">Sources</a>
-    <a href="/applications">Candidatures</a>
-    <a href="/schedule">Planification</a>
+  <nav aria-label="Navigation principale">
+    <a href="/" {% if path == '/' %}aria-current="page"{% endif %}>Aujourd'hui</a>
+    {% if solo %}
+    <a href="/profiles/{{ solo.id }}/shortlist" {% if path.endswith('/shortlist') %}aria-current="page"{% endif %}>Offres</a>
+    {% endif %}
+    <a href="/applications" {% if path.startswith('/applications') or path.startswith('/jobs/') %}aria-current="page"{% endif %}>Candidatures</a>
+    {% if solo %}
+    <a href="/profiles/{{ solo.id }}" {% if path.startswith('/profiles/') and not path.endswith('/shortlist') %}aria-current="page"{% endif %}>Profil et recherche</a>
+    {% endif %}
+    <a href="/sources" {% if path == '/sources' %}aria-current="page"{% endif %}>Sources</a>
+    <a href="/schedule" {% if path == '/schedule' %}aria-current="page"{% endif %}>Planification</a>
   </nav>
 </header>
 <main>{% block content %}{% endblock %}</main>

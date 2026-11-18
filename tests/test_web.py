@@ -125,3 +125,30 @@ def test_schedule_add_remove_run(sched_client):
 def test_schedule_run_when_not_installed_shows_error(sched_client):
     r = sched_client.post("/schedule/run", follow_redirects=True)
     assert "big-penalty daily" in r.text
+
+
+def test_single_row_triage_returns_only_that_row(client):
+    pid = int(client.post("/profiles", data=FORM, follow_redirects=False).headers["location"].rsplit("/", 1)[1])
+    client.post(f"/profiles/{pid}/search", data={"max_queries": "3"})
+    for _ in range(100):
+        if "Terminée" in client.get(f"/profiles/{pid}/progress").text:
+            break
+        time.sleep(0.1)
+    a, b = db.load_jobs(pid)[:2]
+    # A stray checked box in the bulk form must not ride along with a one-row action.
+    r = client.post(f"/profiles/{pid}/jobs/action", data={"action": "approve", "job_id": str(a.id), "job_ids": [b.id]},
+                    headers={"HX-Request": "true"})
+    assert r.status_code == 200 and f'id="job-{a.id}"' in r.text and "Approuvé" in r.text and r.text.count("<tr") == 1
+    assert db.get_job(a.id).status == "approved" and db.get_job(b.id).status == "new"
+    r = client.post(f"/profiles/{pid}/jobs/action", data={"action": "reset", "job_id": str(a.id)}, headers={"HX-Request": "true"})
+    assert db.get_job(a.id).status == "new" and "Approuver" in r.text
+    other = int(client.post("/profiles", data=FORM, follow_redirects=False).headers["location"].rsplit("/", 1)[1])
+    r = client.post(f"/profiles/{other}/jobs/action", data={"action": "reject", "job_id": str(a.id)}, headers={"HX-Request": "true"})
+    assert r.status_code == 404 and db.get_job(a.id).status == "new"
+
+
+def test_today_page_summarises_each_profile(client):
+    assert "Commencez par un profil" in client.get("/").text
+    pid = int(client.post("/profiles", data=FORM, follow_redirects=False).headers["location"].rsplit("/", 1)[1])
+    page = client.get("/").text
+    assert "Aujourd'hui" in page and f'href="/profiles/{pid}/shortlist' in page and "CV à valider" in page

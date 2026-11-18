@@ -74,6 +74,18 @@ templates.env.filters["ago"] = ago
 templates.env.filters["host"] = host
 
 
+def iso(value: str | datetime | None) -> datetime | None:
+    if not value or isinstance(value, datetime):
+        return value or None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+templates.env.filters["iso"] = iso
+
+
 def http_url(url: str | None) -> str:
     """The URL only if its scheme is http or https (job data comes from scrapers: no javascript:/data: links)."""
     u = (url or "").strip()
@@ -121,15 +133,34 @@ def _profile_or_404(pid: int) -> Profile:
 
 
 def render(request: Request, name: str, **ctx: Any) -> HTMLResponse:
+    ctx.setdefault("nav_profiles", db.list_profiles())
     return templates.TemplateResponse(request, name, ctx)
 
 
 # ------------------------------------------------------------ profiles
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    """Daily view: what is new since the last search, what to triage, which CVs wait for approval."""
     profiles = db.list_profiles()
-    counts = {p.id: db.job_counts(p.id) for p in profiles}
-    return render(request, "profiles.html", profiles=profiles, counts=counts)
+    boards = []
+    for p in profiles:
+        new_jobs = db.query_jobs(p.id, new_only=True)
+        to_triage = db.query_jobs(p.id, status="new")
+        run = db.latest_run(p.id)
+        src = ((run or {}).get("stats") or {}).get("sources", {})
+        boards.append({
+            "profile": p, "new_count": len(new_jobs), "new_high": sum(1 for j in new_jobs if (j.score or 0) >= 70),
+            "to_triage": len(to_triage), "approved": len(db.query_jobs(p.id, status="approved")),
+            "picks": (new_jobs or to_triage)[:6], "picks_are_new": bool(new_jobs),
+            "drafts": [a for a in cvstore.list_applications(p.id) if a.status == "draft"],
+            "run": run, "failing": [source_labels().get(n, n) for n, s in src.items() if s.get("status") == "error"],
+        })
+    try:
+        st = sched.status(tail=1, **SCHEDULE_KW)
+    except sched.ScheduleError:
+        st = None
+    return render(request, "today.html", boards=boards, st=st, nav_profiles=profiles,
+                  today=datetime.now().astimezone())
 
 
 @app.get("/profiles/new", response_class=HTMLResponse)
@@ -249,7 +280,11 @@ def shortlist(request: Request, pid: int):
     p = _profile_or_404(pid)
     f = _filters(request)
     jobs = db.query_jobs(pid, **f)
+    tab_counts: dict[str, int] = {}
+    for j in db.query_jobs(pid):
+        tab_counts[j.status] = tab_counts.get(j.status, 0) + 1
     return render(request, "shortlist.html", profile=p, jobs=jobs, f=f, labels=source_labels(), counts=db.job_counts(pid),
+                  tab_counts=tab_counts, tab_total=sum(tab_counts.values()),
                   applications=cvstore.applications_by_job(pid),
                   overview=db.shortlist_overview(pid), expire_days=EXPIRE_AFTER_DAYS,
                   sources_available=sorted({s for j in db.load_jobs(pid, with_sightings=True) for s in j.sources}))
@@ -262,6 +297,16 @@ async def job_action(request: Request, pid: int):
     action = form.get("action", "")
     if action not in ACTIONS:
         raise HTTPException(400, "Action inconnue")
+    single = str(form.get("job_id") or "")
+    if single.isdigit() and request.headers.get("HX-Request"):
+        # One-row triage from the list: update that job and send back only its row, no page reload.
+        db.set_status([int(single)], ACTIONS[action], pid)
+        job = db.get_job(int(single))
+        if job is None or job.profile_id != pid:
+            raise HTTPException(404, "Offre introuvable")
+        app_ = cvstore.find_application(pid, job.id)
+        return render(request, "_job_row.html", j=job, profile=_profile_or_404(pid), labels=source_labels(),
+                      applications={job.id: app_} if app_ and app_.status != "withdrawn" else {})
     ids = [int(i) for i in form.getlist("job_ids") if str(i).isdigit()]
     db.set_status(ids, ACTIONS[action], pid)
     if request.headers.get("HX-Request"):

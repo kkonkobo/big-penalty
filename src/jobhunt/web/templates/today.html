@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Aujourd'hui{% endblock %}
+{% block content %}
+{% set DAYS = ['lundi','mardi','mercredi','jeudi','vendredi','samedi','dimanche'] %}
+{% set MONTHS = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'] %}
+<div class="page-head">
+  <div>
+    <h1>Aujourd'hui</h1>
+    <p class="muted">{{ DAYS[today.weekday()]|capitalize }} {{ today.day }} {{ MONTHS[today.month - 1] }}
+      {%- if st and st.installed and st.next_run %} · prochaine recherche automatique le {{ st.next_run.strftime('%d/%m à %H:%M') }}
+      {%- elif st and st.running %} · recherche automatique en cours
+      {%- else %} · <a href="/schedule">recherche automatique désactivée</a>{% endif %}</p>
+  </div>
+</div>
+
+{% if not boards %}
+<section class="empty">
+  <h2>Commencez par un profil</h2>
+  <p>Un profil décrit une <strong>filière ou une fonction</strong> (par exemple « élève ingénieur en mécatronique »), pas un intitulé de poste.
+     L'outil en déduit les métiers voisins, cherche sur une vingtaine de sites, puis classe les offres par pertinence et fraîcheur.</p>
+  <a class="btn primary" href="/profiles/new">Créer un profil</a>
+</section>
+{% endif %}
+
+{% for b in boards %}{% set p = b.profile %}
+<section class="board">
+  <header class="board-head">
+    <div>
+      <h2><a href="/profiles/{{ p.id }}">{{ p.name }}</a></h2>
+      <p class="muted small">{% for c in p.contract_types %}{{ CONTRACT_LABELS[c.value] }}{% if not loop.last %}, {% endif %}{% endfor %}
+        {%- if p.locations %} · {{ p.locations|join(", ") }}{% endif %}</p>
+    </div>
+    {% if boards|length > 1 %}<a class="btn" href="/profiles/{{ p.id }}">Profil et recherche</a>{% endif %}
+  </header>
+
+  <p class="summary">
+    {% if b.new_count %}<strong>{{ b.new_count }}</strong> nouvelle{{ 's' if b.new_count > 1 }} offre{{ 's' if b.new_count > 1 }} depuis la dernière recherche{% if b.new_high %}, dont <strong>{{ b.new_high }}</strong> avec un score de 70 ou plus{% endif %}.
+    {% else %}Pas de nouvelle offre depuis la dernière recherche.{% endif %}
+    <span class="muted"><strong>{{ b.to_triage }}</strong> à trier · <strong>{{ b.approved }}</strong> approuvée{{ 's' if b.approved > 1 }} · <strong>{{ b.drafts|length }}</strong> CV à valider</span>
+  </p>
+
+  {% if b.failing %}
+  <p class="alert"><svg class="ic"><use href="#i-alert"/></svg>
+    <span>{{ b.failing|length }} source{{ 's' if b.failing|length > 1 }} en échec lors de la dernière recherche : {{ b.failing|join(", ") }}.
+    <a href="/profiles/{{ p.id }}">Voir le détail</a></span></p>
+  {% endif %}
+
+  <div class="board-grid">
+    <div class="panel flush">
+      <div class="panel-head">
+        <h3>{{ 'Meilleures nouveautés' if b.picks_are_new else 'Meilleures offres à trier' }}</h3>
+        {% if b.picks %}<a href="/profiles/{{ p.id }}/shortlist{{ '?new=1' if b.picks_are_new else '?status=new' }}">Tout voir</a>{% endif %}
+      </div>
+      {% if b.picks %}
+      <ol class="picks">
+        {% for j in b.picks %}{% set eff = effective_posted_at(j) %}
+        <li><a href="/profiles/{{ p.id }}/shortlist{{ '?new=1' if b.picks_are_new else '?status=new' }}#job-{{ j.id }}">
+          <span class="score s{{ ((j.score or 0)//20)|int }}">{{ (j.score or 0)|int }}</span>
+          <span class="pick-main"><span class="pick-title">{{ j.title }}</span>
+            <span class="muted small">{{ j.company or 'Entreprise non précisée' }}{% if j.location %} · {{ j.location }}{% endif %} · {{ eff[0]|ago }}</span></span>
+        </a></li>
+        {% endfor %}
+      </ol>
+      <div class="panel-foot">
+        <a class="btn primary" href="/profiles/{{ p.id }}/shortlist{{ '?new=1' if b.picks_are_new else '?status=new' }}">
+          Trier {{ 'les ' ~ b.new_count ~ ' nouveautés' if b.picks_are_new else 'les offres' }}<svg class="ic"><use href="#i-arrow"/></svg></a>
+      </div>
+      {% else %}
+      <p class="panel-empty muted">Aucune offre à trier. Lancez une recherche depuis <a href="/profiles/{{ p.id }}">la page du profil</a>
+        ou attendez la prochaine recherche automatique.</p>
+      {% endif %}
+    </div>
+
+    <div class="stack">
+      <div class="panel flush">
+        <div class="panel-head"><h3>CV à valider</h3>{% if b.drafts %}<a href="/applications">Toutes les candidatures</a>{% endif %}</div>
+        {% if b.drafts %}
+        <ul class="plain-list">
+          {% for a in b.drafts[:5] %}
+          <li><a href="/applications/{{ a.id }}"><svg class="ic"><use href="#i-doc"/></svg>
+            <span><span class="pick-title">{{ a.job_title or 'Offre ' ~ a.job_id }}</span>
+            <span class="muted small">{{ a.company or 'Entreprise non précisée' }} ·
+              {% if a.errors %}<span class="t-bad">{{ a.errors|length }} erreur{{ 's' if a.errors|length > 1 }}</span>
+              {% elif a.warnings %}<span class="t-warn">{{ a.warnings|length }} point{{ 's' if a.warnings|length > 1 }} à vérifier</span>
+              {% else %}prêt à approuver{% endif %}</span></span></a></li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="panel-empty muted">Aucun CV en attente. Dans la liste des offres, « Préparer le CV » génère un CV adapté à l'annonce.</p>
+        {% endif %}
+      </div>
+
+      <div class="panel flush">
+        <div class="panel-head"><h3>Dernière recherche</h3></div>
+        {% if b.run %}{% set stats = b.run.stats or {} %}
+        <dl class="facts">
+          <div><dt>Lancée</dt><dd title="{{ b.run.started_at[:16].replace('T', ' ') }} UTC">{{ b.run.started_at|iso|ago }}</dd></div>
+          <div><dt>État</dt><dd>{% if b.run.status == 'done' %}Terminée{% elif b.run.status == 'running' %}En cours{% else %}<span class="t-bad">{{ b.run.status }}</span>{% endif %}</dd></div>
+          <div><dt>Offres uniques</dt><dd class="num">{{ stats.get('unique_jobs') or 0 }}</dd></div>
+          <div><dt>Annonces brutes</dt><dd class="num">{{ stats.get('raw_postings') or 0 }}</dd></div>
+        </dl>
+        {% else %}
+        <p class="panel-empty muted">Jamais lancée.</p>
+        {% endif %}
+        <div class="panel-foot"><a class="btn" href="/profiles/{{ p.id }}">Relancer une recherche</a></div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endfor %}
+{% if boards %}<p class="page-foot muted small"><a href="/profiles/new">Ajouter un profil</a> pour suivre la recherche d'un autre proche.</p>{% endif %}
+{% endblock %}
