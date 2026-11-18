@@ -68,3 +68,19 @@ uploads everything as run *Artifacts*. Pushing a tag such as `v0.1.0` publishes 
 | `packaging/big_penalty.spec` | What goes in the bundle (templates, data files, patchright's driver for this OS) |
 | `packaging/installer.iss` | Windows installer |
 | `packaging/icon.png` | App icon (from `assets/icon.svg`) |
+
+## Download site
+
+`site/` is the download page at https://big-penalty.yibe.studio: a static page in an nginx container on the Dokploy VPS
+(project *Big Penalty*, application `big-penalty-site`). `/download/windows`, `/download/windows-portable`,
+`/download/mac` and `/download/mac-intel` redirect to the newest GitHub Release, so shared links never change and no
+installer is stored on the VPS. `.github/workflows/deploy-site.yml` builds the image, smoke-tests it, pushes it to
+GHCR as `ghcr.io/kkonkobo/big-penalty-site:<commit>` and deploys it whenever `site/` changes on `main`. Pull requests
+only build and test it.
+
+Deployment uses a dedicated Dokploy user that can only reach this project; its key is the `DOKPLOY_API_KEY` secret.
+`DOKPLOY_URL` (secret), `DOKPLOY_APP_ID`, `DOKPLOY_ORIGIN_IP` and `SITE_URL` (variables) complete the setup. To roll
+back, deploy an earlier image: `bash .github/scripts/dokploy-deploy.sh "$DOKPLOY_APP_ID" ghcr.io/kkonkobo/big-penalty-site:<older commit>`.
+
+The screenshot (`site/assets/screenshot.jpg`) comes from a copy of the database with the profile replaced by a demo
+one; never take it from real profile data.
