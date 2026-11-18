@@ -78,3 +78,10 @@ def test_system_prompt_lists_the_hard_fact_keys_and_vehicle_questions():
 def test_system_prompt_forbids_touching_a_captcha_widget():
     flat = " ".join(SYSTEM.split())
     assert "never try to click or type into a CAPTCHA" in flat and "Contrôle de sécurité" in flat
+
+
+def test_system_prompt_states_the_account_upload_dial_and_aggregator_rules():
+    flat = " ".join(SYSTEM.split())
+    for needle in ("ANY field of kind `password` is `account_password`", "`account_exists`", "do NOT fill the login form", "CHOISIR UN FICHIER",
+                   "only attaches it", "Indicatif de pays", "aggregator"):
+        assert needle in flat

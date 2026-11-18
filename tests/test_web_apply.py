@@ -1334,3 +1334,45 @@ def test_the_sent_table_is_capped_at_the_200_most_recent_rows(client, profile, m
 
 def test_the_cap_constant_is_200():
     assert apply_routes.SENT_ROWS_MAX == 200
+
+
+# ------------------------------------------------------------------ batch fixes: frequent questions, header breakdown
+def test_the_answers_page_lists_the_most_frequent_questions_first_with_their_count(client, profile, master, tmp_path):
+    apps = [mk_app(profile, master, tmp_path, n) for n in range(1, 5)]
+    asked = [["Rare ?"], ["Date de naissance ?", "Permis B ?"], ["date de naissance"], ["Date de naissance ?", "Permis B ?"]]
+    for a, labels in zip(apps, asked):
+        make_run(a, tmp_path, mode="submit", status="needs_input", questions=[Question(label=x) for x in labels])
+    s = soup(client.get(answers_url(profile)).text)
+    assert s.select_one("#pending h2").text.startswith("Questions les plus fréquentes")
+    labels = [i["value"].lower().rstrip(" ?") for i in s.select("#pending input[name^=pql_]")]
+    assert labels == ["date de naissance", "permis b", "rare"]
+    tags = [t.text.strip() for t in s.select("#pending label .tag")]
+    assert tags == ["3 candidatures bloquées", "2 candidatures bloquées", "1 candidature bloquée"]
+    assert apply_service.question_counts(profile.id) == {"date de naissance": 3, "permis b": 2, "rare": 1}
+    apply_facts.save_custom_answers(profile.id, [("Permis B ?", "Oui")])
+    assert "permis b" not in apply_service.question_counts(profile.id)
+
+
+def test_the_queue_header_breaks_down_what_blocks_it(client, profile, master, tmp_path, monkeypatch):
+    apps = [mk_app(profile, master, tmp_path, n) for n in range(1, 10)]
+    a_q1, a_q2, a_mail, a_cap, a_acc, a_check, a_tech, a_fix, a_blk = apps
+    run = lambda a, st, **kw: make_run(a, tmp_path, mode="submit", status=st, **kw)[0]  # noqa: E731
+    check = failed_app(profile, master, tmp_path, 10)
+    items = [
+        item(a_q1, "paused", pause_reason="input", last_run=run(a_q1, "needs_input", questions=QUESTIONS)),
+        item(a_q2, "paused", pause_reason="input", last_run=run(a_q2, "needs_input", questions=QUESTIONS)),
+        item(a_mail, "paused", pause_reason="email", last_run=run(a_mail, "needs_email")),
+        item(a_cap, "paused", pause_reason="human", last_run=run(a_cap, "needs_human").model_copy(update={"message": "Un CAPTCHA"})),
+        item(a_acc, "paused", pause_reason="human", last_run=run(a_acc, "needs_human").model_copy(update={"message": "Création de compte impossible"})),
+        item(check, "failed", last_run=apply_store.last_run(check.id), outstanding=apply_store.outstanding_attempt(check.id)),
+        item(a_tech, "failed", last_run=run(a_tech, "failed")),
+        item(a_fix, "blocked", problems=["1 erreur(s) bloquante(s) dans le CV"]),
+        item(a_blk, "blocked", problems=["Offre fermée"]),
+    ]
+    patch_queue(monkeypatch, items)
+    s = soup(client.get("/apply").text)
+    line = s.select_one("#queue-breakdown").text.strip()
+    assert line == ("À traiter en priorité — en pause : 2 question, 1 CAPTCHA, 1 compte, 1 e-mail · 1 envoi à vérifier · "
+                    "1 échec technique · 1 CV à corriger · 1 bloquée")
+    patch_queue(monkeypatch, [])
+    assert soup(client.get("/apply").text).select_one("#queue-breakdown") is None

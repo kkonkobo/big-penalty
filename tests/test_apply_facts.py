@@ -331,7 +331,7 @@ def test_every_field_is_declared_once_with_a_section_and_the_requested_selects()
     assert by["disability"].options == ("", "Non", "Oui (RQTH)", "Ne souhaite pas répondre")
     assert by["criminal_record"].options == ("", "Casier judiciaire vierge", "Ne souhaite pas répondre")
     assert by["needs_visa_sponsorship"].options == ("", "Non", "Oui") and by["vehicle"].options == ("", "Oui", "Non")
-    assert {p for p, f in by.items() if f.widget == "date"} == {"birth_date", "stage.available_from", "alternance.start"}
+    assert {p for p, f in by.items() if f.widget == "date"} == {"birth_date", "stage.available_from", "alternance.start", "graduation_date"}
     assert by["work_authorization"].widget == "textarea" and by["work_authorization"].max_len == 1000
 
 
@@ -354,6 +354,7 @@ def test_save_answers_round_trip_reaches_build_facts(profile):
               "driving_licence": "Oui (permis B)", "vehicle": "Oui", "disability": "Non", "criminal_record": "Casier judiciaire vierge",
               "stage.available_from": "2027-01-04", "stage.duration": "6 mois", "alternance.start": "2027-09-01",
               "alternance.duration": "24 mois", "alternance.rhythm": "3/1", "notice_period": "Aucun (étudiant)",
+              "graduation_date": "2028-06-30", "internship_agreement": "Oui",
               "salary_expectation.stage": "Gratification légale", "salary_expectation.alternance": "Grille légale",
               "current_salary": "Aucun (étudiant)", "mobility": "Toute la France", "languages": "Français, anglais B2",
               "first_name": "Léa-Marie", "last_name": "Durand"}
@@ -368,6 +369,7 @@ def test_save_answers_round_trip_reaches_build_facts(profile):
                 "country": "France", "work_authorization": "Citoyenne française", "needs_visa_sponsorship": "Non",
                 "driving_licence": "Oui (permis B)", "vehicle": "Oui", "disability": "Non",
                 "criminal_record": "Casier judiciaire vierge", "notice_period": "Aucun (étudiant)", "current_salary": "Aucun (étudiant)",
+                "graduation_date": "30 juin 2028", "internship_agreement": "Oui",
                 "mobility": "Toute la France", "languages_summary": "Français, anglais B2", "first_name": "Léa-Marie", "last_name": "Durand"}
     for key, value in expected.items():
         assert val(s, key) == value, key
@@ -471,3 +473,13 @@ def test_custom_answers_update_delete_and_trusted_host_removal(profile):
     assert F.trusted_hosts(profile.id) == ["recrute.exemple.test"] and F.remove_trusted_host(profile.id, "x") is False
     assert F.remove_trusted_host(profile.id, "recrute.exemple.test") and "trusted_hosts" not in F.load_answers(profile.id)
     assert len(F.custom_answers(profile.id)) == 2
+
+
+@pytest.mark.parametrize("label", ["Kennwort", "Passwort bestätigen", "Contraseña", "Senha", "Wachtwoord", "Hasło", "Parola", "密码",
+                                   "Mot de passe", "Password"])
+def test_the_password_label_matches_other_languages(label):
+    from jobhunt.apply.facts import LABEL_RE
+    import re
+    import unicodedata
+    stripped = "".join(c for c in unicodedata.normalize("NFKD", label) if not unicodedata.combining(c)).lower()
+    assert re.search(LABEL_RE["account_password"], stripped, re.I)

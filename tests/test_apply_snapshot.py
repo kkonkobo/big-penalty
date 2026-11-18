@@ -382,3 +382,23 @@ async def test_generic_captcha_detection(page, body, captcha):
     await page.set_content(f'<form class="captcha-enabled"><label for=a>Prénom</label><input id=a name=a>{body}<button type="submit">Envoyer</button></form>')
     snap, _ = await take_snapshot(page)
     assert snap.has_captcha is captcha
+
+
+@pytest.mark.parametrize("html", [
+    '<section><h3>CV</h3><button type=button onclick="f.click()">CHOISIR UN FICHIER</button><input type=file id=f name=cv_file style="display:none"></section>',
+    '<section><h3>CV</h3><div><button type=button data-target="#f">CHOISIR UN FICHIER</button></div><div><input type=file id=f name=cv_file hidden></div></section>',
+    '<section><h3>CV</h3><div><button type=button>Parcourir</button><input type=file name=cv_file hidden></div></section>',
+])
+async def test_a_file_dialog_button_with_a_file_input_behind_it_shows_the_input_labelled_with_the_heading(page, html):
+    await page.set_content(f"<form>{html}<button>Suivant</button></form>")
+    snap, _ = await take_snapshot(page)
+    assert not any(f.kind == "button" and f.label in ("CHOISIR UN FICHIER", "Parcourir") for f in snap.fields)
+    files = [f for f in snap.fields if f.kind == "file"]
+    assert len(files) == 1 and files[0].label.startswith("CV")
+
+
+async def test_a_file_dialog_button_without_any_input_is_kept_with_its_group(page):
+    await page.set_content('<form><section><h3>CV</h3><button type=button>CHOISIR UN FICHIER</button></section><button>Suivant</button></form>')
+    snap, _ = await take_snapshot(page)
+    btn = next(f for f in snap.fields if f.label == "CHOISIR UN FICHIER")
+    assert btn.kind == "button" and btn.group == "CV"

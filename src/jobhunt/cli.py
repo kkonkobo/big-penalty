@@ -591,6 +591,34 @@ def apply_resolve(app_id: int, sent: Annotated[bool, typer.Option("--sent/--not-
                   f"Candidature remise en brouillon (statut : {out.status}) : l'approuver puis la renvoyer.", markup=False)
 
 
+@apply_app.command("resolve-many")
+def apply_resolve_many(
+    app_ids: Annotated[list[int], typer.Argument(help="numéros de candidature")],
+    sent: Annotated[bool, typer.Option("--sent/--not-sent", help="elles ont bien / n'ont pas été envoyées")],
+) -> None:
+    """Règle d'un coup plusieurs envois non confirmés (mêmes règles que `resolve`, une par une) puis résume."""
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.service import resolve_unconfirmed
+    from jobhunt.apply.store import outstanding_attempt
+    from jobhunt.cv.errors import CVError
+
+    ok, failed = 0, []
+    for app_id in dict.fromkeys(app_ids):
+        pending = outstanding_attempt(app_id)
+        try:
+            resolve_unconfirmed(app_id, sent=sent, run_id=pending.id if pending else None)
+        except (ApplyError, CVError) as e:
+            failed.append(app_id)
+            console.print(f"  n°{app_id} : {e}", markup=False, highlight=False)
+        else:
+            ok += 1
+    what = "marquée(s) comme envoyée(s)" if sent else "remise(s) en file (non envoyées)"
+    console.print(f"{ok} candidature(s) {what}" + (f", {len(failed)} refusée(s) : {', '.join(map(str, failed))}." if failed else "."),
+                  markup=False, highlight=False)
+    if failed:
+        raise typer.Exit(1)
+
+
 @apply_app.command("trust")
 def apply_trust(profile_id: int, host: Annotated[str, typer.Argument(help="nom d'hôte, par exemple jobs.exemple.fr")]) -> None:
     """Faire confiance à un site d'hébergement de formulaires (sinon l'outil refuse d'y saisir ou d'y envoyer quoi que ce soit)."""
@@ -671,9 +699,10 @@ def apply_accounts() -> None:
     from jobhunt.apply import accounts
 
     rows = _accounts_call(accounts.list_accounts)
-    t = Table("site", "e-mail", "créé le", "enregistré")
+    t = Table("site", "e-mail", "créé le", "état", "enregistré")
     for r in rows:
-        t.add_row(r.get("host", ""), _mask_email(r["account"]), str(r.get("created_at", ""))[:10], "oui" if r["stored"] else "non")
+        t.add_row(r.get("host", ""), _mask_email(r["account"]), str(r.get("created_at", ""))[:10],
+                  "en attente (inscription non confirmée)" if r.get("state") == "pending" else "actif", "oui" if r["stored"] else "non")
     console.print(t)
     console.print(f"Stockage : {_accounts_call(accounts.backend_name)}", markup=False, highlight=False)
 

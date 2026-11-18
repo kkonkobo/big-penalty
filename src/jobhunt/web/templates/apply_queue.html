@@ -13,6 +13,7 @@
     {% if groups.paused %}{% set _ = counts.append(groups.paused|length ~ ' en pause') %}{% endif %}
     {% if groups.to_validate %}{% set _ = counts.append(groups.to_validate|length ~ (' prêtes' if groups.to_validate|length > 1 else ' prête')) %}{% endif %}
     {% if sent_total %}{% set _ = counts.append(sent_today ~ (' envoyée aujourd\'hui' if sent_today < 2 else ' envoyées aujourd\'hui')) %}{% set _ = counts.append(sent_total ~ ' au total') %}{% endif %}
+    {% if breakdown %}<p id="queue-breakdown" class="muted small">À traiter en priorité — {{ breakdown|join(' · ') }}</p>{% endif %}
     {% if counts %}<p id="queue-counts"><strong>{{ counts|join(' · ') }}</strong></p>{% endif %}
   </div>
   <div class="row">{% for p in profiles if not profile_id or p.id == profile_id %}

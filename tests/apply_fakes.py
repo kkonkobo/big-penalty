@@ -58,7 +58,7 @@ class ScriptedPlanner:
 
     async def plan(self, snapshot: PageSnapshot, facts: FactSheet, *, job_title: str, company: str, history: list[StepLog],
                    mode: str) -> StepPlan:
-        self.calls.append({"snapshot": snapshot, "history": list(history), "mode": mode})
+        self.calls.append({"snapshot": snapshot, "history": list(history), "mode": mode, "facts": facts})
         if callable(self.steps):
             return self.steps(snapshot)
         step = self.steps[min(len(self.calls), len(self.steps)) - 1]

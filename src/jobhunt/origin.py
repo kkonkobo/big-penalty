@@ -72,6 +72,7 @@ AGGREGATOR_DOMAINS = (
     "bebee.com", "jobintree.com", "trabajo.org", "jobleads.com", "letudiant.fr", "stage.fr", "talents-handicap.com",
     "jobzmall.com", "iagora.com", "bordeaux-emplois.com", "bandana.com", "screeningpass.ai", "robopost.com",
     "versaillesgrandparc.fr", "stationf.co", "ycombinator.com",
+    "gozapp.fr", "gozapp.com",
     # click trackers / ad redirectors: never an origin, always followed to their final url
     "recruitics.com", "appcast.io", "doubleclick.net", "googleadservices.com", "googlesyndication.com",
     "dartsearch.net", "talroo.com", "joveo.com", "pandologic.com", "jobcase.com", "jobiak.ai",

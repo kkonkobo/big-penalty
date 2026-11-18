@@ -183,7 +183,7 @@ _JS = r"""
     return null;
   };
 
-  const LINK_RE = /postuler|candidat|apply|continuer|suivant|next|je postule|int[eé]ress|interested|rejoindre|join us/i;
+  const LINK_RE = /postuler|candidat|apply|continuer|suivant|next|je postule|int[eé]ress|interested|rejoindre|join us|cr[eé]er (un|votre|mon) compte|s'?inscrire|inscription|sign ?up|register|create (an )?account|konto erstellen|registrieren|pas encore de compte|new user/i;
   const BTN_CLASS_RE = /(^|[\s_-])(btn|button|cta)([\s_-]|$)/i;
   const up = (e) => e.parentElement || (e.getRootNode && e.getRootNode().host) || null;
   const fileUsable = (el) => {
@@ -275,8 +275,24 @@ _JS = r"""
       const text = (tag === 'input' ? clean(el.value) : clean(el.innerText || el.textContent))
         || clean(el.getAttribute('aria-label')) || clean(el.getAttribute('title')) || clean(el.value);
       if (!text) continue;
+      // a button that only opens a file dialog: when a file input stands behind it (its label's control, a data target, or the only
+      // file input of a nearby container) the planner sees THAT input (labelled with the group heading), not the button
+      const OPENER = /(choisir|choose|select|s[eé]lectionner|parcourir|browse|joindre|t[eé]l[eé]charger|t[eé]l[eé]verser|upload|importer|d[eé]poser|ajouter|attach|add)\b.{0,20}\b(fichier|file|document|cv|resume|curriculum|pi[eè]ce)|^\s*(parcourir|browse)/i;
+      const opener = OPENER.test(text);
+      if (opener) {
+        let linked = el.control && el.control.type === 'file' ? el.control : null;
+        const tg = el.getAttribute('data-target') || el.getAttribute('data-for') || el.getAttribute('aria-controls');
+        if (!linked && tg) { const nn = byId(el, tg.replace(/^#/, '')); if (nn && nn.type === 'file') linked = nn; }
+        for (let p = el.parentElement, i = 0; !linked && p && i < 4; p = p.parentElement, i++) {
+          const fs = p.querySelectorAll('input[type=file]');
+          if (fs.length === 1) linked = fs[0];
+          else if (fs.length > 1) break;
+        }
+        if (linked && !linked.disabled && fileUsable(linked)) continue;
+      }
       const f = base('f' + (++n), 'button', el);
       f.label = text.slice(0, 120);
+      if (opener) f.group = groupOf(el);
       f.prio = (el.getAttribute('type') || '').toLowerCase() === 'submit' || PRIO_RE.test(text);
       btns.push([el, f]);
       tagRef(el, f.ref); out.push(f);
@@ -307,7 +323,7 @@ _JS = r"""
       // The <label> of a styled upload is often just the button text ("Parcourir...", "Choisir un fichier"): what the
       // file is for is then in the title attribute or in a short text just above the control. Put it in front.
       const GENERIC_UPLOAD = /^(parcourir|browse|choisir|choose|s[eé]lectionner|select|importer|import|t[eé]l[eé]charger|upload|d[eé]poser|ajouter|joindre|fichier|file)/i;
-      if (!f.label || GENERIC_UPLOAD.test(f.label)) {
+      if (!f.label || f.label === (el.getAttribute('name') || '') || GENERIC_UPLOAD.test(f.label)) {
         // The control's OWN text (title, data-field-name, aria-label) wins. A heading above it is used only when the control has
         // none, and never when the heading is shared by several file inputs (the ancestor holds more than one).
         const hints = [clean(el.getAttribute('title')), clean((el.getAttribute('data-field-name') || '').replace(/[-_]+/g, ' ')),

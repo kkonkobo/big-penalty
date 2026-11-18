@@ -95,6 +95,32 @@ def _msg(e: Exception) -> str:
 
 
 SENT_ROWS_MAX = 200
+PAUSE_LABELS = {"input": "question", "email": "e-mail", "human": "CAPTCHA", "host": "site non approuvé"}
+
+
+def _breakdown(groups: dict[str, list[QueueItem]]) -> list[str]:
+    """What blocks the queue, by cause, for the header: paused by reason, to check (unconfirmed send), technical failures,
+    CVs to fix, other blocked applications."""
+    out: list[str] = []
+    paused: dict[str, int] = {}
+    for it in groups["paused"]:
+        reason = PAUSE_LABELS.get(it.pause_reason, it.pause_reason)
+        if it.pause_reason == "human" and it.last_run is not None:
+            reason = apply_service.pause_reason_label(it.last_run)
+        paused[reason] = paused.get(reason, 0) + 1
+    if paused:
+        out.append("en pause : " + ", ".join(f"{n} {k}" for k, n in sorted(paused.items(), key=lambda kv: (-kv[1], kv[0]))))
+    check = sum(1 for it in groups["failed"] if it.app.status == "failed")
+    if check:
+        out.append(f"{check} envoi{'s' if check > 1 else ''} à vérifier")
+    if len(groups["failed"]) - check:
+        out.append(f"{len(groups['failed']) - check} échec{'s' if len(groups['failed']) - check > 1 else ''} technique{'s' if len(groups['failed']) - check > 1 else ''}")
+    fix = sum(1 for it in groups["blocked"] if any("erreur(s) bloquante(s)" in p for p in it.problems))
+    if fix:
+        out.append(f"{fix} CV à corriger")
+    if len(groups["blocked"]) - fix:
+        out.append(f"{len(groups['blocked']) - fix} bloquée{'s' if len(groups['blocked']) - fix > 1 else ''}")
+    return out
 
 
 def _sent_host(it: QueueItem) -> str:
@@ -244,6 +270,7 @@ def apply_page(request: Request, profile: str | None = None, f: str | None = Non
     groups: dict[str, list[QueueItem]] = {b: [] for b in BUCKET_LABELS}
     for it in items:
         groups[it.bucket].append(it)
+    breakdown = _breakdown(groups)
     # "Envoyées": newest first, at most SENT_ROWS_MAX rows (the page stays light after a big pass); counts cover them all.
     from jobhunt.freshness import start_of_today_paris  # noqa: PLC0415
 
@@ -261,7 +288,7 @@ def apply_page(request: Request, profile: str | None = None, f: str | None = Non
             log.exception("inferred answers failed")
     return web.render(request, "apply_queue.html", groups=groups, count=len(items), profile_id=pid, notice=notice,
                       inferred_counts=inferred_counts, errors=errors, settings=get_settings(), status=_status(), profiles=db.list_profiles(),
-                      sent_total=sent_total, sent_today=sent_today, sent_hosts=sent_hosts, sent_rows_max=SENT_ROWS_MAX)
+                      sent_total=sent_total, sent_today=sent_today, breakdown=breakdown, sent_hosts=sent_hosts, sent_rows_max=SENT_ROWS_MAX)
 
 
 @router.get("/apply/status", response_class=HTMLResponse)
@@ -486,7 +513,9 @@ def answers_page(request: Request, pid: str, f: str | None = None):
         ctx = {"sections": [], "country_suggestion": "", "custom": [], "hosts": []}
         errors.append(str(e))
     try:
-        pending = [{"app": a, "run": r, "q": q, "i": i} for i, (a, r, q) in enumerate(apply_service.pending_questions(profile_id))]
+        counts = apply_service.question_counts(profile_id)
+        pending = [{"app": a, "run": r, "q": q, "i": i, "count": counts.get(facts.norm_question(q.label), 1)}
+                   for i, (a, r, q) in enumerate(apply_service.pending_questions(profile_id))]
         resumable = apply_service.resumable(profile_id)
     except Exception as e:  # noqa: BLE001 - the form itself must still render
         log.exception("pending questions failed")

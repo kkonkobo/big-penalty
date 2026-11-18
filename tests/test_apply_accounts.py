@@ -302,7 +302,7 @@ def test_index_is_maintained_and_has_no_password(mem):
     raw = A._index_path().read_text("utf-8")
     index = json.loads(raw)
     assert pw not in raw and len(index) == 2
-    assert set(index[0]) == {"service", "account", "host", "label", "created_at"}
+    assert set(index[0]) == {"service", "account", "host", "label", "created_at", "state", "state_at"}
     assert index[0]["service"] == "big-penalty:jobs.lever.co" and index[0]["host"] == "jobs.lever.co"
     rows = A.list_accounts()
     assert [r["stored"] for r in rows] == [True, True]
@@ -343,7 +343,7 @@ def test_export_import_round_trip_between_two_machines(machines, tmp_path):
     assert A.export_accounts(out) == 2
     data = json.loads(out.read_text("utf-8"))
     assert data["version"] == 1 and data["exported_at"] and len(data["accounts"]) == 2
-    assert set(data["accounts"][0]) == {"service", "account", "host", "label", "password"}
+    assert set(data["accounts"][0]) == {"service", "account", "host", "label", "password", "state"}
     if sys.platform != "win32":
         assert out.stat().st_mode & 0o777 == 0o600
     use(1)
@@ -444,3 +444,70 @@ def test_cli_reports_a_keyring_error_without_traceback(monkeypatch):
     monkeypatch.setenv(A.ENV_BACKEND, "keyring")
     r = CliRunner().invoke(app, ["apply", "accounts"])
     assert r.exit_code == 1 and "Trousseau indisponible" in r.output
+
+
+# ---- account state: pending (password created for a signup) / active (a run got past the account pages) ----
+
+def test_a_new_password_is_pending_and_an_existing_credential_is_active(mem):
+    A.create_password("jobs.lever.co", "camille@example.test")
+    assert A.account_state("jobs.lever.co", "camille@example.test") == "pending"
+    mem.items[("big-penalty:old.example.test", "camille@example.test")] = "Old-Pw-1"  # a credential that predates the index
+    A.create_password("old.example.test", "camille@example.test")
+    assert A.account_state("old.example.test", "camille@example.test") == "active"
+    assert {r["host"]: r["state"] for r in A.list_accounts()} == {"jobs.lever.co": "pending", "old.example.test": "active"}
+
+
+def test_account_known_needs_a_stored_password_and_the_active_state(mem):
+    h, e = "jobs.lever.co", "camille@example.test"
+    assert A.account_known(h, e) is False  # nothing stored
+    A.create_password(h, e)
+    assert A.account_known(h, e) is False  # signup not confirmed yet
+    assert A.set_state(h, e, "active") is True
+    assert A.account_known(h, e) is True
+    A.set_state(h, e, "pending")
+    assert A.account_known(h, e) is False
+    A.set_state(h, e, "active")
+    del mem.items[("big-penalty:jobs.lever.co", e)]
+    assert A.account_known(h, e) is False  # active in the index but the password is gone
+    assert A.account_known("bad host", e) is False  # errors -> False
+
+
+def test_entries_without_a_state_are_active_and_set_state_validates(mem):
+    h, e = "jobs.lever.co", "camille@example.test"
+    A.create_password(h, e)
+    index = json.loads(A._index_path().read_text("utf-8"))
+    for entry in index:
+        entry.pop("state"), entry.pop("state_at")  # an index written by an older version
+    A._index_path().write_text(json.dumps(index), "utf-8")
+    assert A.account_state(h, e) == "active" and A.list_accounts()[0]["state"] == "active" and A.account_known(h, e) is True
+    with pytest.raises(ApplyError):
+        A.set_state(h, e, "weird")
+    assert A.set_state("unknown.example.test", e, "active") is False
+
+
+def test_export_and_import_keep_the_state(mem, monkeypatch, tmp_path):
+    A.create_password("jobs.lever.co", "camille@example.test")  # pending
+    A.create_password("boards.greenhouse.io", "camille@example.test")
+    A.set_state("boards.greenhouse.io", "camille@example.test", "active")
+    out = tmp_path / "export.json"
+    A.export_accounts(out)
+    A._index_path().unlink()
+    mem.items.clear()
+    assert A.import_accounts(out) == (2, 0)
+    assert {r["host"]: r["state"] for r in A.list_accounts()} == {"jobs.lever.co": "pending", "boards.greenhouse.io": "active"}
+    old = json.loads(out.read_text("utf-8"))
+    for a in old["accounts"]:
+        a.pop("state")  # an export from before states existed
+    out.write_text(json.dumps(old), "utf-8")
+    A._index_path().unlink()
+    mem.items.clear()
+    A.import_accounts(out)
+    assert {r["state"] for r in A.list_accounts()} == {"active"}
+
+
+def test_accounts_command_shows_the_state(mem):
+    A.create_password("jobs.lever.co", "camille@example.test")
+    A.create_password("boards.greenhouse.io", "camille@example.test")
+    A.set_state("boards.greenhouse.io", "camille@example.test", "active")
+    r = CliRunner().invoke(app, ["apply", "accounts"])
+    assert r.exit_code == 0 and "état" in r.output and "en attente" in r.output and "actif" in r.output

@@ -71,6 +71,20 @@ Known facts that answer hard-fact questions (cite them, never guess when they ar
 `needs_visa_sponsorship`, `vehicle`, `criminal_record`, `notice_period`, `current_salary`.
 A CAPTCHA / security-check widget ("Contrôle de sécurité", "cliquez ici pour vérifier", "I am not a robot", an image code) is for a human:
 never try to click or type into a CAPTCHA, classify the page `captcha`.
+Account pages: ANY field of kind `password` is `account_password` (confirmation fields too, in any language: "Kennwort", "bestätigen",
+"répéter"...). The facts list carries `account_exists` ("oui"/"non": does an account already exist on THIS site for the candidate).
+On `account_login` with `account_exists` = non: do NOT fill the login form; click the link / button that leads to account creation
+("Créer un compte", "S'inscrire", "Nouveau candidat", "Pas encore de compte", "Create account", "Sign up", "Register", "Konto erstellen",
+"Registrieren"; click_role `open_form`); only when there is no such control, fill the login form anyway. On `account_signup` fill the
+account e-mail, password, confirmation, required consents and the names if asked, then click the signup button. With `account_exists`
+= oui: log in.
+A styled upload button ("CHOISIR UN FICHIER", "Parcourir") that is the only control of the file field: use `upload_cv` on it. A button
+"Ajouter" / "Joindre" / "Téléverser" next to a file input that already holds the file only attaches it: click it (role `next`), it does
+not send anything.
+A phone dial-code selector ("Indicatif de pays", "Country code", "+33") is NOT a question and NOT a hard fact: choose the option whose
+code is the candidate's phone code (+33 -> "France (+33)"), citing the `phone` fact. A "pays de résidence" select is a hard fact.
+If the page is not the employer's posting at all (a job-app aggregator, an app-store / app-only page, no way to apply), classify it
+`other` and say so in `note` ("agrégateur", "App Store / Google Play").
 Keep `note` short. If nothing can be done on the page, return no action.
 Extra rules:
 - Facts whose key starts with `custom_` are the candidate's OWN explicit answers to a specific question (the fact label is the

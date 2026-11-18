@@ -41,8 +41,8 @@
 <form method="post" action="/profiles/{{ profile.id }}/answers" class="stack">
 {% if pending %}
 <section class="panel" id="pending">
-  <div class="panel-head plain"><h2>Questions en attente <span class="count">{{ pending|length }}</span></h2></div>
-  <p class="muted small">Ces questions ont arrêté un envoi. Vos réponses sont gardées pour tous les prochains formulaires.</p>
+  <div class="panel-head plain"><h2>Questions les plus fréquentes <span class="count">{{ pending|length }}</span></h2></div>
+  <p class="muted small">Ces questions ont arrêté des envois, les plus fréquentes d'abord : y répondre en premier débloque le plus de candidatures. Vos réponses sont gardées pour tous les prochains formulaires.</p>
   <div class="form">
     {% for p in pending %}
     <label>{{ p.q.label }}
@@ -50,7 +50,8 @@
       {% if p.q.options %}
       <select name="pqa_{{ p.i }}"><option value="">Choisir…</option>{% for o in p.q.options %}<option>{{ o }}</option>{% endfor %}</select>
       {% else %}<input name="pqa_{{ p.i }}" maxlength="500">{% endif %}
-      <small>{{ p.app.company or 'Entreprise non précisée' }} · {{ p.app.job_title or '' }}</small></label>
+      <small><span class="tag warn">{{ p.count }} candidature{{ 's' if p.count > 1 }} bloquée{{ 's' if p.count > 1 }}</span>
+        {{ p.app.company or 'Entreprise non précisée' }} · {{ p.app.job_title or '' }}</small></label>
     {% endfor %}
   </div>
 </section>

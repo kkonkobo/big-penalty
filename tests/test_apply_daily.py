@@ -391,7 +391,8 @@ async def test_progress_lines_are_numbered_and_the_counts_close_the_pass(env, pr
     assert by["Société 1"].endswith(": envoyée") and "en pause (" in by["Société 2"] and "échec (msg)" in by["Société 4"]
     assert "à vérifier (envoi non confirmé : msg)" in by["Société 5"]
     assert (s.sent, s.paused, s.failed, s.to_check) == (2, 1, 1, 1)
-    assert lines[-1].startswith("Passe terminée : 2 envoyée(s), 1 en pause, 1 à vérifier, 0 à corriger")
+    assert any(line.startswith("Passe terminée : 2 envoyée(s), 1 en pause, 1 à vérifier, 0 à corriger") for line in lines)
+    assert "Détail : 2 envoyée(s) · 1 en pause (question 1) · 1 à vérifier · 0 à corriger · 0 bloquée(s) · 1 échec(s) technique(s)" in lines
 
 
 async def test_the_pass_blocked_by_a_problem_names_the_reason(env, profile, monkeypatch):
@@ -445,3 +446,171 @@ def test_apply_auto_command_passes_its_options(profile, monkeypatch):
     assert r.exit_code != 0
     assert CliRunner().invoke(cli, ["apply", "auto", "999"]).exit_code != 0
     assert CliRunner().invoke(cli, ["apply", "auto", str(profile.id), "--limit", "0"]).exit_code != 0
+
+
+# ------------------------------------------------------------------ batch fixes: retry / resume policy, breakdown
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+from jobhunt.apply import facts  # noqa: E402
+from jobhunt.apply.types import Question  # noqa: E402
+
+
+def paused_run(env, job, status, *, questions=(), message="", age=timedelta(0), rev=1):
+    """An approved application of `job` whose last run ended `status` `age` ago."""
+    app = store.find_application(env.profile.id, job.id) or cvs.approve(env.draft(job).id, 1)
+    r = astore.start_run(app.id, rev, "submit", "auto", lambda rid: env.tmp / "runs" / str(rid))
+    done = astore.finish_run(r.id, RunResult(status=status, message=message, questions=list(questions)))
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET finished_at=? WHERE id=?", (db._iso(datetime.now(UTC) - age), done.id))
+    return app
+
+
+async def test_a_paused_run_whose_questions_are_all_answered_is_resumed(env, profile):
+    job = env.job(1)
+    paused_run(env, job, "needs_input", questions=[Question(label="Date de naissance ?"), Question(label="Permis B ?")],
+               age=-timedelta(minutes=5))  # finished "after" any answers file written now: only the answers themselves count
+    s, lines = await daily(profile)
+    assert not env.runs and s.paused == 1  # nothing answered yet
+    facts.save_custom_answers(profile.id, [("date de naissance", "4 mars 1999")])
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1  # only one of the two
+    facts.save_custom_answers(profile.id, [("Permis B ?", "Oui")])
+    s, lines = await daily(profile)
+    assert len(env.runs) == 1 and s.sent == 1 and any("envoyée" in line for line in lines)
+
+
+async def test_a_paused_run_is_resumed_when_the_answers_file_changed_since(env, profile):
+    job = env.job(1)
+    paused_run(env, job, "needs_input", questions=[Question(label="Nationalité ?")], age=timedelta(minutes=5))
+    facts.save_answers(profile.id, {"nationality": "Française"})  # written AFTER the run finished
+    s, _ = await daily(profile)
+    assert len(env.runs) == 1 and s.sent == 1
+
+
+async def test_the_answers_file_older_than_the_pause_does_not_resume_it(env, profile):
+    job = env.job(1)
+    facts.save_answers(profile.id, {"nationality": "Française"})
+    paused_run(env, job, "needs_input", questions=[Question(label="Nationalité ?")], age=timedelta(0))
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET finished_at=?", (db._iso(datetime.now(UTC) + timedelta(minutes=1)),))
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1
+
+
+async def test_an_email_pause_is_resumed_after_30_minutes_at_most_twice(env, profile):
+    job = env.job(1)
+    env.run_status = "needs_email"  # every resume pauses again on the same e-mail verification
+    app = paused_run(env, job, "needs_email", age=timedelta(minutes=5))
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1  # too early: the candidate may not have clicked yet
+
+    def age_last(minutes):
+        with db.connect() as c:
+            c.execute("UPDATE application_runs SET finished_at=? WHERE id=(SELECT MAX(id) FROM application_runs WHERE application_id=?)",
+                      (db._iso(datetime.now(UTC) - timedelta(minutes=minutes)), app.id))
+
+    for resume in (1, 2):
+        age_last(45)
+        s, _ = await daily(profile)
+        assert len(env.runs) == resume, resume  # resumed once the link had time to be clicked
+    age_last(45)
+    s, _ = await daily(profile)
+    assert len(env.runs) == 2 and s.paused == 1  # two resumes spent: it waits for the user for good
+
+
+async def test_a_captcha_pause_waits_for_an_attended_visible_pass(env, profile):
+    job = env.job(1)
+    paused_run(env, job, "needs_human", message="CAPTCHA")
+    for kw in ({}, {"headless": False}, {"attended": True}):
+        s, _ = await daily(profile, **kw)
+        assert not env.runs and s.paused == 1, kw  # unattended, or visible but nobody there: never retried
+    s, _ = await daily(profile, headless=False, attended=True)
+    assert len(env.runs) == 1 and env.runs[0][1]["attended"] is True
+
+
+async def test_a_technical_failure_without_a_click_is_retried_twice_per_revision(env, profile):
+    job = env.job(1)
+    env.run_status = "failed"
+    for attempt in (1, 2):
+        s, _ = await daily(profile)
+        assert len(env.runs) == attempt and s.failed == 1
+    s, lines = await daily(profile)
+    assert len(env.runs) == 2 and s.failed == 1 and any("deux essais ont déjà échoué" in line for line in lines)
+
+
+async def test_a_blocked_unusable_link_run_never_counts_as_a_failed_attempt(env, profile):
+    job = env.job(1)
+    app = cvs.approve(env.draft(job).id, 1)
+    for _ in range(3):
+        r = astore.start_run(app.id, 1, "submit", "auto", lambda rid: env.tmp / "runs" / str(rid))
+        astore.finish_run(r.id, RunResult(status="blocked", message="Lien de l'offre inexploitable : page vide"))
+    s, _ = await daily(profile)
+    assert len(env.runs) == 1 and s.sent == 1
+
+
+async def test_an_application_already_resumed_and_sent_by_someone_else_is_skipped(env, profile, monkeypatch):
+    job = env.job(1)
+    app = paused_run(env, job, "needs_input", questions=[Question(label="Q ?")])
+    facts.save_custom_answers(profile.id, [("Q ?", "R")])
+    candidates = policy.auto_candidates
+
+    def after_listing(pid, now=None):
+        found = candidates(pid, now)
+        cvs_sent(app)  # sent by someone else AFTER the pass listed its candidates
+        return found
+
+    monkeypatch.setattr(policy, "auto_candidates", after_listing)
+    s, lines = await daily(profile)
+    assert not env.runs and s.sent == 0 and any("déjà traitée par ailleurs" in line for line in lines)
+
+
+def cvs_sent(app):
+    """Another process (the web portal) resumed and sent it between the candidate list and its turn."""
+    store.mark_submitted(app.id, 1)
+
+
+async def test_an_application_being_resumed_elsewhere_is_left_alone(env, profile, monkeypatch):
+    job = env.job(1)
+    app = cvs.approve(env.draft(job).id, 1)
+    r = astore.start_run(app.id, 1, "submit", "user", lambda rid: env.tmp / "runs" / str(rid))  # running, our own pid is alive
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET pid=? WHERE id=?", (1, r.id))  # pid 1 = a live process that is not us
+    s, lines = await daily(profile)
+    assert not env.runs and s.sent == 0 and s.waiting == 1 and any("déjà en cours" in line for line in lines)
+
+
+async def test_the_summary_breaks_down_pauses_and_lists_the_most_frequent_questions(env, profile, monkeypatch):
+    jobs = [env.job(n, 100 - n) for n in range(1, 6)]
+    plan = {jobs[0].id: ("needs_input", [Question(label="Date de naissance ?"), Question(label="Permis B ?")]),
+            jobs[1].id: ("needs_input", [Question(label="Date de naissance ?")]),
+            jobs[2].id: ("needs_email", []), jobs[3].id: ("needs_human", []), jobs[4].id: ("submitted", [])}
+    original = env.run
+
+    async def run(app_id, **kw):
+        status, questions = plan[store.get_application(app_id).job_id]
+        env.run_status = status
+        res = await original(app_id, **kw)
+        if questions:
+            with db.connect() as c:
+                c.execute("UPDATE application_runs SET result_json=? WHERE id=?",
+                          (RunResult(status=status, questions=questions).model_dump_json(), res.id))
+            res = astore.get_run(res.id)
+        return res
+
+    monkeypatch.setattr(service, "run", run)
+    s, lines = await daily(profile)
+    assert s.paused_by == {"question": 2, "e-mail": 1, "CAPTCHA": 1} and s.sent == 1
+    assert s.top_questions() == [("date de naissance", 2), ("permis b", 1)]
+    assert "Détail : 1 envoyée(s) · 4 en pause (CAPTCHA 1, e-mail 1, question 2)" in " ".join(lines)
+    i = lines.index("Questions les plus fréquentes (à renseigner d'abord sur la page « Réponses aux formulaires ») :")
+    assert lines[i + 1:i + 3] == ["  1. date de naissance (×2)", "  2. permis b (×1)"]
+
+
+def test_pause_reason_labels():
+    from jobhunt.apply.store import ApplyRun
+    base = dict(id=1, application_id=1, rev=1, mode="submit", trigger="auto", started_at=datetime.now(UTC))
+    assert service.pause_reason_label(ApplyRun(**base, status="needs_input")) == "question"
+    assert service.pause_reason_label(ApplyRun(**base, status="needs_email")) == "e-mail"
+    assert service.pause_reason_label(ApplyRun(**base, status="needs_human", message="Un CAPTCHA")) == "CAPTCHA"
+    assert service.pause_reason_label(ApplyRun(**base, status="needs_human", message="Création de compte impossible")) == "compte"
+    assert service.pause_reason_label(ApplyRun(**base, status="blocked", result=RunResult(status="blocked", untrusted_host="x.test"))) == "site non approuvé"

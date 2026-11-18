@@ -1155,3 +1155,125 @@ async def test_captcha_wait_for_the_automatic_trigger_needs_an_attended_visible_
     calls = stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
     await service.run(app.id, mode="dry_run", trigger=trigger, pool=FakePool(), headless=headless, attended=attended)
     assert calls[0]["captcha_wait_s"] == wait
+
+
+# ------------------------------------------------------------------ batch fixes: accounts, unusable link, resolve-many
+_REAL = {n: getattr(accounts, n) for n in ("create_password", "get_password", "account_known")}
+
+
+class _Mem:
+    name = "mémoire"
+
+    def __init__(self):
+        self.items = {}
+
+    def get(self, service_, account):
+        return self.items.get((service_, account))
+
+    def set(self, service_, account, password, label):
+        self.items[(service_, account)] = password
+
+    def delete(self, service_, account):
+        self.items.pop((service_, account), None)
+
+
+@pytest.fixture
+def real_accounts(monkeypatch):
+    """The real accounts module on an in-memory credential store (the file's autouse fixture stubs the keychain out)."""
+    mem = _Mem()
+    monkeypatch.setattr(accounts, "_backend_override", mem)
+    for name, fn in _REAL.items():
+        monkeypatch.setattr(accounts, name, fn)
+    return mem
+
+
+def _steps(*kinds):
+    return [StepLog(index=i, url="https://x.test", page_kind=k) for i, k in enumerate(kinds, 1)]
+
+
+async def _signup_run(profile, master, tmp_path, monkeypatch, result, *, n=1):
+    _, app = new_app(profile, master, tmp_path, n, approve=True)
+    seen = {}
+
+    async def hook(kw):
+        seen["known_before"] = kw["account_known"]("jobs.exemple.test")
+        seen["pw"] = kw["password"]("jobs.exemple.test")
+        seen["known_after_create"] = kw["account_known"]("jobs.exemple.test")
+
+    stub_engine(monkeypatch, result, hook=hook)
+    await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
+    return seen
+
+
+async def test_a_signup_that_never_got_past_the_account_page_stays_unknown(profile, master, tmp_path, monkeypatch, real_accounts):
+    result = RunResult(status="failed", message="x", steps=_steps("job_page", "account_signup"))
+    seen = await _signup_run(profile, master, tmp_path, monkeypatch, result)
+    assert seen["known_before"] is False and seen["pw"] and seen["known_after_create"] is False  # created, but pending
+    [row] = accounts.list_accounts()
+    assert row["host"] == "jobs.exemple.test" and row["state"] == "pending"
+    again = await _signup_run(profile, master, tmp_path, monkeypatch, result, n=2)
+    assert again["known_before"] is False  # a failed signup is not mistaken for an existing account
+
+
+@pytest.mark.parametrize("steps, status", [(("job_page", "account_signup", "form"), "ready"),
+                                           (("account_login", "confirmation"), "ready"), (("account_signup",), "needs_email")])
+async def test_an_account_becomes_active_once_the_run_got_past_the_account_pages(profile, master, tmp_path, monkeypatch, real_accounts,
+                                                                              steps, status):
+    await _signup_run(profile, master, tmp_path, monkeypatch, RunResult(status=status, message="x", steps=_steps(*steps)))
+    assert [r["state"] for r in accounts.list_accounts()] == ["active"]
+    again = await _signup_run(profile, master, tmp_path, monkeypatch, RunResult(status="ready", steps=_steps("form")), n=2)
+    assert again["known_before"] is True  # the next run logs in instead of signing up
+
+
+async def test_account_known_gets_the_same_account_email_as_the_password(profile, master, tmp_path, monkeypatch):
+    _, app = new_app(profile, master, tmp_path, approve=True)
+    asked = []
+    monkeypatch.setattr(accounts, "account_known", lambda host, email: asked.append((host, email)) or True)
+    monkeypatch.setattr(accounts, "create_password", lambda host, email: asked.append(("pw", host, email)) or "Pw")
+
+    async def hook(kw):
+        kw["password"]("a.exemple.test")
+        assert kw["account_known"]("a.exemple.test") is True
+
+    stub_engine(monkeypatch, RunResult(status="ready"), hook=hook)
+    await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
+    assert asked[0][0] == "pw" and asked[0][2] == asked[1][1] and asked[1][0] == "a.exemple.test"
+
+
+async def test_an_unusable_link_is_forgotten_and_the_run_is_not_a_failed_attempt(profile, master, tmp_path, monkeypatch):
+    job, app = new_app(profile, master, tmp_path, approve=True, url="https://gozapp.exemple.test/offre/1")
+    with db.connect() as c:
+        c.execute("UPDATE jobs SET origin_ats='x', origin_confidence=0.9 WHERE id=?", (job.id,))
+    stub_engine(monkeypatch, RunResult(status="blocked", message="Lien de l'offre inexploitable : page de redirection"))
+    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    assert r.status == "blocked"
+    live = db.get_job(job.id)
+    assert live.origin_url is None and live.origin_ats is None and live.origin_confidence is None
+    assert live.extra["bad_origin_url"] == "https://gozapp.exemple.test/offre/1"
+    assert store.get_application(app.id).status == "approved" and not astore.active_reservations(profile.id)
+    assert not any(x.status == "failed" for x in astore.list_runs(app.id))
+    again = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())  # no link any more: refused, nothing opened
+    assert again.status == "blocked" and "pas de lien" in again.message
+
+
+async def test_other_blocked_messages_keep_the_link(profile, master, tmp_path, monkeypatch):
+    job, app = new_app(profile, master, tmp_path, approve=True)
+    stub_engine(monkeypatch, RunResult(status="blocked", message="Formulaire hébergé ailleurs"))
+    await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
+    assert db.get_job(job.id).origin_url == job.origin_url and "bad_origin_url" not in db.get_job(job.id).extra
+
+
+def test_cli_resolve_many(profile, master, tmp_path):
+    from typer.testing import CliRunner
+
+    from jobhunt.cli import app as cli
+
+    ids = [failed_after_click(profile, master, tmp_path, n)[1].id for n in (1, 2, 3)]
+    _, ok = new_app(profile, master, tmp_path, 4, approve=True)  # not failed: refused
+    r = CliRunner().invoke(cli, ["apply", "resolve-many", "--not-sent", str(ids[0]), str(ids[1]), str(ok.id)])
+    assert r.exit_code == 1 and "2 candidature(s) remise(s) en file (non envoyées), 1 refusée(s)" in r.output and "pas en échec" in r.output
+    assert [store.get_application(i).status for i in ids] == ["draft", "draft", "failed"]
+    r = CliRunner().invoke(cli, ["apply", "resolve-many", "--sent", str(ids[2]), str(ids[2])])  # duplicates counted once
+    assert r.exit_code == 0 and "1 candidature(s) marquée(s) comme envoyée(s)." in r.output
+    assert store.get_application(ids[2]).status == "submitted"
+    assert CliRunner().invoke(cli, ["apply", "resolve-many", "--sent"]).exit_code != 0

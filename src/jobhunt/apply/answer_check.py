@@ -81,6 +81,9 @@ _LEGAL_RE = re.compile(
     r"\bsanction disciplinaire\b|\bbackground check|\bnon compete\b|\bclause de non concurrence\b|\bconflict of interest\b|"
     r"\bconflits? d interets?\b|\blie a (?:un|une) (?:employ|salari)|\brelative (?:who )?works?\b|\bparente avec\b|"
     r"\bhabilitation\b|\bclearance\b|\bsecret defense\b|\bnotice period\b|\bpreavis\b|"
+    # degree dates are hard facts (the CV policy: degrees and dates stay true): never deduced
+    r"\bgraduat(e|ion|ing)\b.{0,25}\b(date|year|when)\b|\b(date|year|when)\b.{0,25}\bgraduat|"
+    r"\b(date|annee)\b.{0,25}\b(diplome|obtention|fin d'etudes|fin de (cursus|formation|scolarite))\b|\bend of (your )?studies\b|"
     r"\bvehicul|\bvehicle|\bvoitures?\b|\bcars?\b|\bautomobiles?\b|\bmotos?\b|\bmotorbikes?\b|\bscooters?\b|\bdeux roues\b|\bmotorise|"
     r"\bmoyens? de (?:transport|locomotion)\b|\bmeans of transport\b|\bown transport\b|\btransport personnel\b|"
     r"\bmoyens? de deplacements?\b|\bpropres? (?:vehicule|moyen)|\bown (?:transport|transportation|means)\b|\bpersonal (?:vehicle|transport)|"

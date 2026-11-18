@@ -152,6 +152,10 @@ ANSWER_FIELDS: tuple[AnswerField, ...] = (
        options=("", "Non", "Oui (RQTH)", "Ne souhaite pas répondre"), section=S_ADMIN),
     _F(path="criminal_record", label="Casier judiciaire", widget="select",
        options=("", "Casier judiciaire vierge", "Ne souhaite pas répondre"), section=S_ADMIN),
+    _F(path="graduation_date", label="Date d'obtention du diplôme (prévue)", widget="date", section=S_AVAIL,
+       help="Fin prévue du cursus en cours ; beaucoup de formulaires la demandent."),
+    _F(path="internship_agreement", label="L'école fournit une convention de stage", widget="select",
+       options=("", "Oui", "Non"), section=S_AVAIL),
     _F(path="stage.available_from", label="Début de stage possible à partir du", widget="date", section=S_AVAIL),
     _F(path="stage.duration", label="Durée du stage", section=S_AVAIL, placeholder="6 mois"),
     _F(path="alternance.start", label="Début d'alternance", widget="date", section=S_AVAIL),
@@ -348,7 +352,7 @@ LABEL_RE: dict[str, str] = {
     "email": _label_re("mail|courriel"),
     "phone": _label_re(r"(?<![a-z])tel(?![a-z])|telephone|phone|mobile|portable|(?<![a-z])gsm"),
     "linkedin": _label_re("linkedin"),
-    "account_password": _label_re("mot de passe|password|passwort|mdp"),
+    "account_password": _label_re("mot de passe|password|passwort|mdp|kennwort|contrase[nñ]a|senha|wachtwoord|has[lł]o|parola|密码"),
 }
 LABEL_RE["account_email"] = LABEL_RE["email"]
 
@@ -440,7 +444,9 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
                        ("birth_place", "Lieu de naissance"), ("department", "Département de résidence"),
                        ("needs_visa_sponsorship", "Besoin d'un visa ou d'un permis de travail (sponsoring)"),
                        ("vehicle", "Véhicule personnel"), ("criminal_record", "Casier judiciaire (déclaration)"),
-                       ("notice_period", "Préavis"), ("current_salary", "Rémunération actuelle")):
+                       ("notice_period", "Préavis"), ("current_salary", "Rémunération actuelle"),
+                       ("graduation_date", "Date d'obtention du diplôme en cours (prévue) / graduation date"),
+                       ("internship_agreement", "L'école fournit une convention de stage (internship agreement)")):
         add(key, label, answers.get(key))
     add("work_authorization", "Autorisation de travail / situation administrative en France", answers.get("work_authorization"))
     add("mobility", "Mobilité géographique", answers.get("mobility"))

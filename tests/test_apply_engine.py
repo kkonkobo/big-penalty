@@ -1354,11 +1354,11 @@ async def test_upload_gets_its_own_step_then_the_page_is_read_again(page, server
 PREFILLED_FORMS = {
     "input_value": '<form method="post" action="/apply"><label for=a>Prénom</label><input id=a name=first_name value="Camille">'
                    '<button type="submit">Continuer</button></form>',
-    "textarea": '<form method="post" action="/apply"><label for=a>Message</label><textarea id=a name=msg>Bonjour</textarea>'
+    "textarea": '<form method="post" action="/apply"><label for=a>Message</label><textarea id=a name=msg>Bonjour, je suis Camille Durand</textarea>'
                 '<input type="submit" value="Continuer"></form>',
     "button_outside_form": '<form id="f" method="post" action="/apply"><label for=a>Prénom</label><input id=a name=first_name value="Camille"></form>'
                            '<button form="f">Continuer</button>',
-    "untyped_button": '<form method="post" action="/apply"><label for=a>E-mail</label><input id=a type=email name=email value="c@example.test">'
+    "untyped_button": '<form method="post" action="/apply"><label for=a>E-mail</label><input id=a type=email name=email value="camille@example.test">'
                       '<button>Continuer</button></form>',
 }
 
@@ -1893,13 +1893,13 @@ async def test_captcha_wait_gives_up_when_the_captcha_stays(page, server, fast, 
 # ------------------------------------------------------------------ 1. "the page holds candidate data" does not depend on a native <form> submit
 POST_JS = "fetch('/apply',{method:'POST',body:'x'})"
 JS_DRAFTS = {
-    "request_submit": ('<form id=f method="post" action="/apply"><label for=a>E-mail</label><input id=a type=email name=email value="c@example.test">'
+    "request_submit": ('<form id=f method="post" action="/apply"><label for=a>E-mail</label><input id=a type=email name=email value="camille@example.test">'
                        '<button type="button" onclick="document.getElementById(\'f\').requestSubmit()">Continuer</button></form>'),
-    "div_form_button": ('<div><label for=a>E-mail</label><input id=a type=email name=email value="c@example.test">'
+    "div_form_button": ('<div><label for=a>E-mail</label><input id=a type=email name=email value="camille@example.test">'
                         f'<button type="button" onclick="{POST_JS}">Continuer</button></div>'),
     "div_role_button": ('<div><label for=a>Téléphone</label><input id=a type=tel name=tel value="0600000000">'
                         f'<div role="button" onclick="{POST_JS}">Continuer</div></div>'),
-    "textarea_and_link": ('<div><label for=a>Message</label><textarea id=a name=msg>Bonjour</textarea>'
+    "textarea_and_link": ('<div><label for=a>Message</label><textarea id=a name=msg>Bonjour, je suis Camille Durand</textarea>'
                           f'<a class="btn" href="#" onclick="{POST_JS};return false">Continuer</a></div>'),
 }
 
@@ -2538,3 +2538,222 @@ async def test_a_solved_icon_captcha_lets_the_run_continue(page, server, fast, c
     planner = ScriptedPlanner([StepPlan(page_kind="closed")])
     res = await go(page, server, planner, tmp_path, cv_pdf, start="iconcaptcha_solved")
     assert res.status == "blocked" and len(planner.calls) == 1
+
+
+async def test_a_filter_value_on_the_ad_page_does_not_make_postuler_a_send(page, server, fast, cv_pdf, tmp_path):
+    """Real-site case: an ad page with a location box saying "France" (not the candidate's data). "Postuler" only opens
+    the form: it must be clicked as open_form, never gated/recorded as a possible send."""
+    calls: list[str] = []
+
+    async def gate():
+        calls.append("gate")
+        return []
+
+    async def on_submit():
+        calls.append("submit")
+
+    async def on_nav():
+        calls.append("nav")
+
+    await serve(page, "adpage", '<div><label for=loc>Lieu</label><input id=loc name=lieu value="France">'
+                                '<label for=kw>Métier</label><input id=kw name=metier value="ingénieur"></div>'
+                                '<a id=go href="/form">Postuler</a>')
+    def plan(snap):
+        return StepPlan(page_kind="job_page", actions=[act(snap, r"^Postuler$", "click", role="open_form")])
+    res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="form")]), tmp_path, cv_pdf, mode="submit",
+                   start="adpage", before_submit=gate, on_submit_click=on_submit, on_nav_click=on_nav, max_steps=2)
+    assert res.steps[0].clicked == "Postuler" and calls == [] and res.submit_clicked is False
+
+
+# ================================================================== first real automatic batch
+FILTERED_AD = ('<div><label for=loc>Lieu</label><input id=loc name=lieu value="France"><label for=kw>Métier</label><input id=kw name=metier value="ingénieur"></div>'
+               '<div id=bn><button type="button" onclick="document.getElementById(\'bn\').remove()">Tout refuser</button></div>'
+               '<a id=go href="/form">Postuler</a>')
+
+
+async def test_a_cookie_banner_on_an_ad_page_with_filter_values_is_a_plain_click(page, server, fast, cv_pdf, tmp_path):
+    calls: list[str] = []
+
+    async def gate():
+        calls.append("gate")
+        return []
+
+    async def on_nav():
+        calls.append("nav")
+
+    async def on_submit():
+        calls.append("submit")
+    await serve(page, "adpage2", FILTERED_AD)
+    plan = lambda snap: StepPlan(page_kind="job_page", actions=[act(snap, r"Tout refuser", "click", role="cookies")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="form")]), tmp_path, cv_pdf, mode="submit", start="adpage2",
+                   before_submit=gate, on_submit_click=on_submit, on_nav_click=on_nav, max_steps=2)
+    assert res.steps[0].clicked == "Tout refuser" and calls == [] and res.submit_clicked is False
+
+
+# ------------------------------------------------------------------ 1. password fields whatever the language
+GERMAN_SIGNUP = ('<form method="post" action="/signup"><label for=e>E-Mail-Adresse *</label><input id=e type=email required>'
+                 '<label for=p>Kennwort *</label><input id=p type=password required>'
+                 '<label for=p2>Neues Kennwort bestätigen *</label><input id=p2 type=password required>'
+                 '<button type="submit">Konto erstellen</button></form>')
+
+
+def facts_with_password_label_re():
+    facts = sample_facts()
+    for f in facts.facts:
+        if f.key == "account_password":
+            f.label_re = "mot de passe|password|passwort|mdp"
+    return facts
+
+
+async def test_password_fields_take_the_account_secret_whatever_their_label_and_the_confirmation_too(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "de_signup", GERMAN_SIGNUP)
+    seen = []
+
+    async def nav():
+        seen.append((await page.input_value("#p"), await page.input_value("#p2")))
+    plan = lambda snap: StepPlan(page_kind="account_signup", actions=[act(snap, r"E-Mail", "fill", "account_email"),  # noqa: E731
+                                                                      act(snap, r"^Kennwort", "fill", "account_password"),
+                                                                      act(snap, r"Konto erstellen", "click", role="signup")])
+    res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="email_verification")]), tmp_path, cv_pdf, start="de_signup", mode="submit",
+                   facts=facts_with_password_label_re(), on_nav_click=nav, max_steps=3)
+    assert seen == [(TEST_PASSWORD, TEST_PASSWORD)], res.message
+    assert TEST_PASSWORD not in res.model_dump_json()
+
+
+async def test_the_planner_filling_both_password_fields_works_too(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "de_signup", GERMAN_SIGNUP)
+    seen = []
+
+    async def nav():
+        seen.append((await page.input_value("#p"), await page.input_value("#p2")))
+    plan = lambda snap: StepPlan(page_kind="account_signup", actions=[act(snap, r"E-Mail", "fill", "account_email"),  # noqa: E731
+                                                                      act(snap, r"^Kennwort", "fill", "account_password"),
+                                                                      act(snap, r"bestätigen", "fill", "account_password"),
+                                                                      act(snap, r"Konto erstellen", "click", role="signup")])
+    await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="email_verification")]), tmp_path, cv_pdf, start="de_signup", mode="submit",
+             facts=facts_with_password_label_re(), on_nav_click=nav, max_steps=3)
+    assert seen == [(TEST_PASSWORD, TEST_PASSWORD)]
+
+
+# ------------------------------------------------------------------ 2. login page when no account exists yet
+LOGIN_NO_ACCOUNT = ('<form method="post" action="/login_x"><label for=e>E-mail :</label><input id=e type=email required>'
+                    '<label for=p>Mot de passe :</label><input id=p type=password required><button type="submit">Se connecter</button></form>'
+                    '<a href="/signup">Créer un compte</a>')
+
+
+def account_fact(planner_call):
+    return next((f for f in planner_call["facts"].facts if f.key == "account_exists"), None)
+
+
+@pytest.mark.parametrize("known,expected", [(False, "non"), (True, "oui")])
+async def test_the_planner_is_told_whether_an_account_exists_for_the_host(page, server, fast, cv_pdf, tmp_path, known, expected):
+    await serve(page, "login_na", LOGIN_NO_ACCOUNT)
+    hosts = []
+
+    def account_known(host):
+        hosts.append(host)
+        return known
+    planner = ScriptedPlanner([StepPlan(page_kind="other")])
+    await go(page, server, planner, tmp_path, cv_pdf, start="login_na", account_known=account_known, max_steps=1)
+    assert account_fact(planner.calls[0]).value == expected and hosts and hosts[0] == "127.0.0.1"
+    planner = ScriptedPlanner([StepPlan(page_kind="other")])
+    await go(page, server, planner, tmp_path, cv_pdf, start="login_na", max_steps=1)
+    assert account_fact(planner.calls[0]) is None
+
+
+async def test_going_to_account_creation_from_a_login_page_is_not_an_unanswered_question(page, server, fast, cv_pdf, tmp_path, mode="submit"):
+    await serve(page, "login_na", LOGIN_NO_ACCOUNT)
+    plan = lambda snap: StepPlan(page_kind="account_login", actions=[act(snap, r"Créer un compte", "click", role="signup")])  # noqa: E731
+    planner = ScriptedPlanner([plan, StepPlan(page_kind="email_verification")])
+    res = await go(page, server, planner, tmp_path, cv_pdf, start="login_na", mode=mode, account_known=lambda h: False, max_steps=3)
+    assert res.steps[0].clicked == "Créer un compte" and res.status == "needs_email" and not res.submit_clicked and not server.posts
+    assert page.url.endswith("/signup")
+
+
+async def test_a_failed_login_on_a_site_without_known_account_asks_for_the_account(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "login_only", '<div id=m></div><form onsubmit="event.preventDefault();document.getElementById(\'m\').innerHTML=\'<div role=alert>Identifiants incorrects</div>\'">'
+                                    '<label for=e>E-mail :</label><input id=e type=email required><label for=p>Mot de passe :</label>'
+                                    '<input id=p type=password required><button type="submit">Se connecter</button></form>')
+    plan = lambda snap: StepPlan(page_kind="account_login", actions=[act(snap, r"E-mail", "fill", "account_email"),  # noqa: E731
+                                                                     act(snap, r"Mot de passe", "fill", "account_password"),
+                                                                     act(snap, r"Se connecter", "click", role="login")])
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="login_only", mode="submit", account_known=lambda h: False, max_steps=4)
+    assert res.status == "needs_input" and any("Compte requis sur 127.0.0.1" in q.label for q in res.questions) and not res.submit_clicked
+
+
+# ------------------------------------------------------------------ 3. a styled upload button
+async def test_a_file_chooser_button_without_a_reachable_input_uploads_through_the_chooser(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "chooser", '<form><h3>CV</h3><button type=button onclick="var i=document.createElement(\'input\');i.type=\'file\';'
+                                 'i.onchange=()=>{document.body.dataset.f=i.files[0].name};i.click()">CHOISIR UN FICHIER</button>'
+                                 '<button type="submit">Suivant</button></form>')
+    plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"CHOISIR UN FICHIER", "upload_cv")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="chooser", max_steps=1)
+    assert await page.evaluate("document.body.dataset.f") == cv_pdf.name and res.steps[0].filled and res.steps[0].filled[0].value == cv_pdf.name
+
+
+async def test_no_file_chooser_means_a_question_and_the_click_is_not_repeated(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "nochooser", '<form><h3>CV</h3><label>Joindre *</label><button type=button onclick="document.body.dataset.n=(+document.body.dataset.n||0)+1">'
+                                   'CHOISIR UN FICHIER</button><button type="submit">Suivant</button></form>')
+    plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"CHOISIR UN FICHIER", "upload_cv"), act(snap, r"Suivant", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="nochooser", max_steps=2)
+    assert await page.evaluate("document.body.dataset.n") == "1" and res.status in ("needs_input", "ready")
+
+
+async def test_the_same_click_with_the_same_error_on_the_same_page_stops_the_run_with_a_question(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "gestmax", '<form onsubmit="return false"><label for=cv>CV</label><input type=file id=cv name=cv><span class="error" id=err style="display:none">CV manquant</span>'
+                                 '<button type="button" onclick="document.body.dataset.n=(+document.body.dataset.n||0)+1;document.getElementById(\'err\').style.display=\'inline\'">SUIVANT</button></form>')
+    plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"SUIVANT", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="gestmax", mode="submit", max_steps=8)
+    assert await page.evaluate("document.body.dataset.n") == "1" and res.status == "needs_input" and not res.submit_clicked
+    assert any("CV" in q.label for q in res.questions) and len(res.steps) <= 3
+
+
+# ------------------------------------------------------------------ 4. "Ajouter" attaches the file, it is not a navigation
+TALENTSOFT = ('<div id=blk><label for=cv>CV</label><input type=file id=cv name=cv>'
+              '<button type="button" onclick="document.getElementById(\'e\').style.display=\'block\'">Ajouter</button>'
+              '<p class="error" id=e style="display:none">Le fichier est invalide</p></div>'
+              '<button type="button">Continuer</button>')
+
+
+async def test_an_attach_button_after_the_file_is_set_is_not_a_possible_send(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "talentsoft", TALENTSOFT)
+    calls: list[str] = []
+
+    async def nav():
+        calls.append("nav")
+
+    async def final():
+        calls.append("final")
+    up = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^CV", "upload_cv", kind="file")])  # noqa: E731
+    add = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Ajouter$", "click", role="next")])  # noqa: E731
+    res = await go(page, server, ScriptedPlanner([up, add, StepPlan(page_kind="form")]), tmp_path, cv_pdf, start="talentsoft", mode="submit",
+                   on_nav_click=nav, on_submit_click=final, max_steps=4)
+    assert res.steps[1].clicked == "Ajouter" and calls == [] and res.status == "needs_input" and not res.submit_clicked
+    assert any(q.label.startswith("CV") for q in res.questions)
+
+
+# ------------------------------------------------------------------ 5. a link that is not the employer's posting
+@pytest.mark.parametrize("kind", ["other", "closed"])
+async def test_an_aggregator_page_is_a_blocked_link_not_a_failure(page, server, fast, cv_pdf, tmp_path, kind):
+    plan = StepPlan(page_kind=kind, note="Page d'un agrégateur d'offres : uniquement des liens App Store / Google Play")
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="job")
+    assert res.status == "blocked" and res.message == "Lien de l'offre inexploitable : 127.0.0.1"
+
+
+# ------------------------------------------------------------------ 6. phone dial-code selector
+DIAL_PAGE = ('<form method="post" action="/apply"><label for=fn>Prénom *</label><input id=fn name=first_name required>'
+             '<label for=d>Indicatif de pays *</label><select id=d name=d required><option value="">Choisir</option>'
+             '<option value="be">Belgique (+32)</option><option value="fr">France (+33)</option><option value="ch">Suisse (+41)</option></select>'
+             '<label for=t>Téléphone *</label><input id=t type=tel name=t>'
+             '<button type="submit">Envoyer ma candidature</button></form>')
+
+
+async def test_the_dial_code_matching_the_phone_is_chosen_and_code_backed(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "dial", DIAL_PAGE)
+    plan = deduce_plan(lambda s: act(s, r"Indicatif", "select", "phone", "France (+33)"), lambda s: act(s, r"Téléphone", "fill", "phone"))
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="dial", verifier=None)
+    assert await page.input_value("#d") == "fr" and not filled_of(res, "Indicatif de pays").inferred
+    # the planner's own value is ignored: the code of the phone decides
+    plan = deduce_plan(lambda s: act(s, r"Indicatif", "select", "phone", "Belgique (+32)"))
+    await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="dial", verifier=None)
+    assert await page.input_value("#d") == "fr"

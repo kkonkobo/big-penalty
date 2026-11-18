@@ -308,13 +308,61 @@ def _load_index() -> list[dict[str, Any]]:
     return data
 
 
-def _index_add(host: str, email: str) -> None:
+STATES = ("pending", "active")
+DEFAULT_STATE = "active"          # an index entry without `state` (older versions, imports) is a working account
+PENDING_GRACE_S = 600             # a signup younger than this is never trusted to exist (the run may still be on that page)
+
+
+def _index_add(host: str, email: str, state: str = DEFAULT_STATE) -> None:
     service = service_name(host)
     entries = _load_index()
     if any(e["service"] == service and e["account"] == email for e in entries):
         return
-    entries.append({"service": service, "account": email, "host": _hostname(host), "label": _label(host), "created_at": _now()})
+    entries.append({"service": service, "account": email, "host": _hostname(host), "label": _label(host), "created_at": _now(),
+                    "state": state, "state_at": _now()})
     _write_json_atomic(_index_path(), entries, private=False)
+
+
+def set_state(host: str, email: str, state: str) -> bool:
+    """Record whether the account really exists on the site: `pending` (password created for a signup that may have failed)
+    or `active` (a run went past the account pages, or the site now waits for the e-mail link). False when the account is
+    not in the index. Unknown states are refused."""
+    if state not in STATES:
+        raise ApplyError("État de compte inconnu")
+    if not _hostname(host):
+        raise ApplyError(_BAD_NAME)
+    service = service_name(host)
+    entries = _load_index()
+    for e in entries:
+        if e["service"] == service and e["account"] == email:
+            if e.get("state", DEFAULT_STATE) != state:
+                e["state"], e["state_at"] = state, _now()
+                _write_json_atomic(_index_path(), entries, private=False)
+            return True
+    return False
+
+
+def account_state(host: str, email: str) -> str | None:
+    """`pending` / `active`, None when the index does not know the account."""
+    service = service_name(host)
+    for e in _load_index():
+        if e["service"] == service and e["account"] == email:
+            return e.get("state") if e.get("state") in STATES else DEFAULT_STATE
+    return None
+
+
+def account_known(host: str, email: str) -> bool:
+    """Does an account really exist on `host` for `email`? A stored password AND state `active`. A `pending` account (its
+    signup was never confirmed by a later page) is not known, so the engine signs up again with the stored password instead of
+    logging in to an account that does not exist. A credential without index entry counts as active (it predates the index).
+    Any error -> False."""
+    try:
+        if get_password(host, email) is None:
+            return False
+        state = account_state(host, email)
+        return state in (None, "active")
+    except ApplyError:
+        return False
 
 
 def _label(host: str) -> str:
@@ -355,20 +403,21 @@ def create_password(host: str, email: str) -> str:
     service = service_name(host)
     existing = backend.get(service, email)
     if existing:
-        _index_add(host, email)
+        _index_add(host, email)  # a credential that was not indexed yet is an older, working one
         return existing
     pw = generate_password()
     backend.set(service, email, pw, _label(host))
     if backend.get(service, email) != pw:
         raise ApplyError("Enregistrement dans le trousseau impossible")
-    _index_add(host, email)
+    _index_add(host, email, "pending")  # until a run gets past the account pages
     return pw
 
 
 def list_accounts() -> list[dict[str, Any]]:
-    """Index entries (no password) plus `stored`: the backend still has a password for it."""
+    """Index entries (no password) plus `stored` (the backend still has a password for it) and `state` (pending / active)."""
     backend = get_backend()
-    return [{**e, "stored": backend.get(e["service"], e["account"]) is not None} for e in _load_index()]
+    return [{**e, "state": e.get("state") if e.get("state") in STATES else DEFAULT_STATE,
+             "stored": backend.get(e["service"], e["account"]) is not None} for e in _load_index()]
 
 
 def delete_account(host: str, email: str) -> None:
@@ -394,7 +443,7 @@ def export_accounts(path: Path, *, overwrite: bool = False) -> int:
         pw = backend.get(e["service"], e["account"])
         if pw:
             out.append({"service": e["service"], "account": e["account"], "host": e.get("host", ""),
-                        "label": e.get("label", ""), "password": pw})
+                        "label": e.get("label", ""), "password": pw, "state": e.get("state", DEFAULT_STATE)})
     _write_json_atomic(path, {"version": EXPORT_VERSION, "exported_at": _now(), "accounts": out})
     return len(out)
 
@@ -417,7 +466,8 @@ def _parse_import(path: Path) -> list[dict[str, str]]:
         if not h or e.get("service") != service_name(h):
             raise bad
         _check_name(h, account)  # same allow-list as create_password
-        entries.append({"host": h, "account": account, "password": pw})
+        entries.append({"host": h, "account": account, "password": pw,
+                        "state": e.get("state") if e.get("state") in STATES else DEFAULT_STATE})
     return entries
 
 
@@ -435,6 +485,6 @@ def import_accounts(path: Path, *, overwrite: bool = False) -> tuple[int, int]:
             continue
         if current != e["password"]:
             backend.set(service, e["account"], e["password"], _label(e["host"]))
-        _index_add(e["host"], e["account"])
+        _index_add(e["host"], e["account"], e["state"])
         imported += 1
     return imported, skipped

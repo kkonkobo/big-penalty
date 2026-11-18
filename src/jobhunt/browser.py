@@ -12,6 +12,7 @@ Design (personal, low-volume use):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
 import os
@@ -137,6 +138,9 @@ class BrowserPool:
                 kwargs["service_workers"] = "block"
             if not headless:
                 kwargs["args"] = list(window_args())
+                # Keep Chrome's own sandbox: without this the driver adds --no-sandbox and every window shows the yellow
+                # "unsupported command-line flag" banner (and runs less safely).
+                kwargs["chromium_sandbox"] = True
             try:
                 ctx = await self._pw.chromium.launch_persistent_context(channel="chrome", **kwargs)
             except Exception as e:  # Chrome not installed -> bundled Chromium
@@ -148,11 +152,26 @@ class BrowserPool:
     @asynccontextmanager
     async def page(self, profile_id: int, site: str, headless: bool | None = None) -> AsyncIterator[Page]:
         ctx = await self.context(profile_id, site, headless)
-        page = await ctx.new_page()
+        # A persistent context starts with one blank tab: use it instead of leaving it behind as an empty window.
+        blank = [p for p in ctx.pages if p.url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")]
+        page = blank[0] if blank else await ctx.new_page()
         try:
             yield page
         finally:
-            await page.close()
+            with contextlib.suppress(Exception):
+                await page.close()
+            if site.startswith(("apply-", "applydry-")):
+                # One application = one window: close the site's browser as soon as its run is over, so a long pass
+                # never piles up windows (cookies and logins stay in the profile folder on disk).
+                await self.close_site(profile_id, site)
+
+    async def close_site(self, profile_id: int, site: str) -> None:
+        """Close the browser window of one (profile, site) and forget it; the next use reopens it from its profile dir."""
+        async with self._lock:
+            ctx = self._contexts.pop((profile_id, site), None)
+        if ctx is not None:
+            with contextlib.suppress(Exception):
+                await ctx.close()
 
     async def goto(self, page: Page, url: str, *, challenge_timeout_s: float = 180, wait_until: str = "domcontentloaded") -> None:
         """Paced navigation + challenge handling. Raises ChallengeRequired if a human didn't clear it."""

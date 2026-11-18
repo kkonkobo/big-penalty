@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Literal
 from urllib.parse import urlparse
@@ -21,6 +23,7 @@ from jobhunt.apply import accounts, policy
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.engine import Letter, Uploads, run_application
 from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.facts import answers_path as facts_answers_path
 from jobhunt.apply.facts import build_facts, custom_answers, load_answers, norm_question, save_custom_answers, trusted_hosts
 from jobhunt.apply.letter import ensure_letter
 from jobhunt.apply.planner import LLMPlanner
@@ -80,7 +83,19 @@ class ApplySummary(BaseModel):
     failed: int = 0
     to_check: int = 0                  # sent attempts left unconfirmed: verify on the company's site
     to_fix: int = 0                    # CV with blocking errors: skipped until corrected
+    paused_by: dict[str, int] = Field(default_factory=dict)   # pause reason (question / e-mail / CAPTCHA / compte / site non approuvé) -> n
+    asked: dict[str, int] = Field(default_factory=dict)       # normalized unknown-question label -> how many paused runs asked it
     errors: list[str] = Field(default_factory=list)
+
+    def top_questions(self, n: int = 10) -> list[tuple[str, int]]:
+        """The `n` most frequent pause questions (normalized label, count), most frequent first."""
+        return sorted(self.asked.items(), key=lambda kv: (-kv[1], kv[0]))[:n]
+
+    def breakdown(self) -> str:
+        """One line the owner can act on: sent, paused by reason, to check, to fix, blocked, technical failures."""
+        paused = f"{self.paused} en pause" + (" (" + ", ".join(f"{k} {v}" for k, v in sorted(self.paused_by.items())) + ")" if self.paused_by else "")
+        return (f"{self.sent} envoyée(s) · {paused} · {self.to_check} à vérifier · {self.to_fix} à corriger · "
+                f"{self.waiting} bloquée(s) · {self.failed} échec(s) technique(s)")
 
 
 BUCKET_ORDER: tuple[str, ...] = ("to_validate", "paused", "sending", "failed", "blocked", "sent")
@@ -302,6 +317,20 @@ def _default_verifier(llm: _Llm):
     return LLMAnswerVerifier(llm.get())
 
 
+def _confirm_accounts(res: RunResult, hosts: set[str], email: str) -> None:
+    """A password created for a signup is `pending` until the run got past the account pages: a later `form` / `confirmation`
+    step, or the site now waiting for the e-mail link (`needs_email`). Only then is the account `active` (known to the engine)."""
+    if not hosts or not email:
+        return
+    kinds = [st.page_kind for st in res.steps]
+    last_account = max((i for i, k in enumerate(kinds) if k in ("account_login", "account_signup")), default=-1)
+    past = last_account >= 0 and any(k in ("form", "confirmation") for k in kinds[last_account + 1:])
+    if past or res.status in ("needs_email", "submitted"):
+        for h in hosts:
+            with contextlib.suppress(ApplyError):
+                accounts.set_state(h, email, "active")
+
+
 async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, headless: bool | None, pool, planner,
                  llm: _Llm, verifier=None, out: list[RunResult] | None = None, attended: bool = False) -> RunResult:
     """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
@@ -319,8 +348,15 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
     account_email = (facts.get("account_email").value if facts.get("account_email") else None) or ""
     challenge: list[bool] = []
 
+    pw_hosts: set[str] = set()  # hosts a password was asked for during this run (account pages)
+
     def password(h: str) -> str:
-        return accounts.create_password(h, account_email)
+        pw_hosts.add(h)
+        return accounts.create_password(h, account_email)  # creates (state `pending`) when there is none: a signup needs it
+
+    def account_known(h: str) -> bool:
+        """Does an account REALLY exist on that host (stored password and state `active`)? Errors -> False."""
+        return accounts.account_known(h, account_email)
 
     async def goto(page, url: str) -> None:
         try:
@@ -379,13 +415,14 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
         res = await run_application(
             page, url=started_origin, facts=facts, planner=planner, uploads=Uploads(cv_pdf=cv_pdf, letter=letter), mode=mode,
             out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)), job_title=job.title, company=job.company or "",
-            password=password, before_submit=before_submit if submit else None,
+            password=password, account_known=account_known, before_submit=before_submit if submit else None,
             on_submit_click=reserve(False) if submit else None, on_nav_click=reserve(True) if submit else None,
             host_allowed=host_allowed, verifier=verifier,
             max_steps=get_settings().apply_max_steps, goto=goto, on_progress=progress if submit else None,
             captcha_wait_s=captcha_wait_s)
         if out is not None:
             out.append(res)
+        _confirm_accounts(res, pw_hosts, account_email)
     if challenge and res.status == "failed":
         res = res.model_copy(update={"status": "needs_human", "message": "Un défi anti-robot doit être résolu à la main."})
     return res
@@ -449,9 +486,29 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
                     await pool.close()
         finally:
             await shared_llm.aclose()
+    if done.status == "blocked" and done.message.startswith(BAD_ORIGIN_PREFIX):
+        _drop_bad_origin(job)
     if reraise is not None:
         raise reraise
     return done
+
+
+BAD_ORIGIN_PREFIX = "Lien de l'offre inexploitable"
+
+
+def _drop_bad_origin(job) -> None:
+    """The engine found the job's link unusable: forget it (kept in `extra["bad_origin_url"]`) so the next origin
+    re-resolution looks for another one. The run is `blocked`, which never counts as a failed attempt."""
+    with db.connect() as c:
+        row = c.execute("SELECT origin_url, extra FROM jobs WHERE id=? AND profile_id=?", (job.id, job.profile_id)).fetchone()
+        if row is None or not row["origin_url"]:
+            return
+        extra = db._json_object(row["extra"])
+        extra["bad_origin_url"] = row["origin_url"]
+        for key in ("origin_fingerprint", "origin_posted_at", "origin_date_checked", "origin_via"):
+            extra.pop(key, None)
+        c.execute("UPDATE jobs SET origin_url=NULL, origin_ats=NULL, origin_confidence=NULL, extra=? WHERE id=? AND profile_id=?",
+                  (json.dumps(extra, ensure_ascii=False), job.id, job.profile_id))
 
 
 def _settle(run_: ApplyRun, job, mode: Mode, result: RunResult, crashed: bool) -> ApplyRun:
@@ -623,30 +680,83 @@ def resumable(profile_id: int) -> list[QueueItem]:
     return [i for i in queue(profile_id) if i.bucket == "paused" and i.pause_reason == "input" and i.last_run is not None]
 
 
+def question_counts(profile_id: int) -> dict[str, int]:
+    """Normalized question label -> how many paused applications (current revision) are waiting for it, answered ones left out."""
+    answered = {norm_question(c["question"]) for c in custom_answers(profile_id)}
+    counts: dict[str, int] = {}
+    for it in resumable(profile_id):
+        for key in dict.fromkeys(norm_question(q.label) for q in it.questions):
+            if key and key not in answered:
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def pending_questions(profile_id: int) -> list[tuple[Application, ApplyRun, Question]]:
     """Questions of the paused `needs_input` runs of the profile (current revision), one per normalized label (the first
-    application that asked it), leaving out those the user already answered in `custom`."""
-    answered = {norm_question(c["question"]) for c in custom_answers(profile_id)}
+    application that asked it), MOST FREQUENT FIRST (ties keep the queue order), leaving out those already answered in `custom`."""
+    counts = question_counts(profile_id)
     seen: set[str] = set()
     out: list[tuple[Application, ApplyRun, Question]] = []
     for it in resumable(profile_id):
         for q in it.questions:
             key = norm_question(q.label)
-            if key and key not in seen and key not in answered:
+            if key in counts and key not in seen:
                 seen.add(key)
                 out.append((it.app, it.last_run, q))  # type: ignore[arg-type]
-    return out
+    return sorted(out, key=lambda t: -counts[norm_question(t[2].label)])
 
 
-def _waiting_on_user(app: Application, job, last: ApplyRun | None) -> bool:
-    """The last run of this revision waits for the user: an answer, an e-mail link, a CAPTCHA or trust in a host."""
+EMAIL_RESUME_AFTER = timedelta(minutes=30)   # the candidate may have clicked the link by then
+EMAIL_MAX_RESUMES = 2
+
+
+def _questions_answered_since(app: Application, last: ApplyRun) -> bool:
+    """A paused `needs_input` run can go on: every one of its questions now has a custom answer (same normalized question), or
+    the answers file was modified after the run finished (a hard fact may now be filled)."""
+    asked = [norm_question(q.label) for q in (last.result.questions if last.result else [])]
+    answered = {norm_question(c["question"]) for c in custom_answers(app.profile_id)}
+    if asked and all(k in answered for k in asked):
+        return True
+    try:
+        mtime = datetime.fromtimestamp(facts_answers_path(app.profile_id).stat().st_mtime, UTC)
+    except OSError:
+        return False
+    return last.finished_at is not None and mtime > last.finished_at
+
+
+def _waiting_on_user(app: Application, job, last: ApplyRun | None, *, retry_captcha: bool = False) -> bool:
+    """The last run of this revision waits for the user: an answer, an e-mail link, a CAPTCHA or trust in a host.
+    The automatic pass still goes on when: the questions were answered since (`needs_input`); 30 minutes passed since an e-mail
+    pause (at most twice per revision); or it is an ATTENDED visible pass and the run was stopped by a CAPTCHA (`needs_human`)."""
     if last is None or last.rev != app.current_rev:
         return False
+    if retry_captcha and last.status == "needs_human":
+        return False
+    if last.status == "needs_input" and _questions_answered_since(app, last):
+        return False
+    if last.status == "needs_email" and last.finished_at is not None and now() - last.finished_at >= EMAIL_RESUME_AFTER:
+        n = sum(1 for r in apply_store.list_runs(app.id) if r.rev == app.current_rev and r.status == "needs_email")
+        if n <= EMAIL_MAX_RESUMES:
+            return False
     return last.status in PAUSE_REASON or bool(_host_pause(app, job, last))
 
 
 def _print_now(line: str) -> None:
     print(line, flush=True)
+
+
+def pause_reason_label(res: ApplyRun) -> str:
+    """Why a run paused, in one word: question / e-mail / CAPTCHA / compte / site non approuvé."""
+    if untrusted_host_of(res):
+        return "site non approuvé"
+    if res.status == "needs_input":
+        return "question"
+    if res.status == "needs_email":
+        return "e-mail"
+    steps = res.result.steps if res.result else []
+    if "compte" in res.message.lower() or (steps and steps[-1].page_kind in ("account_login", "account_signup")):
+        return "compte"
+    return "CAPTCHA"
 
 
 def _pause_detail(res: ApplyRun) -> str:
@@ -727,6 +837,12 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
         await shared_llm.aclose()
     emit(f"Passe terminée : {summary.sent} envoyée(s), {summary.paused} en pause, {summary.to_check} à vérifier, "
          f"{summary.to_fix} à corriger, {summary.waiting} en attente, {summary.failed} en échec, {summary.prepared} CV préparé(s)")
+    emit("Détail : " + summary.breakdown())
+    top = summary.top_questions(10)
+    if top:
+        emit("Questions les plus fréquentes (à renseigner d'abord sur la page « Réponses aux formulaires ») :")
+        for i, (label, n) in enumerate(top, 1):
+            emit(f"  {i}. {label} (×{n})")
     return summary
 
 
@@ -734,9 +850,18 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
                     planner, verifier, headless: bool, attended: bool, min_score: float | None) -> None:
     """One application of the automatic pass: checks, auto-approval, the send itself and its progress line."""
     s = get_settings()
+    app = cvstore.get_application(app.id) or app  # someone else (the web portal, the user) may have moved it since the pass began
+    if app.status in ("submitted", "withdrawn"):
+        emit(f"{tag} : déjà traitée par ailleurs ({'envoyée' if app.status == 'submitted' else 'retirée'})")
+        return
     last = apply_store.last_run(app.id)
-    if _waiting_on_user(app, job, last):
+    if last is not None and last.status == "running" and last.pid and last.pid != os.getpid() and apply_store.pid_alive(last.pid):
+        summary.waiting += 1
+        emit(f"{tag} : bloquée (un envoi est déjà en cours pour cette candidature)")
+        return
+    if _waiting_on_user(app, job, last, retry_captcha=attended and not headless):
         summary.paused += 1
+        summary.paused_by["en attente"] = summary.paused_by.get("en attente", 0) + 1
         emit(f"{tag} : en pause (en attente de votre réponse)")
         return
     if sum(1 for r in apply_store.list_runs(app.id) if r.rev == app.current_rev and r.status == "failed") >= 2:
@@ -780,6 +905,11 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : envoyée")
     elif res.status in PAUSE_REASON or untrusted_host_of(res):  # the pass never trusts a host by itself
         summary.paused += 1
+        reason = pause_reason_label(res)
+        summary.paused_by[reason] = summary.paused_by.get(reason, 0) + 1
+        if res.status == "needs_input" and res.result:
+            for key in dict.fromkeys(norm_question(q.label) for q in res.result.questions if norm_question(q.label)):
+                summary.asked[key] = summary.asked.get(key, 0) + 1
         emit(f"{tag} : en pause ({_pause_detail(res)})")
     elif res.status == "failed" and (res.submit_clicked_at or res.nav_clicked_at or (res.result and res.result.submit_clicked)):
         summary.to_check += 1
