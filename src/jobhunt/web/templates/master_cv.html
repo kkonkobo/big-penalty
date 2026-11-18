@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}CV maître · {{ profile.name }}{% endblock %}
+{% block content %}
+<div class="row between">
+  <h1>CV maître — <a href="/profiles/{{ profile.id }}">{{ profile.name }}</a></h1>
+  <a class="btn small" href="/applications">Candidatures</a>
+</div>
+<p class="muted">Source de vérité de tous les CV sur mesure : l'IA ne peut reformuler que ce qui est écrit ici. Fichier : <code>{{ path }}</code></p>
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+
+{% if pending %}
+<div class="card" style="margin-bottom:1rem">
+  <h2>Import en attente de confirmation</h2>
+  <p class="muted">Le CV importé n'est pas encore actif. Vérifiez-le, surtout les champs contestés (surlignés), puis confirmez.</p>
+  <table class="tbl"><tbody>
+    {% for k, v in [('name', pending.identity.name), ('email', pending.identity.email), ('phone', pending.identity.phone), ('linkedin', pending.identity.linkedin)] %}
+    <tr><td>{{ k }}</td><td>{% if ('identity.' ~ k) in disputed %}<mark>{{ v }}</mark>{% else %}{{ v or '—' }}{% endif %}</td></tr>
+    {% endfor %}
+  </tbody></table>
+  {% for d in report.get('disputed', []) %}<div class="flag error"><mark>{{ d.field }}</mark> : {{ d.value }} — {{ d.reason }}</div>{% endfor %}
+  {% for u in report.get('unmatched', []) %}<div class="flag warning"><mark>{{ u }}</mark> — non retrouvé mot pour mot dans le CV source</div>{% endfor %}
+  <form method="post" action="/profiles/{{ profile.id }}/cv/confirm" class="row" style="margin-top:.8rem">
+    <button class="btn primary">Confirmer ce CV maître</button></form>
+  <form method="post" action="/profiles/{{ profile.id }}/cv/discard"><button class="btn small">Abandonner l'import</button></form>
+</div>
+{% elif master and not confirmed %}
+<div class="card" style="margin-bottom:1rem">
+  <h2>CV maître non confirmé</h2>
+  <p class="muted">Aucun CV sur mesure ne peut être généré (ni envoyé automatiquement) tant que ce CV n'est pas confirmé.</p>
+  <form method="post" action="/profiles/{{ profile.id }}/cv/confirm"><button class="btn primary">Confirmer ce CV maître</button></form>
+</div>
+{% elif master %}<p class="badge ok">CV maître confirmé</p>{% endif %}
+
+<div class="cvpage">
+  <div>
+    {% if master %}<div class="cvframe"><iframe src="/profiles/{{ profile.id }}/cv/preview" title="Aperçu du CV maître"></iframe></div>
+    {% else %}<p class="muted">Pas encore de CV maître : importez un CV (PDF ou texte).</p>{% endif %}
+  </div>
+  <div>
+    <form method="post" action="/profiles/{{ profile.id }}/cv/import" enctype="multipart/form-data" class="card editform">
+      <h2>Importer / réimporter un CV</h2>
+      <p class="muted small">Un appel IA structure le CV (texte copié mot pour mot) et en extrait la photo. Le résultat reste en attente jusqu'à votre confirmation.</p>
+      <input type="file" name="file" accept=".pdf,.txt" required>
+      <p><button class="btn" onclick="return confirm('Importer un nouveau CV (en attente de confirmation) ?')">Importer</button></p>
+    </form>
+    <form method="post" action="/profiles/{{ profile.id }}/cv" class="card editform" style="margin-top:1rem">
+      <h2>Modifier {{ 'le brouillon importé' if pending else 'master.yaml' }}</h2>
+      <textarea name="text" rows="30" class="mono" spellcheck="false">{{ text }}</textarea>
+      <p><button class="btn primary">Enregistrer</button></p>
+    </form>
+  </div>
+</div>
+{% endblock %}

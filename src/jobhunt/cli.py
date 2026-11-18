@@ -310,6 +310,119 @@ def schedule_status() -> None:
         console.print("Aucun journal pour l'instant.", markup=False)
 
 
+cv_app = typer.Typer(help="CV sur mesure : profil maître, adaptation à une offre, liste des candidatures.", no_args_is_help=True)
+app.add_typer(cv_app, name="cv")
+
+
+def _print_flags(flags) -> None:
+    for f in flags:
+        console.print(f"  [{ {'error': 'ERREUR', 'prep': 'prépa entretien'}.get(f.level, 'à vérifier') }] {f.location} : {f.message}"
+                      + (f" → {f.hint}" if f.hint else ""), markup=False,
+                      highlight=False)
+
+
+@cv_app.command("import")
+def cv_import(
+    profile_id: int,
+    pdf: Annotated[Optional[Path], typer.Option("--pdf", help="CV au format PDF (texte + photo)")] = None,
+    text: Annotated[Optional[Path], typer.Option("--text", help="CV en texte brut")] = None,
+    stage_qualifier: Annotated[Optional[str], typer.Option(
+        "--stage-qualifier", help='Texte entre parenthèses dans « Recherche de stage (…) en … »')] = None,
+) -> None:
+    """Structure le CV en brouillon de profil maître (master.pending.yaml, UN appel IA) + rapport ; à confirmer dans l'interface."""
+    from jobhunt.cv.importer import import_cv
+    from jobhunt.cv.master import save_pending
+    from jobhunt.llm import LLMError, get_llm
+
+    profile = db.get_profile(profile_id)
+    if profile is None:
+        raise typer.BadParameter(f"profil {profile_id} introuvable")
+    if (pdf is None) == (text is None):
+        raise typer.BadParameter("fournir exactement --pdf ou --text")
+    for f in (pdf, text):
+        if f is not None and not f.is_file():
+            raise typer.BadParameter(f"fichier introuvable : {f}")
+
+    async def go():
+        llm = get_llm()
+        try:
+            return await import_cv(profile_id, profile, llm, pdf=pdf, text_file=text)
+        finally:
+            await llm.aclose()
+
+    try:
+        res = asyncio.run(go())
+    except (LLMError, ValueError) as e:
+        console.print(f"Erreur : {e}", markup=False)
+        raise typer.Exit(1) from None
+    master, unverified, path = res.master, res.unverified, res.path
+    if stage_qualifier is not None:
+        master.identity.stage_qualifier = stage_qualifier
+        save_pending(profile_id, master)
+    bullets = sum(len(p.bullets) for p in master.projects)
+    console.print(f"Brouillon de profil maître écrit : {path}", markup=False)
+    console.print(f"À CONFIRMER dans l'interface (bouton « Confirmer ce CV maître ») : /profiles/{profile_id}/cv", markup=False)
+    for d in res.disputed:
+        console.print(f"  contesté : {d['field']} — {d['reason']}", markup=False)
+    console.print(f"{len(master.skill_groups)} groupes de compétences ({len(master.skill_items())} éléments), "
+                  f"{len(master.projects)} projets ({bullets} points), {len(master.education)} formations, "
+                  f"{len(master.languages)} langues · photo : {'oui' if master.identity.photo else 'non'}", markup=False)
+    if unverified:
+        console.print(f"{len(unverified)} élément(s) non retrouvé(s) mot pour mot dans le CV source :", markup=False)
+        for u in unverified:
+            console.print("  - " + u, markup=False, highlight=False)
+    else:
+        console.print("Vérification : tout le contenu est retrouvé mot pour mot dans le CV source.", markup=False)
+
+
+@cv_app.command("tailor")
+def cv_tailor(job_id: int, profile: Annotated[Optional[int], typer.Option("--profile", "-p")] = None) -> None:
+    """Génère le CV adapté à une offre (UN appel IA), vérifie les faits, produit le PDF d'une page."""
+    from jobhunt.cv.service import CVError, is_eligible, prepare_application
+    from jobhunt.llm import LLMError
+
+    job = db.get_job(job_id)
+    if job is None:
+        raise typer.BadParameter(f"offre {job_id} introuvable")
+    if profile is not None and profile != job.profile_id:
+        raise typer.BadParameter(f"l'offre {job_id} appartient au profil {job.profile_id}")
+    try:
+        application = asyncio.run(prepare_application(job.profile_id, job_id))
+    except (CVError, LLMError) as e:
+        console.print(f"Erreur : {e}", markup=False)
+        raise typer.Exit(1) from None
+    console.print(f"Candidature {application.id} · {job.title} · {job.company or '?'} · statut {application.status}", markup=False)
+    console.print("Titre du CV : " + application.tailored.headline, markup=False)
+    console.print("Mots-clés couverts : " + ", ".join(application.tailored.matched_keywords), markup=False)
+    console.print("Mots-clés ajoutés (à préparer) : " + ("; ".join(application.tailored.gaps) or "aucun"), markup=False)
+    for a in application.tailored.adjustments:
+        console.print("Ajustement : " + a, markup=False)
+    console.print(f"{len(application.errors)} erreur(s), {len(application.warnings)} à vérifier, {len(application.preps)} point(s) à préparer", markup=False)
+    _print_flags(application.flags)
+    if application.notes:
+        console.print(application.notes, markup=False)
+    console.print(f"PDF : {application.cv_path or '(non généré)'}", markup=False)
+    v = application.verifier
+    console.print(f"Version {application.current_rev} · vérification IA : "
+                  + (f"{'réussie' if v.passed else 'échec'} ({v.provider})" if v and v.ran else "non effectuée"), markup=False)
+    ok, reasons = is_eligible(application)
+    console.print("Éligible à l'envoi automatique : " + ("oui" if ok else "non — " + " ; ".join(reasons)), markup=False)
+    if application.errors:
+        raise typer.Exit(2)
+
+
+@cv_app.command("list")
+def cv_list(profile: Annotated[Optional[int], typer.Option("--profile", "-p")] = None) -> None:
+    """Liste les candidatures (CV adaptés) et leur statut."""
+    from jobhunt.cv.store import list_applications
+
+    t = Table("id", "offre", "poste", "entreprise", "statut", "erreurs", "à vérifier", "PDF")
+    for a in list_applications(profile):
+        t.add_row(str(a.id), str(a.job_id), (a.job_title or "")[:45], (a.company or "")[:25], a.status,
+                  str(len(a.errors)), str(len(a.warnings)), a.cv_path or "")
+    console.print(t)
+
+
 @app.command()
 def login(source: str, profile: Annotated[int, typer.Option("--profile", "-p")]) -> None:
     """Ouvre un navigateur visible pour se connecter à une source ; la session est conservée."""
