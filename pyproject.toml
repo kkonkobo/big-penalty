@@ -39,3 +39,8 @@ dev = [
     "pytest-asyncio>=1.5.0",
     "respx>=0.23.1",
 ]
+package = [
+    "pillow>=13.0.0",
+    "pyinstaller>=6.22.3",
+    "pywebview>=6.2.1",
+]
