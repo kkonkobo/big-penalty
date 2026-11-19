@@ -16,7 +16,7 @@ from jobhunt.apply import facts, service
 from jobhunt.apply import store as apply_store
 from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
-from jobhunt.dedupe import TRACKING_PARAMS
+from jobhunt.dedupe import TRACKING_PARAMS, canonical_url
 from jobhunt.portal import protocol
 from jobhunt.portal.journal import Journal, ProfileRow
 from jobhunt.portal.settings import get_portal_settings, is_masked_question
@@ -91,7 +91,7 @@ def _sent_url(item: service.QueueItem) -> str | None:
     if recorded:
         if "://" in recorded:
             return sanitize_url(recorded)
-        if item.origin_url and service.canonical_url(item.origin_url) == recorded:
+        if item.origin_url and canonical_url(item.origin_url) == recorded:
             return sanitize_url(item.origin_url)
     return None
 
@@ -109,7 +109,6 @@ def interrupted_after_click(run: apply_store.ApplyRun | None) -> bool:
     return bool(run and run.status == "running" and run.mode == "submit"
                 and (run.submit_clicked_at or run.nav_clicked_at or (run.result and run.result.submit_clicked))
                 and not apply_store.pid_alive(run.pid))
-
 
 # ---------------------------------------------------------------- the schema and the answers
 def _schema(write_only: frozenset[str]) -> tuple[protocol.AnswerSchema, list[facts.AnswerField]]:
@@ -174,6 +173,12 @@ def _doc_id(journal: Journal, profile_key: str, sha: str) -> str:
     return hmac.new(journal.local_secret(), f"{profile_key}:{sha}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
+def settlement_binding(app, run, origin_sha: str, held) -> dict:
+    return dict(app_id=app.id, rev=run.rev, run_id=run.id, mode=run.mode,
+                origin_sha=service.origin_digest(held.url) if held else origin_sha,
+                pdf_sha256=held.pdf_sha256 if held else (cvstore.sha256_file(cvs.safe_pdf(app)) or ""))
+
+
 def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[protocol.Snapshot, dict[str, Path]]:
     profile = journal.get_profile(profile_id)
     if profile is None:
@@ -191,19 +196,28 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
     pdfs: dict[int, tuple[Path, str, int, bool] | None] = {}
     for it in items:
         a = it.app
-        if it.bucket != "sent" and interrupted_after_click(it.last_run):
+        if it.bucket != "sent" and it.outstanding is None and interrupted_after_click(it.last_run):
             info.append(protocol.InfoItem(kind="interrupted", company=_t(a.company, 300), title=_t(a.job_title, 300),
                                           host=_t(it.origin_host, 255)))
-        elif it.bucket == "to_validate" and it.selectable:
+        elif it.supervised and a.approved_by == "user" and a.status == "approved":
+            info.append(protocol.InfoItem(kind="supervised", company=_t(a.company, 300), title=_t(a.job_title, 300),
+                                          host=_t(it.origin_host, 255)))
+        elif it.bucket == "to_validate" and (it.selectable or it.supervised):
             if apply_store.requires_manual_retry(a.id) or apply_store.has_site_handoff(a.id):
                 continue
             pdfs[a.id] = pdf = _pdf_info(a)
             if pdf is None:
                 continue
-            awaiting_src.append((it, grant("send", app_id=a.id, rev=a.current_rev, pdf_sha256=pdf[1], origin_sha=it.origin_sha), pdf[1]))
+            mode = "submit" if it.selectable else "supervised"
+            awaiting_src.append((it, grant("send", app_id=a.id, rev=a.current_rev, pdf_sha256=pdf[1], origin_sha=it.origin_sha,
+                                          mode=mode), pdf[1]))
         elif it.bucket == "paused":
             last = it.last_run
-            if it.pause_reason == "email" and it.selectable and last is not None and last.mode == "submit":
+            if it.pause_reason == "email" and last is not None and last.mode == "submit":
+                if not it.selectable:
+                    info.append(protocol.InfoItem(kind="supervised", company=_t(a.company, 300), title=_t(a.job_title, 300),
+                                                  host=_t(it.origin_host, 255)))
+                    continue
                 pdfs[a.id] = pdf = _pdf_info(a)
                 if pdf is None:
                     continue
@@ -221,12 +235,13 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
             info.append(protocol.InfoItem(kind="sending", company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255)))
         elif it.bucket == "needs_verification" and it.outstanding is not None:
             o = it.outstanding
-            binding = dict(app_id=a.id, rev=a.current_rev, run_id=o.id, mode=o.mode, origin_sha=it.origin_sha,
-                           pdf_sha256=cvstore.sha256_file(cvs.safe_pdf(a)) or "")
+            held = apply_store.held_binding(o.id)
+            binding = settlement_binding(a, o, it.origin_sha, held)
             gs = grant("resolve_sent", **binding)
             gn = grant("resolve_not_sent", **binding)
             unconfirmed.append(protocol.Unconfirmed(
-                grant_sent=gs, grant_not_sent=gn, company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255),
+                grant_sent=gs, grant_not_sent=gn, company=_t(a.company, 300), title=_t(a.job_title, 300),
+                host=_t(urlsplit(held.url).hostname if held else it.origin_host, 255),
                 when=o.submit_clicked_at or o.nav_clicked_at or o.finished_at or o.started_at))
 
     # --- documents: the 100 best-scored awaiting, the 50 most recent sent

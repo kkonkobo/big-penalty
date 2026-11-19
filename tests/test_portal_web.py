@@ -17,7 +17,9 @@ from jobhunt.portal import manage, protocol, sync, web_routes
 from jobhunt.portal.manage import ManageError
 from jobhunt.web import app as webapp
 
-from portal_fakes import NOW, journal, master, new_app, paired, portal, server  # noqa: F401
+from portal_fakes import NOW, fixture_ats, journal, master, new_app, paired, portal, server  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fixture_ats")
 
 TEMPLATE = Path(webapp.__file__).parent / "templates" / "portal_admin.html"
 

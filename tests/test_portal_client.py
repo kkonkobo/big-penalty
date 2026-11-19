@@ -11,7 +11,7 @@ import pytest
 from jobhunt.portal import protocol, secrets
 from jobhunt.portal.client import MAX_RESPONSE_BYTES, PortalClient, PortalError, PortalOffline
 
-TOKEN = "tok-SECRET-0123456789-abcdefghijklmnopqrstuvwxyz"
+TOKEN = "not-a-real-device-token-used-only-by-tests"
 KEY = "a" * 32
 
 

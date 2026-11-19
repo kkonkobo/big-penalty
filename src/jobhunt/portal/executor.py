@@ -1,6 +1,4 @@
-"""Execute the approved `send` / `resume` intents as ONE batch under the engine's send lock (DESIGN §5.5).
-
-Never `attended=True`, never a dry run. A busy lock leaves everything `queued`: no claim, no run row."""
+"""Apply portal approvals under the send lock; only enrolled adapters may dispatch."""
 
 from __future__ import annotations
 
@@ -24,6 +22,7 @@ CHANGED = "La candidature a changé depuis votre accord : rechargez la page."
 APPROVAL_REFUSED = "CV à corriger : cette candidature ne peut pas être envoyée telle quelle."
 SEND_FAILED = "Envoi impossible."
 SEND_UNCONFIRMED = "Envoi non confirmé : à vérifier sur le site de l'entreprise."
+SUPERVISED = "À envoyer en mode supervisé sur le Mac."
 PAUSE_STATUSES = ("needs_input", "needs_email", "needs_human")
 Runner = Callable[..., Awaitable[Any]]
 
@@ -76,7 +75,7 @@ class _Work:
         return self.grant or self
 
 
-def _live_binding_problem(w: _Work, binding: Any) -> str | None:
+def _live_binding_problem(w: _Work, binding: Any, *, approval_only: bool) -> str | None:
     """None when the live state still equals what the user agreed to, else a reason."""
     app = cvstore.get_application(binding.app_id)
     if app is None or app.profile_id != w.profile_id or app.status in ("submitted", "withdrawn"):
@@ -92,6 +91,10 @@ def _live_binding_problem(w: _Work, binding: Any) -> str | None:
     job = db.get_job(app.job_id)
     if job is None or service.origin_digest(job.origin_url) != binding.origin_sha:
         return "origin"
+    if approval_only != (not service.unattended_available(job)):
+        return "adapter"
+    if binding.action == "send" and binding.mode != ("supervised" if approval_only else "submit"):
+        return "mode"
     if binding.action == "resume":
         if (last is None or last.id != binding.run_id or last.rev != binding.rev or last.mode != "submit"
                 or binding.mode != "submit" or last.status not in PAUSE_STATUSES):
@@ -110,7 +113,7 @@ def _live_binding_problem(w: _Work, binding: Any) -> str | None:
         if apply_store.has_site_handoff(app.id) or apply_store.requires_manual_retry(app.id):
             return "run"
         item = next((i for i in service.queue(w.profile_id) if i.app.id == app.id), None)
-        if item is None or item.bucket != "to_validate":
+        if item is None or item.bucket != "to_validate" or not (item.selectable or item.supervised):
             return "bucket"
     else:
         return "action"
@@ -128,6 +131,8 @@ def _outcome_of(run: Any) -> tuple[str, str]:
     if st == "needs_human":
         return "failed", "En pause : un CAPTCHA doit être résolu sur le Mac."
     clicked = bool(run.submit_clicked_at or run.nav_clicked_at or (run.result and run.result.submit_clicked))
+    if isinstance(run, apply_store.ApplyRun) and apply_store.held_binding(run.id) is not None:
+        clicked = True
     if st == "running":
         return "interrupted", SEND_UNCONFIRMED if clicked else "Résultat inconnu : vérifiez avant de réessayer."
     if clicked:
@@ -221,10 +226,13 @@ async def _execute(journal: Journal, work: list[_Work], runner: Runner, report: 
             break
         b = w.bind()
         try:
+            app = cvstore.get_application(b.app_id)
+            job = db.get_job(app.job_id) if app else None
+            approval_only = b.action == "send" and not service.unattended_available(job)
             claim = journal.claim_send(w.profile_id, w.event_id, w.grant.grant_id if w.grant else None, db.now,
                                        ps.max_sends_per_day, spacing=timedelta(minutes=ps.send_every_min),
-                                       batch_started=w.profile_id in stamped, expected=w.profile,
-                                       validate=lambda: _live_binding_problem(w, b) is None, refusal=CHANGED,
+                                       batch_started=w.profile_id in stamped, expected=w.profile, approval_only=approval_only,
+                                       validate=lambda: _live_binding_problem(w, b, approval_only=approval_only) is None, refusal=CHANGED,
                                        resume_candidate=(b.app_id, b.run_id) if w.grant is None else None)
         except Exception:  # noqa: BLE001
             report.skipped[w.profile_id] = "Erreur technique."
@@ -240,11 +248,12 @@ async def _execute(journal: Journal, work: list[_Work], runner: Runner, report: 
         elif claim == "inbox":
             report.skipped[w.profile_id] = "événements non traités"
         elif claim == "claimed":
-            stamped.add(w.profile_id)
-            await _one(journal, w, b, db.now(), runner, report)
+            if not approval_only:
+                stamped.add(w.profile_id)
+            await _one(journal, w, b, db.now(), runner, report, approval_only=approval_only)
 
 
-async def _one(journal: Journal, w: _Work, b: Any, now: datetime, runner: Runner, report: BatchReport) -> None:
+async def _one(journal: Journal, w: _Work, b: Any, now: datetime, runner: Runner, report: BatchReport, *, approval_only: bool) -> None:
     def done(state: str, message: str, run_id: int | None = None) -> None:
         if w.event_id:
             journal.update_event(w.event_id, now, only_from=("running",), state=state, message=message[:300], run_id=run_id)
@@ -255,15 +264,21 @@ async def _one(journal: Journal, w: _Work, b: Any, now: datetime, runner: Runner
     try:
         if b.action == "send":
             app = cvstore.get_application(b.app_id)
-            if app is not None and app.status == "draft":
+            if app is None or app.current_rev != b.rev:
+                return done("refused", CHANGED)
+            if app.status == "draft" or (approval_only and app.approved_by != "user"):
                 try:
-                    cvs.approve(b.app_id, b.rev)
+                    app = cvs.approve(b.app_id, b.rev, expected_sha256=b.pdf_sha256)
                 except CVError:
                     return done("refused", APPROVAL_REFUSED)
+            if app.approved_sha256 != b.pdf_sha256:
+                return done("refused", CHANGED)
+        if approval_only:
+            return done("done", SUPERVISED)
         previous = apply_store.last_run(b.app_id)
         started = True
         run = await runner(b.app_id, mode="submit", trigger="user", headless=None, _lock_held=True, expected_rev=b.rev,
-                           expected_origin=b.origin_sha)
+                           expected_origin=b.origin_sha, expected_pdf=b.pdf_sha256)
         state, message = _outcome_of(run)
         done(state, message, getattr(run, "id", None))
     except Exception as error:

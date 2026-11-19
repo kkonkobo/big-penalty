@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import hashlib
 import re
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+import respx
 from pydantic import TypeAdapter, ValidationError
 
 from jobhunt.apply import store as apply_store
+from jobhunt.apply import service
+from jobhunt.apply.adapters import Receipt, Registry, Requisition
 from jobhunt.apply.types import FilledField, Question, RunResult, StepLog
 from jobhunt.cv import service as cvs
 from jobhunt.portal import manage, protocol, secrets
@@ -26,6 +30,42 @@ BASE = "http://127.0.0.1:8099/app"
 NOW = datetime(2026, 11, 18, 10, 0, tzinfo=UTC)
 PAIRING_CODE = "pairing-code-for-tests-0123456789abcdef"
 _EVENT = TypeAdapter(protocol.Event)
+
+
+class FixtureATS:
+    name = "fixture-ats"
+    capability = "unattended"
+    retry_rule = "never"
+    boundaries = {"final_submit": "auto"}
+
+    def matches(self, url, dom_markers):
+        return 1.0
+
+    def resolve(self, url, dom_markers):
+        return Requisition(self.name, urlsplit(url).path.strip("/").replace("/", "-"))
+
+    async def dispatch(self, request, gate):
+        return await gate.perform("final_submit", request.attempt.url, attach_pdf=True)
+
+    async def verify_receipt(self, attempt, *, evidence=None):
+        return Receipt(attempt, "confirmed", "first_party_confirmation", reference="fixture-receipt",
+                       observed_nonce=evidence.headers["X-Application-Attempt"],
+                       observed_requisition=evidence.headers["X-Application-Requisition"])
+
+
+@pytest.fixture
+def fixture_ats(monkeypatch):
+    registry = Registry()
+    adapter = FixtureATS()
+    for host in ("careers.exemple.test", "jobs.exemple.test", "work.example.org", "careers.example.com"):
+        registry.register(adapter, host=host, unattended_tenants={adapter.name: "first_party_confirmation"})
+    monkeypatch.setattr(service, "registry", registry)
+    with respx.mock(assert_all_called=False) as router:
+        route = router.post(url__regex=r"^https://(careers\.exemple\.test|jobs\.exemple\.test|work\.example\.org|careers\.example\.com)/").mock(
+            side_effect=lambda request: httpx.Response(200, headers={key: request.headers[key] for key in (
+                "X-Application-Attempt", "X-Application-Requisition")}))
+        router.route().pass_through()
+        yield route.calls
 
 
 @dataclass
@@ -326,8 +366,8 @@ def make_sent(app, job, *, inferred=(), submitted_at=None):
     apply_store.reserve_send(run.id, profile_id=app.profile_id, application_id=app.id, trigger="user",
                              role_key=policy.normalize_role(job.company, job.title), url_key=canonical_url(job.origin_url), daily_cap=10)
     steps = [StepLog(index=1, url="https://careers.exemple.test/apply", page_kind="form", filled=list(inferred))]
-    res = apply_store.finish_and_settle(run.id, RunResult(status="submitted", message="ok", steps=steps, submit_clicked=True),
-                                        sent_origin_url=canonical_url(job.origin_url))
+    res = apply_store.finish_and_settle(run.id, RunResult(status="failed", message="ok", steps=steps, submit_clicked=True))
+    apply_store.resolve_attempt(app.id, sent=True, run_id=run.id)
     if submitted_at is not None:
         from jobhunt.db import _iso, connect
 

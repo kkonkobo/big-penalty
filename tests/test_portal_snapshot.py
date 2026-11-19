@@ -13,7 +13,9 @@ from jobhunt.cv import store as cvstore
 from jobhunt.portal import protocol, snapshot
 from jobhunt.portal.snapshot import build_snapshot, sanitize_url
 
-from portal_fakes import NOW, journal, make_outstanding, make_run, make_sent, master, new_app, set_pdf  # noqa: F401
+from portal_fakes import NOW, fixture_ats, journal, make_outstanding, make_run, make_sent, master, new_app, set_pdf  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fixture_ats")
 
 
 @pytest.fixture

@@ -15,8 +15,9 @@ from jobhunt.portal import apply_events, executor, manage, protocol, sync
 from jobhunt.portal.journal import pass_lock
 from jobhunt.portal.snapshot import stored_answer
 
-from apply_service_fakes import FakePool, stub_engine
-from portal_fakes import NOW, Portal, journal, make_run, master, new_app, paired, portal, server  # noqa: F401
+from portal_fakes import NOW, Portal, fixture_ats, journal, make_run, master, new_app, paired, portal, server  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fixture_ats")
 
 
 @pytest.fixture(autouse=True)
@@ -434,14 +435,8 @@ def test_historical_journal_result_label_stays_local(portal):
 
 # ------------------------------------------------------------------ with sends
 @pytest.fixture
-def engine(monkeypatch):
-    async def hook(kw):
-        assert await kw["before_submit"]() == []
-        await kw["on_submit_click"]()
-
-    calls = stub_engine(monkeypatch, RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True), hook=hook)
-    monkeypatch.setattr(service, "BrowserPool", lambda headless=None: FakePool())
-    return calls
+def engine(fixture_ats):
+    return fixture_ats
 
 
 async def test_send_intent_end_to_end(portal, profile, master, tmp_path, engine):

@@ -209,7 +209,7 @@ class Unconfirmed(Wire):
 
 
 class InfoItem(Wire):
-    kind: Literal["captcha", "host", "dry_run", "sending", "interrupted"]
+    kind: Literal["captcha", "host", "dry_run", "sending", "interrupted", "supervised"]
     company: Name = ""
     title: Name = ""
     host: Host = ""

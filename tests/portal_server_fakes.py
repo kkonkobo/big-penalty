@@ -33,7 +33,7 @@ from jobhunt.portal.server.app import Portal, create_app
 from jobhunt.portal.server.config import Config
 
 ORIGIN = "https://testserver"
-KEY_HEX = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+KEY_HEX = "00" * 32
 OLD_KEY_HEX = "ff" * 32
 PAIRING_CODE = "pairing-code-for-tests-0123456789-abcdefghij"
 T0 = 1_800_000_000.0  # the fake clock's start (epoch seconds)

@@ -663,7 +663,7 @@ class Journal:
     def claim_send(self, profile_id: int, event_id: str | None, grant_id: str | None,
                    clock: datetime | Callable[[], datetime], max_per_day: int, *, spacing: timedelta = timedelta(),
                    batch_started: bool = False, expected: ProfileRow | None = None, validate: Callable[[], bool] | None = None,
-                   refusal: str | None = None, resume_candidate: tuple[int, int] | None = None) -> str:
+                   refusal: str | None = None, resume_candidate: tuple[int, int] | None = None, approval_only: bool = False) -> str:
         """Check controls and bindings, then record the claim, budget and first batch stamp together."""
         with self.transaction() as journal:
             profile, stop = journal.controls(profile_id)
@@ -682,7 +682,7 @@ class Journal:
                 return "not_queued"
             valid = validate is None or validate()
             now = clock() if callable(clock) else clock
-            if not batch_started and profile.last_send_batch_at and now - profile.last_send_batch_at < spacing:
+            if not approval_only and not batch_started and profile.last_send_batch_at and now - profile.last_send_batch_at < spacing:
                 return "spacing"
             grant = journal.usable_grant(grant_id, profile, now) if event is not None else None
             if event is not None and (grant is None or grant.action not in ("send", "resume") or not valid):
@@ -694,14 +694,16 @@ class Journal:
                 return "no_grant"
             if not valid:
                 return "refused"
-            if not journal.take_budget(profile_id, now, max_per_day):
+            if approval_only and (grant is None or grant.action != "send"):
+                return "no_grant"
+            if not approval_only and not journal.take_budget(profile_id, now, max_per_day):
                 return "budget"
             if grant is not None:
                 journal._connection.execute("UPDATE grants SET state='used' WHERE grant_id=?", (grant_id,))
                 journal.update_event(event_id, now, state="running", message="")
             if resume_candidate is not None:
                 journal.forget_resume(profile_id, *resume_candidate)
-            if not batch_started:
+            if not approval_only and not batch_started:
                 journal.save_profile(profile_id, last_send_batch_at=now)
             return "claimed"
 

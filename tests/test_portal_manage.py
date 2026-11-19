@@ -12,7 +12,9 @@ from jobhunt.portal.journal import Journal
 from jobhunt.portal.manage import ManageError
 from jobhunt.portal.snapshot import stored_answer
 
-from portal_fakes import BASE, NOW, PAIRING_CODE, Portal, journal, master, new_app, paired, portal, server  # noqa: F401
+from portal_fakes import BASE, NOW, PAIRING_CODE, Portal, fixture_ats, journal, master, new_app, paired, portal, server  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fixture_ats")
 
 ORIGIN = "http://127.0.0.1:8099"
 

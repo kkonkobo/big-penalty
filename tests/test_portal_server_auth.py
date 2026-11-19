@@ -29,25 +29,25 @@ def cfg(tmp_path, **env):
 # ---------------------------------------------------------------- client address
 def test_client_address_without_proxy_ignores_forwarded_for(tmp_path):
     c = cfg(tmp_path)
-    assert auth.client_address(("203.0.113.9", 1), {"x-forwarded-for": "1.2.3.4"}, c) == "203.0.113.9"
+    assert auth.client_address(("203.0.113.9", 1), {"x-forwarded-for": "192.0.2.4"}, c) == "203.0.113.9"
     assert auth.client_address(None, {}, c) == "unknown"
     assert auth.client_address(("testclient", 5), {}, c) == "testclient"
 
 
 def test_client_address_through_trusted_proxy(tmp_path):
-    c = cfg(tmp_path, PORTAL_TRUSTED_PROXIES="10.0.0.0/8, 172.18.0.2")
-    peer = ("172.18.0.2", 5)
+    c = cfg(tmp_path, PORTAL_TRUSTED_PROXIES="192.0.2.0/24, 203.0.113.2")
+    peer = ("203.0.113.2", 5)
     assert auth.client_address(peer, {"x-forwarded-for": "198.51.100.5"}, c) == "198.51.100.5"
     # spoofed prefix: the right-most entry that is not a proxy wins
-    assert auth.client_address(peer, {"x-forwarded-for": "6.6.6.6, 198.51.100.5, 10.1.1.1"}, c) == "198.51.100.5"
-    raw = [(b"x-forwarded-for", b"6.6.6.6"), (b"X-Forwarded-For", b"198.51.100.5, 10.0.0.9")]
-    assert auth.client_address(peer, raw, c) == "172.18.0.2"
+    assert auth.client_address(peer, {"x-forwarded-for": "203.0.113.6, 198.51.100.5, 192.0.2.11"}, c) == "198.51.100.5"
+    raw = [(b"x-forwarded-for", b"203.0.113.6"), (b"X-Forwarded-For", b"198.51.100.5, 192.0.2.9")]
+    assert auth.client_address(peer, raw, c) == "203.0.113.2"
     # malformed -> peer; none -> peer; all trusted -> peer
-    assert auth.client_address(peer, {"x-forwarded-for": "198.51.100.5, garbage"}, c) == "172.18.0.2"
-    assert auth.client_address(peer, {}, c) == "172.18.0.2"
-    assert auth.client_address(peer, {"x-forwarded-for": "10.0.0.1"}, c) == "172.18.0.2"
+    assert auth.client_address(peer, {"x-forwarded-for": "198.51.100.5, garbage"}, c) == "203.0.113.2"
+    assert auth.client_address(peer, {}, c) == "203.0.113.2"
+    assert auth.client_address(peer, {"x-forwarded-for": "192.0.2.1"}, c) == "203.0.113.2"
     # an untrusted peer cannot borrow the header
-    assert auth.client_address(("8.8.8.8", 1), {"x-forwarded-for": "1.1.1.1"}, c) == "8.8.8.8"
+    assert auth.client_address(("198.51.100.8", 1), {"x-forwarded-for": "203.0.113.1"}, c) == "198.51.100.8"
 
 
 def test_ipv6_addresses_share_their_slash_64(tmp_path):

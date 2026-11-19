@@ -13,6 +13,7 @@ import pytest
 from jobhunt import db, schedule
 from jobhunt.apply import accounts, facts, service
 from jobhunt.apply import store as apply_store
+from jobhunt.apply.adapters import Registry
 from jobhunt.apply.types import Question, RunResult
 from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
@@ -24,9 +25,11 @@ from jobhunt.portal.client import PortalClient, PortalError
 from jobhunt.portal.journal import Journal
 from jobhunt.portal.server import admin, ops
 
-from apply_service_fakes import FakePool, stub_engine
+from apply_service_fakes import FakePool
 from portal_e2e_helpers import Kill, LiveServer, Mac, Seeker, Setup
-from portal_fakes import journal, make_outstanding, make_run, make_sent, master, new_app, set_pdf  # noqa: F401
+from portal_fakes import app_dir, fixture_ats, journal, make_outstanding, make_run, make_sent, master, new_app, set_pdf  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fixture_ats")
 
 
 # ---------------------------------------------------------------- fixtures
@@ -87,13 +90,8 @@ def srv_results(w: Setup) -> dict[str, str]:
 
 
 @pytest.fixture
-def engine(monkeypatch):
-    """The engine stubbed at its edge: a submission that clicks and succeeds."""
-    async def hook(kw):
-        assert await kw["before_submit"]() == []
-        await kw["on_submit_click"]()
-
-    return stub_engine(monkeypatch, RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True), hook=hook)
+def engine(fixture_ats):
+    return fixture_ats
 
 
 @pytest.fixture
@@ -484,6 +482,62 @@ def awaiting(w: Setup):
     return srv_snap(w).awaiting
 
 
+@pytest.mark.parametrize("sent", [True, False])
+def test_supervised_approval_and_exact_attempt_settlement(w, profile, master, tmp_path, monkeypatch, run_spy, engine, sent):
+    monkeypatch.setattr(service, "registry", Registry())
+    job, draft = new_app(profile, master, tmp_path)
+    assert w.mac.sync_one(profile.id).ok
+    approval = awaiting(w)[0]
+    event = w.seeker.request(approval.grant).event_ids[0]
+    assert w.mac.sync_one(profile.id).ok
+    app = cvstore.get_application(draft.id)
+    assert app.approved_rev == draft.current_rev and app.approved_by == "user"
+    assert not run_spy and not engine and not apply_store.list_runs(app.id)
+    assert w.mac.journal.sends_today(profile.id, w.mac.now) == 0
+    assert w.seeker.statuses()[event] == "done" and "mode supervisé" in w.seeker.messages()[event]
+    assert [item.kind for item in srv_snap(w).info] == ["supervised"]
+
+    def reserve_without_click():
+        live_job = db.get_job(job.id)
+        run = apply_store.start_run(app.id, app.current_rev, "supervised", "user", app_dir,
+                                    origin_sha=service.origin_digest(live_job.origin_url))
+        service._reserve(run, live_job, "supervised", "user")
+        apply_store.finish_and_settle(run.id, RunResult(status="failed", message="Fenêtre fermée."))
+        return run.id
+
+    first = reserve_without_click()
+    assert w.mac.sync_one(profile.id).ok
+    stale = srv_snap(w).unconfirmed[0].grant_sent
+    service.resolve_unconfirmed(app.id, sent=False, run_id=first)
+    cvs.approve(app.id, app.current_rev)
+    second = reserve_without_click()
+    stale_event = w.seeker.request(stale).event_ids[0]
+    assert w.mac.sync_one(profile.id).ok
+    assert w.seeker.statuses()[stale_event] == "refused" and apply_store.outstanding_attempt(app.id).id == second
+    verification = srv_snap(w).unconfirmed[0]
+    decision = w.seeker.request(verification.grant_sent if sent else verification.grant_not_sent).event_ids[0]
+    assert w.mac.sync_one(profile.id).ok
+    assert w.seeker.statuses()[decision] == "done" and apply_store.outstanding_attempt(app.id) is None
+    if sent:
+        assert apply_store.sent_run(app.id).id == second
+    else:
+        assert apply_store.requires_manual_retry(app.id) and cvstore.get_application(app.id).status == "draft"
+    assert not run_spy and not engine
+
+
+def test_supervised_grant_cannot_be_promoted_to_unattended(w, profile, master, tmp_path, monkeypatch, engine):
+    registry = service.registry
+    monkeypatch.setattr(service, "registry", Registry())
+    _, app = new_app(profile, master, tmp_path)
+    assert w.mac.sync_one(profile.id).ok
+    grant = awaiting(w)[0].grant
+    event = w.seeker.request(grant).event_ids[0]
+    monkeypatch.setattr(service, "registry", registry)
+    assert w.mac.sync_one(profile.id).ok
+    assert w.seeker.statuses()[event] == "refused"
+    assert cvstore.get_application(app.id).status == "draft" and not engine and not apply_store.list_runs(app.id)
+
+
 def test_08_send_approval_end_to_end(w, profile, master, tmp_path, engine, run_spy):
     live, mac, pid, seeker = w.live, w.mac, w.profile_id, w.seeker
     job, app = new_app(profile, master, tmp_path, 1)  # a draft: bucket to_validate
@@ -672,7 +726,7 @@ def test_11_unconfirmed_not_sent_goes_back_to_the_queue(w, profile, master, tmp_
     app, u = unconfirmed_setup(w, profile, master, tmp_path)
     out = seeker.request(u.grant_not_sent)
     mac.sync_one(pid)
-    assert seeker.statuses()[out.event_ids[0]] == "done" and "file" in seeker.messages()[out.event_ids[0]]
+    assert seeker.statuses()[out.event_ids[0]] == "done" and "manuelle uniquement" in seeker.messages()[out.event_ids[0]]
     assert cvstore.get_application(app.id).status in ("draft", "approved") and apply_store.outstanding_attempt(app.id) is None
     assert mac.journal.get_grant(u.grant_sent).state == "void" and engine == []
     snap = srv_snap(w)
@@ -1024,7 +1078,8 @@ def test_16_snapshot_replay_and_ordering_rules(w):
     assert (rev, row["acked_seq"], row["last_seq"]) == (3 - 1, 1, 1)
 
     def push(**kw):
-        body = {"stream_id": stream, "rev": rev + 1, "acked_seq": 1, "results": [], "snapshot": cur.model_dump(mode="json")}
+        body = {"stream_id": stream, "sessions_epoch": row["sessions_epoch"], "revoked_through_seq": row["revoked_through_seq"],
+                "rev": rev + 1, "acked_seq": 1, "results": [], "snapshot": cur.model_dump(mode="json")}
         body.update(kw)
         return http.put(f"/profiles/{key}/snapshot", json=body)
 
@@ -1536,19 +1591,16 @@ def test_24_first_sync_with_many_documents_stays_under_the_server_rate_limit(w, 
 # ================================================================ extra: the volume loop (send -> question -> answer -> resume -> sent)
 def test_25_send_pauses_on_a_question_the_seeker_answers_and_the_run_resumes(w, profile, master, tmp_path, monkeypatch):
     live, mac, pid, seeker = w.live, w.mac, w.profile_id, w.seeker
-    script = [RunResult(status="needs_input", message="Une question", questions=[Question(label="Pays de résidence ?")]),
-              RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True)]
+    pause = RunResult(status="needs_input", message="Une question", questions=[Question(label="Pays de résidence ?")])
     calls = []
 
-    async def scripted(page, **kw):
-        calls.append(kw)
-        res = script[len(calls) - 1]
-        if res.status == "submitted":
-            assert await kw["before_submit"]() == []
-            await kw["on_submit_click"]()
-        return res
+    drive = service._drive
 
-    monkeypatch.setattr(service, "run_application", scripted)
+    async def scripted(*args, **kw):
+        calls.append(kw)
+        return pause if len(calls) == 1 else await drive(*args, **kw)
+
+    monkeypatch.setattr(service, "_drive", scripted)
     (app,), (g,) = two_apps(w, profile, master, tmp_path, 1)
     e1 = seeker.request(g).event_ids[0]
     rep = mac.sync_one(pid)

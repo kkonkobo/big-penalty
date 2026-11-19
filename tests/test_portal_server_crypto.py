@@ -111,6 +111,6 @@ def test_pairing_off_unless_complete(tmp_path):
 
 
 def test_trusted_proxies_and_extras(tmp_path):
-    cfg = Config.from_env(make_env(tmp_path, PORTAL_TRUSTED_PROXIES="10.0.0.0/8, 172.18.0.1", PORTAL_MAX_DEVICES="3",
+    cfg = Config.from_env(make_env(tmp_path, PORTAL_TRUSTED_PROXIES="192.0.2.0/24, 203.0.113.1", PORTAL_MAX_DEVICES="3",
                                    PORTAL_BASE_PATH="/portal", PORTAL_DATA_KEY_OLD=OLD_KEY_HEX))
     assert len(cfg.trusted_proxies) == 2 and cfg.max_devices == 3 and cfg.base_path == "/portal" and cfg.data_key_old == OLD

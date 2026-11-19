@@ -17,12 +17,12 @@ from jobhunt.apply import facts, service
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.errors import ApplyError
 from jobhunt.config import get_settings
-from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
 from jobhunt.filelock import try_lock, unlock
 from jobhunt.portal import protocol
 from jobhunt.portal.journal import EventRow, Journal, ProfileRow
-from jobhunt.portal.snapshot import (answer_key, custom_entry, custom_key, field_version, question_id, stored_answer, value_hash)
+from jobhunt.portal.snapshot import (answer_key, custom_entry, custom_key, field_version, question_id, settlement_binding,
+                                     stored_answer, value_hash)
 
 TOO_LATE = "Trop tard : l'action avait déjà commencé."
 GRANT_GONE = "Cette action n'est plus valable : rechargez la page."
@@ -346,8 +346,8 @@ def _intent(ctx: _Ctx, ev: EventRow) -> None:
         app = cvstore.get_application(g.app_id)
         job = db.get_job(app.job_id) if app else None
         if (out is None or out.id != g.run_id or out.mode != g.mode or app is None or app.profile_id != ctx.pid
-                or app.current_rev != g.rev or (cvstore.sha256_file(cvs.safe_pdf(app)) or "") != g.pdf_sha256
-                or service.origin_digest(job.origin_url if job else None) != g.origin_sha):
+                or app.current_rev != g.rev or any(getattr(g, key) != value for key, value in settlement_binding(
+                    app, out, service.origin_digest(job.origin_url if job else None), apply_store.held_binding(out.id)).items())):
             return ctx.finish(ev, "interrupted" if retry else "refused", GRANT_GONE, label=label)
         if not retry:
             other = "resolve_not_sent" if g.action == "resolve_sent" else "resolve_sent"
@@ -363,8 +363,8 @@ def _intent(ctx: _Ctx, ev: EventRow) -> None:
         except ApplyError:
             return ctx.finish(ev, "interrupted" if retry else "refused", GRANT_GONE, label=label)
         return ctx.finish(ev, "done", "Notée comme envoyée." if g.action == "resolve_sent"
-                          else "Remise dans la file : elle pourra être renvoyée.", label=label)
-    ctx.finish(ev, "queued", "En attente d'envoi sur le Mac.", label=label)
+                          else "Notée comme non envoyée. Nouvelle tentative manuelle uniquement.", label=label)
+    ctx.finish(ev, "queued", "En attente de traitement sur le Mac.", label=label)
 
 
 def _cancel(ctx: _Ctx, ev: EventRow) -> None:

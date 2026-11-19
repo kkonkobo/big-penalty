@@ -303,8 +303,8 @@ def test_pages_render_from_a_rich_snapshot(h, user, prof):
 
     t = user.get("/app/accord").text
     for needle in ("En attente de mon accord", "Adéquation 81 %", "publiée il y a 3 jours", "Voir l'annonce", "Voir le CV",
-                   f"/app/documents/{DOC_A}", "CV non disponible sur le portail", "Envoyer celle-ci", "Envoyer la sélection",
-                   "Tout envoyer (2)", "L'envoi est fait par le Mac à sa prochaine synchronisation", f'name="g" value="{GRANT_SEND_1}"'):
+                   f"/app/documents/{DOC_A}", "CV non disponible sur le portail", "Approuver celle-ci", "Approuver la sélection",
+                   "Tout approuver (2)", "Le Mac traite votre accord", f'name="g" value="{GRANT_SEND_1}"'):
         assert needle in t, needle
     assert 'rel="noopener noreferrer"' in t and f'href="{JOB_URL}"' in t
 
@@ -506,7 +506,7 @@ def test_two_step_intent_flow(h, user, prof):
     push(h, prof, rich_snapshot())
     r = post(user, "/confirmer", {"g": GRANT_SEND_1, "retour": "accord"})
     assert r.status_code == 200 and events(h, prof) == []
-    for needle in ("Envoyer cette candidature ?", "Société Exemple", "Technicien", "ats.example", f"/app/documents/{DOC_A}", JOB_URL,
+    for needle in ("Approuver cette candidature ?", "Société Exemple", "Technicien", "ats.example", f"/app/documents/{DOC_A}", JOB_URL,
                    "Confirmer", 'action="/app/intentions"', 'href="/app/accord"', f'name="g" value="{GRANT_SEND_1}"'):
         assert needle in r.text, needle
     r = post(user, "/intentions", {"g": GRANT_SEND_1, "retour": "accord"})
@@ -515,7 +515,7 @@ def test_two_step_intent_flow(h, user, prof):
     assert [(e.kind, e.grant) for e in events(h, prof)] == [("intent", GRANT_SEND_1)]
     # the page now shows the waiting state instead of the buttons
     t = user.get("/app/accord").text
-    assert "Demande envoyée, en attente du Mac" in t and "Tout envoyer (1)" in t
+    assert "Demande envoyée, en attente du Mac" in t and "Tout approuver (1)" in t
     # a second request for the same grant is refused
     r = post(user, "/intentions", {"g": GRANT_SEND_1, "retour": "accord"})
     assert "Cette candidature a changé : rechargez la page." in follow(user, r).text and len(events(h, prof)) == 1
@@ -542,11 +542,11 @@ def test_unconfirmed_sibling_and_email_resume(h, user, prof):
 def test_select_and_send_all(h, user, prof):
     push(h, prof, rich_snapshot())
     r = post(user, "/confirmer", {"g": [GRANT_SEND_1, GRANT_SEND_2], "retour": "accord"})
-    assert "Envoyer ces 2 candidatures ?" in r.text
+    assert "Approuver ces 2 candidatures ?" in r.text
     r = post(user, "/confirmer", {"tout": "1", "retour": "accord"})
-    assert "Envoyer ces 2 candidatures ?" in r.text and GRANT_SEND_2 in r.text
+    assert "Approuver ces 2 candidatures ?" in r.text and GRANT_SEND_2 in r.text
     r = post(user, "/confirmer", {"un": GRANT_SEND_2, "g": GRANT_SEND_1, "retour": "accord"})
-    assert "Envoyer cette candidature ?" in r.text and GRANT_SEND_1 not in r.text
+    assert "Approuver cette candidature ?" in r.text and GRANT_SEND_1 not in r.text
     r = post(user, "/confirmer", {"retour": "accord"})
     assert "Sélectionnez au moins une candidature." in follow(user, r).text
     r = post(user, "/intentions", {"g": [GRANT_SEND_1, GRANT_SEND_2], "retour": "accord"})
@@ -578,7 +578,7 @@ def test_cancel_a_pending_intent(h, user, prof):
     push(h, prof, rich_snapshot())
     post(user, "/intentions", {"g": GRANT_SEND_1, "retour": "accord"})
     t = user.get("/app/a-faire").text
-    assert "Envoi : Société Exemple — Technicien" in t and "Annuler" in t
+    assert "Approbation de la candidature : Société Exemple — Technicien" in t and "Annuler" in t
     event_id = re.search(r'name="event" value="([0-9a-f]{32})"', t).group(1)
     assert event_id == events(h, prof)[0].event_id
     r = post(user, "/annuler", {"event": event_id})

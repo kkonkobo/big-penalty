@@ -242,16 +242,18 @@ def set_status(app_id: int, new: str, *, base_rev: int | None = None) -> Applica
 
 
 def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_errors: bool = False,
-                     approved_by: str = "user") -> Application:
+                     approved_by: str = "user", confirm_auto: bool = False) -> Application:
     """Approve EXACTLY `rev`: it must be the current revision, its PDF must exist and hash to the stored sha256."""
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        a = c.execute("SELECT status, current_rev FROM applications WHERE id=?", (app_id,)).fetchone()
+        a = c.execute("SELECT status, current_rev, approved_by FROM applications WHERE id=?", (app_id,)).fetchone()
         if a is None:
             raise CVError("Candidature introuvable")
         if rev != a["current_rev"]:
             raise StaleRevision("Le CV a changé entre-temps : rouvrir la page et recommencer")
-        if "approved" not in TRANSITIONS[a["status"]]:
+        if "approved" not in TRANSITIONS[a["status"]] and not (
+            confirm_auto and approved_by == "user" and a["status"] == "approved" and a["approved_by"] == "auto"
+        ):
             raise TransitionError("Seul un brouillon peut être approuvé")
         r = c.execute("SELECT pdf_path, pdf_sha256, flags_json FROM application_revisions WHERE application_id=? AND rev=?",
                       (app_id, rev)).fetchone()

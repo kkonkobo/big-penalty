@@ -68,8 +68,10 @@ STATUS_LABELS = {
 STATUS_CLASSES = {"applied": "ok", "done": "ok", "conflict": "warn", "awaiting_review": "warn", "queued": "warn", "running": "warn",
                   "rejected": "bad", "refused": "bad", "failed": "bad", "interrupted": "bad", "lost": "bad", "cancelled": ""}
 INFO_LABELS = {"captcha": "CAPTCHA à résoudre", "host": "Site à approuver", "dry_run": "Essai à blanc en pause",
-               "sending": "Envoi en cours", "interrupted": "Envoi interrompu : à vérifier"}
-GRANT_VERBS = {"send": "Envoi", "resume": "Reprise de la candidature", "sent": "Marquée comme envoyée", "not_sent": "Remise dans la file"}
+               "sending": "Envoi en cours", "interrupted": "Envoi interrompu : à vérifier",
+               "supervised": "À envoyer en mode supervisé sur le Mac"}
+GRANT_VERBS = {"send": "Approbation de la candidature", "resume": "Reprise de la candidature", "sent": "Marquée comme envoyée",
+               "not_sent": "Remise dans la file"}
 EVENT_VERBS = {"answer": "Réponse enregistrée", "question_answer": "Réponse à une question", "custom_edit": "Réponse modifiée",
                "custom_delete": "Réponse retirée"}
 MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
@@ -513,7 +515,7 @@ def _do_confirm(c: Ctx) -> Response:
         return c.redirect(back, err=[MSG_ALREADY])
     kinds = {e.kind for e in entries}
     if kinds == {"send"}:
-        heading = "Envoyer cette candidature ?" if len(entries) == 1 else f"Envoyer ces {len(entries)} candidatures ?"
+        heading = "Approuver cette candidature ?" if len(entries) == 1 else f"Approuver ces {len(entries)} candidatures ?"
     elif len(entries) == 1:
         heading = {"resume": "Reprendre cette candidature ?", "sent": "Marquer comme envoyée ?", "not_sent": "Remettre dans la file ?"}[entries[0].kind]
     else:

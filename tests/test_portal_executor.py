@@ -22,7 +22,9 @@ from jobhunt.portal.executor import APPROVAL_REFUSED, CHANGED
 from jobhunt.portal.journal import NewEvent
 
 from apply_service_fakes import FakePool, stub_engine
-from portal_fakes import NOW, journal, make_run, make_sent, master, new_app, set_pdf  # noqa: F401
+from portal_fakes import NOW, fixture_ats, journal, make_run, make_sent, master, new_app, set_pdf  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fixture_ats")
 
 STREAM = "b" * 32
 
@@ -62,7 +64,7 @@ def queue_intent(jp, profile, app, action="send", *, run_id=0, mode="", now=NOW,
     item = next(i for i in service.queue() if i.app.id == app.id)
     g = jp.find_or_create_grant(jp.get_profile(profile.id), action, now, app_id=app.id, rev=app.current_rev,
                                 pdf_sha256=sha or cvstore.sha256_file(cvs.safe_pdf(app)), origin_sha=origin if origin is not None else item.origin_sha,
-                                run_id=run_id, mode=mode)
+                                run_id=run_id, mode=mode or ("submit" if action == "send" else ""))
     p = jp.get_profile(profile.id)
     seq = p.cursor_seq + 1
     eid = f"{profile.id:08x}{seq:024x}"
@@ -95,7 +97,8 @@ async def test_a_send_runs_with_the_bound_arguments(jp, profile, master, tmp_pat
     (app_id, kw), = runner.calls
     item = next(i for i in service.queue(profile.id) if i.app.id == app.id)
     assert app_id == app.id and kw == {"mode": "submit", "trigger": "user", "headless": None, "_lock_held": True,
-                                       "expected_rev": app.current_rev, "expected_origin": item.origin_sha}
+                                       "expected_rev": app.current_rev, "expected_origin": item.origin_sha,
+                                       "expected_pdf": app.pdf_sha256}
     assert "attended" not in kw
     ev = jp.get_event(eid)
     assert ev.state == "done" and ev.message == "Envoyée." and ev.run_id == 1001 and jp.get_grant(g).state == "used"
@@ -390,7 +393,7 @@ async def test_exception_after_recorded_send_uses_recorded_outcome(jp, profile, 
     event_id, _ = queue_intent(jp, profile, app)
 
     async def runner(*args, **kwargs):
-        make_sent(app, job)
+        await service.run(*args, **kwargs)
         raise RuntimeError("Private browser data")
 
     await run_batch(jp, [profile.id], NOW, runner=runner)
@@ -494,21 +497,13 @@ async def test_auto_resume_does_not_duplicate_a_queued_resume_intent(jp, profile
 
 
 # ------------------------------------------------------------------ the real service.run with the engine stubbed
-def click_hook():
-    async def hook(kw):
-        assert await kw["before_submit"]() == []
-        await kw["on_submit_click"]()
-    return hook
-
-
-async def test_real_service_run_reaches_submitted(jp, profile, master, tmp_path, monkeypatch):
+async def test_real_service_run_reaches_submitted(jp, profile, master, tmp_path, fixture_ats):
     job, draft = new_app(profile, master, tmp_path, 1)
     eid, g = queue_intent(jp, profile, draft)
-    calls = stub_engine(monkeypatch, RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True), hook=click_hook())
-    monkeypatch.setattr(service, "BrowserPool", lambda headless=None: FakePool())
     rep = await run_batch(jp, [profile.id], NOW)
     ev = jp.get_event(eid)
-    assert ev.state == "done" and ev.run_id and len(calls) == 1
+    assert ev.state == "done" and ev.run_id and len(fixture_ats) == 1
+    assert fixture_ats[0].request.content == cvs.safe_pdf(draft).read_bytes()
     a = cvstore.get_application(draft.id)
     assert a.status == "submitted" and a.approved_by == "user" and db.get_job(job.id).status == "applied"
     run_ = apply_store.get_run(ev.run_id)
