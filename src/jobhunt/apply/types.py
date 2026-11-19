@@ -151,6 +151,7 @@ class StepLog(BaseModel):
 
 
 class DispatchDiagnostics(BaseModel, validate_assignment=True):
+    email: Literal['email_link_used', 'email_code_used', 'email_not_found', 'email_auth_failed'] | None = None
     step: int = Field(default=0, ge=0, le=10000)
     control: Literal["reservation", "navigation", "scan", "text", "choice", "upload", "account_creation", "login_otp",
                      "cv_upload_parse", "draft_write", "final_submit", "other"] = "reservation"

@@ -206,6 +206,9 @@ MIGRATIONS: list[str] = [
     ALTER TABLE apply_reservations ADD COLUMN receipt_at TEXT;
     CREATE UNIQUE INDEX idx_active_requisition ON apply_reservations(dedupe_key) WHERE released_at IS NULL;
     """,
+    """
+    ALTER TABLE application_runs ADD COLUMN email_resumed INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

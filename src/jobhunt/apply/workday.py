@@ -50,6 +50,8 @@ _AUTH_IDS = {"signin", "signinbutton", "createaccount", "createaccountbutton", "
              "verificationcode", "otp", "one-time-code"}
 _MANUAL_IDS = {"voluntarydisclosures", "selfidentify", "selfidentification", "reviewpage"}
 _OTP = re.compile(r"\b(?:verification code|one.time (?:code|password)|code (?:de verification|a usage unique)|otp)\b")
+_EMAIL_CHALLENGE = re.compile(r"\b(?:check your (?:e-mail|email|inbox)|verify your (?:e-mail|email) address|"
+                              r"verifiez votre (?:e-mail|email|boite de reception)|lien de verification)\b")
 _CUSTOM_QUESTION = re.compile(r"(?:primary|secondary)?questionnaire(?:page[-_])?.+")
 
 
@@ -118,7 +120,7 @@ class WorkdayPlanner:
         ids = {field.automation_id.casefold() for field in snapshot.fields}
         if snapshot.has_captcha:
             return StepPlan(page_kind="captcha")
-        if _OTP.search(_normalized(snapshot.text)) or any(
+        if _OTP.search(_normalized(snapshot.text)) or _EMAIL_CHALLENGE.search(_normalized(snapshot.text)) or any(
             field.autocomplete == "one-time-code" or _OTP.search(_normalized(field.label)) for field in snapshot.fields
         ) or ids & {"verificationcode", "otp", "one-time-code"}:
             return StepPlan(page_kind="email_verification")

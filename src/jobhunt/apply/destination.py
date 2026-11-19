@@ -131,6 +131,7 @@ class RecipientGuard:
         self.refused = False
         self.refusal_code = "recipient_refused_transport"
         self.transmitted = False
+        self.non_account_transmitted = False
         self.final_started = False
         self.final_response = False
         self._allow_write = allow_write
@@ -257,6 +258,8 @@ class RecipientGuard:
                     self.audience.recheck()
                     if not entry_post:
                         self.transmitted = True
+                        if not getattr(self.audience, 'account_only_request', lambda _: False)(request):
+                            self.non_account_transmitted = True
                 final_request = self.final_started and write and self.audience.click_write is request
                 response = await route.fetch(max_redirects=0, max_retries=0)
                 if final_request and request.is_navigation_request() and response.status in {301, 302, 303} and response.headers.get("location"):

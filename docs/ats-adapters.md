@@ -1,5 +1,25 @@
 # ATS adapter contract
 
+## Optional Gmail verification
+
+`big-penalty mail set-password PROFILE` reads a Gmail app password from stdin (hidden when interactive).
+Use `--file PATH` to read from an existing file instead. Never put the password in an argument or the project's
+environment. Big Penalty uses only the macOS Keychain service `big-penalty-imap`, keyed by the candidate's profile
+email (confirmed master preferred). `big-penalty mail test PROFILE` prints `OK` and the INBOX count;
+`big-penalty mail forget PROFILE` removes the credential and disables mailbox lookups for that address.
+
+An unattended account challenge polls every 10 seconds for up to 180 seconds, configurable with
+`JOBHUNT_MAIL_POLL_S` and `JOBHUNT_MAIL_TIMEOUT_S`. Mail is read with `EXAMINE` and `BODY.PEEK`, and
+the verification link uses the existing browser context's cookie jar without rendering the email or executing
+scripts from the verification response. Each redirect must stay with the employer or the same ATS tenant. Codes
+go only into a single identifiable verification input; only a supported native verification form can be submitted
+automatically. Unrecognized challenges still pause.
+
+`big-penalty mail resume [PROFILE]` checks eligible, unexpired holds once and requeues applications after opening
+an account activation link. The daily autonomous pass also runs this check. A hold expires from this check after
+24 hours and remains available for manual follow-up. Resume ignores one-time codes and sign-in links; it never
+releases an unresolved application submission or sends an application itself.
+
 Workday and SmartRecruiters can use the unattended browser for postings they resolve unambiguously. Supervised mode still leaves navigation, account entry and the final click to the operator. Setting `JOBHUNT_APPLY_AUTONOMOUS` to `0`, `false`, `no`, or `off`, or tripping the shared per-host circuit breaker, disables unattended dispatch. An unresolved receipt still holds the individual application; switching modes does not release it.
 
 ## Implementing an adapter
