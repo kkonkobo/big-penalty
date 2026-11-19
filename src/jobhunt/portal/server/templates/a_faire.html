@@ -19,7 +19,7 @@
     <label class="check"><input type="checkbox" name="never_employed" value="1" autocomplete="off"> Je n’ai jamais travaillé pour ces entreprises, sauf pour celles marquées « Oui » ci-dessous.</label>
     {% endif %}
     {% for q in entries %}
-    {% set spec = (snap.answer_schema.fields|selectattr('path', 'equalto', q.path)|first) if q.path else none %}
+    {% set spec = (snap.answer_schema.fields|selectattr('path', 'equalto', q.path)|first) if q.path and q.path in snap.answers else none %}
     {% if spec %}<input type="hidden" name="v_{{ q.qid }}" value="{{ snap.answers[q.path].ver }}">{% endif %}
     <label>{{ q.label }}{% if q.application_count %} · {{ q.application_count }} candidature{{ 's' if q.application_count != 1 }}{% endif %}
       {% if q.company or q.title %}<span class="sub">{{ q.company }}{% if q.company and q.title %} · {% endif %}{{ q.title }}</span>{% endif %}
