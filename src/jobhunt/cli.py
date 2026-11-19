@@ -650,9 +650,12 @@ def apply_fill_step(app_id: Annotated[int, typer.Argument(help="numéro de candi
         preview = asyncio.run(call_local(app_id, "preview"))
         console.print(f"Offre réservée : {preview['company']} · {preview['title']} · {preview['reserved_url']}", markup=False)
         console.print(f"Page ouverte : {preview['page_url']}", markup=False)
+        if not preview["requires_confirmation"]:
+            console.print(f"Poste vérifié : {preview['tenant']} · {preview['requisition_id']}", markup=False)
         if preview["warning"]:
             console.print("ATTENTION : le titre de la page ne ressemble ni au poste ni à l’entreprise réservés.", style="bold yellow")
-        if not typer.confirm("Confirmez-vous que la page ouverte concerne cette offre et autorisez-vous la saisie de cette étape ?"):
+        if preview["requires_confirmation"] and not typer.confirm(
+                "Confirmez-vous que la page ouverte concerne cette offre et autorisez-vous la saisie de cette étape ?"):
             raise typer.Exit(1)
         result = asyncio.run(call_local(app_id, "fill", preview["token"]))
     except ApplyError as exc:
@@ -661,7 +664,7 @@ def apply_fill_step(app_id: Annotated[int, typer.Argument(help="numéro de candi
     if result["status"] in ("blocked", "failed", "needs_human"):
         console.print("Saisie interrompue. Consultez l’essai ; si la fenêtre est ouverte, vérifiez le poste avant de reconfirmer.")
         raise typer.Exit(1)
-    console.print("Étape vérifiée. Poursuivez dans la fenêtre supervisée ; aucun bouton n’a été cliqué.")
+    console.print("Étape vérifiée. Poursuivez dans la fenêtre supervisée ; aucun clic de navigation ou d’envoi.")
 
 
 @apply_app.command("send")

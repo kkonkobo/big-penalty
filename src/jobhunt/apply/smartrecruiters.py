@@ -62,6 +62,8 @@ def _first_party(url: str) -> bool:
 
 
 def _identity(url: str, *, confirmation: bool = False) -> tuple[str, str, str] | None:
+    if "#" in url:
+        return None
     url = clean_url(url, navigation=True)
     if not url or not _first_party(url):
         return None
@@ -175,6 +177,8 @@ class SmartRecruitersAdapter:
     def resolve(self, url: str, dom_markers: frozenset[str]) -> Requisition | None:
         from jobhunt.apply.adapters import Requisition
 
+        if "#" in url:
+            return None
         source = clean_url(url, navigation=True)
         if not origin(source) or not source.startswith("https://"):
             return None

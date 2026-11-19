@@ -121,6 +121,8 @@ class FillPreview:
     page_url: str
     warning: bool
     requires_confirmation: bool
+    tenant: str | None = None
+    requisition_id: str | None = None
 
 
 class Session:
@@ -168,7 +170,8 @@ class Session:
             else:
                 urls = (top, *await target.evaluate("""node => {
                     const view = node.ownerDocument.defaultView;
-                    return [view.location.href, node.form?.action || view.location.href];
+                    const form = node.form || node.closest('form');
+                    return [view.location.href, form?.action || view.location.href];
                 }"""))
             if top != self.page.url:
                 raise ApplyError(WRONG_POSTING)
@@ -217,6 +220,10 @@ class Session:
                 raise StepChanged(CONFIRM_AGAIN)
             if target is not None and (not live or not _generic_action_allowed(url, *live[1:])):
                 raise ManualField()
+        if self.match and expected is not None:
+            current, _, _ = await self.fingerprint()
+            if not secrets.compare_digest(current, expected):
+                raise StepChanged(CONFIRM_AGAIN)
 
     async def preview(self) -> FillPreview:
         async with self.lock:
@@ -235,7 +242,9 @@ class Session:
             self.pending = token, current
             return FillPreview(token, self.attempt.run_id, self.attempt.application_id, self.company, self.title,
                                audit_url(self.attempt.url), audit_url(url),
-                               not bool(_words(headings) & _words(f"{self.company} {self.title}")), self.match is None)
+                               not self.match and not bool(_words(headings) & _words(f"{self.company} {self.title}")),
+                               self.match is None, self.attempt.tenant if self.match else None,
+                               self.attempt.requisition_id if self.match else None)
 
     async def run(self, token: str | None, *, initial: bool = False) -> RunResult:
         async with self.lock:

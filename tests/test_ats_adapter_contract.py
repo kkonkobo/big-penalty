@@ -256,14 +256,18 @@ def workday_registry(server, monkeypatch):
             return True
 
         def resolve(self, url, markers):
-            if urlsplit(url).netloc != urlsplit(server.base).netloc or not urlsplit(url).path.startswith("/workday-"):
+            parsed = urlsplit(url)
+            if parsed.netloc != urlsplit(server.base).netloc:
                 return None
-            return replace(super().resolve(WORKDAY_POSTING, markers), write_origins=(server.base,),
-                           endpoints=(("cv_upload_parse", server.base + "/workday-upload/{tenant}/{requisition}"),))
+            posting = WORKDAY_POSTING if parsed.path.startswith("/workday-") else origin_of_workday + parsed.path
+            identity = super().resolve(posting, markers)
+            return replace(identity, write_origins=(server.base,), endpoints=(
+                ("cv_upload_parse", server.base + "/workday-upload/{tenant}/{requisition}"),)) if identity else None
 
         def matches(self, url, markers):
             return float(self.resolve(url, markers) is not None)
 
+    origin_of_workday = "https://" + urlsplit(WORKDAY_POSTING).netloc
     registry = Registry()
     registry.register(LoopbackWorkday(), host="127.0.0.1", supervised_receipt_kind="candidate_home_listing")
     monkeypatch.setattr(service, "registry", registry)
@@ -297,6 +301,7 @@ def test_workday_live_step_identity(posting):
         other = posting.replace("JR123", "JR124").replace("R12", "R13")
         assert adapter.resolve(other + suffix, frozenset()).requisition_id != reserved.requisition_id
     assert adapter.resolve(posting + "/apply/other", frozenset()) is None
+    assert adapter.resolve(posting + "#/job/Other_JR999", frozenset()) is None
     assert adapter.resolve(posting.split("/job/")[0] + "/apply/myInformation", frozenset()) is None
 
 
@@ -484,7 +489,7 @@ def test_smartrecruiters_live_step_identity():
                    "/application/attachments", "/review", "/application/submit"):
         assert adapter.resolve(SMART_URL + suffix, frozenset()) == reserved
         assert adapter.resolve(SMART_URL.replace(PUBLICATION, OTHER_PUBLICATION) + suffix, frozenset()).requisition_id == OTHER_PUBLICATION
-    for suffix in ("/login", "/apply/anything", "/confirmation", "/attachments", "?jobId=other"):
+    for suffix in ("/login", "/apply/anything", "/confirmation", "/attachments", "?jobId=other", "#/publication/other"):
         assert adapter.resolve(SMART_URL + suffix, frozenset()) is None
 
 
@@ -688,3 +693,105 @@ async def test_smartrecruiters_browser_upload_boundary(smart_adapter, scenario, 
             await asyncio.wait_for(task, timeout=8)
         upload.close()
         foreign.close()
+
+
+@pytest.mark.parametrize("platform", ["workday", "smart_adapter"])
+@pytest.mark.parametrize("change", [None, "another-posting", "other-form-action", "same-posting-step", "autosave"])
+async def test_adapter_fill_step_identity(platform, change, request, server, page, profile, tmp_path, fast, monkeypatch):
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.supervised import CONFIRM_AGAIN, WRONG_POSTING
+
+    workday = platform == "workday"
+    request.getfixturevalue("workday_registry" if workday else platform)
+    posting = urlsplit(WORKDAY_POSTING).path if workday else PUBLICATION_PATH
+    req = "JR123" if workday else PUBLICATION
+    other_req = "JR124" if workday else OTHER_PUBLICATION
+    paths = [posting + suffix for suffix in (("/apply/myInformation", "/apply/myExperience", "/apply/applicationQuestions")
+                                             if workday else ("/profile", "/experience", "/questions"))]
+    facts = FactSheet(facts=[Fact(key="first_name", label="First name", value="Camille", exact=True),
+                             Fact(key="job_source", label="How did you hear about us?", value="Referral", exact=True),
+                             Fact(key="custom_1", label="Preferred working language", value="French", exact=True),
+                             Fact(key="custom_2", label="My Experience Preferred working language", value="French", exact=True),
+                             Fact(key="available_from", label="Available from", value="2027-08-19", exact=True)])
+    monkeypatch.setattr(service, "_candidate_facts", lambda *_: facts)
+
+    for index, (path, heading) in enumerate(zip(paths, ("My Information", "My Experience", "Application Questions"), strict=True)):
+        marker, label, answer = (("sourcePrompt", "How did you hear about us?", "Referral") if index == 0 else
+                                 ("availableFrom-month", "Available from (month)", "08")) if workday else (
+                                     "language", "Preferred working language", "French")
+        widget = f'''<div id="choice" data-automation-id="{marker}" role="combobox" aria-label="{label}"
+                      aria-controls="options">Select</div>
+                     <ul id="options" role="listbox" hidden><li role="option">{answer}</li><li role="option">Other</li></ul>
+                     <script>
+                      const control = document.querySelector('#choice'), options = document.querySelector('#options');
+                      control.onclick = () => {{ options.hidden = false; }};
+                      options.onclick = event => {{ control.textContent = event.target.textContent; options.hidden = true; }};
+                     </script>'''
+        controls = ('<label>First name<input id="name" data-automation-id="legalNameCountry-firstName"></label>' if not index else '')
+        if index == 1 and workday:
+            controls += '<label>Resume<input id="resume" type="file" data-automation-id="resumeUpload"></label>'
+        else:
+            controls += widget
+        next_link = f'<a href="{paths[index + 1]}">Next manually</a>' if index < 2 else ''
+        server.html[path] = (f'<!doctype html><section><h1>{heading}</h1><form method="post" action="{path}">{controls}'
+                             '<button>Submit manually</button></form></section>' + next_link)
+    server.html[posting] = f'<h1>Fixture role</h1><a href="{paths[0]}">Start manually</a>'
+
+    job = make_job(profile, url=server.base + posting)
+    app = make_app(profile, job, tmp_path, master_hash=save_confirmed(profile.id).content_hash)
+    cvs.approve(app.id, app.current_rev)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page), verifier=FakeVerifier()))
+    try:
+        await page.locator("aside").wait_for(timeout=6000)
+        await page.get_by_text("Start manually").click()
+        for index, path in enumerate(paths):
+            current = await service.preview_fill_step(app.id)
+            assert current.title == job.title and not current.requires_confirmation and current.requisition_id == req
+            assert current.tenant == ("demo.wd3.myworkdayjobs.com/external" if workday else "fixtureco")
+            attempt = store.held_binding(current.run_id)
+            assert attempt and store.binding_active(attempt)
+            if index == 1 and change == "another-posting":
+                await page.evaluate("path => history.pushState({}, '', path)", path.replace(req, other_req))
+                if workday:
+                    result = await service.fill_step(app.id, current.token, run_id=attempt.run_id)
+                    assert result.status == "blocked" and result.message == WRONG_POSTING
+                else:
+                    with pytest.raises(ApplyError, match="Destination non vérifiée"):
+                        await service.fill_step(app.id, current.token, run_id=attempt.run_id)
+                assert page.is_closed()
+                break
+            if index == 1 and change == "other-form-action":
+                await page.locator("form").evaluate("(form, path) => { form.action = path; }", path.replace(req, other_req))
+                result = await service.fill_step(app.id, current.token, run_id=attempt.run_id)
+                assert result.status == "blocked" and page.is_closed()
+                break
+            if index == 1 and change == "same-posting-step":
+                await page.evaluate("path => history.pushState({}, '', path)", paths[2])
+                with pytest.raises(ApplyError, match=CONFIRM_AGAIN):
+                    await service.fill_step(app.id, current.token, run_id=attempt.run_id)
+                assert not page.is_closed()
+                break
+            if index == 2 and change == "autosave":
+                await page.locator("#options").evaluate("list => list.addEventListener('click', () => {"
+                                                        "void fetch('/undeclared-autosave', {method: 'POST', body: 'fixture'}); })")
+                await service.fill_step(app.id, current.token, run_id=attempt.run_id)
+                assert page.is_closed()
+                break
+            result = await service.fill_step(app.id, current.token, run_id=attempt.run_id)
+            assert result.status not in ("blocked", "failed") and page.url == server.base + path, result
+            if index == 0:
+                assert await page.input_value("#name") == "Camille", result
+            if index == 1 and workday:
+                assert await page.locator("#resume").evaluate("input => input.files[0].name") == "CV.pdf"
+            else:
+                assert await page.locator("#choice").text_content() == (("Referral" if not index else "08") if workday else "French")
+            assert store.held_binding(attempt.run_id) == attempt
+            with pytest.raises(ApplyError, match=CONFIRM_AGAIN):
+                await service.fill_step(app.id, current.token, run_id=attempt.run_id)
+            if index < 2:
+                await page.get_by_text("Next manually").click()
+    finally:
+        if not page.is_closed():
+            await page.close()
+        result = await asyncio.wait_for(task, timeout=8)
+    assert not server.posts and store.outstanding_attempt(app.id).id == result.id

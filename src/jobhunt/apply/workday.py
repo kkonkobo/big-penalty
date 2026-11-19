@@ -58,7 +58,7 @@ def _normalized(text: str) -> str:
 
 def _posting(url: str) -> tuple[str, str, str] | None:
     cleaned = clean_url(url, navigation=True)
-    if not cleaned:
+    if not cleaned or urlsplit(url).fragment:
         return None
     parsed = urlsplit(cleaned)
     host = parsed.hostname or ""
