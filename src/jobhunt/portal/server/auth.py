@@ -184,6 +184,10 @@ def same_origin_ok(method: str, headers: Mapping[str, str] | Iterable[tuple[byte
     origin, site = h.get("origin"), h.get("sec-fetch-site")
     if origin is None and site is None:
         return False
+    if origin is not None and origin.strip() == "null" and site == "same-origin":
+        # Browsers serialize Origin as "null" when the page's referrer policy is no-referrer (or for some privacy
+        # modes); Sec-Fetch-Site is set by the browser itself and cannot be forged by another site.
+        return True
     if origin is not None and ((canonical := _origin(origin)) is None or canonical != _origin(config.public_origin)):
         return False
     return site is None or site == "same-origin"
