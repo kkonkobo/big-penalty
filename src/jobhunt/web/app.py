@@ -28,6 +28,7 @@ from jobhunt.cv.master import (MasterError, confirm_master, discard_pending, dum
 from jobhunt.llm import LLMError, get_llm
 from jobhunt.freshness import EXPIRE_AFTER_DAYS, effective_posted_at, is_repost, rank_score
 from jobhunt.models import ContractType, Profile, SearchQuery
+from jobhunt.portal.periodic import PeriodicSync
 from jobhunt.scoring import FLAG_LABELS
 from jobhunt.sources import registry
 
@@ -39,12 +40,13 @@ templates = Jinja2Templates(directory=str(HERE / "templates"))
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     stopped = asyncio.Event()
-    task = asyncio.create_task(sched.Scheduler().run(stopped))
+    daily_task = asyncio.create_task(sched.Scheduler().run(stopped))
+    portal_task = asyncio.create_task(PeriodicSync().run(stopped))
     try:
         yield
     finally:
         stopped.set()
-        await task
+        await asyncio.gather(daily_task, portal_task)
 
 
 app = FastAPI(title="Big Penalty", lifespan=lifespan)

@@ -14,6 +14,7 @@ _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     from jobhunt import schedule
+    from jobhunt.portal import periodic
 
     plist_path = schedule.plist_path
     monkeypatch.setattr(schedule, "plist_path", lambda home=None: plist_path(home or tmp_path))
@@ -22,6 +23,7 @@ def isolated(tmp_path, monkeypatch):
         raise AssertionError("Tests must use a fake daily launcher")
 
     monkeypatch.setattr(schedule, "_launch_daily", unexpected_daily_launch)
+    monkeypatch.setattr(periodic, "run_pass", lambda: None)
     monkeypatch.setattr(db, "DB_PATH_OVERRIDE", tmp_path / "test.sqlite3")
     s = get_settings()
     monkeypatch.setattr(s, "anthropic_api_key", None)

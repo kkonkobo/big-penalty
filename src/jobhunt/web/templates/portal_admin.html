@@ -48,6 +48,7 @@
       <tbody>
         <tr><th>Portail</th><td>{{ st.origin }}{{ st.base_path }}{% if st.device_name %} <span class="muted small">(appareil « {{ st.device_name }} »)</span>{% endif %}</td></tr>
         <tr><th>Pause générale</th><td>{% if st.paused %}oui : rien n'est appliqué ni envoyé depuis le portail{% else %}non{% endif %}</td></tr>
+        <tr><th>Dernière synchronisation automatique (Mac)</th><td>{% if automatic_sync %}<time datetime="{{ automatic_sync.at.isoformat() }}">{{ automatic_sync.at.astimezone().strftime('%d/%m/%Y à %H:%M %Z') }}</time> · {{ automatic_sync.label }}{% else %}jamais{% endif %}</td></tr>
         {% if ps and ps.enabled %}
         <tr><th>Mode</th><td>{% if ps.mode == 'review' %}validation (vous validez chaque action){% else %}direct{% endif %}</td></tr>
         <tr><th>Identifiant</th><td class="mono">{{ handle_shown }}</td></tr>
@@ -62,7 +63,7 @@
   {% endif %}
   {% if syncing %}<p><span class="spinner sm" aria-hidden="true"></span> Synchronisation en cours… <a href="/profiles/{{ profile.id }}/portal">Actualiser</a></p>{% endif %}
   {% if not syncing and (sync_lines or sync_error) %}
-    <h3>Dernière synchronisation lancée d'ici</h3>
+    <h3>Dernière synchronisation lancée d'ici{% if sync_at %} · {{ sync_at | ago }}{% endif %}</h3>
     {% if sync_error %}<p class="error-box">{{ sync_error }}</p>{% endif %}
     {% for line in sync_lines %}<p class="small">{{ line }}</p>{% endfor %}
   {% endif %}

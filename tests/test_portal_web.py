@@ -343,6 +343,13 @@ def test_bulk_approval_rejects_whole_stale_selection(client, portal, monkeypatch
 
 
 # ---------------------------------------------------------------- sync now
+def test_page_shows_persisted_automatic_sync_result(client, portal):
+    portal.journal.set_setting("automatic_sync_outcome", f"failed {NOW.isoformat()}")
+    page = client.get(url(portal.profile_id)).text
+    assert "Dernière synchronisation automatique (Mac)" in page
+    assert f'<time datetime="{NOW.isoformat()}">' in page and "</time> · Échec" in page
+
+
 def test_sync_button_starts_one_background_task_only(client, portal, monkeypatch):
     release, started = threading.Event(), []
 

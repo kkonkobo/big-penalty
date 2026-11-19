@@ -21,8 +21,8 @@ from jobhunt.portal.manage import ManageError
 
 portal_app = typer.Typer(
     help="Portail de la personne accompagnée : appairage, activation par profil, validation, synchronisation (toutes les 5 minutes "
-         "avec « agent install »).", no_args_is_help=True)
-agent_app = typer.Typer(help="Agent launchd (macOS) : synchronisation toutes les 5 minutes, silencieuse si le disque externe n'est pas monté.",
+         "quand Big Penalty est ouvert).", no_args_is_help=True)
+agent_app = typer.Typer(help="État et retrait de l’ancien agent launchd (macOS).",
                         no_args_is_help=True)
 portal_app.add_typer(agent_app, name="agent")
 console = Console()
@@ -325,10 +325,9 @@ def portal_status(tail: Annotated[int, typer.Option("--tail", help="Afficher les
 # ---------------------------------------------------------------- launchd agent
 @agent_app.command("install")
 def agent_install() -> None:
-    """Installe l'agent launchd (toutes les 5 minutes ; silencieux si le disque externe n'est pas monté)."""
-    path = _call(agent.install)
-    _p(f"Agent installé et chargé : {path}")
-    _p(f"Synchronisation toutes les {agent.DEFAULT_INTERVAL_S // 60} minutes ; journal : data/logs/{agent.SYNC_LOG}.")
+    """La synchronisation est intégrée ; aucun agent n’est installé."""
+    _p("Synchronisation intégrée toutes les 5 minutes quand Big Penalty est ouvert. Aucun agent launchd installé.")
+    _p("Pour retirer un ancien agent : big-penalty portal agent uninstall")
 
 
 @agent_app.command("uninstall")
@@ -339,7 +338,7 @@ def agent_uninstall() -> None:
 
 @agent_app.command("status")
 def agent_status() -> None:
-    """État de l'agent : fichier, chargé, intervalle, dernières lignes du journal de synchronisation."""
+    """État de l’ancien agent launchd et de son journal."""
     st = _call(agent.status)
     _p(f"Fichier plist : {'présent' if st.installed else 'absent'} · agent : {'chargé' if st.loaded else 'non chargé'}")
     if st.interval_s:

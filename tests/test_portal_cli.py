@@ -364,10 +364,9 @@ def test_agent_commands_translate_errors(monkeypatch):
     def refuse(**kw):
         raise agent.AgentError("launchd n'existe que sous macOS")
 
-    monkeypatch.setattr(agent, "install", refuse)
     monkeypatch.setattr(agent, "uninstall", refuse)
     monkeypatch.setattr(agent, "status", refuse)
-    for cmd in ("install", "uninstall", "status"):
+    for cmd in ("uninstall", "status"):
         res = run("agent", cmd)
         assert res.exit_code == 1 and "macOS" in res.output and "Traceback" not in res.output
 
@@ -376,10 +375,10 @@ def test_agent_commands_happy_path(monkeypatch, tmp_path):
     from jobhunt.portal import agent
 
     st = agent.Status(installed=True, loaded=True, interval_s=300, log_path=tmp_path / "portal-sync.log", log_tail=["ligne un"])
-    monkeypatch.setattr(agent, "install", lambda: tmp_path / "x.plist")
     monkeypatch.setattr(agent, "uninstall", lambda: True)
     monkeypatch.setattr(agent, "status", lambda: st)
-    assert "x.plist" in run("agent", "install").output
+    result = run("agent", "install")
+    assert result.exit_code == 0 and "Synchronisation intégrée" in result.output
     assert "désinstallé" in run("agent", "uninstall").output.lower()
     out = run("agent", "status").output
     assert "chargé" in out and "5 min" in out and "ligne un" in out
