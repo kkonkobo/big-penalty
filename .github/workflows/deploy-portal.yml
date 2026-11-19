@@ -129,7 +129,7 @@ jobs:
             grep -qi "^$header:" headers.txt || { echo "missing header $header on /app/" >&2; exit 1; }
           done
           grep -qi '^x-frame-options: DENY' headers.txt
-          grep -qi '^referrer-policy: no-referrer' headers.txt
+          grep -qi '^referrer-policy: same-origin' headers.txt
           grep -qi '^x-content-type-options: nosniff' headers.txt
 
           code=$(curl -sS -D redirect.txt -o /dev/null -w '%{http_code}' "$base/app")
