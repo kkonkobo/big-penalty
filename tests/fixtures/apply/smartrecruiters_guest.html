@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Synthetic guest application</title>
+<h1>Apply to Fixture Co</h1>
+<form method="post" action="/apply">
+  <a href="/smart-profile/login">Sign in with SmartProfile</a>
+  <a href="/import/linkedin">Import with LinkedIn</a>
+  <a href="/import/indeed">Import with Indeed</a>
+  <fieldset><legend>Personal information</legend>
+    <label>First name <input id="first" name="firstName" required></label>
+    <label>Last name <input id="last" name="lastName" required></label>
+    <label>Email <input id="email" type="email" name="email" required></label>
+    <label>Phone number <input id="phone" type="tel" name="phone" required></label>
+    <label>City <input id="city" name="city"></label>
+    <label>LinkedIn profile <input id="linkedin" type="url" name="linkedin"></label>
+  </fieldset>
+  <fieldset><legend>Education</legend>
+    <label>School <input id="school" name="school"></label>
+  </fieldset>
+  <fieldset><legend>Experience</legend>
+    <label>Employer <input id="employer" name="employer"></label>
+  </fieldset>
+  <label>CV <input id="cv" type="file" name="resume" accept="application/pdf" required></label>
+  <label>Message to hiring manager <textarea id="letter" name="message"></textarea></label>
+  <fieldset><legend>Screening questions</legend>
+    <label>Preferred working language <select id="language" name="language" required>
+      <option value="">Choose one</option><option value="en">English</option><option value="fr">French</option>
+    </select></label>
+  </fieldset>
+  <fieldset><legend>Privacy notice</legend>
+    <label><input id="privacy" type="checkbox"> I agree to the privacy policy</label>
+    <label><input id="notice" type="checkbox"> I acknowledge the candidate notice</label>
+  </fieldset>
+  <button type="submit">Submit application</button>
+</form>
+</html>

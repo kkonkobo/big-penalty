@@ -12,6 +12,7 @@ from pathlib import Path
 from jobhunt.apply.facts import answers_lock, answers_path, replace_file
 from jobhunt.apply.prompt_rules import decision_key, requires_site_consent, technical_key
 from jobhunt.apply.types import FormField, Question
+from jobhunt.apply.widgets import denied_widget
 
 
 def _digest(data: object) -> str:
@@ -19,7 +20,8 @@ def _digest(data: object) -> str:
 
 
 def field_choices(url: str, field: FormField) -> tuple[str, list[int]] | None:
-    if (field.kind not in {"select", "radio"} or field.multiple or not field.name or not field.form or not field.wording
+    if (field.kind not in {"select", "radio", "combobox"} or field.multiple or not field.name or not field.form or not field.wording
+            or (field.kind == "combobox" and denied_widget(field))
             or not field.choice_destination or not field.choice_options
             or technical_key(field.label, field.kind, group=field.group, autocomplete=field.autocomplete)
             or (decision_key(field.label) or decision_key(field.group)) == "consent"

@@ -94,9 +94,13 @@ def is_bound_pdf(content_type: str, body: bytes | None, pdf: bytes) -> bool:
 
 
 class RecipientGuard:
-    def __init__(self, allowed: frozenset[str], *, audience=None, allow_write: Callable | None = None):
+    def __init__(self, allowed: frozenset[str], *, audience=None, read_only: frozenset[str] = frozenset(),
+                 request_allowed: Callable[[str, str, bool], bool] | None = None,
+                 allow_write: Callable | None = None):
         self.allowed = allowed
         self.audience = audience
+        self.read_only = read_only
+        self.request_allowed = request_allowed
         self.refused = False
         self.transmitted = False
         self.final_started = False
@@ -160,25 +164,33 @@ class RecipientGuard:
             if self.refused:
                 await route.abort()
                 return
-            write = request.method not in {"GET", "HEAD"}
-            permitted = self.allows(request.url)
+            navigation = request.is_navigation_request()
+            read = request.method in {"GET", "HEAD"}
+            write = not read
+            permitted = self.allows(request.url) or (read and not navigation and origin(request.url) in self.read_only)
             if self.audience:
                 try:
                     permitted = self.audience.request_allowed(request, page, initial=request.url == self._initial_url)
                 except Exception:
                     permitted = False
             if not permitted:
-                if request.method not in {"GET", "HEAD"} or request.is_navigation_request():
+                if not read or navigation:
                     await refuse(route)
                 else:
                     await route.abort()
                 return
-            if request.is_navigation_request() and not clean_url(request.url, navigation=True):
+            if self.request_allowed and not self.request_allowed(request.url, request.method, navigation):
+                if not read or navigation:
+                    await refuse(route)
+                else:
+                    await route.abort()
+                return
+            if navigation and not clean_url(request.url, navigation=True):
                 await refuse(route)
                 return
             response = None
             try:
-                if write and self._allow_write and not self._allow_write(request):
+                if not read and self._allow_write and not await self._allow_write(request):
                     await refuse(route)
                     return
                 if self.audience and (write or (self.audience.active and urlsplit(request.url).query)):

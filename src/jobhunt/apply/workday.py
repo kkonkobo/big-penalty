@@ -12,6 +12,7 @@ from jobhunt.apply.answer_check import fold
 from jobhunt.apply.destination import clean_url, origin
 from jobhunt.apply.identity import canonical_identity
 from jobhunt.apply.types import Action, Question, StepPlan
+from jobhunt.apply.widgets import date_segment, date_segment_option, denied_widget
 
 if TYPE_CHECKING:
     from jobhunt.apply.adapters import Attempt, Receipt, Requisition
@@ -22,6 +23,8 @@ _HOST = re.compile(rf"{_LABEL}(?:\.{_LABEL})*\.(?:myworkdayjobs|myworkdaysite)\.
 _SITE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _LOCALE = re.compile(r"[a-z]{2,3}-[a-z]{2}\Z", re.I)
 _REQ = re.compile(r"(?:^|_)((?:JR|REQ|R)[-_]?\d[A-Za-z0-9-]{0,35})\Z", re.I)
+_APPLY_STEPS = frozenset({"signin", "autofillwithresume", "applymanually", "usemylastapplication", "myinformation",
+                          "myexperience", "applicationquestions", "voluntarydisclosures", "selfidentify", "review", "submit"})
 
 _STEPS = {
     "my information": "information", "mes informations": "information",
@@ -59,7 +62,7 @@ def _posting(url: str) -> tuple[str, str, str] | None:
         return None
     parsed = urlsplit(cleaned)
     host = parsed.hostname or ""
-    if parsed.scheme != "https" or parsed.port is not None or not _HOST.fullmatch(host):
+    if parsed.scheme != "https" or parsed.port is not None or parsed.query or not _HOST.fullmatch(host):
         return None
     parts = [unquote(segment) for segment in parsed.path.removeprefix("/").removesuffix("/").split("/")]
     if any(not segment or segment in {".", ".."} or any(ch in "/\\?#%" or ord(ch) < 32 or ord(ch) == 127 for ch in segment)
@@ -74,10 +77,17 @@ def _posting(url: str) -> tuple[str, str, str] | None:
         namespace = ""
     if parts and _LOCALE.fullmatch(parts[0]) and len(parts) > 1 and parts[1] != "job":
         parts = parts[1:]
+    if namespace and len(parts) > 2 and _LOCALE.fullmatch(parts[1]) and parts[2] == "job":
+        parts.pop(1)
     if len(parts) < 3 or not _SITE.fullmatch(parts[0]) or parts[1] != "job":
         return None
-    if parts[-1] == "apply":
-        parts.pop()
+    for index in (3, 4):
+        if len(parts) > index and parts[index].casefold() == "apply" and _REQ.search(parts[index - 1]):
+            steps = parts[index + 1:]
+            if len(steps) > 2 or any(step.casefold().replace("-", "") not in _APPLY_STEPS for step in steps):
+                return None
+            parts = parts[:index]
+            break
     if len(parts) < 3 or len(parts) > 4:
         return None
     match = _REQ.search(parts[-1])
@@ -118,7 +128,7 @@ class WorkdayPlanner:
             if first in _STEPS:
                 steps = {_STEPS[first]}
         if "manual" in steps or ids & _MANUAL_IDS or len(steps) > 1:
-            return StepPlan(page_kind="form")
+            return StepPlan(page_kind="other")
         if not steps:
             return StepPlan(page_kind="job_page")
 
@@ -132,6 +142,9 @@ class WorkdayPlanner:
                 actions.append(Action(ref=field.ref, op="upload_cv"))
                 continue
             key = {"information": _INFO, "experience": _EXPERIENCE, "questions": _SCREENING}[step].get(marker)
+            segment = date_segment(field) if step == "questions" else None
+            if segment:
+                key = segment[0]
             if key is None and step == "questions" and _CUSTOM_QUESTION.fullmatch(marker) and field.label:
                 known = [fact.key for fact in facts.facts if fact.key.startswith("custom_")
                          and _normalized(fact.label) == _normalized(field.label)]
@@ -142,7 +155,10 @@ class WorkdayPlanner:
                 if field.kind in {"select", "combobox", "radio"}:
                     labels = [option.label for option in field.options if option.label
                               and _normalized(option.label) == _normalized(fact.value)]
-                    if len(labels) == 1 and field.kind == "select" and not field.multiple:
+                    index = date_segment_option(field, fact.value) if segment and fact.exact else -1
+                    if index >= 0:
+                        labels = [field.options[index].label]
+                    if len(labels) == 1 and (field.kind == "select" or field.kind == "combobox" and not denied_widget(field)) and not field.multiple:
                         action = Action(ref=field.ref, op="select", fact=fact.key, value=labels[0])
                 elif field.kind == "date" and re.fullmatch(r"\d{4}-\d{2}-\d{2}", fact.value):
                     action = Action(ref=field.ref, op="fill", fact=fact.key, value=fact.value)
@@ -172,13 +188,37 @@ class WorkdayAdapter:
         from jobhunt.apply.adapters import Requisition
 
         posting = _posting(url)
-        return Requisition(posting[0], posting[1], (posting[2],)) if posting else None
+        if not posting:
+            return None
+        tenant, requisition, recipient = posting
+        return Requisition(tenant, requisition, (recipient,), endpoints=(
+            ("cv_upload_parse", recipient + "/wday/cxs/{tenant}/job/{requisition}/attachments"),
+        ))
 
     async def dispatch(self, request, gate) -> object:
         gate.stop("final_submit")
 
     async def supervise(self, request, fill):
         return await fill(WorkdayPlanner())
+
+    def browser_request_allowed(self, attempt: Attempt, url: str, method: str, navigation: bool) -> bool:
+        if not navigation:
+            return True
+        if origin(url) != origin(attempt.url):
+            return False
+        target = _posting(url)
+        if target:
+            return target[:2] == (attempt.tenant, attempt.requisition_id)
+        # On shared hosts, keep non-posting account/form screens within the tenant's career-site path.
+        if _posting(attempt.url):
+            path = unquote(urlsplit(url).path).strip("/").casefold().split("/")
+            if path and _LOCALE.fullmatch(path[0]):
+                path.pop(0)
+            tenant = attempt.tenant.split("/", 1)[1].split("/")
+            if len(tenant) > 1:
+                tenant.insert(0, "recruiting")
+            return path[:len(tenant)] == tenant and "job" not in path[len(tenant):]
+        return False
 
     async def verify_receipt(self, attempt: Attempt, *, evidence: object = None) -> Receipt:
         from jobhunt.apply.adapters import Receipt

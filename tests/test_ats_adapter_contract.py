@@ -10,14 +10,14 @@ from urllib.parse import urlsplit
 import pytest
 
 from apply_cv_helpers import make_app, make_job
-from apply_fakes import FixtureServer, ScriptedPlanner, act, fast, page, sample_facts, server  # noqa: F401
+from apply_fakes import FakeVerifier, FixtureServer, ScriptedPlanner, act, fast, page, sample_facts, server  # noqa: F401
 from apply_service_fakes import FakePool
 from cv_fakes import save_confirmed
 from jobhunt import db
-from jobhunt.apply import service, store
-from jobhunt.apply.adapters import Dispatch, Receipt, Registry, Requisition, clean_receipt, registry as production_registry
+from jobhunt.apply import scoped_choices, service, smartrecruiters, store
+from jobhunt.apply.adapters import Attempt, Dispatch, Receipt, Registry, Requisition, clean_receipt, registry as production_registry
 from jobhunt.apply.snapshot import take_snapshot
-from jobhunt.apply.types import Fact, StepPlan
+from jobhunt.apply.types import Fact, FactSheet, StepPlan
 from jobhunt.apply.workday import CandidateHomeEvidence, WorkdayAdapter, WorkdayPlanner
 from jobhunt.config import get_settings
 from jobhunt.cv import service as cvs
@@ -252,10 +252,14 @@ WORKDAY_POSTING = "https://demo.wd3.myworkdayjobs.com/en-US/External/job/Paris/E
 @pytest.fixture
 def workday_registry(server, monkeypatch):
     class LoopbackWorkday(WorkdayAdapter):
+        def browser_request_allowed(self, attempt, url, method, navigation):
+            return True
+
         def resolve(self, url, markers):
             if urlsplit(url).netloc != urlsplit(server.base).netloc or not urlsplit(url).path.startswith("/workday-"):
                 return None
-            return replace(super().resolve(WORKDAY_POSTING, markers), write_origins=(server.base,))
+            return replace(super().resolve(WORKDAY_POSTING, markers), write_origins=(server.base,),
+                           endpoints=(("cv_upload_parse", server.base + "/workday-upload/{tenant}/{requisition}"),))
 
         def matches(self, url, markers):
             return float(self.resolve(url, markers) is not None)
@@ -270,7 +274,8 @@ def test_workday_production_registry_is_supervised():
     match = production_registry.find(WORKDAY_POSTING, "careers_site")
     assert match.capability == "supervised" and match.receipt_kind == "candidate_home_listing"
     assert match.requisition == Requisition("demo.wd3.myworkdayjobs.com/external", "JR123",
-                                            ("https://demo.wd3.myworkdayjobs.com",))
+                                            ("https://demo.wd3.myworkdayjobs.com",), endpoints=(
+                                                ("cv_upload_parse", "https://demo.wd3.myworkdayjobs.com/wday/cxs/{tenant}/job/{requisition}/attachments"),))
     assert production_registry.find("https://wd5.myworkdaysite.com/recruiting/example/External/job/Stage_R12/apply", None)
     assert production_registry.find(WORKDAY_POSTING.replace("en-US", "fr-FR") + "/apply?utm_source=fixture", None) == match
     for url in (WORKDAY_POSTING.replace(".com/", ".com.fixture.test/"), WORKDAY_POSTING.replace("demo.wd3.", ""),
@@ -278,6 +283,21 @@ def test_workday_production_registry_is_supervised():
                 WORKDAY_POSTING.replace("JR123", "unknown") + "?reqId=JR123",
                 "https://careers.example.test/job/JR123?applyUrl=" + WORKDAY_POSTING):
         assert production_registry.find(url, "workday") is None
+
+
+@pytest.mark.parametrize("posting", [WORKDAY_POSTING,
+    "https://wd5.myworkdaysite.com/recruiting/example/External/fr-FR/job/Stage_R12"])
+def test_workday_live_step_identity(posting):
+    adapter = WorkdayAdapter()
+    reserved = adapter.resolve(posting, frozenset())
+    assert reserved is not None
+    for suffix in ("/apply", "/apply/applyManually/my-information", "/apply/myExperience",
+                   "/apply/applicationQuestions", "/apply/review", "/apply/submit"):
+        assert adapter.resolve(posting + suffix, frozenset()) == reserved
+        other = posting.replace("JR123", "JR124").replace("R12", "R13")
+        assert adapter.resolve(other + suffix, frozenset()).requisition_id != reserved.requisition_id
+    assert adapter.resolve(posting + "/apply/other", frozenset()) is None
+    assert adapter.resolve(posting.split("/job/")[0] + "/apply/myInformation", frozenset()) is None
 
 
 async def test_workday_planner_maps_synthetic_steps(server, page):
@@ -390,3 +410,281 @@ async def test_workday_supervised_contract(step, workday_registry, server, page,
         record = dict(conn.execute("SELECT * FROM apply_reservations WHERE run_id=?", (result.id,)).fetchone())
     assert record["receipt_kind"] == "candidate_home_listing" and record["receipt_outcome"] == "confirmed"
     assert json.loads(record["binding_json"])["requisition_id"] == "JR123" and WORKDAY_POSTING not in str(record)
+
+
+@pytest.mark.parametrize("scenario", ["choose", "deny-id", "deny-text", "deny-role", "deny-tag", "consent", "autosave",
+                                       "changed-options", "changed-action", "date-segment"])
+async def test_workday_widget_selection(scenario, workday_registry, server, page, profile, tmp_path, fast, monkeypatch):
+    facts = sample_facts()
+    facts.facts.append(Fact(key="job_source", label="How did you hear about us?", value="Referral", exact=True))
+    facts.facts.append(Fact(key="available_from", label="Available from", value="2027-08-19", exact=True))
+    job = make_job(profile, url=server.url("workday-widgets"))
+    app = make_app(profile, job, tmp_path, master_hash=save_confirmed(profile.id).content_hash)
+    cvs.approve(app.id, app.current_rev)
+    monkeypatch.setattr(service, "_candidate_facts", lambda *_: facts)
+
+    class Pool(FakePool):
+        async def goto(self, page, url):
+            await super().goto(page, url)
+            await page.evaluate("""scenario => {
+              const source = document.querySelector('#source');
+              if (scenario === 'deny-id') source.id = 'bottom-navigation-next-button';
+              if (scenario === 'deny-text') source.textContent = 'Save and Continue';
+              if (scenario === 'deny-role') source.setAttribute('role', 'button'), source.setAttribute('aria-haspopup', 'listbox');
+              if (scenario === 'deny-tag') {
+                const wrapper = document.createElement('button'); wrapper.type = 'button';
+                source.before(wrapper); wrapper.append(source);
+              }
+              if (scenario === 'consent') source.setAttribute('aria-label', 'Consent to disclose my identity');
+              if (scenario === 'changed-options') source.addEventListener('click', () => {
+                document.querySelector('#sources [role=option]').textContent = 'Other';
+              });
+              if (scenario === 'changed-action') source.addEventListener('click', () => {
+                source.closest('form').action = '/other-requisition';
+              });
+              if (scenario === 'date-segment') {
+                document.querySelector('h1').textContent = 'Application Questions';
+                source.setAttribute('data-automation-id', 'availableFrom-month');
+                source.setAttribute('aria-label', 'Available from (month)');
+                const [july, august] = document.querySelectorAll('#sources [role=option]');
+                july.textContent = '07'; august.textContent = '08';
+              }
+              document.body.dataset.autosave = scenario === 'autosave' ? 'true' : 'false';
+            }""", scenario)
+
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=Pool(page), verifier=FakeVerifier()))
+    if scenario == "autosave":
+        result = await asyncio.wait_for(task, 8)
+        assert service.RECIPIENT_REFUSED in result.message and page.is_closed()
+    else:
+        try:
+            await page.locator("aside").wait_for(timeout=6000)
+            clicks = await page.locator("body").get_attribute("data-clicks")
+            if scenario == "date-segment":
+                assert await page.locator("#source").text_content() == "08"
+        finally:
+            await page.close()
+            result = await asyncio.wait_for(task, 8)
+        assert clicks == {"choose": "open choose", "date-segment": "open choose", "changed-options": "open",
+                          "changed-action": "open"}.get(scenario, ""), result.result
+    assert not server.posts and store.held_binding(result.id) is not None
+
+
+PUBLICATION = "df29561e-226a-4524-ae13-2133e84bdbef"
+OTHER_PUBLICATION = "df29561e-226a-4524-ae13-2133e84bdbff"
+PUBLICATION_PATH = f"/oneclick-ui/company/FixtureCo/publication/{PUBLICATION}"
+SMART_UPLOAD_PATH = smartrecruiters.UPLOAD_PATH.format(tenant="fixtureco", requisition=PUBLICATION)
+SMART_URL = "https://jobs.smartrecruiters.com" + PUBLICATION_PATH
+
+
+def test_smartrecruiters_live_step_identity():
+    adapter = smartrecruiters.SmartRecruitersAdapter()
+    reserved = adapter.resolve(SMART_URL, frozenset())
+    for suffix in ("/profile", "/apply", "/apply/experience", "/application/education", "/questions",
+                   "/application/attachments", "/review", "/application/submit"):
+        assert adapter.resolve(SMART_URL + suffix, frozenset()) == reserved
+        assert adapter.resolve(SMART_URL.replace(PUBLICATION, OTHER_PUBLICATION) + suffix, frozenset()).requisition_id == OTHER_PUBLICATION
+    for suffix in ("/login", "/apply/anything", "/confirmation", "/attachments", "?jobId=other"):
+        assert adapter.resolve(SMART_URL + suffix, frozenset()) is None
+
+
+@pytest.fixture
+def smart_adapter(server, monkeypatch):
+    """Register the actual supervised adapter with only hostname/transport replaced for offline tests."""
+    adapter = smartrecruiters.SmartRecruitersAdapter()
+    original = smartrecruiters._identity
+
+    def loopback_identity(url, **kwargs):
+        if url.startswith(server.base + "/"):
+            url = "https://jobs.smartrecruiters.com" + url[len(server.base):]
+        return original(url, **kwargs)
+
+    class LoopbackAdapter(smartrecruiters.SmartRecruitersAdapter):
+        def resolve(self, url, dom_markers):
+            real = "https://jobs.smartrecruiters.com" + url[len(server.base):] if url.startswith(server.base + "/") else url
+            return super().resolve(real, dom_markers)
+
+    registry = Registry()
+    registry.register(LoopbackAdapter(), host="127.0.0.1")
+    monkeypatch.setattr(service, "registry", registry)
+    monkeypatch.setattr(smartrecruiters, "_identity", loopback_identity)
+    server.get_pages[PUBLICATION_PATH] = "smartrecruiters_guest.html"
+    server.get_pages[PUBLICATION_PATH + "/confirmation"] = "smartrecruiters_confirmation.html"
+    return adapter
+
+
+def test_smartrecruiters_production_registry_and_canonical_aliases():
+    adapter = smartrecruiters.SmartRecruitersAdapter()
+    advert = "https://jobs.smartrecruiters.com/FIXTURECO/744000123456789-synthetic-role"
+    branded = "https://careers.fixture.test/offers/synthetic-role"
+    match = production_registry.find(SMART_URL, None)
+    assert match.capability == "supervised" and match.receipt_kind == "first_party_confirmation"
+    assert match.requisition.tenant == "fixtureco" and match.requisition.requisition_id == PUBLICATION
+    assert production_registry.find(advert, None).requisition.requisition_id == "744000123456789"
+    assert adapter.resolve(advert, frozenset({smartrecruiters.same_job_marker(advert, SMART_URL)})).requisition_id == PUBLICATION
+    assert not production_registry.find(branded, adapter.name, frozenset({SMART_URL}))
+    assert production_registry.find(branded, adapter.name, frozenset({smartrecruiters.same_job_marker(branded, SMART_URL)})).requisition.requisition_id == PUBLICATION
+    assert not adapter.resolve(branded, frozenset({smartrecruiters.same_job_marker(advert, SMART_URL)}))
+    for url in (SMART_URL.replace("jobs.", "guest.eu."), SMART_URL.lower(), SMART_URL + "?utm_source=test"):
+        assert production_registry.find(url, None).requisition.requisition_id == PUBLICATION
+    for bad in (SMART_URL.replace("jobs.", ""), SMART_URL.replace("smartrecruiters.com", "smartrecruiters.com.evil.test"),
+                SMART_URL.replace("jobs.smart", "fakesmart"), SMART_URL.replace(".com/", ".com:443/"),
+                SMART_URL.replace("https:", "http:"), SMART_URL + "/extra", SMART_URL + "?jobid=other",
+                SMART_URL.replace(PUBLICATION, "..%2F"), SMART_URL.replace("//", "//fixture@")):
+        assert not production_registry.find(bad, None)
+
+
+def smart_attempt(url=SMART_URL):
+    return Attempt(1, 1, 1, "fake-digest", url, urlsplit(url).hostname, "fixture-nonce", "smartrecruiters",
+                   "fixtureco", PUBLICATION)
+
+
+@pytest.mark.parametrize("change", [None, "wrong-publication", "wrong-nonce", "wrong-tab", "wrong-origin", "parse-only", "bare-200"])
+async def test_smartrecruiters_same_tab_receipt(smart_adapter, change, server, page):
+    form = server.base + PUBLICATION_PATH
+    await page.goto(form)
+    confirmation_path = PUBLICATION_PATH + "/confirmation"
+    server.post_pages[confirmation_path] = "smartrecruiters_confirmation.html"
+    await page.locator("form").evaluate("(form, path) => { form.action = path; form.noValidate = true; }", confirmation_path)
+    await page.get_by_role("button", name="Submit application").click()
+    attempt = smart_attempt(form)
+    evidence = smartrecruiters.SameTabConfirmation(attempt.nonce, "tab-a", "tab-a", form, page.url,
+                                                   await page.locator("h1").inner_text())
+    evidence = {
+        "wrong-publication": replace(evidence, confirmation_url=evidence.confirmation_url.replace(PUBLICATION, OTHER_PUBLICATION)),
+        "wrong-nonce": replace(evidence, observed_nonce="wrong"),
+        "wrong-tab": replace(evidence, confirmation_tab="tab-b"),
+        "wrong-origin": replace(evidence, confirmation_url=SMART_URL + "/confirmation"),
+        "parse-only": replace(evidence, acknowledgment="CV uploaded successfully"),
+        "bare-200": {"status": 200},
+    }.get(change, evidence)
+    receipt = await smart_adapter.verify_receipt(attempt, evidence=evidence)
+    assert receipt.outcome == ("confirmed" if change is None else "uncertain")
+    if change is None:
+        assert (receipt.kind, receipt.observed_requisition, receipt.observed_nonce) == (
+            "first_party_confirmation", PUBLICATION, attempt.nonce)
+    assert len(server.posts_to(confirmation_path)) == 1
+
+
+async def test_smartrecruiters_supplied_boundaries_and_exact_recipients():
+    adapter = smartrecruiters.SmartRecruitersAdapter()
+    attempt = smart_attempt()
+    assert adapter.resolve(SMART_URL, frozenset()).write_origins == (smartrecruiters.UPLOAD_ORIGIN,)
+    assert adapter.browser_request_allowed(attempt, smartrecruiters.UPLOAD_ORIGIN + SMART_UPLOAD_PATH, "POST", False)
+    for url, nav in [(smartrecruiters.UPLOAD_ORIGIN + SMART_UPLOAD_PATH, True),
+                     (smartrecruiters.UPLOAD_ORIGIN + "/attachments", False),
+                     (smartrecruiters.UPLOAD_ORIGIN + "/publications/other/applications", False),
+                     ("https://api.smartrecruiters.com.evil.test/attachments", False),
+                     ("https://jobs.smartrecruiters.com/smart-profile/login", False),
+                     ("https://jobs.smartrecruiters.com/%69mport/indeed", False),
+                     ("https://jobs.smartrecruiters.com/import/linkedin", False)]:
+        assert not adapter.browser_request_allowed(attempt, url, "POST", nav)
+    assert adapter.boundaries["challenge"] == adapter.boundaries["final_submit"] == "pause_for_human"
+    assert adapter.boundaries["import_profile"] == adapter.boundaries["login_otp"] == "forbidden"
+    with pytest.raises(ValueError):
+        Registry().register(adapter, host="jobs.smartrecruiters.com", unattended_tenants={"fixtureco": "first_party_confirmation"})
+
+
+@pytest.mark.parametrize("choice", ["known", "outside-options", "scoped", "stale-scoped"])
+async def test_smartrecruiters_supervised_fill_holds_and_dedupes(smart_adapter, choice, server, page, profile, tmp_path, fast, monkeypatch):
+    master = save_confirmed(profile.id)
+    url = server.base + PUBLICATION_PATH
+    job = make_job(profile, url=url)
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+    fake_values = {"first_name": "Camille", "last_name": "Fixture", "email": "fiction@example.test", "phone": "+33123456789",
+                   "linkedin": "https://www.linkedin.com/in/synthetic", "city": "Toulouse", "school": "Fixture Academy"}
+    facts = [Fact(key=key, label=key, value=value, exact=key in {"first_name", "last_name", "email", "phone", "linkedin"})
+             for key, value in fake_values.items()]
+    facts.extend([Fact(key="custom_1", label="Experience Employer", value="Fixture Labs"),
+                  Fact(key="custom_2", label="Message to hiring manager", value="Synthetic cover message.")])
+    if choice in {"known", "outside-options"}:
+        facts.append(Fact(key="custom_3", label="Preferred working language",
+                          value="French" if choice == "known" else "Klingon"))
+    else:
+        await page.goto(url)
+        if choice == "stale-scoped":
+            await page.locator('#language option[value="fr"]').evaluate("option => { option.textContent = 'Spanish'; }")
+        snap, _ = await take_snapshot(page)
+        field = next(field for field in snap.fields if field.name == "language")
+        binding, indices = scoped_choices.field_choices(url, field)
+        monkeypatch.setattr(scoped_choices, "load", lambda *_: {binding: indices[-1]})
+        await page.goto("about:blank")
+    monkeypatch.setattr(service, "_candidate_facts", lambda *_: FactSheet(facts=facts))
+    pool = FakePool(page)
+    assert (await service.run(app.id, mode="submit", trigger="user", pool=pool)).status == "blocked"
+    assert not pool.opened
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page)))
+    try:
+        await page.locator("aside").wait_for(timeout=8000)
+        assert store.active_reservations(profile.id)
+        for form_id, key in {"first": "first_name", "last": "last_name", "email": "email", "phone": "phone",
+                             "city": "city", "linkedin": "linkedin", "school": "school"}.items():
+            assert await page.input_value("#" + form_id) == fake_values[key]
+        assert await page.input_value("#employer") == "Fixture Labs"
+        assert await page.input_value("#letter") == "Synthetic cover message."
+        assert await page.locator("#cv").evaluate("e => e.files[0].name") == "CV.pdf"
+        assert await page.input_value("#language") == ("fr" if choice in {"known", "scoped"} else "")
+        assert not await page.is_checked("#privacy") and not await page.is_checked("#notice")
+        assert not server.posts
+    finally:
+        await page.close()
+        result = await asyncio.wait_for(task, timeout=8)
+    assert store.outstanding_attempt(app.id).id == result.id
+    duplicate = make_job(profile, url=url.lower() + "?utm_source=other", title="Other synthetic row", company="Other display name")
+    second = make_app(profile, duplicate, tmp_path, master_hash=master.content_hash)
+    cvs.approve(second.id, second.current_rev)
+    pool = FakePool()
+    assert (await service.run(second.id, mode="supervised", trigger="user", pool=pool)).status == "blocked"
+    assert not pool.opened and not server.posts
+
+
+@pytest.mark.parametrize("scenario", ["approved", "different-pdf", "before-upload", "foreign", "sign-in"])
+async def test_smartrecruiters_browser_upload_boundary(smart_adapter, scenario, server, page, profile, tmp_path, fast, monkeypatch):
+    upload = FixtureServer()
+    foreign = FixtureServer()
+    task = None
+    try:
+        monkeypatch.setattr(smartrecruiters, "UPLOAD_ORIGIN", upload.base)
+        url = server.base + PUBLICATION_PATH
+        target = (foreign if scenario == "foreign" else upload).base + SMART_UPLOAD_PATH
+        if scenario == "sign-in":
+            target = server.url("smart-profile/login")
+        job = make_job(profile, url=url)
+        app = make_app(profile, job, tmp_path, master_hash=save_confirmed(profile.id).content_hash)
+        cvs.approve(app.id, app.current_rev)
+        expected = cvs.safe_pdf(app).read_bytes()
+        monkeypatch.setattr(service, "_candidate_facts", lambda *_: FactSheet())
+
+        class UploadPool(FakePool):
+            async def goto(self, page, url):
+                await super().goto(page, url)
+                await page.evaluate("""([target, scenario]) => {
+                    const post = file => {
+                        const body = new FormData();
+                        body.append('resume', file, 'CV.pdf');
+                        return fetch(target, {mode: 'no-cors', method: 'POST', body}).catch(() => {});
+                    };
+                    if (scenario === 'before-upload') return post(new Blob(['%PDF-1.4 fake one page'], {type: 'application/pdf'}));
+                    document.querySelector('#cv').addEventListener('change', event => {
+                        void post(scenario === 'different-pdf' ? new Blob(['%PDF-tampered'], {type: 'application/pdf'}) : event.target.files[0]);
+                    });
+                }""", [target, scenario])
+
+        task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=UploadPool(page)))
+        if scenario == "approved":
+            await page.locator("aside").wait_for(timeout=8000)
+            posts = upload.posts_to(SMART_UPLOAD_PATH)
+            assert store.active_reservations(profile.id) and len(posts) == 1 and expected in posts[0]["body"]
+            await page.close()
+        result = await asyncio.wait_for(task, timeout=8)
+        assert not foreign.requests and not foreign.posts and not server.posts
+        if scenario != "approved":
+            assert page.is_closed() and not upload.posts
+        assert store.outstanding_attempt(app.id).id == result.id
+    finally:
+        if task is not None and not task.done():
+            await page.close()
+            await asyncio.wait_for(task, timeout=8)
+        upload.close()
+        foreign.close()

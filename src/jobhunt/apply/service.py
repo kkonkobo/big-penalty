@@ -34,7 +34,7 @@ from jobhunt.apply.missing_answers import editable_custom
 from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR
 from jobhunt.apply.planner import LLMPlanner
 from jobhunt.apply.store import ApplyRun
-from jobhunt.apply.supervised import FillPreview, Session, UNAVAILABLE, local_bridge
+from jobhunt.apply.supervised import FillPreview, Session, UNAVAILABLE, local_bridge, require_posting
 from jobhunt.apply.types import DispatchDiagnostics, FilledField, Mode, Question, RunResult
 from jobhunt.apply.unattended import handoff_result
 from jobhunt.browser import BrowserPool
@@ -627,11 +627,19 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             live, _, _, _ = _check_boundary(run_, job, mode, trigger, reserved=True, confirmed_distinct=confirmed_distinct)
             if not apply_store.binding_active(request.attempt):
                 return ["Réservation ou approbation périmée : saisie annulée."]
+            if match and registry.find(job.origin_url, job.origin_ats) != match:
+                return ["Politique d’adaptateur périmée : saisie annulée."]
+            if page.url != "about:blank" and (origin(page.url) != origin(started_origin)
+                    or not clean_url(page.url, navigation=True)
+                    or (route_policy and not route_policy(request.attempt, page.url, "GET", True))):
+                return ["Destination non vérifiée : saisie annulée."]
             pdf = cvs.safe_pdf(live)
             if (pdf is None or live.pdf_sha256 != request.attempt.pdf_sha256
                     or hashlib.sha256(pdf.read_bytes()).hexdigest() != request.attempt.pdf_sha256):
                 return ["Le PDF approuvé a changé : saisie annulée."]
-        except ApplyError as exc:
+        except (ApplyError, OSError) as exc:
+            if isinstance(exc, OSError):
+                return ["Le PDF approuvé est inaccessible : saisie annulée."]
             return [str(exc)]
         return []
 
@@ -640,26 +648,46 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
     site = f"apply-supervised-{host}" if request else "applydry-" + accounts.registrable_host(host)
     async with pool.page(app.profile_id, site, not request) as page:
         browser_guard = None
-        read_only_fill = bool(request and match and match.adapter.boundaries.get("field_entry") == "auto")
+        guarded_fields = bool(request and match and match.adapter.boundaries.get("field_entry") == "auto")
+        gate = None
+        navigating = True
         upload_pending = False
-        handed_off = False
+        manual = False
+        route_policy = getattr(match.adapter, "browser_request_allowed", None) if match else None
+        upload_route = getattr(match.adapter, "browser_upload_route", None) if match else None
 
-        def allow_fill_write(network_request) -> bool:
+        def allow_request(url: str, method: str, navigation: bool) -> bool:
+            if guarded_fields and navigation and not (navigating or manual):
+                return False
+            return route_policy is None or route_policy(request.attempt, url, method, navigation)
+
+        async def allow_fill_write(network_request) -> bool:
             nonlocal upload_pending
-            if handed_off:
-                return True
-            if (not upload_pending or network_request.method != "POST" or network_request.is_navigation_request()
-                    or origin(network_request.url) not in match.requisition.write_origins
+            target = network_request.url
+            endpoint = gate and gate.matches_endpoint("cv_upload_parse", target)
+            upload = endpoint or (upload_route and upload_route(request.attempt, target))
+            if manual and not upload:
+                return origin(target) == origin(started_origin)
+            if not endpoint or manual or network_request.is_navigation_request() or await recheck():
+                return False
+            require_posting(match, request.attempt, page.url, network_request.frame.url)
+            if network_request.method == "OPTIONS":
+                return upload_pending
+            if (not upload_pending or network_request.method != "POST"
                     or not is_bound_pdf(network_request.headers.get("content-type", ""), network_request.post_data_buffer,
                                         request.pdf)):
                 return False
-            gate._enter("cv_upload_parse", network_request.url)
+            gate._enter("cv_upload_parse", target)
             upload_pending = False
             return True
 
         if request and not page.is_closed():
-            browser_guard = RecipientGuard(frozenset({origin(started_origin), *(match.requisition.write_origins if match else ())}),
-                                           allow_write=allow_fill_write if read_only_fill else None)
+            browser_guard = RecipientGuard(
+                frozenset({origin(started_origin), *(match.requisition.write_origins if match else ())}),
+                read_only=frozenset(match.requisition.read_origins if match else ()),
+                request_allowed=allow_request,
+                allow_write=allow_fill_write if guarded_fields else None,
+            )
             await browser_guard.install(page)
 
         if not request:
@@ -686,12 +714,22 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                 await browser_guard.navigate(page, started_origin, goto)
             except ChallengeRequired:
                 return RunResult(status="needs_human", message="Un défi anti-robot doit être résolu à la main.")
+            finally:
+                navigating = False
             res = RunResult(status="needs_human", message=SUPERVISED_HANDOFF)
 
             async def fill_pass(expected):
+                nonlocal gate, manual, upload_pending
                 gate = _write_gate(request, run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct) if match else None
                 available, used = True, False
                 fill_result = None
+
+                def before_field(op):
+                    nonlocal upload_pending
+                    boundary = "cv_upload_parse" if op == "upload_cv" else "field_entry" if guarded_fields else "draft_write"
+                    gate._enter(boundary, started_origin)
+                    if op == "upload_cv":
+                        upload_pending = True
 
                 async def fill(selected_planner):
                     nonlocal used, fill_result
@@ -700,12 +738,14 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                     used = True
                     options = {}
                     if gate:
-                        options["before_field"] = lambda op: gate._enter(
-                            "cv_upload_parse" if op == "upload_cv" else "draft_write", started_origin)
+                        options["before_field"] = before_field
+                    if guarded_fields:
+                        options["attended_accounts"] = match.adapter.boundaries.get("login_otp") == "pause_for_human"
                     fill_result = await run_application(
                         page, url=started_origin, facts=facts, planner=selected_planner,
                         uploads=Uploads(cv_pdf=cv_pdf, cv_bytes=request.pdf), mode=mode, before_submit=recheck,
-                        supervised_attempt=request.attempt, current_step=True, generic_step=identity_match is None,
+                         supervised_attempt=request.attempt, current_step=True, generic_step=identity_match is None,
+                         supervised_widgets=guarded_fields,
                         live_mutation_check=lambda target: session.before_mutation(target, expected),
                         out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)) / f"pass-{len(steps)}",
                         job_title=job.title, company=job.company or "", host_allowed=host_allowed,
@@ -714,17 +754,20 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                         **options)
                     return fill_result
 
+                manual = False
                 try:
                     result = (await match.adapter.supervise(request, fill) if match else
                               await fill(planner if planner is not None else LLMPlanner(llm.get())))
                 finally:
                     available = False
+                    upload_pending = False
                 if fill_result is not None:
                     result = fill_result
                 for step in result.steps:
                     steps.append(step.model_copy(update={"index": len(steps) + 1}))
                 result = result.model_copy(update={"steps": list(steps)})
                 apply_store.save_progress(run_.id, result)
+                manual = result.status not in ("blocked", "failed")
                 return result
 
             session = Session(attempt=request.attempt, page=page, match=identity_match, company=job.company or "",
@@ -733,6 +776,8 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                 _SUPERVISED[app.id] = session
                 if identity_match:
                     res = await session.run(None, initial=True)
+                else:
+                    manual = True
                 if not page.is_closed():
                     with contextlib.suppress(Exception):
                         await page.evaluate("""message => {

@@ -38,6 +38,7 @@ from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
 from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
+from jobhunt.apply.widgets import DENIED, WIDGET, date_segment, date_segment_option, denied_widget
 from jobhunt.apply.store import binding_active
 from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan)
@@ -542,6 +543,7 @@ class _Run:
         self.consent_codes = set()
         self.live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None
         self.attended_accounts = False
+        self.supervised_widgets = False
         self.verifier, self.host_allowed = verifier, host_allowed
         self.max_steps, self.goto = max_steps, goto
         self.on_progress, self.captcha_wait_s = on_progress, captcha_wait_s
@@ -843,7 +845,8 @@ class _Run:
         by_ref = {f.ref: f for f in snap.fields}
         seen: set[str] = set()
         clicks: list[tuple[FormField, str]] = []
-        for field in snap.fields:
+        manual_refs = {question.ref for question in plan.unknown} if self.mode == "supervised" else set()
+        for field in snap.fields if self.mode != "supervised" or plan.page_kind == "form" else ():
             if self.autonomous:
                 selected = self._autonomous_decision(field)
                 if selected:
@@ -863,7 +866,7 @@ class _Run:
                     self._drop(v, field, "réponse volontaire à choisir sur le site", ask=True)
                     continue
             entry = self.choice_fields.get(field.ref)
-            if not entry or entry[0] != _question(field) or field_choices(self.page.url, field) != entry[1:]:
+            if field.ref in manual_refs or not entry or entry[0] != _question(field) or field_choices(self.page.url, field) != entry[1:]:
                 continue
             index = self.choices.get(entry[1])
             if index is not None and index in entry[2]:
@@ -899,9 +902,11 @@ class _Run:
             v.click = clicks[-1]
             if len(clicks) > 1:
                 v.notes.append("plusieurs clics proposés : seul le dernier est conservé")
-        v.items = [item for item in v.items if item.used != "confirmed_form_choice" or (
-            v.click and v.click[0].native_submit and v.click[0].form == item.field.form
-            and v.click[0].destination == item.field.choice_destination)]
+        submit_controls = ([field for field in snap.fields if field.native_submit] if self.mode == "supervised"
+                           else [v.click[0]] if v.click and v.click[0].native_submit else [])
+        v.items = [item for item in v.items if item.used != "confirmed_form_choice" or any(
+            control.form == item.field.form and control.destination == item.field.choice_destination
+            for control in submit_controls)]
         return v
 
     @staticmethod
@@ -1167,6 +1172,13 @@ class _Run:
                 return drop("type de téléphone déclaré absent des options")
             item.option_index = matches[0]
             return need_verdict(f.options[item.option_index].label, True)
+        if (self.supervised_widgets and k in ("select", "combobox") and op == "select" and not a.inferred
+                and fact and fact.exact and (segment := date_segment(f)) and segment[0] == fact.key):
+            item.option_index = date_segment_option(f, fact.value)
+            if item.option_index < 0 or a.value != f.options[item.option_index].label:
+                return drop("segment de date non vérifié")
+            item.value = f.options[item.option_index].label
+            return item
         if k in ("select", "radio") or (k == "combobox" and f.options):
             item.option_index = _match_option(f, want)
             if item.option_index < 0:
@@ -1383,6 +1395,8 @@ class _Run:
             if f.kind not in {"select", "text", "email", "tel", "url", "number", "date", "textarea", "password"}:
                 raise ManualField()
         if self.mode == "supervised":
+            if self.supervised_widgets and f.kind == "combobox" and a.op == "select":
+                return await self._supervised_combobox(loc, f, it)
             if a.op == "upload_cv" and f.kind == "file" and self.uploads.cv_bytes is not None:
                 await self._before_mutation(a.op, loc)
                 await loc.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": self.uploads.cv_bytes}, timeout=T)
@@ -1527,6 +1541,24 @@ class _Run:
     async def _combo_value(loc: Locator) -> str:
         return str(await loc.evaluate("e => { const i = e.matches('input,textarea') ? e : e.querySelector('input'); "
                                       "return (i ? i.value : (e.innerText || e.textContent || '')).trim(); }") or "")
+
+    async def _supervised_combobox(self, loc: ElementHandle, field: FormField, item: _Item) -> str:
+        if (not field.form.startswith("0:") or not field.destination or _site_consent(field) or denied_widget(field)
+                or field.multiple or not 0 <= item.option_index < len(field.options)):
+            raise _Skip("liste à compléter à la main")
+        option = field.options[item.option_index]
+        expected = [option.label, option.value]
+        start_url = self.page.url
+        for phase in ("open", "choose"):
+            fresh, _ = await take_snapshot(self.page, read_only=True)
+            current = next((entry for entry in fresh.fields if entry.live_ref == field.ref), None)
+            if (fresh.url != start_url or not current or _choice_shape(current) != _choice_shape(field)
+                    or _site_consent(current) or denied_widget(current)):
+                raise _Skip("liste de choix non vérifiée")
+            await self._before_mutation("select", loc)
+            if not await loc.evaluate(WIDGET, [phase, DENIED, expected, field.choice_options, start_url, field.destination]):
+                raise _Skip("liste de choix modifiée")
+        return await self._combo_value(loc)
 
     async def _abandon_combobox(self, loc: Locator) -> None:
         """Leave the control without choosing: clear what was typed and blur it (no key press: Escape is never sent)."""
@@ -2393,6 +2425,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           supervised_attempt: Attempt | None = None,
                           before_field: Callable[[str], None] | None = None, current_step: bool = False, generic_step: bool = False,
                           attended_accounts: bool = False,
+                          supervised_widgets: bool = False,
                           live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None,
                           autonomous=None, autonomous_attempt: Attempt | None = None,
                           diagnostics: DispatchDiagnostics | None = None) -> RunResult:
@@ -2439,4 +2472,5 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     if diagnostics is not None:
         flow.diagnostics = diagnostics
     flow.attended_accounts = attended_accounts
+    flow.supervised_widgets = mode == "supervised" and supervised_widgets
     return await flow.run()
