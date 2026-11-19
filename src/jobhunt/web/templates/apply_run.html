@@ -32,6 +32,14 @@
     L’absence d’e-mail ne prouve pas que rien n’a été envoyé. En cas de doute, ne choisissez aucun résultat.</p>
   <p class="muted small">Les captures ci-dessous, si disponibles, restent locales et peuvent montrer le formulaire avant le clic.</p>
   {{ resolve_form(a.id, run) }}
+  {% if workday_receipt %}
+  <form method="post" action="/applications/{{ a.id }}/apply/resolve" class="stack">
+    <input type="hidden" name="run_id" value="{{ run.id }}">
+    <label>Lien de l’offre Workday affichée dans Candidate Home <input name="workday_posting" type="url" required></label>
+    <label><input type="checkbox" name="verified" value="1" required> J’ai vérifié que cette candidature est envoyée, pas en brouillon.</label>
+    <button class="btn small" name="sent" value="1">Enregistrer le reçu Candidate Home</button>
+  </form>
+  {% endif %}
 </section>
 {% endif %}
 

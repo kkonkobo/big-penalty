@@ -208,6 +208,12 @@ class Audience:
                 await self.bind_document(page)
         self.next_document = ""
 
+    def form_allowed(self, document, targets, endpoint):
+        return _generic_action_allowed(document, *targets)
+
+    def click_endpoint_allowed(self, document, endpoint):
+        return _target_allowed(document, endpoint)
+
     async def target(self, target, *, button=False, final=False):
         if target is None:
             raise ManualField()
@@ -230,7 +236,7 @@ class Audience:
             }}""", button, isolated_context=True)
         except Exception:
             raise ManualField() from None
-        if not value or not _generic_action_allowed(value[0], *value[1]):
+        if not value or not self.form_allowed(value[0], value[1], value[2]):
             raise ManualField()
         live = clean_url(value[0], navigation=True)
         if not live or live != self.document or value[0] != self.live_url or value[3] != self.document_nonce or not self.write_recipient(live):
@@ -242,7 +248,7 @@ class Audience:
             if final and value[4] == "GET":
                 raise ApplyError(SUPERVISED_REQUIRED)
             endpoint = urlsplit(value[2] or live)._replace(fragment="").geturl()
-            if not clean_url(endpoint, navigation=True) or not _target_allowed(value[0], endpoint):
+            if not clean_url(endpoint, navigation=True) or not self.click_endpoint_allowed(live, endpoint):
                 raise ApplyError(SUPERVISED_REQUIRED)
             self.endpoint = endpoint
             self.method = value[4]

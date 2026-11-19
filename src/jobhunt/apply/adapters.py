@@ -1,4 +1,4 @@
-"""Trusted, code-registered ATS adapters. No production adapters are installed."""
+"""Trusted, code-registered ATS adapters."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from jobhunt.apply.planner import Planner
 from jobhunt.apply.types import DispatchDiagnostics, RunResult
 
 Capability = Literal["supervised", "unattended"]
-Boundary = Literal["account_creation", "login_otp", "cv_upload_parse", "draft_write", "final_submit"]
+Boundary = Literal["account_creation", "login_otp", "field_entry", "import_profile", "challenge", "cv_upload_parse", "draft_write", "final_submit"]
 BoundaryPolicy = Literal["auto", "pause_for_human", "forbidden"]
 ReceiptType = Literal["first_party_confirmation", "candidate_home_listing", "correlated_email", "none"]
 Outcome = Literal["confirmed", "not_sent", "uncertain"]
@@ -35,6 +35,7 @@ class Requisition:
     requisition_id: str | None
     write_origins: tuple[str, ...] = ()
     endpoints: tuple[tuple[Boundary, str], ...] = ()
+    read_origins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,16 @@ class WriteGate:
             self._diagnostics.control = "login_otp" if reason == "otp" else "other"
         raise Handoff(reason)
 
+    def matches_endpoint(self, boundary: Boundary, target_url: str) -> bool:
+        attempt = self._dispatch.attempt if self._dispatch else None
+        return bool(attempt and attempt.tenant and attempt.requisition_id and any(
+            operation == boundary and "{tenant}" in template and "{requisition}" in template
+            and target_url == clean_url(target_url, navigation=True)
+            == template.replace("{tenant}", quote(attempt.tenant, safe=""))
+            .replace("{requisition}", quote(attempt.requisition_id, safe=""))
+            for operation, template in self._endpoints
+        ))
+
     def _enter(self, boundary: Boundary, target_url: str, *, mark_final: bool = True) -> None:
         if self.stopped or self.final_called:
             self.stop("étape non autorisée")
@@ -134,12 +145,7 @@ class WriteGate:
             self.stop("étape non autorisée")
         url = clean_url(target_url, navigation=True)
         attempt = self._dispatch.attempt
-        if not attempt.tenant or not attempt.requisition_id or not any(
-            operation == boundary and "{tenant}" in template and "{requisition}" in template
-            and url and target_url == url == template.replace("{tenant}", quote(attempt.tenant, safe=""))
-            .replace("{requisition}", quote(attempt.requisition_id, safe=""))
-            for operation, template in self._endpoints
-        ):
+        if not self.matches_endpoint(boundary, target_url):
             self.stop("redirect")
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
             self._enter(boundary, url)
@@ -182,19 +188,32 @@ class Match:
 
 class Registry:
     def __init__(self) -> None:
-        self._adapters: dict[tuple[str, str], tuple[Adapter, dict[str, ReceiptType]]] = {}
+        self._adapters: dict[tuple[str, str, bool], tuple[Adapter, dict[str, ReceiptType], ReceiptType, ReceiptType]] = {}
+
+    def register_supervised_domain(self, adapter: Adapter, *, domain: str, receipt_kind: ReceiptType) -> None:
+        """Recognize only subdomains; domain entries cannot enroll unattended tenants."""
+        domain = domain.lower()
+        self.register(adapter, host=domain, include_subdomains=True, supervised_receipt_kind=receipt_kind)
 
     def register(self, adapter: Adapter, *, host: str, origin_ats: str = "",
-                 unattended_tenants: Mapping[str, ReceiptType] | None = None) -> None:
-        key = (host.lower(), origin_ats)
+                 unattended_tenants: Mapping[str, ReceiptType] | None = None,
+                 include_subdomains: bool = False,
+                 auto_enroll: ReceiptType = "none",
+                 supervised_receipt_kind: ReceiptType = "none") -> None:
+        key = (host.lower(), origin_ats, include_subdomains)
         evidence = unattended_tenants or {}
-        if (not host or not adapter.name or not adapter.boundaries or adapter.retry_rule != "never"
+        if ((not host and (not origin_ats or include_subdomains or evidence))
+                or (include_subdomains and evidence)
+                or (auto_enroll != "none" and (not host or auto_enroll not in RECEIPT_TYPES or
+                    adapter.capability != "unattended" or not callable(getattr(adapter, "browser_enrollable", None))))
+                or not adapter.name or not adapter.boundaries or adapter.retry_rule != "never"
                 or getattr(adapter, "capability", "supervised") not in ("supervised", "unattended")
                 or (evidence and getattr(adapter, "capability", "supervised") != "unattended")
+                or (supervised_receipt_kind != "none" and supervised_receipt_kind not in RECEIPT_TYPES)
                 or any(not tenant or kind not in RECEIPT_TYPES for tenant, kind in evidence.items())
                 or key in self._adapters):
             raise ValueError("Invalid or duplicate ATS adapter registration")
-        self._adapters[key] = (adapter, dict(evidence))
+        self._adapters[key] = (adapter, dict(evidence), supervised_receipt_kind, auto_enroll)
 
     def find(self, url: str | None, origin_ats: str | None, dom_markers: frozenset[str] = frozenset()) -> Match | None:
         url = clean_url(url, navigation=True)
@@ -202,20 +221,48 @@ class Registry:
             host = urlsplit(url or "").hostname or ""
         except ValueError:
             return None
-        entry = self._adapters.get((host, origin_ats or "")) or self._adapters.get((host, ""))
+        entry = self._adapters.get((host, origin_ats or "", False)) or self._adapters.get((host, "", False))
+        labels = host.split(".")
+        for index in range(1, len(labels) - 1):
+            if entry:
+                break
+            suffix = ".".join(labels[index:])
+            entry = self._adapters.get((suffix, origin_ats or "", True)) or self._adapters.get((suffix, "", True))
+        if entry is None and origin_ats and dom_markers:
+            entry = self._adapters.get(("", origin_ats, False))
         if not url or not entry:
             return None
-        adapter, allowed = entry
+        adapter, allowed, supervised_kind, auto_enroll = entry
         if not 0.9 <= adapter.matches(url, dom_markers) <= 1:
             return None
         requisition = adapter.resolve(url, dom_markers)
         if not requisition or not requisition.tenant:
             return None
         attested = allowed.get(requisition.tenant, "none")
-        if any(not value or origin(value) != value for value in requisition.write_origins):
+        if auto_enroll != "none" and adapter.browser_enrollable(url):
+            attested = auto_enroll
+        if any(not value or origin(value) != value for value in (*requisition.write_origins, *requisition.read_origins)):
             return None
         capability = "unattended" if attested != "none" and canonical_identity(requisition.tenant, requisition.requisition_id) else "supervised"
-        return Match(adapter, requisition, capability, attested if capability == "unattended" else "none")
+        return Match(adapter, requisition, capability, attested if capability == "unattended" else supervised_kind)
 
 
 registry = Registry()
+
+
+def _register_production_adapters() -> None:
+    from jobhunt.apply.workday import DOMAINS, WorkdayAdapter
+
+    from jobhunt.apply.smartrecruiters import SmartRecruitersAdapter
+
+    smart = SmartRecruitersAdapter()
+    registry.register(smart, host="smartrecruiters.com", include_subdomains=True,
+                      auto_enroll="first_party_confirmation", supervised_receipt_kind="first_party_confirmation")
+    registry.register(smart, host="", origin_ats=smart.name, supervised_receipt_kind="first_party_confirmation")
+    adapter = WorkdayAdapter()
+    for domain in DOMAINS:
+        registry.register(adapter, host=domain, include_subdomains=True,
+                          auto_enroll="candidate_home_listing", supervised_receipt_kind="candidate_home_listing")
+
+
+_register_production_adapters()

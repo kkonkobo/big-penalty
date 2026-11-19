@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><title>Workday fixture</title>
+<section><h1>My Information</h1>
+<form method="post" action="/workday-draft">
+<label>First Name <input id="first" required data-automation-id="legalNameCountry-firstName"></label>
+<label>Country <select id="country" required data-automation-id="countryDropdown">
+  <option value="">Select</option><option value="FR">France</option><option value="DE">Germany</option>
+</select></label>
+<button type="button" role="combobox" aria-label="How did you hear about us?" aria-expanded="true" aria-controls="options" aria-required="true" data-automation-id="sourcePrompt">Select</button>
+<ul id="options" role="listbox"><li role="option">University</li><li role="option">Referral</li></ul>
+</form>
+<a href="/workday-experience">Save and Continue</a>
+</section>

@@ -5,11 +5,12 @@
   <p><strong>Offre réservée :</strong> {{ preview.company }} · {{ preview.title }}</p>
   <p><strong>Destination approuvée :</strong> {{ preview.reserved_url }}</p>
   <p><strong>Page ouverte :</strong> {{ preview.page_url }}</p>
+  {% if not preview.requires_confirmation %}<p><strong>Poste vérifié :</strong> {{ preview.tenant }} · {{ preview.requisition_id }}</p>{% endif %}
   {% if preview.warning %}<p role="alert" class="tag warn"><strong>Attention :</strong> le titre de la page ne ressemble ni au poste ni à l’entreprise réservés. Vérifiez la fenêtre avant de continuer.</p>{% endif %}
   <p>La saisie et le dépôt du CV peuvent transmettre des données avant le clic final.</p>
   <form method="post" action="/apply/runs/{{ preview.run_id }}/fill-step">
     <input type="hidden" name="token" value="{{ preview.token }}">
-    <button class="btn" name="confirm" value="1">Je confirme que la page ouverte concerne cette offre — Remplir cette étape</button>
+    <button class="btn" name="confirm" value="1">{% if preview.requires_confirmation %}Je confirme que la page ouverte concerne cette offre — {% endif %}Remplir cette étape</button>
     <a href="/apply/runs/{{ preview.run_id }}">Annuler</a>
   </form>
 </section>

@@ -5,6 +5,9 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+from collections.abc import Callable
+from email import policy
+from email.parser import BytesParser
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 _REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid"}
@@ -71,14 +74,38 @@ RECIPIENT_REFUSED = ("Destination ou transmission non autorisée : fenêtre ferm
                      "Si vous poursuivez depuis le lien de l’offre dans votre navigateur, vérifiez vous-même le destinataire.")
 
 
+def is_bound_pdf(content_type: str, body: bytes | None, pdf: bytes) -> bool:
+    """Accept just a PDF body or a single unencoded PDF file part, not draft data."""
+    if not body or not content_type.isascii() or "\r" in content_type or "\n" in content_type:
+        return False
+    media = content_type.partition(";")[0].strip().lower()
+    if media == "application/pdf":
+        return body == pdf
+    if media != "multipart/form-data" or len(body) > len(pdf) + 4096:
+        return False
+    message = BytesParser(policy=policy.default).parsebytes(b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body)
+    parts = list(message.iter_parts())
+    if message.defects or message.preamble or message.epilogue or len(parts) != 1:
+        return False
+    part = parts[0]
+    return (not part.defects and part.get_content_type() == "application/pdf" and part.get_content_disposition() == "form-data"
+            and part.get_filename() == "CV.pdf" and part.get("Content-Transfer-Encoding") is None
+            and part.get_payload(decode=True) == pdf)
+
+
 class RecipientGuard:
-    def __init__(self, allowed: frozenset[str], *, audience=None):
+    def __init__(self, allowed: frozenset[str], *, audience=None, read_only: frozenset[str] = frozenset(),
+                 request_allowed: Callable[[str, str, bool], bool] | None = None,
+                 allow_write: Callable | None = None):
         self.allowed = allowed
         self.audience = audience
+        self.read_only = read_only
+        self.request_allowed = request_allowed
         self.refused = False
         self.transmitted = False
         self.final_started = False
         self.final_response = False
+        self._allow_write = allow_write
         self._initial_url = ""
         self._next_url = ""
 
@@ -137,24 +164,35 @@ class RecipientGuard:
             if self.refused:
                 await route.abort()
                 return
-            write = request.method not in {"GET", "HEAD"}
-            permitted = self.allows(request.url)
+            navigation = request.is_navigation_request()
+            read = request.method in {"GET", "HEAD"}
+            write = not read
+            permitted = self.allows(request.url) or (read and not navigation and origin(request.url) in self.read_only)
             if self.audience:
                 try:
                     permitted = self.audience.request_allowed(request, page, initial=request.url == self._initial_url)
                 except Exception:
                     permitted = False
             if not permitted:
-                if request.method not in {"GET", "HEAD"} or request.is_navigation_request():
+                if not read or navigation:
                     await refuse(route)
                 else:
                     await route.abort()
                 return
-            if request.is_navigation_request() and not clean_url(request.url, navigation=True):
+            if self.request_allowed and not self.request_allowed(request.url, request.method, navigation):
+                if not read or navigation:
+                    await refuse(route)
+                else:
+                    await route.abort()
+                return
+            if navigation and not clean_url(request.url, navigation=True):
                 await refuse(route)
                 return
             response = None
             try:
+                if not read and self._allow_write and not await self._allow_write(request):
+                    await refuse(route)
+                    return
                 if self.audience and (write or (self.audience.active and urlsplit(request.url).query)):
                     self.audience.recheck()
                     self.transmitted = True

@@ -240,15 +240,18 @@ _JS = r"""
   };
   const base = (ref, kind, el) => {
     const oldRef = el.getAttribute('data-bp-ref');
-    let destination = formDestination(el.form, isSubmitter(el) ? el : null);
+    const owningForm = el.form || (kind === 'combobox' ? el.closest('form') : null);
+    let destination = formDestination(owningForm, isSubmitter(el) ? el : null);
     if (kind === 'link') {
       try { destination = [new URL(el.getAttribute('href'), document.baseURI).href, 'GET']; }
       catch (_) { destination = null; }
     }
-    return {ref, kind, label: '', name: el.getAttribute('name') || '', placeholder: el.getAttribute('placeholder') || '',
+    return {ref, kind, label: '', name: el.getAttribute('name') || (kind === 'combobox' ? el.id : ''), placeholder: el.getAttribute('placeholder') || '',
+      automation_id: (el.getAttribute('data-automation-id') || '').slice(0, 120),
+      widget_candidate: kind === 'combobox' && !!el.closest('form') && !el.closest('button,a,[role=button],[role=link]'),
       required: false, options: [], value: '', accept: '', group: '', error: '', prio: false, form: formKey(el),
       autocomplete: el.getAttribute('autocomplete') || '', destination, native_submit: !!el.form && isSubmitter(el),
-      choice_destination: ['select', 'radio', 'checkbox', 'combobox'].includes(kind) ? choiceDestination(el.form) : null,
+      choice_destination: ['select', 'radio', 'checkbox', 'combobox'].includes(kind) ? choiceDestination(owningForm) : null,
       live_ref: readOnly && oldRef && (window.__bpEls || {})[oldRef] === el ? oldRef : ''};
   };
   const groupOf = (el) => {
@@ -369,9 +372,16 @@ _JS = r"""
       const ids = (el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '').split(/\s+/).filter(Boolean);
       let lb = ids.map((i) => byId(el, i)).find(Boolean);
       if (!lb && el.getAttribute('list')) lb = byId(el, el.getAttribute('list'));
-      if (lb) f.options = [...lb.querySelectorAll('[role=option],option')].slice(0, 100)
-        .map((o) => ({value: o.getAttribute('data-value') || o.getAttribute('value') || clean(o.textContent), label: clean(o.textContent)}))
-        .filter((o) => o.label);
+      if (lb) {
+        f.multiple = lb.getAttribute('aria-multiselectable') === 'true';
+        f.choice_options = [...lb.querySelectorAll('[role=option],option')].slice(0, 100).map(o => {
+          const label = clean(o.textContent);
+          return [o.getAttribute('data-value') || o.getAttribute('value') || label, label,
+                  o.matches(':disabled,[aria-disabled=true]'), ''];
+        });
+        f.options = f.choice_options.filter(([value, label, disabled]) => value && label && !disabled)
+          .map(([value, label]) => ({value, label}));
+      }
       const inner = el.matches('input,textarea') ? el : el.querySelector('input');
       f.value = inner ? inner.value : (/^(s[ée]lectionn|choisi|select|choose)/i.test(clean(el.textContent)) ? '' : clean(el.textContent).slice(0, 120));
     } else if (kind === 'checkbox') {

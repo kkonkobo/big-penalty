@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>Workday fixture</title>
+<section><h1>My Experience</h1>
+<form method="post" action="/workday-upload">
+<label>Resume / CV <input type="file" id="resume" required accept="application/pdf" data-automation-id="file-upload-input-ref"></label>
+<label>LinkedIn <input type="url" data-automation-id="linkedinUrl"></label>
+</form>
+<a href="/workday-questions">Save and Continue</a>
+</section>
+<script>
+document.querySelector('#resume').addEventListener('change', event => {
+  fetch('/workday-upload/demo.wd3.myworkdayjobs.com%2Fexternal/JR123', {method: 'POST', body: event.target.files[0]});
+});
+</script>
