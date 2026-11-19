@@ -139,6 +139,7 @@ class FixtureServer:
         self.post_json: dict[str, dict] = {}
         self.get_pages: dict[str, str] = {}
         self.redirects: dict[str, str] = {}
+        self.post_redirects: dict[str, str] = {}
         self.html: dict[str, str] = {}
         outer = self
 
@@ -190,6 +191,11 @@ class FixtureServer:
                 body = self.rfile.read(n)
                 outer.posts.append({"path": self.path, "body": body})
                 outer.sent.append({"method": "POST", "path": self.path, "body": body})
+                if self.path in outer.post_redirects:
+                    self.send_response(303)
+                    self.send_header("Location", outer.post_redirects[self.path])
+                    self.end_headers()
+                    return
                 if self.path in outer.redirects:
                     self.send_response(307)
                     self.send_header("Location", outer.redirects[self.path])

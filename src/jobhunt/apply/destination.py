@@ -19,9 +19,28 @@ _CODE = re.compile(
     r"(?:verifizierungs|bestätigungs|sicherheits)[ -]?code)(?:\s+(?:is|est|ist|lautet)\b)?\s*[:=–—-]?\s*"
     r"[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*", re.I)
 _JOB_PATH = re.compile(r"/(?:jobs?|job-postings?|requisitions?|positions?)/([0-9]{1,18})/?\Z", re.I)
+_LOGIN_PATH = re.compile(r"(?:^|/)(?:login|sign-?in|register|createaccount)(?:\.aspx)?(?:/|$)", re.I)
+_LOGIN_REDIRECT = {"returnurl", "redirect"}
 
 
-def clean_url(url: str | None, *, navigation: bool = False) -> str:
+def login_return(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        if not _LOGIN_PATH.search(parsed.path):
+            return ""
+        values = [value for name, value in parse_qsl(parsed.query, max_num_fields=100) if name.lower() in _LOGIN_REDIRECT]
+        if len(values) != 1 or re.search(r"[\\\x00-\x20]|%(?:2f|5c|00)", values[0], re.I):
+            return ""
+        target = urljoin(url, values[0])
+        result = urlsplit(target)
+        if (result.scheme, result.netloc) != (parsed.scheme, parsed.netloc) or result.fragment:
+            return ""
+        return clean_url(target, navigation=True, allow_login_redirect=False)
+    except ValueError:
+        return ""
+
+
+def clean_url(url: str | None, *, navigation: bool = False, allow_login_redirect: bool = True) -> str:
     if not url or any(ord(char) < 33 or char == "\\" for char in url):
         return ""
     try:
@@ -36,6 +55,8 @@ def clean_url(url: str | None, *, navigation: bool = False) -> str:
             name = key.lower()
             if name in _REQUISITION and _ID.fullmatch(value) and name not in kept:
                 kept[name] = (key, value)
+            elif navigation and name in _LOGIN_REDIRECT and allow_login_redirect and login_return(url):
+                continue
             elif navigation and name not in _TRACKING and not name.startswith("utm_"):
                 return ""
         return urlunsplit((parsed.scheme, netloc, parsed.path or "/", urlencode(sorted(kept.values())), ""))
@@ -253,6 +274,11 @@ class RecipientGuard:
                     if (self.probe and response.status in ({301, 302, 303} if entry_post else {301, 302, 303, 307, 308})
                             and response.headers.get("location")
                             and request.is_navigation_request() and self.probe.redirect(target)):
+                        await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif (self.audience and self.audience.entry_binding and response.headers.get("location")
+                            and response.status in ({301, 302, 303, 307, 308} if read else {301, 302, 303})
+                            and request.is_navigation_request() and request.frame == self.page.main_frame
+                            and self.audience.account_redirect(target)):
                         await route.fulfill(status=200, content_type="text/plain", body="")
                     elif (300 <= response.status < 400 and response.headers.get("location")
                             and request.method in {"GET", "HEAD"} and _navigation_matches(request.url, self._initial_url)

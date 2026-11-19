@@ -207,6 +207,8 @@ def binding_record(attempt: Attempt) -> dict:
     if not attempt.landing_digest:
         payload.pop("landing_host")
         payload.pop("landing_digest")
+    if not attempt.landing_binding:
+        payload.pop("landing_binding")
     return {**payload, "url": audit_url(attempt.url), "url_digest": _url_key(attempt.url)}
 
 
@@ -653,12 +655,13 @@ def binding_active(attempt: Attempt) -> bool:
                     and _binding_current(conn, run, attempt))
 
 
-def bind_apply_landing(attempt: Attempt, target: str, *, confirmed_distinct=frozenset()) -> Attempt:
+def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", confirmed_distinct=frozenset()) -> Attempt:
     from urllib.parse import urlsplit
     from jobhunt.apply.identity import ats_target
 
     host = urlsplit(target).hostname
-    if not attempt.autonomous or attempt.landing_digest or not host or clean_url(target, navigation=True) != target:
+    if (method not in {"requisition", "continuity"} or not attempt.autonomous or attempt.landing_digest
+            or not host or clean_url(target, navigation=True) != target):
         raise ApplyError(NOT_ACTIVE)
     _, canonical = ats_target(target)
     with connect() as conn:
@@ -672,13 +675,13 @@ def bind_apply_landing(attempt: Attempt, target: str, *, confirmed_distinct=froz
         if any(exact or app_id not in confirmed_distinct for app_id, exact in duplicates.items()):
             raise ApplyError(NOT_ACTIVE)
         digest = _url_key(target)
-        if conn.execute("SELECT 1 FROM apply_reservations WHERE profile_id=? AND application_id<>?"
+        if method == "requisition" and conn.execute("SELECT 1 FROM apply_reservations WHERE profile_id=? AND application_id<>?"
                         " AND (released_at IS NULL OR receipt_outcome='confirmed' OR run_id IN"
                         " (SELECT sent_run_id FROM applications WHERE profile_id=? AND status='submitted'))"
                         " AND (url_key=? OR json_extract(binding_json, '$.landing_digest')=?)",
                         (attempt.profile_id, attempt.application_id, attempt.profile_id, digest, digest)).fetchone():
             raise ApplyError(NOT_ACTIVE)
-        updated = replace(attempt, landing_host=host, landing_digest=digest,
+        updated = replace(attempt, landing_host=host, landing_digest=digest, landing_binding=method,
                           tenant=canonical[0] if canonical else attempt.tenant,
                           requisition_id=canonical[1] if canonical else attempt.requisition_id)
         conn.execute("UPDATE apply_reservations SET binding_json=? WHERE run_id=?", (_binding_json(updated), attempt.run_id))

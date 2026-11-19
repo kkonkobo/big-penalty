@@ -98,6 +98,7 @@ OTHER_DOC_RE = re.compile(r"diplome|releve|transcript|bulletin|lettre|motivation
                           r"photo|certificat|attestation|justificatif|recommandation|reference")
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 ACCOUNT_KINDS = ("account_login", "account_signup")
+ACCOUNT_FACTS = frozenset({"account_email", "account_password", "email", "first_name", "last_name", "full_name", "phone"})
 ACTION_TIMEOUT_MS = 8000
 MAX_SUBMIT_CLICKS = 1  # at most ONE final dispatch per run: a field error is never proof that nothing was sent
 IDLE_TIMEOUT_MS = 3000   # network-idle wait of a step (never fatal)
@@ -2028,6 +2029,15 @@ class _Run:
             if self.current_step:
                 await self._supervised_checkpoint()
             snap, resolve = await self._snapshot()
+            if self.autonomous and self.autonomous.entry_binding and not self.final_awaiting:
+                from jobhunt.apply.autonomous import POSTING_IDS_JS
+
+                ids = await self.page.evaluate(POSTING_IDS_JS, isolated_context=True)
+                if not self.autonomous.write_recipient(self.page.url) or not self.autonomous.posting_matches(self.page.url, ids):
+                    await self.page.close()
+                    result = self._end("needs_human", SUPERVISED_REQUIRED)
+                    result.diagnostic_code = "posting_mismatch"
+                    return result
             if self.current_step:
                 await self._supervised_checkpoint()
             if snap.has_captcha and self.captcha_wait_s > 0:  # visible window: give the human time to solve it, touching nothing
@@ -2139,13 +2149,42 @@ class _Run:
             if self.final_clicked:
                 await self._shot(log)
                 return self._unconfirmed()
-            if self.mode != "submit" and kind in ACCOUNT_KINDS:
+            if self.mode != "submit" and (kind in ACCOUNT_KINDS or (
+                    self._inspection_only and self.apply_link_followed and any(field.kind == "password" for field in snap.fields))):
                 await self._shot(log)
-                return self._account_handoff()
+                result = self._account_handoff()
+                if self._inspection_only and self.apply_link_followed:
+                    result.diagnostic_code = "dry_account_gate"
+                    result.final_url = origin(self.page.url)
+                return result
 
             if self.current_step:
                 await self._supervised_checkpoint()
+            bound_account = bool(self.autonomous and self.autonomous.entry_binding and
+                                 (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields)))
+            if bound_account:
+                if self.app_touched or kind not in ACCOUNT_KINDS or any(field.kind == "file" for field in snap.fields):
+                    return self._end("needs_human", SUPERVISED_REQUIRED)
+                known_account = self.account_known and self.account_known(self._account_address(self.page.url))
+                if kind == "account_login" and not known_account:
+                    signup = [field for field in snap.fields if field.kind in {"button", "link"} and
+                              SIGNUP_LINK_RE.search(fold(field.label)) and (field.kind == "link" or not field.form)]
+                    if len(signup) != 1:
+                        return self._end("needs_human", "Création du compte à effectuer à la main.")
+                    plan = plan.model_copy(update={"actions": [Action(ref=signup[0].ref, op="click", click_role="signup")]})
+                elif kind == "account_signup" and known_account:
+                    signin = [field for field in snap.fields if field.kind == "link" and re.fullmatch(
+                        r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
+                    if len(signin) != 1:
+                        return self._end("needs_human", SUPERVISED_REQUIRED)
+                    plan = plan.model_copy(update={"actions": [Action(ref=signin[0].ref, op="click", click_role="open_form")]})
+                else:
+                    plan = plan.model_copy(update={"actions": [action for action in plan.actions if
+                        (action.op == "fill" and action.fact in ACCOUNT_FACTS) or
+                        (action.op == "click" and action.click_role == ("login" if kind == "account_login" else "signup"))]})
             v = self._validate(plan, snap, resolve)
+            if bound_account:
+                v.items = [item for item in v.items if item.act.op == "fill" and item.used in ACCOUNT_FACTS]
             if not self._inspection_only:
                 await self._verify(v)
             if self.current_step:
@@ -2334,6 +2373,8 @@ class _Run:
             if role is not None and role != v.click[1]:  # type: ignore[index]
                 v.notes.append(f"clic « {v.click[0].label} » reclassé en {role}")  # type: ignore[index]
             final = (not attach) and self._is_final(v.click[0], role) if v.click else False  # type: ignore[arg-type]
+            if bound_account and (final or role not in {None, "open_form", "login", "signup"}):
+                return self._end("needs_human", SUPERVISED_REQUIRED)
             # Whatever the planner called it, a click that is final or made after data entry may send the form: the unanswered
             # required questions are checked first. Only a pre-data cookies / open_form click is exempt.
             cookie_banner = bool(v.click) and self._is_cookie_click(v.click[0], role) and not final  # a real banner button, by its label
@@ -2376,6 +2417,7 @@ class _Run:
                     result.diagnostic_code = "dry_apply_form_found"
                 elif self.apply_link_followed and (kind in ACCOUNT_KINDS or any(f.kind == "password" for f in snap.fields)):
                     result.diagnostic_code = "dry_account_gate"
+                    result.final_url = origin(self.page.url)
                 return result
             if self.mode == "supervised":
                 return self._end("ready", "Vérifiez le formulaire. Vous seul pouvez cliquer sur Envoyer.")
@@ -2496,7 +2538,7 @@ class _Run:
                             if final and self.on_submit_click is not None:
                                 await self.on_submit_click()
                                 self.diagnostics.receipt_reason = "submit_unverified"
-                            self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"})
+                            self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"}, account=bound_account)
                         except (ManualField, ApplyError):
                             raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
                     await self._click(target, recheck=dispatch_check)
@@ -2517,7 +2559,8 @@ class _Run:
             log.clicked = self._r(field.label)
             await self._after_click()
             if self.autonomous:
-                await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending)
+                if await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending):
+                    self.nav_pending = False
         if self.autonomous:
             return self._end("needs_human", "Trop d'étapes : limite atteinte.")
         return self._unconfirmed() if self.final_clicked or self.nav_pending else self._end("failed", "Trop d'étapes : limite atteinte.")

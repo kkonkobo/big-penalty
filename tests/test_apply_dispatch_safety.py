@@ -5,7 +5,7 @@ import asyncio
 import os
 import json
 from contextlib import asynccontextmanager, closing
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from apply_fakes import FakeVerifier, FixtureServer, ScriptedPlanner, act, cv_pdf, fast, page, sample_facts, server  # noqa: F401
@@ -42,6 +42,79 @@ def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes emba
     app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
     cvs.approve(app.id, app.current_rev)
     return job, app
+
+
+@pytest.mark.parametrize("scenario", ["dry", "signin", "signup", "mixed", "wrong_requisition", "foreign", "otp"])
+async def test_continuity_account_boundary(scenario, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    monkeypatch.setattr(service.accounts, "create_password", lambda host, email: "fixture-password")
+    monkeypatch.setattr(service.accounts, "account_known", lambda host, email: scenario not in {"signup", "mixed"})
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = '<main><h1>Offre</h1><a href="/entry">Postuler</a></main>'
+    server.redirects["/entry"] = "/Account/Login?ReturnUrl=%2Fapplication"
+    server.html["/Account/Login"] = '''<h1>Connexion</h1><form method="post" action="/Account/Login">
+        <label>E-mail<input type="email" name="email"></label>
+        <label>Mot de passe<input type="password" name="password"></label>
+        <button>Se connecter</button></form><a href="/Account/Register">Créer un compte</a>'''
+    server.html["/Account/Register"] = '''<h1>Créer un compte</h1><form method="post" action="/Account/Register">
+        <label>E-mail<input type="email" name="email"></label>
+        <label>Mot de passe<input type="password" name="password"></label>
+        <label>LinkedIn<input name="linkedin"></label><button>Créer mon compte</button></form>'''
+    if scenario == "mixed":
+        server.html["/Account/Register"] = server.html["/Account/Register"].replace(
+            "<button>", '<label>CV<input type="file" name="cv"></label><button>')
+    landing = "/jobs/100/apply"
+    server.html[landing] = posting_form(landing)
+    if scenario == "wrong_requisition":
+        server.html[landing] = '<main data-requisition-id="200">' + server.html[landing] + '</main>'
+    if scenario == "foreign":
+        landing = server.url("collect").replace("127.0.0.1", "localhost")
+    if scenario == "otp":
+        landing = "/verify-email"
+        server.html[landing] = '<h1>Vérifiez votre boîte e-mail</h1>'
+    server.post_redirects["/Account/Register"] = landing
+    server.post_redirects["/Account/Login"] = landing
+
+    def plan(snapshot):
+        if urlsplit(snapshot.url).path == "/jobs/100":
+            return StepPlan(page_kind="job_page")
+        if "Vérifiez" in snapshot.text:
+            return StepPlan(page_kind="email_verification")
+        if any(field.kind == "password" for field in snapshot.fields):
+            signup = urlsplit(snapshot.url).path.endswith("/Register")
+            actions = [act(snapshot, "E-mail", "fill", "account_email"), act(snapshot, "Mot de passe", "fill", "account_password"),
+                       act(snapshot, "Créer mon compte" if signup else "Se connecter", "click", role="signup" if signup else "login")]
+            if signup and scenario == "mixed":
+                actions.insert(0, act(snapshot, "CV", "upload_cv"))
+            if signup:
+                actions.insert(0, act(snapshot, "LinkedIn", "fill", "linkedin"))
+            return StepPlan(page_kind="account_signup" if signup else "account_login", actions=actions)
+        return form(snapshot)
+
+    dry_steps = iter([StepPlan(page_kind="job_page"), StepPlan(page_kind="account_login")])
+    result = await service.run(app.id, mode="dry_run" if scenario == "dry" else "submit", trigger="user",
+                               headless=True, planner=ScriptedPlanner(lambda snap: next(dry_steps) if scenario == "dry" else plan(snap)))
+    if scenario == "dry":
+        assert result.result.diagnostic_code == "dry_account_gate"
+        assert result.result.final_url == server.base
+        assert not server.posts
+        return
+    if scenario == "mixed":
+        assert result.status == "needs_human"
+        assert not server.posts
+        return
+    expected = {"signin": "submitted", "signup": "submitted", "wrong_requisition": "needs_human",
+                "foreign": "needs_human", "otp": "needs_email"}
+    assert result.status == expected[scenario], result.result.diagnostic_code
+    account_path = "/Account/Register" if scenario == "signup" else "/Account/Login"
+    assert [post["path"] for post in server.posts] == [account_path] + ([landing] if scenario in {"signin", "signup"} else [])
+    assert b"%PDF" not in server.posts[0]["body"]
+    if scenario == "signup":
+        assert parse_qs(server.posts[0]["body"].decode(), keep_blank_values=True)["linkedin"] == [""]
+    assert not any(request == "/collect" for request in server.requests)
+    with db.connect() as conn:
+        binding = json.loads(conn.execute("SELECT binding_json FROM apply_reservations WHERE run_id=?", (result.id,)).fetchone()[0])
+    assert binding["landing_host"] == "127.0.0.1" and binding["landing_binding"] == "continuity"
 
 
 @pytest.fixture

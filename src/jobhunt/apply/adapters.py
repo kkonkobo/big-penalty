@@ -56,6 +56,7 @@ class Attempt:
     autonomous: bool = False
     landing_host: str = ""
     landing_digest: str = ""
+    landing_binding: str = ""
 
 
 @dataclass(frozen=True)

@@ -571,7 +571,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 if landing is not None:
                     if clean_url(landing.url, navigation=True) != target or guard.refused:
                         return None, "apply_target_unverified"
-                    attempt = apply_store.bind_apply_landing(attempt, target, confirmed_distinct=confirmed_distinct)
+                    attempt = apply_store.bind_apply_landing(attempt, target, method=audience.entry_binding,
+                                                             confirmed_distinct=confirmed_distinct)
                     browser[-1] = (attempt, guard)
                     audience.bind_recipient(target)
                     await audience.bind_document(landing, entry=True)

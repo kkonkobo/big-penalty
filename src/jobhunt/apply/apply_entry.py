@@ -13,7 +13,7 @@ from uuid import UUID
 import httpx
 
 from jobhunt.apply.autonomous import _domain
-from jobhunt.apply.destination import clean_url, origin
+from jobhunt.apply.destination import clean_url, login_return, origin
 from jobhunt.apply.identity import ats_target
 from jobhunt.apply.supervised import _url_posting_ids
 from jobhunt.browser import is_challenge
@@ -119,6 +119,13 @@ class Probe:
         self.hops = 0
         self.post = None
         self.alias = None
+        self.control_origin = ""
+        self.clicked = False
+        self.chain = ""
+        self.tab = None
+
+    def continuity_site(self, target):
+        return self.clicked and (origin(target) == self.control_origin or bool(ats_target(target)[0]))
 
     def arm_post(self, post):
         if not post or self.source_ats != "talentsoft" or not self.source_identity:
@@ -146,9 +153,7 @@ class Probe:
         if len(body) > 2_000_000 or sorted(parse_qsl(body, keep_blank_values=True)) != self.post[1]:
             return False
         self.post = None
-        self.visited.add(request.url)
-        self.hops += 1
-        return True
+        return self.admit_navigation(request)
 
     def same_site(self, target):
         return (origin(target) == origin(self.source) or bool(self.source_domain and
@@ -165,33 +170,39 @@ class Probe:
             return False
         if identity and self.source_identity and ats == self.source_ats and identity != self.source_identity:
             return False
-        target_ids = _url_posting_ids(target)
+        target_ids = _url_posting_ids(target) | _url_posting_ids(login_return(target))
         if ats == "workday":
             target_ids = {workday_requisition(item) for item in target_ids}
         if target_ids and not target_ids <= expected:
             return False
-        return self.same_site(target) or bool(len(self.ids) == 1 and ats)
+        return self.same_site(target) or self.continuity_site(target) or bool(len(self.ids) == 1 and ats)
+
+    def admit_navigation(self, request):
+        if self.hops >= 6 or not self.navigation(request.url) or (self.hops and request.url != self.chain):
+            return False
+        try:
+            frame = request.frame
+            if frame.parent_frame is not None or (self.tab is not None and frame.page != self.tab):
+                return False
+            self.tab = frame.page
+        except Exception:
+            if self.hops or request.resource_type != "document":
+                return False
+        self.chain = ""
+        self.visited.add(request.url)
+        self.hops += 1
+        return True
 
     def allows(self, request):
         if request.is_navigation_request():
-            if self.hops >= 6 or not self.navigation(request.url):
-                return False
-            try:
-                frame = request.frame
-                if frame.parent_frame is not None:
-                    return False
-            except Exception:
-                if request.resource_type != "document":
-                    return False
-            self.visited.add(request.url)
-            self.hops += 1
-            return True
+            return self.admit_navigation(request)
         return self.same_site(request.url) or any(origin(url) == origin(request.url) for url in self.visited)
 
     def redirect(self, target):
         if self.hops >= 6 or self.next_url or not self.navigation(target):
             return False
         self.next_url = target
+        self.chain = target
         return True
 
     def landing(self, target, ids, *, ready):
@@ -199,7 +210,7 @@ class Probe:
             return False
         ats, identity = ats_target(target)
         if self.alias and ats == "smartrecruiters" and identity == self.alias:
-            return ready or bool(_ENTRY.search(urlsplit(target).path))
+            return "requisition" if ready or _ENTRY.search(urlsplit(target).path) else ""
         declared = _identifiers(ids)
         expected = self.ids
         if ats == "workday":
@@ -209,10 +220,12 @@ class Probe:
             return False
         if not (ready or _ENTRY.search(urlsplit(target).path)):
             return False
-        if self.same_site(target):
-            return True
-        return bool(len(expected) == 1 and (
-            (identity and identity[1] in expected) or declared == expected or _url_posting_ids(target) == expected))
+        if len(expected) == 1 and ((identity and identity[1] in expected) or declared == expected
+                                  or _url_posting_ids(target) == expected):
+            return "requisition"
+        if self.clicked and target in self.visited and (self.same_site(target) or self.continuity_site(target)):
+            return "continuity"
+        return ""
 
 
 def _workday_entry(url):
@@ -384,6 +397,8 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
             if details["post"] and probe.source_ats == "talentsoft" and not probe.arm_post(details["post"]):
                 return None, "apply_target_unverified"
             audience.recheck()
+            probe.clicked = True
+            probe.control_origin = origin(details["href"] or (details["post"][0] if details["post"] else ""))
             await button.click(timeout=2500, no_wait_after=True)
         workday = probe.source_ats == "workday" or bool(direct and ats_target(direct)[0] == "workday")
         deadline = asyncio.get_running_loop().time() + (_WORKDAY_WAIT if workday else 5)
@@ -410,15 +425,18 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
                     ids = await landing["ids"].json_value()
                     if workday and await is_challenge(tab):
                         return None, "challenge_or_rate_limited"
-                    if ((tab != page or target != audience.live_url or (ready and not was_ready))
+                    if ((probe.tab is None or tab == probe.tab)
+                            and (tab != page or target != audience.live_url or (ready and not was_ready))
                             and (not workday or marker or ready)
-                            and probe.landing(target, ids, ready=ready)):
+                            and (binding := probe.landing(target, ids, ready=ready))):
                         if tab != page:
                             await page.close()
                         if guard.refused or len(opened) > 1:
                             return None, "apply_target_unverified"
                         audience.recheck()
                         audience.entry_nonce = nonce
+                        audience.entry_binding = binding
+                        audience.entry_ids = frozenset(probe.ids)
                         accepted = True
                         return tab, clean_url(target, navigation=True)
             await asyncio.sleep(0.1)
