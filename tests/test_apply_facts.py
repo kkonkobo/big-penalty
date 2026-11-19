@@ -360,7 +360,9 @@ def test_save_answers_round_trip_reaches_build_facts(profile):
               "graduation_date": "2028-06-30", "internship_agreement": "Oui",
               "salary_expectation.stage": "Gratification légale", "salary_expectation.alternance": "Grille légale",
               "current_salary": "Aucun (étudiant)", "mobility": "Toute la France", "languages": "Français, anglais B2",
-              "first_name": "Léa-Marie", "last_name": "Durand", "phone_device_type": "Mobile"}
+              "first_name": "Léa-Marie", "last_name": "Durand", "phone_device_type": "Mobile",
+              "address_line_2": "Appartement 4", "phone_calling_code": "+33", "conflict_of_interest": "Non",
+              "politically_exposed": "Non", "recruiter_ai": "Oui"}
     assert set(values) == {f.path for f in F.ANSWER_FIELDS}
     F.save_answers(profile.id, values)
     data = F.load_answers(profile.id)
@@ -374,7 +376,9 @@ def test_save_answers_round_trip_reaches_build_facts(profile):
                 "driving_licence": "Oui (permis B)", "vehicle": "Oui", "disability": "Non",
                 "criminal_record": "Casier judiciaire vierge", "notice_period": "Aucun (étudiant)", "current_salary": "Aucun (étudiant)",
                 "graduation_date": "30 juin 2028", "internship_agreement": "Oui", "phone_device_type": "Mobile",
-                "mobility": "Toute la France", "languages_summary": "Français, anglais B2", "first_name": "Léa-Marie", "last_name": "Durand"}
+                "mobility": "Toute la France", "languages_summary": "Français, anglais B2", "first_name": "Léa-Marie", "last_name": "Durand",
+                "address_line_2": "Appartement 4", "phone_calling_code": "+33", "conflict_of_interest": "Non",
+                "politically_exposed": "Non", "recruiter_ai": "Oui"}
     for key, value in expected.items():
         assert val(s, key) == value, key
         assert s.get(key).label and not s.get(key).secret

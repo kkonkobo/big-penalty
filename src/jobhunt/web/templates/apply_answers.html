@@ -39,12 +39,8 @@
 </section>
 <section class="panel" id="answer-decisions">
   <div class="panel-head plain"><h2>À décider</h2></div>
-  {% if decisions or choices %}
+  {% if choices %}
   <p class="muted small">Confirmez une option du formulaire quand elle est disponible. Sinon, vérifiez la question sur le site concerné.</p>
-  <ul class="plain-list">{% for group in decisions %}
-    <li data-decision="{{ group.fact_key }}">{{ decision_titles[group.fact_key] }}
-      <span class="count">{{ group.application_count }}</span>{{ affected(group, true) }}</li>
-  {% endfor %}</ul>
   {% for choice in choices %}{% if choice.options %}
     <form method="post" action="/profiles/{{ profile.id }}/answers/choice" class="form">
       <input type="hidden" name="application_id" value="{{ choice.item.app.id }}">
@@ -62,6 +58,13 @@
   {% endif %}{% endfor %}
   {% else %}<p class="panel-empty muted">Aucune décision particulière repérée.</p>{% endif %}
 </section>
+{% if preferences %}
+<section class="panel" id="standing-preferences">
+  <div class="panel-head plain"><h2>À décider une fois</h2></div>
+  {% for group in preferences %}<p><a href="#ans_recruiter_ai">Accepter qu’un outil d’IA assiste le recruteur ?</a>
+    <span class="count">{{ group.application_count }}</span></p>{% endfor %}
+</section>
+{% endif %}
 <section class="panel" id="technical-blocks">
   <div class="panel-head plain"><h2>Blocages techniques</h2></div>
   {% if technical %}
@@ -69,7 +72,7 @@
   <ul class="plain-list">{% for group in technical %}
     {% set key = group.fact_key.removeprefix('recheck:') %}
     <li data-blocker="{{ group.fact_key }}">
-      {% if key != group.fact_key %}À revérifier : {{ answer_actions[key][0] }}{% else %}{{ technical_titles[key] }}{% endif %}
+      {{ technical_titles.get(key, technical_titles['recheck']) }}
       <span class="count">{{ group.application_count }}</span>{{ affected(group, true) }}</li>
   {% endfor %}</ul>
   {% else %}<p class="panel-empty muted">Aucun blocage technique repéré.</p>{% endif %}
@@ -99,6 +102,17 @@
 {% endif %}
 
 <form method="post" action="/profiles/{{ profile.id }}/answers" class="stack">
+{% if employers %}
+<section class="panel form">
+  <div class="panel-head plain"><h2>À compléter une fois : emploi antérieur</h2></div>
+  <p>Indiquez « Non » pour les entreprises où vous n’avez jamais travaillé, et « Oui » pour chaque exception.</p>
+  {% for group, company in employers %}
+  <label>{{ company }} (ou ses filiales) · {{ group.application_count }} candidature{{ 's' if group.application_count != 1 }}
+    <select name="ans_{{ group.fact_key.replace('.', '__') }}"><option value="">Choisir…</option><option>Oui</option><option>Non</option></select>
+  </label>
+  {% endfor %}
+</section>
+{% endif %}
 {% if pending %}
 <section class="panel" id="pending">
   <div class="panel-head plain"><h2>Questions les plus fréquentes <span class="count">{{ pending|length }}</span></h2></div>

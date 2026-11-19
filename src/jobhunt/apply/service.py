@@ -485,7 +485,8 @@ def _candidate_facts(app: Application, job):
         master = load_master(app.profile_id)
     except MasterError:
         master = None
-    return build_facts(profile, master if master and master.is_confirmed else None, load_answers(app.profile_id), job)
+    return build_facts(profile, master if master and master.is_confirmed else None, load_answers(app.profile_id), job,
+                       employer=app.company)
 
 
 _SUPERVISED: dict[int, Session] = {}

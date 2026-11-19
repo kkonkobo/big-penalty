@@ -1036,7 +1036,7 @@ def test_missing_fact_groups_link_to_existing_fields_and_disappear_on_save(clien
     make_run(superseded, tmp_path, status="needs_input", questions=[Question(label="City of residence")])
     make_run(superseded, tmp_path, status="ready")
     apply_facts.save_answers(profile.id, {"graduation_date": "2028-06-30"})
-    apply_facts.save_custom_answers(profile.id, [("Country of residence", "Pays fictif")])
+    apply_facts.save_answers(profile.id, {"country": "Pays fictif"})
     before = apply_facts.answers_path(profile.id).read_bytes()
     page = soup(client.get(answers_url(profile)).text)
     group = page.select_one('#missing-answers [data-fact-key="city"]')
@@ -1052,7 +1052,7 @@ def test_missing_fact_groups_link_to_existing_fields_and_disappear_on_save(clien
     response = save(client, profile, {"ans_city": "Ville-Test"})
     after = soup(response.text)
     assert response.status_code == 200 and after.select_one("#missing-answers [data-fact-key]") is None
-    assert after.select_one('[data-blocker="recheck:city"] .count').text == "2"
+    assert after.select_one('[data-blocker="recheck:city"]') is None
     assert apply_facts.load_answers(profile.id)["city"] == "Ville-Test"
     assert apply_store.last_run(first.id).status == "needs_input"
 
@@ -1089,9 +1089,9 @@ def test_typed_choices_and_technical_prompts_are_handled_without_retry(client, p
     page = soup(client.get(answers_url(profile)).text)
     assert queue_calls == [profile.id]
     assert page.select_one('[data-blocker="cv_upload"] .count').text == "1"
-    assert page.select_one('[data-blocker="recheck:first_name"]')
+    assert not page.select_one('[data-blocker="recheck:first_name"]')
     assert page.select_one('[data-fact-key="postal_code"] .tag').text.startswith("1 candidature")
-    assert page.select_one('[data-decision="ambiguous_country"]')
+    assert page.select_one('[data-blocker="recheck"]')
     select = page.select_one('#answer-decisions select[name="choice"]')
     assert [(option["value"], option.text) for option in select.select("option")] == [("", "Choisir…"), ("1", "Ja"), ("3", "Nein")]
     assert not select.select("option[selected]")

@@ -499,12 +499,112 @@ async def test_busy_send_lock_leaves_it_queued_and_says_so(portal, profile, mast
 
 
 async def test_answering_a_question_does_not_resume_the_paused_run(portal, profile, master, tmp_path, engine):
-    _, app = new_app(profile, master, tmp_path, 1, approve=True)
+    job, app = new_app(profile, master, tmp_path, 1, approve=True)
+    other_job, other = new_app(profile, master, tmp_path, 2, approve=True)
     make_run(app, tmp_path, status="needs_input", questions=[Question(label="Ville ?")])
+    make_run(other, tmp_path, status="needs_input", questions=[Question(label="City of residence")])
     await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW)
     q = srv(portal).snapshot.questions[0]
-    assert q.label == "Ville ?" and q.qid == facts.custom_id("Ville ?")
-    portal.fake.add_event(portal.key, "question_answer", qid=q.qid, answer="Lyon")
+    assert q.label == "Ville" and q.path == "city" and q.application_count == 2
+    portal.fake.add_event(portal.key, "answer", path=q.path, value="Lyon", base_ver=srv(portal).snapshot.answers[q.path].ver)
     (rep,) = await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(minutes=5))
     assert rep.executed == 0 and not engine and cvstore.get_application(app.id).status == "approved"
     assert srv(portal).snapshot.questions == [] and [r.status for r in srv(portal).results] == ["applied"]
+    assert facts.custom_answers(profile.id) == []
+    for candidate, posting in ((app, job), (other, other_job)):
+        assert service._candidate_facts(candidate, posting).get("city").value == "Lyon"
+
+
+def test_grouped_portal_snapshot_reduces_58_raw_prompts(portal, profile, master, tmp_path, monkeypatch):
+    from jobhunt.portal.snapshot import build_snapshot
+
+    def fields(labels, kind="text", options=()):
+        return [Question(label=label, kind=kind, options=list(options)) for label in labels]
+
+    countries = fields(["Country", "Pays", "Pays de résidence", "Country/Region of Residence",
+                        "Pays/région de résidence", "Country of residence"], "select", ["Belgique", "France"])
+    rows = [
+        fields(["Ville", "City", "Ville de résidence", "Code postal", "Postal Code", "Adresse", "Street Name and Type",
+                "Address Line 2", "Ligne d'adresse 2", "Prénom", "Last name", "Adresse e-mail", "Numéro de téléphone"]),
+        fields(["département", "Department", "state (département de résidence)", "Département de résidence"], "select", ["31", "75"]),
+        fields(["Indicatif de pays", "Code de région/pays"], "select", ["France (+33)", "Belgique (+32)"]),
+        fields(["Type d'appareil téléphonique", "Phone Device Type"], "select", ["Mobile", "Fixe"]),
+        fields(["Créez votre mot de passe", "Password (16 characters)", "Mot de passe du compte candidat fictif",
+                "Mot de passe / Confirmer le nouveau mot de passe"]),
+        fields(["CV (dépôt du fichier impossible sur ce site)", "CV personale", "Photo (JPG)", "Lettre de motivation", "Message",
+                "Compte requis sur careers.fictional.test"]),
+        fields(["I want to be considered for other Job Opportunities", "I consent to receive update messages",
+                "J'accepte d'être sollicité(e)", "J'accepte de recevoir des messages", "I accept the application privacy policy"], "checkbox"),
+        fields(["J’accepte que le recruteur soit assisté par l’outil doté d’IA",
+                "Je refuse que le recruteur soit assisté par l’outil doté d’IA",
+                "I consent to the recruiter being assisted by an AI tool"], "radio", ["Oui", "Non"]),
+        fields(["A déjà travaillé pour l’employeur (ou ses filiales)", "Have you previously worked for us?",
+                "Avez-vous déjà travaillé pour cet employeur ?", "Conflit d’intérêts avec un employé ou un client de l’employeur",
+                "Conflict of interest with an employee or customer of the employer", "Personne politiquement exposée",
+                "Are you a politically exposed person?", "Votre école peut-elle fournir une convention de stage ?",
+                "Can your school provide an internship agreement?"], "radio", ["Oui", "Non"]),
+        fields(["Expected graduation date", "Date prévue d’obtention du diplôme"], "date"),
+        fields(["Votre disponibilité pour un entretien ?", "Précisez votre préférence pour cette mission"]),
+    ]
+    prompts = [question for row in rows for question in row]
+    assert len(countries) + len(prompts) == 58
+    facts.save_answers(profile.id, {"city": "Toulouse", "postal_code": "31000", "address": "12 rue Fictive",
+                                    "graduation_date": "2027-06-30"})
+    for index, country in enumerate(countries):
+        _, app = new_app(profile, master, tmp_path, index + 1)
+        make_run(app, tmp_path, questions=[country, *prompts[index::len(countries)]])
+    queue = service.queue
+    calls = []
+
+    def counted(profile_id):
+        calls.append(profile_id)
+        return queue(profile_id)
+
+    monkeypatch.setattr(service, "queue", counted)
+    snapshot, _ = build_snapshot(portal.journal, profile.id, NOW)
+    assert calls == [profile.id]
+    assert len(snapshot.questions) == 10
+    assert {question.path for question in snapshot.questions if question.group == "fact"} == {
+        "address_line_2", "conflict_of_interest", "politically_exposed", "internship_agreement"}
+    assert len([question for question in snapshot.questions if question.group == "employer"]) == 3
+    ai, = [question for question in snapshot.questions if question.group == "preference"]
+    assert ai.options == ["Oui", "Non"] and ai.application_count == 3
+    assert sum(question.group == "decision" for question in snapshot.questions) == 2
+    categories = {item.category for item in snapshot.info if item.kind == "technical"}
+    assert {"Compte ou connexion", "Mot de passe ou code de vérification", "Dépôt du CV", "Dépôt de la photo",
+            "Lettre de motivation ou message"} <= categories
+
+    facts.save_answers(profile.id, {"address_line_2": "Appartement 2", "recruiter_ai": "Non"})
+    second, _ = build_snapshot(portal.journal, profile.id, NOW)
+    assert calls == [profile.id, profile.id] and len(second.questions) == 8
+
+
+async def test_portal_choice_is_bound_to_one_current_run(portal, profile, master, tmp_path):
+    from jobhunt.apply import scoped_choices
+
+    capture = Question(label="Quel site préférez-vous ?", kind="select", reason="unmapped",
+                       options=["Choisir", "Site A", "Site B"], choice_binding="1" * 64, choice_indices=[1, 2])
+    apps = [new_app(profile, master, tmp_path, index) for index in (1, 2)]
+
+    def pause(job, app):
+        origin = service.origin_digest(job.origin_url)
+        run = apply_store.start_run(app.id, app.current_rev, "submit", "user", lambda _: tmp_path, origin_sha=origin)
+        apply_store.finish_run(run.id, RunResult(status="needs_input", message="Choix requis", questions=[capture]))
+
+    for job, app in apps:
+        pause(job, app)
+    await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW)
+    questions = sorted(srv(portal).snapshot.questions, key=lambda question: question.company)
+    qids = [question.qid for question in questions]
+    assert len(set(qids)) == 2 and all(question.options == ["Site A", "Site B"] for question in questions)
+
+    invalid = portal.fake.add_event(portal.key, "question_answer", qid=qids[0], answer="Choisir")
+    valid = portal.fake.add_event(portal.key, "question_answer", qid=qids[0], answer="Site B")
+    stale = portal.fake.add_event(portal.key, "question_answer", qid=qids[1], answer="Site A")
+    pause(*apps[1])
+    await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(minutes=5))
+    assert [portal.journal.get_event(event).state for event in (invalid, valid, stale)] == ["rejected", "applied", "rejected"]
+    for index, (job, app) in enumerate(apps):
+        saved = scoped_choices.load(profile.id, app.id, app.current_rev, service.origin_digest(job.origin_url))
+        assert saved == ({capture.choice_binding: 2} if index == 0 else {})
+    assert facts.custom_answers(profile.id) == []

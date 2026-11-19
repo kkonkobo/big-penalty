@@ -231,7 +231,7 @@ async def test_two_profiles_in_one_batch(jp, profile, master, tmp_path):
 
 
 # ------------------------------------------------------------------ automatic resume
-def paused_on(jp, profile, master, tmp_path, n=1, labels=("Ville ?",)):
+def paused_on(jp, profile, master, tmp_path, n=1, labels=("Votre mobilité ?",)):
     _, app = new_app(profile, master, tmp_path, n, approve=True)
     run_ = make_run(app, tmp_path, status="needs_input", questions=[Question(label=l) for l in labels])
     return app, run_
@@ -248,7 +248,7 @@ def record_question_answer(journal, profile_id, question, answer):
 
 async def test_legacy_resume_work_cannot_start_an_attempt(jp, profile, master, tmp_path):
     app, run = paused_on(jp, profile, master, tmp_path)
-    record_question_answer(jp, profile.id, "Ville ?", "Lyon")
+    record_question_answer(jp, profile.id, "Votre mobilité ?", "Lyon")
     answer, = jp.events(profile.id, ("applied",), ("question_answer",))
     assert jp.resume_candidates(profile.id) == set()
     jp.record_resume_candidates(profile.id, answer.event_id, [(app.id, run.id)])

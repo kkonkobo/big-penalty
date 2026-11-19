@@ -739,10 +739,10 @@ def test_12_no_auto_resume_in_review_mode(w, profile, master, tmp_path, engine):
     out = seeker.answer_question(q.qid, "Lyon")
     mac.sync_one(pid)
     assert engine == [] and seeker.statuses()[out.event_ids[0]] == "awaiting_review"
-    assert [c for c in facts.custom_answers(pid) if c["question"] == "Ville ?"] == []
+    assert facts.get_answer(facts.load_answers(pid), "city") is None
     manage.review_apply(pid)  # the operator approves the answer: it is saved, and still nothing is started by the portal pass
     mac.sync_one(pid)
-    assert [c["answer"] for c in facts.custom_answers(pid) if c["question"] == "Ville ?"] == ["Lyon"]
+    assert facts.get_answer(facts.load_answers(pid), "city") == "Lyon"
     assert engine == [] and seeker.statuses()[out.event_ids[0]] == "applied"
 
 

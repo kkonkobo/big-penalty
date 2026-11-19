@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 from pydantic import ValidationError
 
 from jobhunt import db
-from jobhunt.apply import facts, service
+from jobhunt.apply import facts, missing_answers, service
 from jobhunt.apply import store as apply_store
 from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
@@ -110,9 +110,9 @@ def interrupted_after_click(run: apply_store.ApplyRun | None) -> bool:
                 and not apply_store.pid_alive(run.pid))
 
 # ---------------------------------------------------------------- the schema and the answers
-def _schema(write_only: frozenset[str]) -> tuple[protocol.AnswerSchema, list[facts.AnswerField]]:
+def _schema(write_only: frozenset[str], employer_fields=()) -> tuple[protocol.AnswerSchema, list[facts.AnswerField]]:
     fields, specs = [], []
-    for f in facts.ANSWER_FIELDS:
+    for f in (*facts.ANSWER_FIELDS, *employer_fields):
         if not _PATH_RE.match(f.path) or len(specs) >= 200:
             continue
         fields.append(f)
@@ -158,6 +158,13 @@ def question_id(label: str) -> str:
     return facts.custom_id(label)
 
 
+def decision_id(decision: missing_answers.Decision) -> str:
+    item, question = decision.item, decision.question
+    if decision.options:
+        return question_id(f"ats {item.app.id} {item.last_run.id} {question.choice_binding}")
+    return question_id(question.label)
+
+
 # ---------------------------------------------------------------- documents
 def _pdf_info(app) -> tuple[Path, str, int, bool] | None:
     p = cvs.safe_pdf(app)
@@ -186,7 +193,6 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
     if profile is None:
         raise ValueError("profil du portail inconnu")
     ps = get_portal_settings()
-    schema, fields = _schema(ps.write_only)
     answers = facts.load_answers(profile_id)
     local = db.get_profile(profile_id)
     items = service.queue(profile_id)
@@ -283,14 +289,39 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
             prep=[protocol.Prep(message=_t(p.message, 1000), hint=_t(p.hint, 1000)) for p in a.preps[:40]]))
 
     # --- questions
-    questions, seen = [], set()
-    for app, _run, q in service.pending_questions(profile_id):
-        qid = question_id(q.label)
-        if qid in seen or not q.label.strip() or len(questions) >= 200:
-            continue
-        seen.add(qid)
-        questions.append(protocol.PendingQuestion(qid=qid, label=_t(q.label, 500), options=[_t(o, 500) for o in q.options[:100]],
-                                                  company=_t(app.company, 300), title=_t(app.job_title, 300)))
+    questions, employer_fields = [], []
+    if local:
+        projection = missing_answers.project_queue(local, items, answers)
+        by_id = {item.app.id: item for item in items}
+        for group in projection.groups:
+            path = group.fact_key
+            field = facts.answer_field(path)
+            if field is None or len(questions) >= 160:
+                continue
+            employer = path.startswith("former_employer.")
+            if employer:
+                company = _t(by_id[group.application_ids[0]].app.company, 300)
+                field = field.model_copy(update={"label": f"Avez-vous déjà travaillé pour {company} (ou ses filiales) ?"})
+                employer_fields.append(field)
+            questions.append(protocol.PendingQuestion(qid=question_id(f"fact {path}"), label=field.label, path=path,
+                group="employer" if employer else "preference" if path == "recruiter_ai" else "fact",
+                options=[option for option in field.options if option], application_count=group.application_count))
+        for decision in projection.decisions:
+            if decision.saved or len(questions) >= 200:
+                continue
+            app, question = decision.item.app, decision.question
+            options = [label for _, label in decision.options if len(label) <= 500]
+            if decision.options and not options:
+                continue
+            questions.append(protocol.PendingQuestion(qid=decision_id(decision), label=_t(question.label, 500),
+                options=options[:100], company=_t(app.company, 300), title=_t(app.job_title, 300)))
+        for group in projection.technical:
+            for app_id in group.application_ids:
+                item = by_id[app_id]
+                info.append(protocol.InfoItem(kind="technical", category=missing_answers.TECHNICAL.get(group.fact_key, missing_answers.TECHNICAL["recheck"]),
+                    company=_t(item.app.company, 300), title=_t(item.app.job_title, 300), host=_t(item.origin_host, 255)))
+
+    schema, fields = _schema(ps.write_only, employer_fields)
 
     counts = protocol.Counts(sending=sum(1 for i in items if i.bucket == "sending"),
                              failed=sum(1 for i in items if i.bucket in ("failed", "needs_verification")),

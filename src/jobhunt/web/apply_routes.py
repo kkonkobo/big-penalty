@@ -21,7 +21,7 @@ from jobhunt.apply import accounts, facts, missing_answers, scoped_choices
 from jobhunt.apply import service as apply_service
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, decision_key, international_calling_code, technical_key
+from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, technical_key
 from jobhunt.apply.service import QueueItem
 from jobhunt.apply.types import Question
 from jobhunt.config import get_settings
@@ -628,10 +628,9 @@ def _pending_answer_prompts(items: list[QueueItem], restricted: set[str], answer
 
 def _answer_actions(profile_id: int) -> dict[str, tuple[str, str]]:
     actions = {key: (facts.ANSWER_BY_PATH[key].label, "#" + _field_name(key))
-               for key in missing_answers.ALIASES if key in facts.ANSWER_BY_PATH}
+               for key in facts.ANSWER_BY_PATH}
     actions.update({key: (label, f"/profiles/{profile_id}/edit") for key, label in {
         "full_name": "Nom complet", "email": "Adresse e-mail", "phone": "Numéro de téléphone",
-        "phone_calling_code": "Numéro de téléphone au format international",
     }.items()})
     return actions
 
@@ -643,49 +642,39 @@ def answers_page(request: Request, pid: str, f: str | None = None):
     profile = web._profile_or_404(profile_id)
     notice, error = web._take_flash(f)
     errors = [error] if error else []
-    recorded_keys = None
+    answers = None
     try:
         answers = facts.load_answers(profile_id)
         ctx = _answers_context(profile_id, answers)
-        recorded_keys = {key for key in missing_answers.ALIASES if facts.get_answer(answers, key)}
     except ApplyError as e:  # unreadable answers.yaml
         ctx = {"sections": [], "custom": [], "hosts": []}
         errors.append(str(e))
-    groups, pending, resumable, decisions, technical, choices = [], [], [], [], [], []
+    groups, pending, resumable, technical, choices, employers, preferences = [], [], [], [], [], [], []
     try:
-        resumable = list(missing_answers.input_pauses(profile_id, apply_service.queue(profile_id)))
-        restricted = _restricted_labels(resumable)
-        if recorded_keys is not None:
-            try:
-                master = load_master(profile_id)
-            except MasterError:
-                master = None
-            identity = facts.identity_answers(profile, master if master and master.is_confirmed else None, answers)
-            recorded_keys.update(key for key, value in identity.items() if value)
-            if international_calling_code(identity["phone"] or ""):
-                recorded_keys.add("phone_calling_code")
-            if facts.get_answer(answers, "phone_device_type") not in {"Mobile", "Fixe"}:
-                recorded_keys.discard("phone_device_type")
+        if answers is not None:
+            projection = missing_answers.project_queue(profile, apply_service.queue(profile_id), answers)
+            resumable, technical = projection.pauses, projection.technical
+            restricted = _restricted_labels(resumable)
+            companies = {item.app.id: item.app.company for item in resumable}
+            for group in projection.groups:
+                if group.fact_key.startswith("former_employer."):
+                    employers.append((group, companies[group.application_ids[0]]))
+                elif group.fact_key == "recruiter_ai":
+                    preferences.append(group)
+                else:
+                    groups.append(group)
             answered = {facts.norm_question(entry["question"]) for entry in ctx["custom"] if entry["answer"].strip()}
-            groups = missing_answers.project(profile_id, resumable, recorded_fact_keys=recorded_keys, answered_labels=answered)
-            decisions, technical = missing_answers.review_groups(resumable, recorded_keys, answered)
             pending = _pending_answer_prompts(resumable, restricted, answered)
             ctx["custom"] = [entry for entry in ctx["custom"] if facts.norm_question(entry["question"]) not in restricted]
-            for item in resumable:
-                bound = {q.choice_binding: q for q in item.questions if _allows_bound_choice(q)}
-                if not bound or not _choice_run_current(item.app, item.last_run, item.origin_sha):
-                    continue
-                saved = scoped_choices.load(profile_id, item.app.id, item.app.current_rev, item.origin_sha)
-                choices.extend({"item": item, "question": question, "options": scoped_choices.labels(question),
-                                "saved": binding in saved} for binding, question in bound.items())
+            choices = [decision for decision in projection.decisions if decision.options]
     except Exception as e:  # noqa: BLE001 - the form itself must still render
         log.exception("pending questions failed")
-        groups, pending, resumable, decisions, technical, choices = [], [], [], [], [], []
+        groups, pending, resumable, technical, choices, employers, preferences = [], [], [], [], [], [], []
         ctx["custom"] = []
         errors.append(_msg(e))
     return web.render(request, "apply_answers.html", profile=profile, pending=pending, resumable=resumable, notice=notice,
                       errors=errors, mode_labels=MODE_LABELS, missing_groups=groups, answer_actions=_answer_actions(profile_id),
-                      decisions=decisions, technical=technical, choices=choices, decision_titles=missing_answers.DECISIONS,
+                      employers=employers, preferences=preferences, technical=technical, choices=choices,
                       technical_titles=missing_answers.TECHNICAL,
                       runs={item.app.id: item.last_run.id for item in resumable}, **ctx)
 
@@ -694,16 +683,9 @@ STALE_ANSWER = "cette réponse a changé entre-temps"
 
 
 def _allows_bound_choice(question: Question) -> bool:
-    return bool(question.choice_binding and question.kind in {"select", "radio"} and question.reason != "technical"
-                and question.category != "consent" and decision_key(question.label) != "consent"
+    return bool(question.choice_binding and question.kind in {"select", "radio", "combobox"} and question.reason != "technical"
+                and not missing_answers.policy_key(question) and not missing_answers.fact_key(question)
                 and not technical_key(question.label, question.kind))
-
-
-def _choice_run_current(app, run, origin: str) -> bool:
-    return bool(app and run and run.result and not run.result.submit_clicked and run.status == "needs_input"
-                and app.status in {"draft", "approved"} and run.rev == app.current_rev
-                and (app.status != "approved" or (app.approved_rev == app.current_rev and app.approved_sha256))
-                and origin and run.origin_sha == origin and run.application_version == db._iso(app.updated_at))
 
 
 @router.post("/profiles/{pid}/answers/choice")
@@ -726,7 +708,7 @@ async def answers_choice(request: Request, pid: str):
             app = cvstore.get_application(aid)
             run = apply_store.last_run(aid)
             job = db.get_job(app.job_id) if app else None
-            if (not _choice_run_current(app, run, origin) or app.profile_id != profile_id
+            if (not scoped_choices.run_current(app, run, origin) or app.profile_id != profile_id
                     or safe_id(form.get("run_id")) != run.id or not job or job.profile_id != profile_id
                     or not job.origin_url or origin != apply_service.origin_digest(job.origin_url)
                     or apply_store.outstanding_attempt(aid) is not None):
@@ -770,6 +752,12 @@ async def answers_save(request: Request, pid: str):
                 else:
                     changes[f.path] = str(form.get(name) or "")
         pauses = list(missing_answers.input_pauses(profile_id, apply_service.queue(profile_id)))
+        for item in pauses:
+            path = facts.employer_path(item.app.company)
+            if path and any(missing_answers.fact_key(question) == "former_employer" for question in item.questions):
+                posted = str(form.get(_field_name(path)) or "").strip()
+                if posted and not facts.get_answer(current, path):
+                    changes[path] = posted
         restricted = _restricted_labels(pauses)
         asked: dict[str, list[Question]] = {}
         for item in pauses:

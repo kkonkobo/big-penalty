@@ -262,7 +262,10 @@ class Seeker:
         return ops.submit_answers(self.live.portal, self.pid, edits, self.live.clock())
 
     def answer_question(self, qid: str, answer: str) -> ops.SubmitOutcome:
-        return ops.answer_questions(self.live.portal, self.pid, [(qid, answer)], self.live.clock())
+        snapshot = self.view().snapshot
+        question = next((question for question in snapshot.questions if question.qid == qid), None) if snapshot else None
+        tokens = {qid: snapshot.answers[question.path].ver} if question and question.path else None
+        return ops.answer_questions(self.live.portal, self.pid, [(qid, answer)], self.live.clock(), tokens=tokens)
 
     def edit_custom(self, custom_id: str, answer: str, *, token: str | None = None) -> ops.SubmitOutcome:
         tok = token if token is not None else next(c.token for c in self.view().custom if c.custom_id == custom_id)

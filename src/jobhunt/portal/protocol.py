@@ -189,6 +189,9 @@ class PendingQuestion(Wire):
     options: list[Line] = Field(default_factory=list, max_length=100)
     company: Name = ""
     title: Name = ""
+    path: AnswerPath | None = None
+    group: Literal["fact", "preference", "employer", "decision"] = "decision"
+    application_count: int = Field(default=0, ge=0)
 
 
 class EmailPause(Wire):
@@ -209,10 +212,11 @@ class Unconfirmed(Wire):
 
 
 class InfoItem(Wire):
-    kind: Literal["captcha", "host", "dry_run", "sending", "interrupted", "supervised", "approved", "email", "human"]
+    kind: Literal["captcha", "host", "dry_run", "sending", "interrupted", "supervised", "approved", "email", "human", "technical"]
     company: Name = ""
     title: Name = ""
     host: Host = ""
+    category: Line = ""
 
 
 class Awaiting(Wire):

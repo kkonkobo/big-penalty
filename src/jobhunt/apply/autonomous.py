@@ -13,6 +13,7 @@ import tldextract
 from jobhunt.apply.destination import clean_url, login_return, origin
 from jobhunt.apply.errors import ApplyError, ManualField
 from jobhunt.apply.identity import ats_target
+from jobhunt.apply.prompt_rules import optional_recruiting, recruiter_ai_polarity
 from jobhunt.apply.supervised import _FORM_TARGETS_JS, _generic_action_allowed, _posting_ids, _target_allowed, _url_posting_ids
 from jobhunt.origin import ats_of_host, workday_requisition
 
@@ -373,7 +374,7 @@ _BLACK_LABELS = frozenset({"black", "black or african american", "black african 
 
 
 def blocked_consent(text):
-    return bool(_OPT_OUT.search(text))
+    return bool(_OPT_OUT.search(text)) or optional_recruiting(text)
 
 
 def eeo_field(text):
@@ -404,7 +405,8 @@ def _live_option(field, index):
 
 def decision(field, fold, *, race_ethnicity=None):
     text = fold(f"{field.label} {field.group}")
-    if field.kind == "checkbox" and field.required and not blocked_consent(text) and _ACCEPT.search(text):
+    if (field.kind == "checkbox" and field.required and recruiter_ai_polarity(text) is None
+            and not blocked_consent(text) and _ACCEPT.search(text)):
         if _PRIVACY.search(text) or (_APPLICATION.search(text) and _DATA.search(text)):
             return "application_privacy", -1
         if _TERMS.search(text) and (_APPLICATION.search(text) or re.fullmatch(r"j['’ ]?accepte les conditions[ .]*", text.strip())):

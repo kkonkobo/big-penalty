@@ -29,14 +29,14 @@ from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.autonomous import (
-    SUPERVISED_REQUIRED, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
+    SUPERVISED_REQUIRED, _live_option, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
 )
 from jobhunt.apply.destination import clean_text, clean_url, origin
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
-from jobhunt.apply.missing_answers import capture, fact_key
+from jobhunt.apply.missing_answers import IDENTITY, capture, exact_option, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
-from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code, technical_key
+from jobhunt.apply.prompt_rules import decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
 from jobhunt.apply.widgets import DENIED, WIDGET, date_segment, date_segment_option, denied_widget
@@ -724,7 +724,7 @@ class _Run:
                 for field in snapshot.fields:
                     question = _question(field)
                     self.questions_by_ref[field.ref] = question
-                    if (question.reason == "technical" or question.category == "ambiguous_country"
+                    if (question.reason == "technical"
                             or not field.form.startswith("0:") or _dial_selector(field, snapshot) or _site_consent(field)):
                         continue
                     binding = field_choices(self.page.url, field)
@@ -775,6 +775,37 @@ class _Run:
     def _autonomous_decision(self, field: FormField):
         fact = self.facts.get("race_ethnicity")
         return autonomous_decision(field, fold, race_ethnicity=fact.value if fact else None)
+
+    def _standing_item(self, field: FormField) -> _Item | None:
+        question = _question(field)
+        key = question.fact_id
+        fact = self.facts.get(key)
+        if fact is None or not fact.value or field.multiple or key in IDENTITY | {"work_authorization", "needs_visa_sponsorship"}:
+            return None
+        if (self.autonomous or self.mode == "supervised") and field.kind in {"checkbox", "radio"} and not (
+                field.form.startswith("0:") and field.destination):
+            return None
+        if field.kind == "checkbox":
+            polarity = recruiter_ai_polarity(field.label)
+            if key != "recruiter_ai" or polarity is None or fact.value not in {"Oui", "Non"}:
+                return None
+            op = "check" if (fact.value == "Oui") == polarity else "uncheck"
+            return _Item(Action(ref=field.ref, op=op), field, used=key)
+        if field.kind in CHOICE_KINDS:
+            index = exact_option(key, fact.value, [option.label for option in field.options], field.label)
+            if index is None or not field.options[index].value or not _live_option(field, index):
+                return None
+            return _Item(Action(ref=field.ref, op="select"), field, option_index=index, used=key)
+        if not _is_empty(field) or field.kind not in {"text", "textarea", "number", "date", "email", "tel"}:
+            return None
+        value = fact.value
+        if field.kind == "date":
+            from jobhunt.apply.facts import from_french_date
+
+            value = from_french_date(value)
+            if not value:
+                return None
+        return _Item(Action(ref=field.ref, op="fill", fact=key), field, fact, value=value, used=key)
 
     def _identity_needles(self) -> dict[str, list[str]]:
         """What identifies the candidate's own data in a field value: his names, e-mail addresses and phone digits. A page
@@ -856,6 +887,8 @@ class _Run:
     def _validate(self, plan: StepPlan, snap: PageSnapshot, resolve: Resolver | None = None) -> _Validated:
         v = _Validated()
         by_ref = {f.ref: f for f in snap.fields}
+        proposed = {action.ref: action for action in plan.actions if action.op != "click"}
+        dismissing_cookies = any(action.click_role == "cookies" for action in plan.actions)
         seen: set[str] = set()
         clicks: list[tuple[FormField, str]] = []
         manual_refs = {question.ref for question in plan.unknown} if self.mode == "supervised" else set()
@@ -887,6 +920,16 @@ class _Run:
                     seen.add(field.ref)
                     self._drop(v, field, "réponse volontaire à choisir sur le site", ask=True)
                     continue
+            action = proposed.get(field.ref)
+            if (plan.page_kind == "form" and not dismissing_cookies and field.ref not in manual_refs
+                    and (standing := self._standing_item(field))
+                    and (action is None or action.fact == standing.used or standing.used == "recruiter_ai"
+                         or (action.fact == "phone" and standing.used == "phone_calling_code"))
+                    and not (action and standing.used in {"address", "address_line_2"} and action.value
+                             and action.value != standing.value)):
+                seen.add(field.ref)
+                v.items.append(standing)
+                continue
             entry = self.choice_fields.get(field.ref)
             if field.ref in manual_refs or not entry or entry[0] != _question(field) or field_choices(self.page.url, field) != entry[1:]:
                 continue
@@ -958,7 +1001,7 @@ class _Run:
     @staticmethod
     def _dial_option(f: FormField, fact: Fact) -> int:
         """Only a unique exact option for the country calling code of a confirmed international number."""
-        code = international_calling_code(fact.value or "")
+        code = "+33" if french_phone(fact.value or "") else international_calling_code(fact.value or "")
         matches = [index for index, option in enumerate(f.options)
                    if re.findall(r"\+\s*[0-9]+", option.label) == [code]] if code else []
         if not fact.exact or len(matches) != 1:
@@ -967,7 +1010,7 @@ class _Run:
         if f.choice_options and sum(value == option.value or code in re.findall(r"\+\s*[0-9]+", label)
                                     for value, label, _, _ in f.choice_options) != 1:
             return -1
-        return matches[0]
+        return matches[0] if _live_option(f, matches[0]) else -1
 
     def _confirmed_dial_selection(self, field: FormField, snap: PageSnapshot) -> bool:
         phone = self.facts.get("phone")
@@ -987,6 +1030,11 @@ class _Run:
 
     def _open_decision(self, field: FormField, snap: PageSnapshot) -> bool:
         active = not _is_empty(field)
+        if self.autonomous and field.kind == "checkbox" and blocked_consent(fold(f"{field.label} {field.group}")):
+            return active
+        if field.kind == "checkbox" and recruiter_ai_polarity(field.label) is not None:
+            standing = self._standing_item(field)
+            return standing is None or (standing.act.op == "check") != active
         if field.kind not in CHOICE_KINDS:
             return (field.kind != "password" and _question(field).category == "credentials"
                     and (field.required or active))
@@ -1105,7 +1153,7 @@ class _Run:
                 "uncheck": k == "checkbox"}
         if not fits.get(op, False):
             return drop(f"opération {op} incompatible avec un champ {k}")
-        exact_key = fact_key(_question(f))
+        exact_key = _question(f).fact_id
         dial = k in ("select", "combobox") and _dial_selector(f, snap)
         choice = decision_key(f.label) or decision_key(f.group)
         if k in CHOICE_KINDS and _unlabeled(f):
@@ -1120,6 +1168,11 @@ class _Run:
         if a.fact == "work_authorization" or exact_key == "work_authorization":
             if exact_key != "work_authorization" or a.fact != exact_key or op != "fill" or a.inferred:
                 return drop("autorisation de travail : question ou format non confirmé")
+        explicit_facts = {"address", "address_line_2", "department", "phone_calling_code", "graduation_date",
+                          "politically_exposed", "internship_agreement", "recruiter_ai", "conflict_of_interest", "former_employer"}
+        phone_dial = dial and a.fact == "phone" and not a.inferred
+        if (exact_key in explicit_facts or a.fact in explicit_facts) and not phone_dial:
+            return drop("réponse exacte confirmée nécessaire")
         address_facts = {"city", "postal_code", "country", "phone_device_type"}
         if exact_key in address_facts or a.fact in address_facts:
             if a.fact != exact_key or a.inferred:
@@ -1396,7 +1449,9 @@ class _Run:
         T = ACTION_TIMEOUT_MS
         if self.supervised_widgets and f.kind == "combobox" and a.op == "select":
             return await self._supervised_combobox(loc, f, it)
-        if it.used in {"eeo_opt_out", "eeo_race_ethnicity"}:
+        standing_radio = (f.kind == "radio" and (self.autonomous or self.mode == "supervised")
+                          and it.used == _question(f).fact_id and self._standing_item(f) is not None)
+        if it.used in {"eeo_opt_out", "eeo_race_ethnicity"} or standing_radio:
             if self.autonomous:
                 nonce = self.autonomous.document_nonce
             else:
@@ -1422,7 +1477,8 @@ class _Run:
                 if a.op == "check":
                     self.consent_codes.add(it.used)
                 return "true" if a.op == "check" else "false"
-            if f.kind not in {"select", "text", "email", "tel", "url", "number", "date", "textarea", "password"}:
+            if f.kind not in {"select", "text", "email", "tel", "url", "number", "date", "textarea", "password"} and not (
+                    f.kind == "checkbox" and it.used == "recruiter_ai"):
                 raise ManualField()
         if self.mode == "supervised":
             if a.op == "upload_cv" and f.kind == "file" and self.uploads.cv_bytes is not None:
@@ -1430,7 +1486,8 @@ class _Run:
                 await loc.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": self.uploads.cv_bytes}, timeout=T)
                 self.uploaded = True
                 return "CV.pdf"
-            if f.kind not in ("select", "text", "email", "tel", "url", "number", "date", "textarea") or a.op not in ("fill", "select"):
+            if (f.kind not in ("select", "text", "email", "tel", "url", "number", "date", "textarea")
+                    or a.op not in ("fill", "select")) and not (f.kind == "checkbox" and it.used == "recruiter_ai"):
                 raise _Skip("à compléter à la main")
         if a.op == "upload_cv":
             await self._set_files(loc, f, self.uploads.cv_pdf)
@@ -1456,6 +1513,10 @@ class _Run:
             snap_label = _norm(f.label)
             if live_label and snap_label and live_label not in snap_label and snap_label not in live_label:
                 raise _Skip("libellé de la case modifié depuis la lecture")
+            if it.used == "recruiter_ai":
+                await self._before_mutation(a.op, loc)
+                await (loc.check if want else loc.uncheck)(timeout=T)
+                return "true" if want else "false"
             try:
                 await (loc.check if want else loc.uncheck)(timeout=T)
             except Exception:

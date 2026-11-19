@@ -9,6 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from jobhunt import db
 from jobhunt.apply.facts import answers_lock, answers_path, replace_file
 from jobhunt.apply.prompt_rules import decision_key, requires_site_consent, technical_key
 from jobhunt.apply.types import FormField, Question
@@ -55,6 +56,13 @@ def field_choices(url: str, field: FormField) -> tuple[str, list[int]] | None:
 def labels(question: Question) -> list[tuple[int, str]]:
     return [(index, " ".join(question.options[index].split())) for index in dict.fromkeys(question.choice_indices)
             if 0 <= index < len(question.options) and question.options[index].strip()]
+
+
+def run_current(app, run, origin: str) -> bool:
+    return bool(app and run and run.result and not run.result.submit_clicked and run.status == "needs_input"
+                and app.status in {"draft", "approved"} and run.rev == app.current_rev
+                and (app.status != "approved" or (app.approved_rev == app.current_rev and app.approved_sha256))
+                and origin and run.origin_sha == origin and run.application_version == db._iso(app.updated_at))
 
 
 def _path(profile_id: int, app_id: int, rev: int, origin: str) -> Path:

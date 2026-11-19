@@ -286,15 +286,15 @@ def test_custom_replay_after_crash(jp, profile, feed, monkeypatch):
 @pytest.fixture
 def asked(jp, profile, master, tmp_path):
     _, app = new_app(profile, master, tmp_path, 1, approve=True)
-    make_run(app, tmp_path, status="needs_input", questions=[Question(label="Permis B ?", options=["Oui", "Non"]), Question(label="Ville ?")])
+    make_run(app, tmp_path, status="needs_input", questions=[Question(label="Permis B ?", options=["Oui", "Non"]), Question(label="Votre mobilité ?")])
     return app
 
 
 def test_question_answer_uses_the_macs_label(jp, profile, feed, asked):
-    e = feed.add("question_answer", qid=facts.custom_id("Ville ?"), answer="Lyon")
+    e = feed.add("question_answer", qid=facts.custom_id("Votre mobilité ?"), answer="Lyon")
     rep = run(jp, profile)
     assert feed.state(e) == "applied" and rep.applied_answers
-    assert [(c["question"], c["answer"]) for c in facts.custom_answers(profile.id)] == [("Ville ?", "Lyon")]
+    assert [(c["question"], c["answer"]) for c in facts.custom_answers(profile.id)] == [("Votre mobilité ?", "Lyon")]
     assert [q.label for _a, _r, q in service.pending_questions(profile.id)] == ["Permis B ?"]
 
 
@@ -306,13 +306,13 @@ def test_question_answer_must_be_an_option(jp, profile, feed, asked):
 
 def test_question_no_longer_pending_is_rejected_and_replay_is_applied(jp, profile, feed, asked):
     gone = feed.add("question_answer", qid=facts.custom_id("Autre ?"), answer="x")
-    e = feed.add("question_answer", qid=facts.custom_id("Ville ?"), answer="Lyon")
+    e = feed.add("question_answer", qid=facts.custom_id("Votre mobilité ?"), answer="Lyon")
     run(jp, profile)
     assert feed.state(gone) == "rejected" and "n'est plus en attente" in jp.get_event(gone).message
     jp.update_event(e, NOW, state="received")  # crash replay: the answer is saved, the question no longer pending
     run(jp, profile)
     assert feed.state(e) == "applied" and len(facts.custom_answers(profile.id)) == 1
-    other = feed.add("question_answer", qid=facts.custom_id("Ville ?"), answer="Paris")
+    other = feed.add("question_answer", qid=facts.custom_id("Votre mobilité ?"), answer="Paris")
     run(jp, profile)
     assert feed.state(other) == "rejected" and facts.custom_answers(profile.id)[0]["answer"] == "Lyon"
 

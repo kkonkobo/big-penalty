@@ -26,7 +26,7 @@
 
 {% macro field_control(name, spec, value, write_only=False) %}
 {%- if spec.widget == 'select' -%}
-<select name="{{ name }}">
+<select name="{{ name }}" autocomplete="off">
   <option value="">{{ 'Remplacer par…' if write_only else 'Non renseigné' }}</option>
   {%- for o in spec.options if o %}
   <option value="{{ o }}"{% if not write_only and o == value %} selected{% endif %}>{{ o }}</option>
@@ -36,9 +36,9 @@
   {%- endif %}
 </select>
 {%- elif spec.widget == 'date' -%}
-<input type="date" name="{{ name }}" value="{{ value or '' }}">
+<input type="date" name="{{ name }}" value="{{ value or '' }}" autocomplete="off">
 {%- elif spec.widget == 'textarea' -%}
-<textarea name="{{ name }}" rows="4" maxlength="{{ spec.max_len }}" placeholder="{{ 'Remplacer par…' if write_only else spec.placeholder }}">{{ value or '' }}</textarea>
+<textarea name="{{ name }}" rows="4" maxlength="{{ spec.max_len }}" autocomplete="off" placeholder="{{ 'Remplacer par…' if write_only else spec.placeholder }}">{{ value or '' }}</textarea>
 {%- else -%}
 <input type="text" name="{{ name }}" maxlength="{{ spec.max_len }}" value="{{ value or '' }}" placeholder="{{ 'Remplacer par…' if write_only else spec.placeholder }}" autocomplete="off">
 {%- endif -%}
