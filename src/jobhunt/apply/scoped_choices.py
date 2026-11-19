@@ -76,12 +76,15 @@ def save_once(profile_id: int, app_id: int, rev: int, origin: str, binding: str,
             return False
         data[binding] = index
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Close the temporary file before replacing: Windows refuses to rename a file that is still open.
         with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix="ats-choice-", delete=False) as temporary:
-            try:
-                json.dump(data, temporary)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-                os.replace(temporary.name, path)
-            finally:
-                Path(temporary.name).unlink(missing_ok=True)
+            name = temporary.name
+        try:
+            with open(name, "w") as handle:
+                json.dump(data, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(name, path)
+        finally:
+            Path(name).unlink(missing_ok=True)
         return True

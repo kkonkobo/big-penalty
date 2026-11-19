@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlsplit
 
 import pytest
@@ -623,7 +624,8 @@ async def test_an_application_being_resumed_elsewhere_is_left_alone(env, profile
     app = cvs.approve(env.draft(job).id, 1)
     r = astore.start_run(app.id, 1, "submit", "user", lambda rid: env.tmp / "runs" / str(rid))  # running, our own pid is alive
     with db.connect() as c:
-        c.execute("UPDATE application_runs SET pid=? WHERE id=?", (1, r.id))  # pid 1 = a live process that is not us
+        # the parent process (the test runner's shell) is alive and is not us, on every OS (Windows has no pid 1)
+        c.execute("UPDATE application_runs SET pid=? WHERE id=?", (os.getppid(), r.id))
     s, lines = await daily(profile)
     assert not env.runs and s.sent == 0 and s.waiting == 1 and any("déjà en cours" in line for line in lines)
 

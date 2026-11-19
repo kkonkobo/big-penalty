@@ -24,6 +24,10 @@ from jobhunt.config import get_settings
 from jobhunt.dedupe import normalize_title
 
 UNAVAILABLE = "Aucune fenêtre supervisée active pour cette candidature."
+NO_LOCAL_BRIDGE = "La commande fill-step n'est pas disponible sur ce système : utilisez « Remplir cette étape » dans l'application."
+# The private CLI bridge needs Unix-domain sockets and per-user ownership checks. Elsewhere (Windows) supervised mode
+# still works through the web UI, which talks to the session in-process.
+HAS_LOCAL_BRIDGE = hasattr(os, "getuid") and hasattr(asyncio, "start_unix_server")
 WRONG_POSTING = "Le poste affiché ne correspond pas à la candidature réservée : fenêtre fermée."
 CONFIRM_AGAIN = "La page a changé. Vérifiez le poste et confirmez de nouveau « Remplir cette étape »."
 
@@ -260,6 +264,9 @@ def _socket_path(app_id: int) -> Path:
 
 @contextlib.asynccontextmanager
 async def local_bridge(session: Session):
+    if not HAS_LOCAL_BRIDGE:
+        yield
+        return
     path = _socket_path(session.attempt.application_id)
 
     async def handle(reader, writer):
@@ -293,6 +300,8 @@ async def local_bridge(session: Session):
 
 
 async def call_local(app_id: int, op: str, token: str | None = None) -> dict:
+    if not HAS_LOCAL_BRIDGE:
+        raise ApplyError(NO_LOCAL_BRIDGE)
     try:
         reader, writer = await asyncio.open_unix_connection(str(_socket_path(app_id)), limit=8192)
         try:
