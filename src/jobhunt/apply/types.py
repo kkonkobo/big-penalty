@@ -159,6 +159,9 @@ class DispatchDiagnostics(BaseModel, validate_assignment=True):
                             "no_confirmation", "confirmation_text", "confirmation_url", "confirmation_json", "attested", "receipt_rejected",
                             "recipient_refused", "verification_required", "human_required"] = "before_submit"
 
+    def exception_code(self, error: Exception) -> str:
+        return f"exception:{type(error).__name__[:64]}@{self.step}/{self.control}"
+
 
 class RunResult(BaseModel):
     status: RunStatus

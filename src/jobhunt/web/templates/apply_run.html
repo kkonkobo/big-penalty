@@ -49,6 +49,7 @@
   <div><dt>Début</dt><dd>{{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</dd></div>
   <div><dt>Fin</dt><dd>{% if run.finished_at %}{{ run.finished_at.strftime('%d/%m/%Y %H:%M') }}{% else %}en cours{% endif %}</dd></div>
   <div><dt>Version du CV</dt><dd>{{ run.rev }}</dd></div>
+  {% if run.result and run.result.diagnostic_code %}<div><dt>Motif</dt><dd><code>{{ run.result.diagnostic_code }}</code></dd></div>{% endif %}
   {% if verification or run.operator_not_sent_at %}<div><dt>Statut technique</dt><dd>{{ APPLY_RUN_LABELS.get(run.status, run.status) }}</dd></div>{% endif %}
   {% if run.result and run.result.untrusted_host %}<div class="span"><dt>Site non approuvé</dt><dd>{{ run.result.untrusted_host }}</dd></div>{% endif %}
   {% if run.message %}<div class="span"><dt>Message</dt><dd>{{ run.message }}</dd></div>{% endif %}

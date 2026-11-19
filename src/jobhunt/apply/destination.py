@@ -8,9 +8,9 @@ import re
 from collections.abc import Callable
 from email import policy
 from email.parser import BytesParser
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
-_REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid"}
+_REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid", "jobreqid", "career_job_req_id"}
 _TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid"}
 _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
@@ -19,9 +19,28 @@ _CODE = re.compile(
     r"(?:verifizierungs|bestätigungs|sicherheits)[ -]?code)(?:\s+(?:is|est|ist|lautet)\b)?\s*[:=–—-]?\s*"
     r"[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*", re.I)
 _JOB_PATH = re.compile(r"/(?:jobs?|job-postings?|requisitions?|positions?)/([0-9]{1,18})/?\Z", re.I)
+_LOGIN_PATH = re.compile(r"(?:^|/)(?:(?:login|sign-?in|register|createaccount)(?:\.aspx)?|account\.aspx)(?:/|$)", re.I)
+_LOGIN_REDIRECT = {"returnurl", "redirect"}
 
 
-def clean_url(url: str | None, *, navigation: bool = False) -> str:
+def login_return(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        if not _LOGIN_PATH.search(parsed.path):
+            return ""
+        values = [value for name, value in parse_qsl(parsed.query, max_num_fields=100) if name.lower() in _LOGIN_REDIRECT]
+        if len(values) != 1 or re.search(r"[\\\x00-\x20]|%(?:2f|5c|00)", values[0], re.I):
+            return ""
+        target = urljoin(url, values[0])
+        result = urlsplit(target)
+        if (result.scheme, result.netloc) != (parsed.scheme, parsed.netloc) or result.fragment:
+            return ""
+        return clean_url(target, navigation=True, allow_login_redirect=False)
+    except ValueError:
+        return ""
+
+
+def clean_url(url: str | None, *, navigation: bool = False, allow_login_redirect: bool = True) -> str:
     if not url or any(ord(char) < 33 or char == "\\" for char in url):
         return ""
     try:
@@ -36,6 +55,8 @@ def clean_url(url: str | None, *, navigation: bool = False) -> str:
             name = key.lower()
             if name in _REQUISITION and _ID.fullmatch(value) and name not in kept:
                 kept[name] = (key, value)
+            elif navigation and name in _LOGIN_REDIRECT and allow_login_redirect and login_return(url):
+                continue
             elif navigation and name not in _TRACKING and not name.startswith("utm_"):
                 return ""
         return urlunsplit((parsed.scheme, netloc, parsed.path or "/", urlencode(sorted(kept.values())), ""))
@@ -58,6 +79,10 @@ def audit_url(url: str | None) -> str:
     path = parsed.path if _JOB_PATH.fullmatch(parsed.path) else ""
     query = [(key, value) for key, value in parse_qsl(parsed.query) if re.fullmatch(r"[0-9]{1,18}", value)]
     return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query), ""))
+
+
+def _navigation_matches(actual: str, expected: str) -> bool:
+    return bool(expected and actual == quote(expected, safe=":/?#[]@!$&'()*+,;=%"))
 
 
 def clean_text(text: str, *, audit: bool = False) -> str:
@@ -95,19 +120,24 @@ def is_bound_pdf(content_type: str, body: bytes | None, pdf: bytes) -> bool:
 
 class RecipientGuard:
     def __init__(self, allowed: frozenset[str], *, audience=None, read_only: frozenset[str] = frozenset(),
+                 inspection_only: bool = False,
                  request_allowed: Callable[[str, str, bool], bool] | None = None,
                  allow_write: Callable | None = None):
         self.allowed = allowed
         self.audience = audience
         self.read_only = read_only
+        self.inspection_only = inspection_only
         self.request_allowed = request_allowed
         self.refused = False
+        self.refusal_code = "recipient_refused_transport"
         self.transmitted = False
         self.final_started = False
         self.final_response = False
         self._allow_write = allow_write
         self._initial_url = ""
         self._next_url = ""
+        self.probe = None
+        self.page = None
 
     async def navigate(self, page, url, goto) -> None:
         """Follow initial redirects explicitly, preserving the actual document URL."""
@@ -139,6 +169,7 @@ class RecipientGuard:
         return status in {301, 302, 303, 307, 308, 403, 429}
 
     async def install(self, page) -> None:
+        self.page = page
         await page.context.add_init_script(script="""(() => {
             const allowed = new Set(%s);
             const inert = function () { throw new DOMException('Transport disabled', 'SecurityError'); };
@@ -153,8 +184,9 @@ class RecipientGuard:
             });
         })();""" % json.dumps(sorted(self.allowed)))
 
-        async def refuse(route):
+        async def refuse(route, code="recipient_refused_transport"):
             self.refused = True
+            self.refusal_code = code
             await route.abort()
             for opened in page.context.pages:
                 with contextlib.suppress(Exception):
@@ -167,15 +199,43 @@ class RecipientGuard:
             navigation = request.is_navigation_request()
             read = request.method in {"GET", "HEAD"}
             write = not read
-            permitted = self.allows(request.url) or (read and not navigation and origin(request.url) in self.read_only)
-            if self.audience:
+            entry_post = False
+            if self.probe and navigation and read:
+                with contextlib.suppress(Exception):
+                    if request.frame.parent_frame is not None:
+                        await route.abort()
+                        return
+            if self.probe and write:
                 try:
-                    permitted = self.audience.request_allowed(request, page, initial=request.url == self._initial_url)
+                    entry_post = self.probe.allow_post(request)
+                except Exception:
+                    pass
+                if not entry_post:
+                    if self.probe.same_site(request.url):
+                        await route.abort()
+                    else:
+                        await refuse(route, "apply_target_unverified")
+                    return
+            if self.inspection_only and write and not entry_post:
+                await route.abort()
+                return
+            permitted = self.allows(request.url) or (read and not navigation and origin(request.url) in self.read_only)
+            if self.probe:
+                permitted = entry_post or self.probe.allows(request)
+            elif self.audience:
+                try:
+                    permitted = self.audience.request_allowed(request, self.page, initial=_navigation_matches(request.url, self._initial_url))
                 except Exception:
                     permitted = False
             if not permitted:
-                if not read or navigation:
-                    await refuse(route)
+                if write or navigation:
+                    from jobhunt.origin import classify_ats
+
+                    category = ("same_site" if self.allows(request.url) or
+                                (self.audience and self.audience.write_recipient(request.url)) else
+                                "ats" if classify_ats(request.url) else "other")
+                    await refuse(route, "apply_target_unverified" if self.probe else
+                                 f"recipient_refused_{category}_{'write' if write else 'navigation'}")
                 else:
                     await route.abort()
                 return
@@ -195,13 +255,14 @@ class RecipientGuard:
                     return
                 if self.audience and (write or (self.audience.active and urlsplit(request.url).query)):
                     self.audience.recheck()
-                    self.transmitted = True
+                    if not entry_post:
+                        self.transmitted = True
                 final_request = self.final_started and write and self.audience.click_write is request
                 response = await route.fetch(max_redirects=0, max_retries=0)
                 if final_request and request.is_navigation_request() and response.status in {301, 302, 303} and response.headers.get("location"):
                     target = self.audience.confirmation_redirect(urljoin(request.url, response.headers["location"]))
                     if not target:
-                        await refuse(route)
+                        await refuse(route, "recipient_refused_redirect")
                         return
                     await response.dispose()
                     response = None
@@ -210,15 +271,28 @@ class RecipientGuard:
                         self.audience.final_receipt_url = target
                 if self.refusal_status(response.status):
                     target = urljoin(request.url, response.headers.get("location", ""))
-                    if (300 <= response.status < 400 and response.headers.get("location")
-                            and request.method in {"GET", "HEAD"} and request.url == self._initial_url
+                    if (self.probe and response.status in ({301, 302, 303} if entry_post else {301, 302, 303, 307, 308})
+                            and response.headers.get("location")
+                            and request.is_navigation_request() and self.probe.redirect(target)):
+                        await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif (self.audience and self.audience.entry_binding and response.headers.get("location")
+                            and response.status in ({301, 302, 303, 307, 308} if read else {301, 302, 303})
+                            and request.is_navigation_request() and request.frame == self.page.main_frame
+                            and self.audience.account_redirect(target)):
+                        await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif (300 <= response.status < 400 and response.headers.get("location")
+                            and request.method in {"GET", "HEAD"} and _navigation_matches(request.url, self._initial_url)
                             and request.is_navigation_request() and request.frame == page.main_frame
                             and (self.audience.initial_redirect(request.url, target) if self.audience else self.allows(target))
                             and (safe_target := clean_url(target, navigation=True))):
                         self._next_url = safe_target
                         await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif (self.audience and not self.audience.active and not write
+                          and not request.is_navigation_request()):
+                        await route.abort()
                     else:
-                        await refuse(route)
+                        await refuse(route, "recipient_refused_redirect" if 300 <= response.status < 400 else
+                                     "challenge_or_rate_limited" if self.inspection_only and navigation else "recipient_refused_response")
                 elif self.refused:
                     await route.abort()
                 else:

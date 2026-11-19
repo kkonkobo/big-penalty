@@ -472,6 +472,48 @@ def test_account_known_needs_a_stored_password_and_the_active_state(mem):
     assert A.account_known("bad host", e) is False  # errors -> False
 
 
+@pytest.mark.parametrize(("host", "first", "second"), [
+    ("wd3.myworkdaysite.com", "/recruiting/acme/Careers", "/recruiting/other/Careers"),
+    ("shared.wd3.myworkdayjobs.com", "/Acme", "/Other"),
+])
+def test_workday_guard_isolates_same_host_accounts_and_ignores_legacy(mem, host, first, second):
+    email = "camille@example.test"
+    mem.items[(A.service_name(host), email)] = "synthetic-host-only"
+    first_url = f"https://{host}{first}/job/Paris/Engineer_R100"
+    second_url = f"https://{host}{second}/job/Paris/Engineer_R200"
+    accept_host = {host}.__contains__
+    first_password, first_known = A.guarded_account_callbacks(email, accept_host, posting_url=first_url)
+    second_password, second_known = A.guarded_account_callbacks(email, accept_host, posting_url=second_url)
+    assert not first_known(first_url) and not second_known(second_url)
+    assert first_password(second_url) == second_password(first_url) == first_password(host) == ""
+    assert not any(call[1] == A.service_name(host) for call in mem.calls)
+    first_secret = first_password(first_url)
+    assert first_secret and first_secret != "synthetic-host-only"
+    assert A.set_state(host, email, "active", site=A.workday_site(first_url, posting=True))
+    assert first_known(first_url) and not second_known(second_url)
+    assert second_password(second_url) not in {"", first_secret, "synthetic-host-only"}
+    assert first_password(first_url) == first_secret
+
+
+def test_workday_guard_rejects_unproven_scope_without_touching_backend(mem):
+    host = "wd3.myworkdaysite.com"
+    password, known = A.guarded_account_callbacks("a@example.test", {host}.__contains__,
+                                                   posting_url=f"https://{host}/job/Engineer_R100")
+    assert not known(host)
+    assert password(f"https://{host}/recruiting/acme/Careers/job/Engineer_R100") == ""
+    assert not mem.calls
+
+
+def test_workday_guard_never_falls_back_to_plaintext_storage():
+    host = "ag.wd3.myworkdayjobs.com"
+    posting = f"https://{host}/en-US/Airbus/job/Paris/Engineer_R100"
+    password, known = A.guarded_account_callbacks("a@example.test", {host}.__contains__, posting_url=posting)
+    assert not known(posting)
+    with pytest.raises(A.ApplyError, match="Trousseau requis"):
+        password(posting)
+    assert not A.FileBackend().path.exists()
+
+
 def test_entries_without_a_state_are_active_and_set_state_validates(mem):
     h, e = "jobs.lever.co", "camille@example.test"
     A.create_password(h, e)

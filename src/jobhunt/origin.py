@@ -411,6 +411,12 @@ def _smart_publication(url: str) -> tuple[str, str] | None:
     return None
 
 
+def workday_requisition(value: str) -> str:
+    value = value.casefold()
+    match = re.fullmatch(r"((?:jr|r)\d+)-\d{1,2}", value)
+    return match[1] if match else value
+
+
 def _identity(ats: str, url: str) -> tuple[str | None, str | None, str | None]:
     parsed = urlparse(url)
     host, path = _host(url), unquote(parsed.path)
@@ -449,6 +455,7 @@ def _identity(ats: str, url: str) -> tuple[str | None, str | None, str | None]:
             tenant = company
     elif ats == "talentsoft":
         tenant = host
+        path = "/" + path.lstrip("/")
         match = _TALENTSOFT_POST.match(path) or re.match(r"^/job-offer/(\d+)\.aspx$", path, re.I)
         req = match[1] if match else (params.get("id") or params.get("idoffre") or params.get("offreid")
                                       if path.lower().endswith("/pages/offre/detailoffre.aspx") else None)
@@ -582,7 +589,8 @@ def _page_evidence(url: str, html: str, status: int = 200, posting: JobPosting |
             continue
         local_req = hosted_req if local else _identity(ats, url)[1] if ats == "successfactors" else front_id
         gh_id = dict(parse_qsl(parsed.query)).get("gh_jid")
-        exact = bool(req and (req.lower() == (local_req or "").lower() or ats == "greenhouse" and req == gh_id))
+        exact = bool(req and (req.lower() == (local_req or "").lower() or ats == "greenhouse" and req == gh_id
+                              or ats == "workday" and workday_requisition(req) == workday_requisition(local_req or "")))
         different_ids_explicitly_bound = (bound and req and ats == "smartrecruiters" and not local
                                           and _SMART_APPLY.match(urlparse(target).path))
         if (_host(target) != host and (not posting or not _employer_destination(posting, url)
@@ -1009,7 +1017,8 @@ def _continuity_rejection(source: str, target: str) -> str | None:
         after_tenant, after_id, _ = _identity(target_ats, target)
         if before_tenant and after_tenant and before_tenant.lower() != after_tenant.lower():
             return "tenant_mismatch"
-        if before_id and after_id and before_id.lower() != after_id.lower():
+        normalize_id = workday_requisition if source_ats == "workday" else str.casefold
+        if before_id and after_id and normalize_id(before_id) != normalize_id(after_id):
             return "requisition_mismatch"
     return None
 

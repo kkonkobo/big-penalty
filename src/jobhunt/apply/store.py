@@ -9,7 +9,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
 from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.identity import canonical_identity, posting_fingerprint, resolved_identity, similar_role
+from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, posting_fingerprint, resolved_identity, similar_role
 from jobhunt.apply.types import Mode, RunResult, RunStatus
 from jobhunt.db import _dt, _iso, connect, now
 from jobhunt.dedupe import canonical_url
@@ -34,7 +34,8 @@ _DIAGNOSTICS = {
     "credential_page": "Vérification ou connexion manuelle requise (credential_page).",
     "recipient_refused": RECIPIENT_REFUSED,
     "posting_mismatch": "Identité du poste non vérifiée : saisie annulée.",
-    "dry_untested": "Simulation non testée : inspection hors ligne, sans saisie, fichier ni clic sur le site.",
+    "dry_untested": "Simulation non testée : inspection hors ligne, sans saisie, fichier ni envoi de candidature.",
+    "dry_account_gate": "L’étape de connexion ou de création de compte a été atteinte, sans saisie.",
     "no_adapter": "Envoi bloqué : aucun adaptateur d'envoi et de reçu vérifié pour ce site. À envoyer en mode supervisé.",
     "supervised_only": "À envoyer en mode supervisé",
     "not_approved": "CV non approuvé",
@@ -52,6 +53,8 @@ _DIAGNOSTICS = {
     "bad_origin": "Lien de l'offre inexploitable",
     "receipt_recording": "Reçu vérifié, mais enregistrement impossible. Ne pas renvoyer cette candidature.",
     "challenge": "Un défi anti-robot doit être résolu à la main.",
+    "challenge_or_rate_limited": "Défi anti-robot ou accès limité par le site.",
+    "public_page_shell": "Page publique incomplète : aucun formulaire vérifiable.",
     "untrusted_host": "Le formulaire est hébergé sur un site non reconnu.",
     "technical": "Erreur technique.",
     "interrupted": "interrompu",
@@ -59,8 +62,42 @@ _DIAGNOSTICS = {
     "duplicate": "Candidature déjà envoyée (ou tentée) pour la même offre.",
     "potential_duplicate": "Doublon possible : confirmez « ce n'est pas un doublon ».",
     "daily_cap": "Le plafond d’envois automatiques par jour est atteint.",
+    "aggregator_origin": "Le lien est celui d'un agrégateur, pas du site de l'entreprise.",
+    "origin_not_usable": "Il n’y a pas de lien exploitable vers le site de l’entreprise.",
+    "job_page_no_apply_control": "Aucun lien de candidature vérifiable sur la page de l’offre.",
+    "apply_target_unverified": "Destination de candidature non vérifiée.",
+    "apply_control_ambiguous": "Plusieurs contrôles de candidature possibles.",
+    "dry_apply_form_found": "Formulaire de candidature observé. Aucune donnée saisie ni envoyée.",
+    "dry_apply_form_needs_input": "Formulaire de candidature observé ; des réponses sont requises.",
+    "cross_domain_apply_target": "Lien de candidature sur une autre origine non vérifiée.",
+    "duplicate_unconfirmed": "Doublon possible : confirmez « ce n'est pas un doublon ».",
+    "approval_binding_changed": "Approbation ou destination modifiée avant l'envoi",
+    "reservation_exists": "Cet essai a déjà été réservé",
+    "destination_unverified": "Destination de l'offre non vérifiée.",
+    "duplicate_reserved": "Un essai existe déjà pour ce poste chez cet employeur.",
+    "recipient_refused_ats_navigation": RECIPIENT_REFUSED,
+    "recipient_refused_other_navigation": RECIPIENT_REFUSED,
+    "recipient_refused_other_write": RECIPIENT_REFUSED,
+    "recipient_refused_ats_write": RECIPIENT_REFUSED,
+    "recipient_refused_same_site_write": RECIPIENT_REFUSED,
+    "recipient_refused_same_site_navigation": RECIPIENT_REFUSED,
+    "recipient_refused_redirect": RECIPIENT_REFUSED,
+    "recipient_refused_response": RECIPIENT_REFUSED,
+    "recipient_refused_transport": RECIPIENT_REFUSED,
+    "required_fields": "Informations requises à compléter.",
+    "verification_required": "Validation par e-mail ou par code requise.",
+    "human_required": "Une intervention humaine est nécessaire.",
+    "form_actions_missing": "Aucune action possible sur le formulaire.",
+    "step_limit": "Trop d'étapes : limite atteinte.",
+    "job_closed": "Offre clôturée.",
+    "manual_retry_required": "Nouvel essai manuel requis pour ce poste.",
+    "prior_attempt_unverified": "Un envoi de cette candidature a déjà été tenté : vérifier sur le site de l'entreprise.",
+    "requisition_conflict": "Identité du poste incohérente : envoi annulé.",
+    "job_missing": "Offre introuvable pour ce profil.",
+    "application_withdrawn": "Candidature retirée.",
+    "no_attested_receipt": "Aucun reçu authentifié pour cet essai.",
 }
-_EXACT_DIAGNOSTICS = {message: code for code, message in _DIAGNOSTICS.items()}
+_EXACT_DIAGNOSTICS = {message: code for code, message in _DIAGNOSTICS.items() if not code.startswith("recipient_refused_")}
 _DIAGNOSTIC_PATTERNS = (
     (r"Erreur technique \([A-Za-z_]+\)\.", "technical"),
     (r"Interrompu\.", "interrupted"),
@@ -68,7 +105,14 @@ _DIAGNOSTIC_PATTERNS = (
     (r"Lien de l'offre inexploitable : .*", "bad_origin"),
     (r"Doublon possible : .*", "potential_duplicate"),
     (r"(?:candidature déjà envoyée pour la même offre \(n°\d+\)|Candidature déjà envoyée \(ou tentée\) pour la même offre)", "duplicate"),
-    (r"plafond de \d+ envois automatiques par jour atteint", "daily_cap"),
+    (r"[Pp]lafond de \d+ envois automatiques par jour atteint", "daily_cap"),
+    (r"PDF différent de celui approuvé", "pdf_changed"),
+    (r"Un envoi de cette candidature a déjà été tenté : vérifier sur le site de l'entreprise", "prior_attempt_unverified"),
+    (r"Aucune action possible sur cette page\.", "form_actions_missing"),
+    (r"Offre clôturée", "job_closed"),
+    (r"Un CAPTCHA doit être résolu à la main\.", "challenge"),
+    (r"offre introuvable pour ce profil", "job_missing"),
+    (r"candidature retirée", "application_withdrawn"),
     (r"\d+ erreur\(s\) bloquante\(s\)(?: dans le CV)?", "cv_errors"),
     (r"\d+ erreur\(s\) à corriger avant d'approuver \(ou cocher « Ignorer et approuver »\)", "cv_errors"),
 )
@@ -77,7 +121,11 @@ _HOST = re.compile(r"(?:[a-z0-9-]+\.)*[a-z0-9-]+|[a-f0-9:]+", re.I)
 
 def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
     message = result.message
-    if (contains_verification_code(message) or any(
+    explicit = result.diagnostic_code
+    exception = re.fullmatch(r"exception:[A-Za-z_][A-Za-z_0-9]{0,63}@\d{1,5}/[a-z_]{1,32}", explicit)
+    if explicit in _DIAGNOSTICS or exception:
+        code = explicit
+    elif (contains_verification_code(message) or any(
         step.page_kind in {"account_login", "account_signup", "email_verification"} or contains_verification_code(step.note)
         for step in result.steps
     )):
@@ -89,8 +137,14 @@ def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
         code = next((known for reason in reasons if (known := _EXACT_DIAGNOSTICS.get(reason))), "")
         if not code:
             code = next((known for pattern, known in _DIAGNOSTIC_PATTERNS if any(re.fullmatch(pattern, reason) for reason in reasons)), "")
-        code = code or result.status
-    message = _DIAGNOSTICS[code]
+        if code == "potential_duplicate":
+            code = "duplicate_unconfirmed"
+        code = code or ("required_fields" if result.status == "needs_input" else
+                        "verification_required" if result.status == "needs_email" else
+                        "human_required" if result.status == "needs_human"
+                        else f"{result.status}_at_{result.dispatch_diagnostics.control}")
+    message = _DIAGNOSTICS.get(code, _DIAGNOSTICS.get(result.status, _DIAGNOSTICS["technical"]) if not exception
+                               else _DIAGNOSTICS["technical"])
     if held and code != "unconfirmed":
         message = UNCONFIRMED_NOTE + ". " + message
     return RunResult(status=result.status, diagnostic_code=code, message=message, final_url=origin(result.final_url),
@@ -127,6 +181,9 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
         return value
 
     payload = result.model_dump(include=_RESULT_FIELDS)
+    if result.status.startswith("needs_"):
+        failure = _failure_result(result)
+        payload.update(diagnostic_code=failure.diagnostic_code, message=failure.message)
     payload["consent_codes"] = _safe_consents(result)
     sensitive = {"account_login", "account_signup", "email_verification"}
     credential_page = contains_verification_code(result.message)
@@ -147,6 +204,11 @@ def binding_record(attempt: Attempt) -> dict:
     payload = asdict(attempt)
     if not attempt.autonomous:
         payload.pop("autonomous")
+    if not attempt.landing_digest:
+        payload.pop("landing_host")
+        payload.pop("landing_digest")
+    if not attempt.landing_binding:
+        payload.pop("landing_binding")
     return {**payload, "url": audit_url(attempt.url), "url_digest": _url_key(attempt.url)}
 
 
@@ -472,13 +534,13 @@ def _save_receipt(conn, run_id: int, receipt: Receipt) -> None:
 
 def held_binding(run_id: int) -> Attempt | None:
     with connect() as conn:
-        row = conn.execute("SELECT v.binding_json, j.origin_url FROM apply_reservations v JOIN applications a"
+        row = conn.execute("SELECT v.binding_json, j.origin_url, j.extra FROM apply_reservations v JOIN applications a"
                            " ON a.id=v.application_id JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id"
                            " WHERE v.run_id=? AND v.released_at IS NULL", (run_id,)).fetchone()
     if not row or not row["binding_json"]:
         return None
     data = json.loads(row["binding_json"])
-    url = clean_url(row["origin_url"], navigation=True)
+    url = dispatch_url(row["origin_url"], row["extra"], autonomous=data.get("autonomous") is True)
     if not url or data.pop("url_digest", None) != _url_key(url):
         return None
     return Attempt(**{**data, "url": url})
@@ -574,12 +636,13 @@ def latest_runs(profile_id: int) -> dict[int, ApplyRun]:
 
 
 def _binding_current(conn, run, attempt: Attempt) -> bool:
-    row = conn.execute("SELECT a.status, a.updated_at, a.current_rev, a.approved_rev, a.approved_sha256, j.origin_url,"
+    row = conn.execute("SELECT a.status, a.updated_at, a.current_rev, a.approved_rev, a.approved_sha256, j.origin_url, j.extra,"
                        " j.status AS job_status FROM applications a JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id"
                        " WHERE a.id=?", (attempt.application_id,)).fetchone()
     return bool(row and row["status"] == "approved" and row["updated_at"] == run["application_version"]
                 and row["current_rev"] == row["approved_rev"] == attempt.rev
-                and row["approved_sha256"] == attempt.pdf_sha256 and clean_url(row["origin_url"], navigation=True) == attempt.url
+                and row["approved_sha256"] == attempt.pdf_sha256
+                and dispatch_url(row["origin_url"], row["extra"], autonomous=attempt.autonomous) == attempt.url
                 and row["job_status"] not in ("applied", "rejected"))
 
 
@@ -592,11 +655,41 @@ def binding_active(attempt: Attempt) -> bool:
                     and _binding_current(conn, run, attempt))
 
 
+def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", confirmed_distinct=frozenset()) -> Attempt:
+    from urllib.parse import urlsplit
+    from jobhunt.apply.identity import ats_target
+
+    host = urlsplit(target).hostname
+    if (method not in {"requisition", "continuity"} or not attempt.autonomous or attempt.landing_digest
+            or not host or clean_url(target, navigation=True) != target):
+        raise ApplyError(NOT_ACTIVE)
+    _, canonical = ats_target(target)
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run = conn.execute("SELECT r.* FROM application_runs r JOIN apply_reservations v ON v.run_id=r.id"
+                           " WHERE r.id=? AND r.status='running' AND r.submit_clicked_at IS NULL"
+                           " AND v.released_at IS NULL AND v.binding_json=?", (attempt.run_id, _binding_json(attempt))).fetchone()
+        if not run or not _binding_current(conn, run, attempt) or _host_paused(conn, host):
+            raise ApplyError(NOT_ACTIVE)
+        digest = _url_key(target)
+        duplicates = _potential_duplicates(conn, attempt.profile_id, attempt.application_id,
+                                           canonical or canonical_identity(attempt.tenant, attempt.requisition_id),
+                                           target_digests=(digest,))
+        if any(exact or app_id not in confirmed_distinct for app_id, exact in duplicates.items()):
+            raise ApplyError(NOT_ACTIVE)
+        updated = replace(attempt, landing_host=host, landing_digest=digest, landing_binding=method,
+                          tenant=canonical[0] if canonical else attempt.tenant,
+                          requisition_id=canonical[1] if canonical else attempt.requisition_id)
+        conn.execute("UPDATE apply_reservations SET binding_json=? WHERE run_id=?", (_binding_json(updated), attempt.run_id))
+        return updated
+
+
 def _host_paused(conn, host: str) -> bool:
     outcomes = conn.execute("""SELECT r.status, v.receipt_outcome FROM apply_reservations v
         JOIN application_runs r ON r.id=v.run_id
         WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
-        AND json_extract(v.binding_json, '$.host')=? ORDER BY v.id DESC LIMIT 2""", (host,)).fetchall()
+        AND ? IN (json_extract(v.binding_json, '$.host'), json_extract(v.binding_json, '$.landing_host'))
+        ORDER BY v.id DESC LIMIT 2""", (host,)).fetchall()
     return len(outcomes) == 2 and all(row["status"] == "failed" or row["receipt_outcome"] == "uncertain" for row in outcomes)
 
 
@@ -607,11 +700,17 @@ def host_paused(host: str) -> bool:
 
 def paused_hosts() -> set[str]:
     with connect() as conn:
-        rows = conn.execute("""WITH host_runs AS (
-            SELECT json_extract(v.binding_json, '$.host') AS host, v.receipt_outcome, r.status,
-            ROW_NUMBER() OVER (PARTITION BY json_extract(v.binding_json, '$.host') ORDER BY v.id DESC) AS pos
+        rows = conn.execute("""WITH eligible AS (
+            SELECT v.id, json_extract(v.binding_json, '$.host') AS host,
+            json_extract(v.binding_json, '$.landing_host') AS landing, v.receipt_outcome, r.status
             FROM apply_reservations v JOIN application_runs r ON r.id=v.run_id
             WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
+        ), hosts AS (
+            SELECT id, host, receipt_outcome, status FROM eligible
+            UNION ALL SELECT id, landing, receipt_outcome, status FROM eligible WHERE landing != host
+        ), host_runs AS (
+            SELECT host, receipt_outcome, status, ROW_NUMBER() OVER (PARTITION BY host ORDER BY id DESC) AS pos
+            FROM hosts
         ) SELECT host FROM host_runs WHERE pos<=2 GROUP BY host
         HAVING SUM(CASE WHEN status='failed' OR receipt_outcome='uncertain' THEN 1 ELSE 0 END)=2""").fetchall()
         return {row["host"] for row in rows}
@@ -628,18 +727,22 @@ def mark_autonomous_submit(attempt: Attempt) -> None:
         conn.execute("UPDATE application_runs SET submit_clicked_at=? WHERE id=?", (_iso(now()), attempt.run_id))
 
 
-def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=None) -> dict[int, bool]:
+def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=None, *, target_digests=()) -> dict[int, bool]:
     current = conn.execute("SELECT j.id, j.company, j.title, j.extra, j.origin_url FROM applications a JOIN jobs j"
                            " ON j.id=a.job_id AND j.profile_id=a.profile_id WHERE a.id=? AND a.profile_id=?",
                            (application_id, profile_id)).fetchone()
     if current is None:
         return {}
-    canonical = canonical or resolved_identity(current["extra"])
+    identities = {dedupe_identity(canonical), dedupe_identity(resolved_identity(current["extra"]))} - {None}
     current_url = clean_url(current["origin_url"])
+    digests = {digest for digest in target_digests if digest}
+    if current_url:
+        digests.add(_url_key(current_url))
     rows = conn.execute("""SELECT a.id, a.job_id, COALESCE(j.company,a.company) AS company,
         COALESCE(j.title,a.job_title) AS title, j.extra, j.origin_url, a.sent_origin_url,
         v.binding_json, v.url_key FROM applications a LEFT JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id
-        LEFT JOIN apply_reservations v ON v.application_id=a.id AND v.released_at IS NULL
+        LEFT JOIN apply_reservations v ON v.application_id=a.id AND
+            (v.released_at IS NULL OR v.receipt_outcome='confirmed' OR v.run_id=a.sent_run_id)
         WHERE a.profile_id=? AND a.id<>? AND (a.status='submitted' OR v.id IS NOT NULL OR EXISTS (
             SELECT 1 FROM application_runs r WHERE r.application_id=a.id AND r.operator_not_sent_at IS NULL
             AND (r.submit_clicked_at IS NOT NULL OR r.nav_clicked_at IS NOT NULL)))""",
@@ -650,8 +753,13 @@ def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=
             binding = json.loads(row["binding_json"] or "{}")
         except ValueError:
             binding = {}
-        held = canonical_identity(binding.get("tenant"), binding.get("requisition_id")) if isinstance(binding, dict) else None
-        exact = (current["id"] == row["job_id"] or bool(canonical and canonical in (held, resolved_identity(row["extra"])))
+        if not isinstance(binding, dict):
+            binding = {}
+        held = dedupe_identity((binding.get("tenant"), binding.get("requisition_id")))
+        resolved = dedupe_identity(resolved_identity(row["extra"]))
+        exact = (current["id"] == row["job_id"] or held in identities or resolved in identities
+                 or any(digest in digests for digest in (row["url_key"], binding.get("url_digest"), binding.get("landing_digest"))
+                        if isinstance(digest, str))
                  or bool(current_url and (row["url_key"] in (_url_key(current_url), canonical_url(current_url))
                          or any(current_url == clean_url(row[key]) for key in ("origin_url", "url_key", "sent_origin_url")))))
         if exact or similar_role(current["company"], current["title"], row["company"], row["title"]):
@@ -716,7 +824,8 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
             if binding.autonomous and _host_paused(c, binding.host):
                 raise ApplyError("À envoyer en mode supervisé")
             duplicates = _potential_duplicates(c, profile_id, application_id,
-                                               canonical_identity(binding.tenant, binding.requisition_id))
+                                               canonical_identity(binding.tenant, binding.requisition_id),
+                                               target_digests=(_url_key(binding.url), binding.landing_digest))
             if any(duplicates.values()):
                 raise ApplyError("Un essai existe déjà pour ce poste chez cet employeur.")
             if trigger == "user":
@@ -753,9 +862,14 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
         if binding and c.execute("SELECT 1 FROM apply_reservations WHERE dedupe_key=? AND released_at IS NULL",
                                  (binding.dedupe_key,)).fetchone():
             raise ApplyError("Un essai existe déjà pour ce poste chez cet employeur.")
-        if binding and trigger == "auto" and c.execute(
-                "SELECT 1 FROM apply_reservations WHERE dedupe_key=? AND released_at IS NOT NULL", (binding.dedupe_key,)).fetchone():
-            raise ApplyError("Nouvel essai manuel requis pour ce poste.")
+        if binding and trigger == "auto":
+            identity = dedupe_identity((binding.tenant, binding.requisition_id))
+            released = c.execute("""SELECT dedupe_key, json_extract(binding_json, '$.tenant') AS tenant,
+                    json_extract(binding_json, '$.requisition_id') AS requisition
+                FROM apply_reservations WHERE profile_id=? AND released_at IS NOT NULL""", (profile_id,))
+            if any(row["dedupe_key"] == binding.dedupe_key or (
+                    identity and identity == dedupe_identity((row["tenant"], row["requisition"]))) for row in released):
+                raise ApplyError("Nouvel essai manuel requis pour ce poste.")
         c.execute("INSERT INTO apply_reservations(profile_id, application_id, run_id, trigger, role_key, url_key, created_at, pending, binding_json, dedupe_key)"
                   " VALUES (?,?,?,?,?,?,?,?,?,?)",
                   (profile_id, application_id, run_id, trigger, role_key or "", url_key or "", _iso(ts), 1 if pending else 0,

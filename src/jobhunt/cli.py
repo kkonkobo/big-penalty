@@ -526,6 +526,8 @@ BUCKET_FR = {"to_validate": "à valider", "paused": "en pause", "sending": "en c
 
 def _print_run(run) -> None:
     console.print(f"Statut : {run.status} — {run.message}", markup=False, highlight=False)
+    if run.result and run.result.diagnostic_code:
+        console.print(f"Motif : {run.result.diagnostic_code}", markup=False, highlight=False)
     if run.result and run.result.untrusted_host:
         console.print(f"Site non approuvé : {run.result.untrusted_host} — `big-penalty apply trust PROFIL {run.result.untrusted_host}` "
                       "pour lui faire confiance, puis relancer.", markup=False, highlight=False)
@@ -590,7 +592,7 @@ def apply_diagnostics(
 
 @apply_app.command("dry-run")
 def apply_dry_run(app_id: int, headless: HeadlessOpt = None) -> None:
-    """Inspecte le formulaire sans saisir de données, joindre de document ni cliquer."""
+    """Inspecte le formulaire sans saisie, pièce jointe ni envoi."""
     from jobhunt.apply.errors import ApplyError
     from jobhunt.apply.service import run
 

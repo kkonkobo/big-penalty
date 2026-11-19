@@ -24,11 +24,12 @@ from jobhunt.apply import accounts, policy
 from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Match, Receipt, WriteGate, clean_receipt, origin, registry
 from jobhunt.apply.adapter_browser import AdapterAudience
 from jobhunt.apply.autonomous import Audience
+from jobhunt.apply.apply_entry import discover
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url, is_bound_pdf
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.identity import canonical_identity, resolved_identity
+from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, resolved_identity
 from jobhunt.apply.facts import answers_path as facts_answers_path
 from jobhunt.apply.facts import build_facts, custom_answers, load_answers, norm_question, save_custom_answers, trusted_hosts
 from jobhunt.apply.missing_answers import editable_custom
@@ -49,7 +50,7 @@ from jobhunt.db import now
 from jobhunt.filelock import try_lock, unlock
 from jobhunt.freshness import age_days
 from jobhunt.llm import LLMError, get_llm
-from jobhunt.origin import MIN_CONFIDENCE, ats_of_host
+from jobhunt.origin import MIN_CONFIDENCE, ats_of_host, is_aggregator
 from jobhunt.sources.base import ChallengeRequired
 
 # Where an application stands in the sending queue (one bucket per application):
@@ -223,7 +224,8 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
         bucket = "to_validate"
     open_ = app.status in ("draft", "approved") and not problems
     adapted = bool(job and _unattended(job))
-    generic = _generic_enabled(job, check_host=False) and _host(job.origin_url) not in paused_hosts
+    generic = (_generic_enabled(job, check_host=False)
+               and _host(dispatch_url(job.origin_url, job.extra, autonomous=True)) not in paused_hosts)
     autonomous_ready = generic and app.status == "approved" and not site_handoff
     if generic and run_ and run_.mode == "submit" and run_.status == "needs_human":
         autonomous_ready = False
@@ -296,7 +298,10 @@ def _blocked_result(reasons: list[str]) -> RunResult:
 def _refuse(app: Application, job, mode: Mode, trigger: str, reasons: list[str]) -> ApplyRun:
     """A refusal is a finished `blocked` run (recorded, no browser)."""
     run_ = apply_store.start_run(app.id, app.current_rev, mode, trigger, lambda rid: _run_dir(app.job_id, rid))
-    return apply_store.finish_run(run_.id, _blocked_result(reasons))
+    result = _blocked_result(reasons)
+    if job and not policy._usable_origin(job):
+        result.diagnostic_code = "aggregator_origin" if is_aggregator(job.origin_url) else "origin_not_usable"
+    return apply_store.finish_run(run_.id, result)
 
 
 def _run_dir(job_id: int, run_id: int) -> Path:
@@ -386,7 +391,7 @@ def _generic_enabled(job, *, check_host: bool = True) -> bool:
     return bool(get_settings().apply_autonomous and job and policy._usable_origin(job)
                 and clean_url(job.origin_url, navigation=True)
                 and not ((match := registry.find(job.origin_url, job.origin_ats)) and match.capability == "unattended")
-                and (not check_host or not apply_store.host_paused(_host(job.origin_url))))
+                and (not check_host or not apply_store.host_paused(_host(dispatch_url(job.origin_url, job.extra, autonomous=True)))))
 
 
 def _distinct(ids: frozenset[int]) -> dict:
@@ -430,17 +435,21 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     requisition = match.requisition if match else None
     resolved = resolved_identity(job.extra)
     adapter_identity = canonical_identity(requisition.tenant, requisition.requisition_id) if requisition else None
-    dedupe_identity = getattr(match.adapter, "dedupe_identity", None) if adapter_identity else None
-    if dedupe_identity:
-        adapter_identity = dedupe_identity(url) or adapter_identity
+    adapter_dedupe = getattr(match.adapter, "dedupe_identity", None) if adapter_identity else None
+    if adapter_dedupe:
+        adapter_identity = adapter_dedupe(url) or adapter_identity
     metadata = job.extra.get("origin_resolution") if isinstance(job.extra, dict) else None
     if resolved and adapter_identity and (resolved != adapter_identity or (
             browser_adapter and metadata.get("canonical_ok") is True and metadata.get("submit_ats") != match.adapter.name)):
         raise ApplyError("Identité du poste incohérente : envoi annulé.")
     identity = resolved or adapter_identity
-    canonical = ["req", *identity] if identity else ["job", job.id]
+    dedupe = dedupe_identity(identity)
+    canonical = ["req", *dedupe] if dedupe else ["job", job.id]
     dedupe_key = hashlib.sha256(json.dumps([app.profile_id, *canonical]).encode()).hexdigest()
     autonomous = mode == "submit" and (not match or match.capability != "unattended")
+    if autonomous:
+        url = dispatch_url(job.origin_url, job.extra, autonomous=True)
+        host = _host(url)
     dispatch_match = None if autonomous and not browser_adapter else match
     autonomous = autonomous or browser_adapter
     tenant, requisition_id = ((requisition.tenant, requisition.requisition_id) if requisition and dispatch_match
@@ -511,7 +520,9 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         if not eligible:
             raise ApplyError(" ; ".join(reasons))
         if (not get_settings().apply_autonomous or registry.find(job.origin_url, job.origin_ats) != match
-                or not apply_store.binding_active(attempt) or apply_store.host_paused(attempt.host)):
+                or not apply_store.binding_active(attempt)
+                or apply_store.host_paused(attempt.host)
+                or (attempt.landing_host and apply_store.host_paused(attempt.landing_host))):
             raise ApplyError(SUPERVISED_ONLY)
 
     async def recheck():
@@ -541,7 +552,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         password_fact.value = "disponible"
 
     password, account_known = accounts.guarded_account_callbacks(
-        email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document)
+        email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
+        posting_url=attempt.url,
     ) if email and (not browser_adapter or match.adapter.boundaries.get("account_creation") == "auto") else (None, None)
 
     async def mark_submit():
@@ -552,6 +564,33 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     diagnostics.control = "navigation"
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
         await guard.install(page)
+        async def open_apply(tab, *, require_posting):
+            nonlocal attempt, password, account_known
+            try:
+                landing, target = await discover(tab, guard, audience, requisition=attempt.requisition_id,
+                                                 require_posting=require_posting, platform=job.origin_ats)
+                if landing is not None:
+                    if clean_url(landing.url, navigation=True) != target or guard.refused:
+                        return None, "apply_target_unverified"
+                    attempt = apply_store.bind_apply_landing(attempt, target, method=audience.entry_binding,
+                                                             confirmed_distinct=confirmed_distinct)
+                    browser[-1] = (attempt, guard)
+                    audience.bind_recipient(target)
+                    await audience.bind_document(landing, entry=True)
+                    if clean_url(audience.live_url, navigation=True) != target or guard.refused:
+                        return None, "apply_target_unverified"
+                    if email:
+                        password, account_known = accounts.guarded_account_callbacks(
+                            email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
+                            posting_url=target,
+                        )
+                    guard.page = landing
+                return landing, target
+            except ApplyError:
+                return None, "apply_target_unverified"
+            finally:
+                guard.probe = None
+
         try:
             await guard.navigate(page, attempt.url, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
             if guard.refused or not audience.write_recipient(page.url):
@@ -567,7 +606,9 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
                 supervised_widgets=browser_adapter,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
-                password=password, account_known=account_known, diagnostics=diagnostics,
+                password=(lambda url: password(url)) if password else None,
+                account_known=(lambda url: account_known(url)) if account_known else None,
+                diagnostics=diagnostics, apply_entry=None if browser_adapter else open_apply,
                 host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
@@ -581,6 +622,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             diagnostics.receipt_kind = "none"
             diagnostics.receipt_reason = "recipient_refused"
             result = result.model_copy(update={"status": "needs_human", "message": RECIPIENT_REFUSED + " " + SUPERVISED_ONLY,
+                                               "diagnostic_code": guard.refusal_code,
                                                "dispatch_diagnostics": diagnostics})
         if out is not None:
             out.append(result)
@@ -638,7 +680,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
     facts = _candidate_facts(app, job)
     cv_pdf = cvs.safe_pdf(app)
     assert cv_pdf is not None and job.origin_url
-    started_origin = clean_url(job.origin_url, navigation=True)
+    started_origin = dispatch_url(job.origin_url, job.extra, autonomous=mode == "dry_run" and not _unattended(job))
     host = _host(started_origin)
     challenge: list[bool] = []
 
@@ -726,17 +768,53 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             await browser_guard.install(page)
 
         if not request:
+            inspect_navigation = None
+            if mode == "dry_run" and isinstance(pool, BrowserPool):
+                audience = Audience(started_origin, (), lambda: None)
+                guard = RecipientGuard(frozenset({origin(started_origin)}), audience=audience, inspection_only=True)
+                await guard.install(page)
+
+                async def inspect_goto(tab, url):
+                    try:
+                        await guard.navigate(tab, url, lambda p, u: pool.goto(p, u, challenge_timeout_s=0))
+                    except ChallengeRequired:
+                        challenge.append(True)
+                        raise
+                    audience.document = clean_url(tab.url, navigation=True)
+                    if not guard.refused:
+                        await audience.bind_document(tab)
+
+                async def inspect_navigation(tab, *, require_posting):
+                    identity = resolved_identity(job.extra)
+                    try:
+                        landing, target = await discover(tab, guard, audience, requisition=identity[1] if identity else None,
+                                                         require_posting=require_posting, platform=job.origin_ats)
+                        if landing is not None:
+                            audience.bind_recipient(target)
+                            await audience.bind_document(landing, entry=True)
+                            guard.page = landing
+                        return landing, target
+                    except ApplyError:
+                        return None, "apply_target_unverified"
+                    finally:
+                        guard.probe = None
+
             res = await run_application(page, url=started_origin, facts=facts, planner=planner,
                                         uploads=Uploads(cv_pdf=cv_pdf), mode=mode, verifier=verifier,
                                         out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)),
-                                        job_title=job.title, company=job.company or "", host_allowed=host_allowed,
-                                        max_steps=get_settings().apply_max_steps, goto=goto,
+                                        job_title=job.title, company=job.company or "",
+                                        host_allowed=(lambda name: name == audience.host) if inspect_navigation else host_allowed,
+                                        max_steps=get_settings().apply_max_steps, goto=inspect_goto if inspect_navigation else goto,
+                                        apply_entry=inspect_navigation,
                                         choices=scoped_choices.load(app.profile_id, app.id, app.current_rev,
                                                                    origin_digest(started_origin)) if trigger == "user" else None)
+            if inspect_navigation and guard.refused:
+                res = res.model_copy(update={"status": "needs_human", "diagnostic_code": guard.refusal_code,
+                                             "message": RECIPIENT_REFUSED})
+            if challenge and res.status == "failed":
+                res = res.model_copy(update={"status": "needs_human", "diagnostic_code": "challenge_or_rate_limited"})
             if out is not None:
                 out.append(res)
-            if challenge and res.status == "failed":
-                return res.model_copy(update={"status": "needs_human", "message": "Un défi anti-robot doit être résolu à la main."})
             return res
 
         session = None
@@ -904,7 +982,8 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
         except ApplyError as e:
             result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
-            result, crashed = RunResult(status="failed", message=f"Erreur technique ({type(e).__name__})."), True
+            result, crashed = RunResult(status="failed", message="Erreur technique.",
+                                        diagnostic_code=diagnostics.exception_code(e)), True
         except asyncio.CancelledError as e:  # the row must not stay `running`: settle it, then let the cancellation through
             result, reraise, crashed = RunResult(status="failed", message="Interrompu."), e, True
         if crashed and returned:  # the engine had finished: cleanup failed or was cancelled afterwards, its result stands

@@ -1,4 +1,4 @@
-"""ATS candidate accounts: one stored credential per (full hostname of the account page, e-mail).
+"""ATS candidate accounts: one stored credential per (hostname, Workday site path if applicable, e-mail).
 
 Storage backends (see `get_backend`): the OS credential store through the `keyring` library (macOS Keychain, Windows
 Credential Manager) or, as a fallback, a local JSON file `data/accounts.json` (gitignored). A non-secret index
@@ -24,7 +24,9 @@ from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 from jobhunt.config import get_settings
+from jobhunt.apply.destination import clean_url
 from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.facts import replace_file
 
 SPECIALS = "-_+."
 PASSWORD_LENGTH = 20
@@ -120,10 +122,51 @@ def registrable_host(host: str) -> str:
     return host if len(labels) <= n - 1 else ".".join(labels[-n:])
 
 
-def service_name(host: str) -> str:
-    """Keychain service of an account: scoped to the FULL hostname of the account page (lowercase, no port), so a password
-    created for one site is never offered to another subdomain / tenant of the same registrable domain."""
-    return "big-penalty:" + _hostname(host)
+def is_workday_host(host: str) -> bool:
+    return any(host == domain or host.endswith('.' + domain)
+               for domain in ('myworkdayjobs.com', 'myworkdaysite.com'))
+
+
+_WORKDAY_SEGMENT = r'[A-Za-z0-9_-]{1,64}'
+_WORKDAY_LOCALE = r'[a-z]{2}-[A-Z]{2}'
+
+
+def workday_site(url: str, *, posting: bool = False) -> str | None:
+    """Extract an explicit Workday career-site namespace, never a bare instance or a query parameter."""
+    try:
+        parsed = urlparse(url)
+        host = _hostname(url)
+        if (not is_workday_host(host) or not clean_url(url, navigation=True) or parsed.fragment
+                or parsed.scheme != 'https' or parsed.port is not None
+                or parsed.username is not None or parsed.password is not None or parsed.params):
+            return None
+    except ValueError:
+        return None
+    parts = parsed.path.removeprefix('/').removesuffix('/').split('/')
+    if not all(re.fullmatch(_WORKDAY_SEGMENT, part) for part in parts):
+        return None
+    if parts[:1] == ['recruiting']:
+        scope, rest = parts[:3], parts[3:]
+        if len(scope) != 3:
+            return None
+    elif host.endswith('.myworkdayjobs.com') and not re.fullmatch(r'wd\d+\.myworkdayjobs\.com', host):
+        if re.fullmatch(_WORKDAY_LOCALE, parts[0], re.I):
+            parts = parts[1:]
+        if not parts or parts[0].casefold() in {'job', 'login', 'signin', 'account', 'apply', 'wday'}:
+            return None
+        scope, rest = parts[:1], parts[1:]
+    else:
+        return None
+    if rest and re.fullmatch(_WORKDAY_LOCALE, rest[0], re.I):
+        rest = rest[1:]
+    if posting and (len(rest) < 2 or rest[0] != 'job'):
+        return None
+    return ':'.join(scope)
+
+
+def service_name(host: str, *, site: str | None = None) -> str:
+    """Keychain service scoped to the full hostname and, for Workday, its explicit site path."""
+    return "big-penalty:" + _hostname(host) + (":workday:" + site if site else "")
 
 
 KEYRING_NAME = "trousseau du système"
@@ -209,7 +252,7 @@ def _write_json_atomic(path: Path, data: Any, *, private: bool = True) -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except OSError as e:
         if tmp:
             with contextlib.suppress(OSError):
@@ -313,17 +356,19 @@ DEFAULT_STATE = "active"          # an index entry without `state` (older versio
 PENDING_GRACE_S = 600             # a signup younger than this is never trusted to exist (the run may still be on that page)
 
 
-def _index_add(host: str, email: str, state: str = DEFAULT_STATE) -> None:
-    service = service_name(host)
+def _index_add(host: str, email: str, state: str = DEFAULT_STATE, *, site: str | None = None) -> None:
+    service = service_name(host, site=site)
     entries = _load_index()
     if any(e["service"] == service and e["account"] == email for e in entries):
         return
     entries.append({"service": service, "account": email, "host": _hostname(host), "label": _label(host), "created_at": _now(),
                     "state": state, "state_at": _now()})
+    if site:
+        entries[-1]["site"] = site
     _write_json_atomic(_index_path(), entries, private=False)
 
 
-def set_state(host: str, email: str, state: str) -> bool:
+def set_state(host: str, email: str, state: str, *, site: str | None = None) -> bool:
     """Record whether the account really exists on the site: `pending` (password created for a signup that may have failed)
     or `active` (a run went past the account pages, or the site now waits for the e-mail link). False when the account is
     not in the index. Unknown states are refused."""
@@ -331,7 +376,7 @@ def set_state(host: str, email: str, state: str) -> bool:
         raise ApplyError("État de compte inconnu")
     if not _hostname(host):
         raise ApplyError(_BAD_NAME)
-    service = service_name(host)
+    service = service_name(host, site=site)
     entries = _load_index()
     for e in entries:
         if e["service"] == service and e["account"] == email:
@@ -342,24 +387,24 @@ def set_state(host: str, email: str, state: str) -> bool:
     return False
 
 
-def account_state(host: str, email: str) -> str | None:
+def account_state(host: str, email: str, *, site: str | None = None) -> str | None:
     """`pending` / `active`, None when the index does not know the account."""
-    service = service_name(host)
+    service = service_name(host, site=site)
     for e in _load_index():
         if e["service"] == service and e["account"] == email:
             return e.get("state") if e.get("state") in STATES else DEFAULT_STATE
     return None
 
 
-def account_known(host: str, email: str) -> bool:
+def account_known(host: str, email: str, *, site: str | None = None) -> bool:
     """Does an account really exist on `host` for `email`? A stored password AND state `active`. A `pending` account (its
     signup was never confirmed by a later page) is not known, so the engine signs up again with the stored password instead of
     logging in to an account that does not exist. A credential without index entry counts as active (it predates the index).
     Any error -> False."""
     try:
-        if get_password(host, email) is None:
+        if (get_password(host, email, site=site) if site else get_password(host, email)) is None:
             return False
-        state = account_state(host, email)
+        state = account_state(host, email, site=site)
         return state in (None, "active")
     except ApplyError:
         return False
@@ -369,19 +414,25 @@ def _label(host: str) -> str:
     return f"Big Penalty — {_hostname(host)}"
 
 
-def _check_name(host: str, email: str) -> None:
+def _check_name(host: str, email: str, *, site: str | None = None) -> None:
     """Hosts / accounts that would need quoting are refused before any backend is touched."""
     if not _hostname(host):
         raise ApplyError(_BAD_NAME)
-    if not all(_SAFE_FIELD.fullmatch(v) for v in (service_name(host), email, _label(host))):
+    if site and (not is_workday_host(_hostname(host)) or not re.fullmatch(
+            rf'(?:recruiting:{_WORKDAY_SEGMENT}:)?{_WORKDAY_SEGMENT}', site)):
+        raise ApplyError(_BAD_NAME)
+    if not all(_SAFE_FIELD.fullmatch(v) for v in (service_name(host, site=site), email, _label(host))):
         raise ApplyError(_BAD_NAME)
 
 
-def get_password(host: str, email: str) -> str | None:
+def get_password(host: str, email: str, *, site: str | None = None) -> str | None:
     """The stored password, or None when there is no credential for this host and e-mail."""
     if not _hostname(host):
         raise ApplyError(_BAD_NAME)
-    return get_backend().get(service_name(host), email)
+    backend = get_backend()
+    if site and isinstance(backend, FileBackend):
+        return None
+    return backend.get(service_name(host, site=site), email)
 
 def generate_password() -> str:
     rnd = secrets.SystemRandom()
@@ -395,31 +446,54 @@ def generate_password() -> str:
     return "".join(chars)
 
 
-def create_password(host: str, email: str) -> str:
+def create_password(host: str, email: str, *, site: str | None = None) -> str:
     """The existing password if any (never regenerated), else a new random one stored in the backend (and returned), read back
     to verify and recorded in the index."""
-    _check_name(host, email)
+    _check_name(host, email, site=site)
     backend = get_backend()
-    service = service_name(host)
+    if site and isinstance(backend, FileBackend):
+        raise ApplyError("Trousseau requis pour les comptes Workday")
+    service = service_name(host, site=site)
     existing = backend.get(service, email)
     if existing:
-        _index_add(host, email)  # a credential that was not indexed yet is an older, working one
+        _index_add(host, email, site=site)  # a credential that was not indexed yet is an older, working one
         return existing
     pw = generate_password()
     backend.set(service, email, pw, _label(host))
     if backend.get(service, email) != pw:
         raise ApplyError("Enregistrement dans le trousseau impossible")
-    _index_add(host, email, "pending")  # until a run gets past the account pages
+    _index_add(host, email, "pending", site=site)  # until a run gets past the account pages
     return pw
 
 
-def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool]) -> tuple[Callable[[str], str], Callable[[str], bool]]:
-    """Password and known-account callbacks for a guarded browser's login/signup actions."""
-    def password(host):
-        return create_password(host, email) if accepts_host(host) else ""
+def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *, posting_url: str = "") -> tuple[Callable[[str], str], Callable[[str], bool]]:
+    """For Workday, require a live URL matching the reserved host and explicit career-site path."""
+    reserved_host = _hostname(posting_url)
+    reserved_site = workday_site(posting_url, posting=True)
 
-    def known(host):
-        return accepts_host(host) and account_known(host, email)
+    def scope(url):
+        host = _hostname(url)
+        if not host or not accepts_host(host):
+            return None
+        if not (is_workday_host(host) or is_workday_host(reserved_host)):
+            return host, None
+        if host == reserved_host and reserved_site and workday_site(url) == reserved_site:
+            return host, reserved_site
+        return None
+
+    def password(url):
+        target = scope(url)
+        if not target:
+            return ""
+        host, site = target
+        return create_password(host, email, site=site) if site else create_password(host, email)
+
+    def known(url):
+        target = scope(url)
+        if not target:
+            return False
+        host, site = target
+        return account_known(host, email, site=site) if site else account_known(host, email)
 
     return password, known
 
@@ -431,11 +505,11 @@ def list_accounts() -> list[dict[str, Any]]:
              "stored": backend.get(e["service"], e["account"]) is not None} for e in _load_index()]
 
 
-def delete_account(host: str, email: str) -> None:
+def delete_account(host: str, email: str, *, site: str | None = None) -> None:
     """Remove the credential from the backend and the index entry."""
     if not _hostname(host):
         raise ApplyError(_BAD_NAME)
-    service = service_name(host)
+    service = service_name(host, site=site)
     get_backend().delete(service, email)
     entries = _load_index()
     kept = [e for e in entries if not (e["service"] == service and e["account"] == email)]
@@ -455,11 +529,13 @@ def export_accounts(path: Path, *, overwrite: bool = False) -> int:
         if pw:
             out.append({"service": e["service"], "account": e["account"], "host": e.get("host", ""),
                         "label": e.get("label", ""), "password": pw, "state": e.get("state", DEFAULT_STATE)})
+            if e.get("site"):
+                out[-1]["site"] = e["site"]
     _write_json_atomic(path, {"version": EXPORT_VERSION, "exported_at": _now(), "accounts": out})
     return len(out)
 
 
-def _parse_import(path: Path) -> list[dict[str, str]]:
+def _parse_import(path: Path) -> list[dict[str, Any]]:
     data = _read_json(Path(path), "Fichier d'import")
     if data is None:
         raise ApplyError(f"Fichier d'import introuvable : {Path(path).name}")
@@ -474,10 +550,11 @@ def _parse_import(path: Path) -> list[dict[str, str]]:
         if not all(isinstance(v, str) for v in (host, account, pw)) or not pw or len(pw) > 1000 or not pw.isprintable():
             raise bad
         h = _hostname(host)
-        if not h or e.get("service") != service_name(h):
+        site = e.get("site")
+        if not h or (site is not None and not isinstance(site, str)) or e.get("service") != service_name(h, site=site):
             raise bad
-        _check_name(h, account)  # same allow-list as create_password
-        entries.append({"host": h, "account": account, "password": pw,
+        _check_name(h, account, site=site)
+        entries.append({"host": h, "account": account, "password": pw, "site": site,
                         "state": e.get("state") if e.get("state") in STATES else DEFAULT_STATE})
     return entries
 
@@ -487,15 +564,17 @@ def import_accounts(path: Path, *, overwrite: bool = False) -> tuple[int, int]:
     skipped unless `overwrite`; one that already has the same password counts as imported. Everything is validated first."""
     entries = _parse_import(path)
     backend = get_backend()
+    if isinstance(backend, FileBackend) and any(e["site"] for e in entries):
+        raise ApplyError("Trousseau requis pour les comptes Workday")
     imported = skipped = 0
     for e in entries:
-        service = service_name(e["host"])
+        service = service_name(e["host"], site=e["site"])
         current = backend.get(service, e["account"])
         if current is not None and current != e["password"] and not overwrite:
             skipped += 1
             continue
         if current != e["password"]:
             backend.set(service, e["account"], e["password"], _label(e["host"]))
-        _index_add(e["host"], e["account"], e["state"])
+        _index_add(e["host"], e["account"], e["state"], site=e["site"])
         imported += 1
     return imported, skipped

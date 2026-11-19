@@ -31,7 +31,7 @@ from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.autonomous import (
     SUPERVISED_REQUIRED, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
 )
-from jobhunt.apply.destination import clean_text, clean_url
+from jobhunt.apply.destination import clean_text, clean_url, origin
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import capture, fact_key
@@ -98,6 +98,7 @@ OTHER_DOC_RE = re.compile(r"diplome|releve|transcript|bulletin|lettre|motivation
                           r"photo|certificat|attestation|justificatif|recommandation|reference")
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 ACCOUNT_KINDS = ("account_login", "account_signup")
+ACCOUNT_FACTS = frozenset({"account_email", "account_password", "email", "first_name", "last_name", "full_name", "phone"})
 ACTION_TIMEOUT_MS = 8000
 MAX_SUBMIT_CLICKS = 1  # at most ONE final dispatch per run: a field error is never proof that nothing was sent
 IDLE_TIMEOUT_MS = 3000   # network-idle wait of a step (never fatal)
@@ -129,7 +130,7 @@ FIELD_ERROR_MSG = ("Le site signale une erreur de saisie après le clic : vérif
                    "est partie")
 UNCONFIRMED_MSG = "Envoi non confirmé : vérifier sur le site de l'entreprise"
 UNSUPPORTED_DISPATCH = "Envoi bloqué : aucun adaptateur d'envoi et de reçu vérifié pour ce site."
-DRY_UNTESTED = "Simulation non testée : inspection hors ligne, sans saisie, fichier ni clic sur le site."
+DRY_UNTESTED = "Simulation non testée : inspection hors ligne, sans saisie, fichier ni envoi de candidature."
 # What the live control is, read at click time: its destination (the form it OWNS - `.form`, so an explicit form="id" wins over
 # the closest ancestor, which is used only when `.form` is null - or a link's href), whether it is a submit control and whether
 # its form already holds data (a text-like value or a selected file; hidden inputs, boxes and radios do not count).
@@ -541,6 +542,11 @@ class _Run:
         self.current_step = False
         self.generic_step = False
         self.autonomous = None
+        self.apply_navigation = None
+        self.apply_entry = None
+        self.discovering_apply_entry = False
+        self.apply_link_followed = False
+        self.inspection_offline = False
         self.consent_codes = set()
         self.live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None
         self.attended_accounts = False
@@ -635,7 +641,7 @@ class _Run:
         if self.password is None or not _secure_url(frame_url, self.page.url):
             return None
         try:
-            return self.password(urlparse(frame_url).hostname or "") or None
+            return self.password(self._account_address(frame_url)) or None
         except Exception:
             return None
 
@@ -676,6 +682,12 @@ class _Run:
 
     def _host(self) -> str:
         return urlparse(self.page.url).hostname or ""
+
+    @staticmethod
+    def _account_address(url: str) -> str:
+        from jobhunt.apply.accounts import is_workday_host
+        host = urlparse(url).hostname or ""
+        return url if is_workday_host(host) else host
 
     def _bad_host(self, url: str) -> str:
         """The host (or scheme) of `url` when `host_allowed` refuses it; "" when fine. Loopback always passes."""
@@ -754,7 +766,7 @@ class _Run:
         if self.account_known is None:
             return FactSheet(facts=facts)
         try:
-            known = bool(self.account_known(self._host()))
+            known = bool(self.account_known(self._account_address(self.page.url)))
         except Exception:
             return FactSheet(facts=facts)
         extra = Fact(key="account_exists", label="Un compte existe déjà sur ce site pour le candidat", value="oui" if known else "non")
@@ -1712,7 +1724,6 @@ class _Run:
     async def _run_page(self) -> RunResult:
         """Page lifecycle for callers that have already authorized their interaction policy."""
         ctx = self.page.context
-        offline = False
 
         def on_page(p: Page) -> None:  # (a bound builtin is not accepted as a Playwright handler)
             self.all_pages.append(p)
@@ -1727,7 +1738,9 @@ class _Run:
             try:
                 # any document request once data was entered; before that, any NON-GET one (a dry run never needs one: its pre-data
                 # clicks are cookie banners and "Postuler" links)
-                if offline or (self._inspection_only and request.method not in {"GET", "HEAD"}):
+                if self.discovering_apply_entry:
+                    await route.fallback()
+                elif self.inspection_offline or (self._inspection_only and request.method not in {"GET", "HEAD"}):
                     await route.abort()
                 elif request.resource_type == "document" and (self.touched or self._is_form_get_submission(request)
                         or (request.method != "GET" and self._guarded_frame(request))):
@@ -1740,7 +1753,7 @@ class _Run:
                         self.widget_blocked += 1
                     await route.abort()
                 else:
-                    if self._inspection_only:
+                    if self._inspection_only and not self.apply_navigation:
                         await route.continue_()
                     else:
                         await route.fallback()
@@ -1754,8 +1767,8 @@ class _Run:
             try:
                 if not self.current_step:
                     await (self.goto or _default_goto)(self.page, self.url)
-                if self._inspection_only:
-                    offline = True
+                if self._inspection_only and not self.apply_entry:
+                    self.inspection_offline = True
                     await ctx.set_offline(True)
                 res = await self._loop()
             except _DecisionHold as hold:
@@ -1764,6 +1777,8 @@ class _Run:
                 res = self._end("failed", f"Planificateur indisponible ({e.code}).")
             except Exception as e:  # message: exception type only, never page content
                 res = self._end("failed", f"Erreur technique ({type(e).__name__}).")
+                if self.autonomous or self.apply_navigation:
+                    res.diagnostic_code = self.diagnostics.exception_code(e)
                 if self.steps:
                     await self._shot(self.steps[-1])
         finally:
@@ -1970,6 +1985,36 @@ class _Run:
             log.note = (log.note + "; " if log.note else "") + AUTO_SUBMIT_NOTE
         return self._end("ready", "Formulaire rempli : une soumission automatique de la page a été bloquée (simulation), rien n'a été envoyé.")
 
+    async def _open_posting_apply(self, *, required: bool, has_form: bool) -> tuple[bool, RunResult | None]:
+        live = await self.page.evaluate(r"""() => ({url: location.href, nonce: document.__bp_autonomous_document,
+          posting: !!document.querySelector('[itemtype="https://schema.org/JobPosting"]') ||
+            Array.from(document.querySelectorAll('script[type="application/ld+json"]')).some(
+                s => /"@type"\s*:\s*(?:\[\s*)?"JobPosting"/.test(s.textContent || '')),
+          links: Array.from(document.querySelectorAll('a[href]'))
+            .filter(a => !a.hasAttribute('download') && a.getClientRects().length
+                      && getComputedStyle(a).visibility === 'visible'
+                      && /^(?:je postule|postuler(?: maintenant| à cette offre)?|apply(?: now| for this job)?)$/i
+                          .test((a.innerText || a.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ')))
+            .map(a => a.href).slice(0, 40)})""", isolated_context=True)
+        required = required or (live["posting"] and not self.apply_link_followed)
+        if not required and (has_form or not live["links"]):
+            return False, None
+        candidates = list(dict.fromkeys(clean_url(link, navigation=True) for link in live["links"]))
+        target = candidates[0] if len(candidates) == 1 else ""
+        if target and not self.apply_link_followed:
+            self.inspection_offline = False
+            try:
+                if await self.apply_navigation(target, live["url"], live.get("nonce")):
+                    self.apply_link_followed = True
+                    return True, None
+            finally:
+                self.inspection_offline = self._inspection_only
+        code = ("cross_domain_apply_target" if target and origin(target) != origin(self.page.url)
+                else "job_page_no_apply_control")
+        result = self._end("needs_human", "Lien de candidature non vérifié.")
+        result.diagnostic_code = code
+        return False, result
+
     async def _loop(self) -> RunResult:
         idle = 0
         while self.consumed < self.max_steps or (self.autonomous and self.final_awaiting):
@@ -1984,6 +2029,15 @@ class _Run:
             if self.current_step:
                 await self._supervised_checkpoint()
             snap, resolve = await self._snapshot()
+            if self.autonomous and self.autonomous.entry_binding and not self.final_awaiting:
+                from jobhunt.apply.autonomous import POSTING_IDS_JS
+
+                ids = await self.page.evaluate(POSTING_IDS_JS, isolated_context=True)
+                if not self.autonomous.write_recipient(self.page.url) or not self.autonomous.posting_matches(self.page.url, ids):
+                    await self.page.close()
+                    result = self._end("needs_human", SUPERVISED_REQUIRED)
+                    result.diagnostic_code = "posting_mismatch"
+                    return result
             if self.current_step:
                 await self._supervised_checkpoint()
             if snap.has_captcha and self.captcha_wait_s > 0:  # visible window: give the human time to solve it, touching nothing
@@ -2030,12 +2084,41 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
+            if self.apply_entry and not self.touched and not self.app_touched and not self.apply_link_followed:
+                required = kind == "job_page"
+                self.inspection_offline = False
+                self.discovering_apply_entry = True
+                try:
+                    landing, code = await self.apply_entry(self.page, require_posting=not required and self._has_form(snap))
+                finally:
+                    self.discovering_apply_entry = False
+                    self.inspection_offline = self._inspection_only
+                    if self._inspection_only:
+                        await self.page.context.set_offline(True)
+                if landing is not None:
+                    self.page = landing
+                    self.apply_link_followed = True
+                    continue
+                if required or code != "job_page_no_apply_control":
+                    result = self._end("needs_human", "Accès au formulaire de candidature non vérifié.")
+                    result.diagnostic_code = code
+                    return result
+            if self.apply_navigation and not self.apply_entry and not self.touched and not self.apply_link_followed:
+                navigated, result = await self._open_posting_apply(required=kind == "job_page", has_form=self._has_form(snap))
+                if result:
+                    return result
+                if navigated:
+                    continue
+            if self.autonomous and self.apply_entry and kind == "job_page":
+                result = self._end("needs_human", "Page d’offre, pas de formulaire de candidature vérifié.")
+                result.diagnostic_code = "job_page_no_apply_control"
+                return result
             if (not self.autonomous and self.pre_steps < PRE_STEP_CAP and not self.touched and not self.app_touched
                     and (kind == "job_page" or kind in ACCOUNT_KINDS
                          or (plan.actions and all(a.op == "click" and a.click_role == "cookies" for a in plan.actions)))):
                 self.pre_steps += 1   # a pure pre-data step (cookie banner, open_form, account page): the budget is for the application
                 self.consumed -= 1
-            if plan.note and not (self._inspection_only or self.mode == "supervised"):
+            if plan.note and not (self._inspection_only or self.mode == "supervised" or self.autonomous):
                 log.note = f"{log.note}; {self._r(plan.note[:300])}"
             errors = any(f.error for f in snap.fields)
             if kind in ("other", "closed", "error") and not self.touched and AGGREGATOR_RE.search(fold(plan.note or "")):
@@ -2066,13 +2149,42 @@ class _Run:
             if self.final_clicked:
                 await self._shot(log)
                 return self._unconfirmed()
-            if self.mode != "submit" and kind in ACCOUNT_KINDS:
+            if self.mode != "submit" and (kind in ACCOUNT_KINDS or (
+                    self._inspection_only and self.apply_link_followed and any(field.kind == "password" for field in snap.fields))):
                 await self._shot(log)
-                return self._account_handoff()
+                result = self._account_handoff()
+                if self._inspection_only and self.apply_link_followed:
+                    result.diagnostic_code = "dry_account_gate"
+                    result.final_url = origin(self.page.url)
+                return result
 
             if self.current_step:
                 await self._supervised_checkpoint()
+            bound_account = bool(self.autonomous and self.autonomous.entry_binding and
+                                 (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields)))
+            if bound_account:
+                if self.app_touched or kind not in ACCOUNT_KINDS or any(field.kind == "file" for field in snap.fields):
+                    return self._end("needs_human", SUPERVISED_REQUIRED)
+                known_account = self.account_known and self.account_known(self._account_address(self.page.url))
+                if kind == "account_login" and not known_account:
+                    signup = [field for field in snap.fields if field.kind in {"button", "link"} and
+                              SIGNUP_LINK_RE.search(fold(field.label)) and (field.kind == "link" or not field.form)]
+                    if len(signup) != 1:
+                        return self._end("needs_human", "Création du compte à effectuer à la main.")
+                    plan = plan.model_copy(update={"actions": [Action(ref=signup[0].ref, op="click", click_role="signup")]})
+                elif kind == "account_signup" and known_account:
+                    signin = [field for field in snap.fields if field.kind == "link" and re.fullmatch(
+                        r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
+                    if len(signin) != 1:
+                        return self._end("needs_human", SUPERVISED_REQUIRED)
+                    plan = plan.model_copy(update={"actions": [Action(ref=signin[0].ref, op="click", click_role="open_form")]})
+                else:
+                    plan = plan.model_copy(update={"actions": [action for action in plan.actions if
+                        (action.op == "fill" and action.fact in ACCOUNT_FACTS) or
+                        (action.op == "click" and action.click_role == ("login" if kind == "account_login" else "signup"))]})
             v = self._validate(plan, snap, resolve)
+            if bound_account:
+                v.items = [item for item in v.items if item.act.op == "fill" and item.used in ACCOUNT_FACTS]
             if not self._inspection_only:
                 await self._verify(v)
             if self.current_step:
@@ -2261,6 +2373,8 @@ class _Run:
             if role is not None and role != v.click[1]:  # type: ignore[index]
                 v.notes.append(f"clic « {v.click[0].label} » reclassé en {role}")  # type: ignore[index]
             final = (not attach) and self._is_final(v.click[0], role) if v.click else False  # type: ignore[arg-type]
+            if bound_account and (final or role not in {None, "open_form", "login", "signup"}):
+                return self._end("needs_human", SUPERVISED_REQUIRED)
             # Whatever the planner called it, a click that is final or made after data entry may send the form: the unanswered
             # required questions are checked first. Only a pre-data cookies / open_form click is exempt.
             cookie_banner = bool(v.click) and self._is_cookie_click(v.click[0], role) and not final  # a real banner button, by its label
@@ -2292,10 +2406,19 @@ class _Run:
                 log.note = self._r("; ".join(([log.note] if log.note else []) + v.notes))[:900]
             await self._shot(log)
             if v.questions and (guarded or self._inspection_only or self.mode == "supervised"):
-                return self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
-                                 v.questions)
+                result = self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
+                                   v.questions)
+                if self._inspection_only and self.apply_link_followed and kind == "form" and self._has_form(snap):
+                    result.diagnostic_code = "dry_apply_form_needs_input"
+                return result
             if self._inspection_only:
-                return self._end("blocked", DRY_UNTESTED)
+                result = self._end("blocked", DRY_UNTESTED)
+                if self.apply_link_followed and kind == "form" and self._has_form(snap):
+                    result.diagnostic_code = "dry_apply_form_found"
+                elif self.apply_link_followed and (kind in ACCOUNT_KINDS or any(f.kind == "password" for f in snap.fields)):
+                    result.diagnostic_code = "dry_account_gate"
+                    result.final_url = origin(self.page.url)
+                return result
             if self.mode == "supervised":
                 return self._end("ready", "Vérifiez le formulaire. Vous seul pouvez cliquer sur Envoyer.")
 
@@ -2400,7 +2523,7 @@ class _Run:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
                 with contextlib.suppress(Exception):
-                    self.login_unknown_try = not self.account_known(self._host())
+                    self.login_unknown_try = not self.account_known(self._account_address(self.page.url))
             self.diagnostics.control = ("final_submit" if final else "login_otp" if role == "login" else
                                         "account_creation" if role == "signup" else "navigation")
             try:
@@ -2415,7 +2538,7 @@ class _Run:
                             if final and self.on_submit_click is not None:
                                 await self.on_submit_click()
                                 self.diagnostics.receipt_reason = "submit_unverified"
-                            self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"})
+                            self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"}, account=bound_account)
                         except (ManualField, ApplyError):
                             raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
                     await self._click(target, recheck=dispatch_check)
@@ -2436,7 +2559,8 @@ class _Run:
             log.clicked = self._r(field.label)
             await self._after_click()
             if self.autonomous:
-                await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending)
+                if await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending):
+                    self.nav_pending = False
         if self.autonomous:
             return self._end("needs_human", "Trop d'étapes : limite atteinte.")
         return self._unconfirmed() if self.final_clicked or self.nav_pending else self._end("failed", "Trop d'étapes : limite atteinte.")
@@ -2461,7 +2585,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           supervised_widgets: bool = False,
                           live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None,
                           autonomous=None, autonomous_attempt: Attempt | None = None,
-                          diagnostics: DispatchDiagnostics | None = None) -> RunResult:
+                          diagnostics: DispatchDiagnostics | None = None, apply_navigation=None, apply_entry=None) -> RunResult:
     """Inspect or fill a form; only a bound, guarded unattended flow can submit.
 
     Legacy dispatch callbacks alone do not authorize live sends. Dry callers
@@ -2498,6 +2622,8 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                       host_allowed=host_allowed, max_steps=max_steps, goto=goto, on_progress=on_progress,
                       captcha_wait_s=captcha_wait_s, account_known=account_known, choices=choices)
     flow.before_field = before_field
+    flow.apply_navigation = apply_navigation or apply_entry
+    flow.apply_entry = apply_entry
     flow.current_step = current_step
     flow.generic_step = generic_step
     flow.live_mutation_check = live_mutation_check

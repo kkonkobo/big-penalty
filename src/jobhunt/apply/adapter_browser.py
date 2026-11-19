@@ -54,7 +54,7 @@ class AdapterAudience(Audience):
         return (self.click_boundary in {'account_creation', 'draft_write'} and self.click_write is not None
                 and self.posting(snapshot.url) and self.adapter.browser_continuation(snapshot.url, self.click_source))
 
-    def arm_click(self, *, scripted):
+    def arm_click(self, *, scripted, account=False):
         self.click_source = self.live_url
         super().arm_click(scripted=scripted)
 

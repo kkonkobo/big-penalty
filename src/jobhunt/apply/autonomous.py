@@ -10,13 +10,28 @@ from urllib.parse import parse_qsl, urlsplit
 
 import tldextract
 
-from jobhunt.apply.destination import clean_url, origin
+from jobhunt.apply.destination import clean_url, login_return, origin
 from jobhunt.apply.errors import ApplyError, ManualField
+from jobhunt.apply.identity import ats_target
 from jobhunt.apply.supervised import _FORM_TARGETS_JS, _generic_action_allowed, _posting_ids, _target_allowed, _url_posting_ids
-from jobhunt.origin import ats_of_host
+from jobhunt.origin import ats_of_host, workday_requisition
 
 
 SUPERVISED_REQUIRED = "À envoyer en mode supervisé"
+POSTING_IDS_JS = """() => {
+    const ids = [...document.querySelectorAll('main, h1, [itemtype$="/JobPosting"]')].flatMap(node =>
+        ['data-job-id', 'data-requisition-id', 'data-job-requisition-id'].map(key => node.getAttribute(key)).filter(Boolean));
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try {
+            const data = JSON.parse(script.textContent);
+            for (const item of (Array.isArray(data) ? data : data?.['@graph'] || [data])) {
+                if ([item?.['@type']].flat().includes('JobPosting') && item.identifier != null)
+                    ids.push(String(item.identifier?.value ?? item.identifier));
+            }
+        } catch (_) {}
+    }
+    return ids;
+}"""
 _PSL = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
 
 
@@ -61,6 +76,7 @@ def confirmation_json(body: bytes) -> bool:
 class Audience:
     def __init__(self, reserved_url, verified_urls, recheck, *, pdf_bytes=None):
         self.reserved_url = reserved_url
+        self.recipient_url = reserved_url
         self.verified_urls = frozenset(verified_urls)
         self.document = reserved_url
         self.recheck = recheck
@@ -72,6 +88,13 @@ class Audience:
         self.method = ""
         self.next_document = ""
         self.document_nonce = ""
+        self.entry_nonce = ""
+        self.entry_binding = ""
+        self.entry_ids = frozenset()
+        self.entry_recipient = ""
+        self.account_click = False
+        self.account_next = ""
+        self.account_hops = 0
         self.final_response = False
         self.final_response_at = 0.0
         self.final_started = False
@@ -88,7 +111,36 @@ class Audience:
         if not recipient:
             return False
         host = urlsplit(recipient).hostname
-        return recipient == origin(self.reserved_url) or bool(self.domain and _domain(host) == self.domain)
+        return recipient == origin(self.recipient_url) or bool(self.domain and _domain(host) == self.domain)
+
+    def bind_recipient(self, target):
+        self.recipient_url = self.document = target
+        self.host = urlsplit(target).hostname
+        self.domain = _domain(self.host)
+        self.entry_recipient = target
+
+    def posting_matches(self, url, ids=()):
+        ats, identity = ats_target(url)
+        reference_ats, reference = ats_target(self.entry_recipient or self.reserved_url)
+        if identity and reference and ats == reference_ats and identity[0] != reference[0]:
+            return False
+        expected = self.entry_ids
+        normalize = workday_requisition if ats == 'workday' or reference_ats == 'workday' else str.casefold
+        expected = {normalize(value) for value in expected}
+        found = _url_posting_ids(url) | _url_posting_ids(login_return(url))
+        if identity:
+            found.add(identity[1])
+        found.update(value for value in ids if re.fullmatch(r"[a-z_\-]{0,15}\d[\w-]{1,79}", value, re.I | re.ASCII))
+        return not found or {normalize(value) for value in found} <= expected
+
+    def account_redirect(self, target):
+        if (not self.account_click or self.final_started or self.account_hops >= 5 or self.account_next
+                or not clean_url(target, navigation=True) or not self.write_recipient(target)
+                or not self.posting_matches(target)):
+            return False
+        self.account_next = target
+        self.account_hops += 1
+        return True
 
     def initial_redirect(self, source, destination):
         target = clean_url(destination, navigation=True)
@@ -96,19 +148,28 @@ class Audience:
             return False
         original = urlsplit(self.reserved_url)
         live = urlsplit(target)
+        original_ats, original_identity = ats_target(self.reserved_url)
+        target_ats, target_identity = ats_target(target)
+        if original_identity and any(value.casefold() != original_identity[1] for _, value in parse_qsl(live.query)):
+            return False
+        if target_ats and original_ats == target_ats and original_identity and target_identity:
+            return original_identity == target_identity and self.write_recipient(target)
         expected = _posting_ids(original.path + "?" + original.query)
         live_ids = _posting_ids(live.path + "?" + live.query)
         if expected and expected != live_ids:
             return False
-        if target in self.verified_urls:
+        if target in self.verified_urls and self.write_recipient(target):
             return True
-        if not self.write_recipient(target) and not ats_of_host(live.hostname or ""):
+        if not self.write_recipient(target):
             return False
         if origin(target) == origin(self.reserved_url) and (live.path.rstrip("/"), live.query) == (original.path.rstrip("/"), original.query):
             return True
         if live.hostname != original.hostname and (ats_of_host(original.hostname or "") or ats_of_host(live.hostname or "")):
             return False
         return bool(expected and live_ids == expected)
+
+    def apply_navigation(self, target):
+        return bool(target and target != self.document and self.initial_redirect(self.document, target))
 
     def request_allowed(self, request, page, *, initial):
         if initial and request.method in {"GET", "HEAD"} and request.is_navigation_request():
@@ -117,13 +178,17 @@ class Audience:
             return False
         writing = request.method not in {"GET", "HEAD"}
         if request.is_navigation_request() and request.frame == page.main_frame:
+            if self.entry_binding and self.account_click and not writing and request.url == self.account_next:
+                self.account_next = ""
+                self.next_document = clean_url(request.url, navigation=True)
+                return True
             if (not writing and self.final_response and self.clicking and not self.next_document
                     and request.frame.url == self.live_url and self.receipt_url(request.url)):
                 self.next_document = request.url
                 return True
             if (not self.clicking or self.next_document or request.method != self.method or request.url != self.endpoint
                     or request.frame.url != self.live_url
-                    or not _target_allowed(request.frame.url, request.url)):
+                    or not self.click_endpoint_allowed(request.frame.url, request.url)):
                 return False
             if writing and not self._admit_click_write(request):
                 return False
@@ -132,7 +197,8 @@ class Audience:
         if writing or self.active and urlsplit(request.url).query:
             if request.frame != page.main_frame or request.frame.url != self.live_url:
                 return False
-            if not _url_posting_ids(request.url) <= _url_posting_ids(self.document):
+            if not (self.posting_matches(request.url) if self.entry_binding else
+                    _url_posting_ids(request.url) <= _url_posting_ids(self.document)):
                 return False
             if writing and self.clicking and self.scriptable and not request.is_navigation_request():
                 return self._admit_click_write(request)
@@ -191,16 +257,35 @@ class Audience:
     def receipt_url(self, url):
         return confirmation_url(url, self.document)
 
-    async def bind_document(self, page):
+    async def bind_document(self, page, *, entry=False):
         nonce = secrets.token_urlsafe(24)
+        live_url = await page.evaluate("""([nonce, entry]) => {
+            if (entry && document.__bp_apply_landing !== entry) return null;
+            document.__bp_autonomous_document = nonce;
+            return location.href;
+        }""", [nonce, self.entry_nonce if entry else ""], isolated_context=True)
+        if not live_url:
+            raise ApplyError(SUPERVISED_REQUIRED)
         self.document_nonce = nonce
-        self.live_url = await page.evaluate("value => { document.__bp_autonomous_document = value; return location.href; }",
-                                            nonce, isolated_context=True)
+        self.live_url = live_url
 
     async def after_click(self, page, *, observing=False):
+        if self.account_click and self.entry_binding and self.account_hops:
+            while self.account_next:
+                target = self.account_next
+                self.recheck()
+                await page.goto(target, wait_until="domcontentloaded", timeout=10000)
+            if self.next_document != clean_url(page.url, navigation=True) or not self.posting_matches(page.url):
+                raise ApplyError(SUPERVISED_REQUIRED)
+            self.document = self.next_document
+            await self.bind_document(page)
+            self.next_document = ""
+            self.clicking = self.account_click = False
+            return True
         if observing and self.scriptable and not self.next_document:
             return
         self.clicking = False
+        self.account_click = False
         if self.next_document and not self.final_response:
             new_url = clean_url(page.url, navigation=True)
             if self.next_document == new_url and _generic_action_allowed(self.document, new_url, new_url):
@@ -209,9 +294,15 @@ class Audience:
         self.next_document = ""
 
     def form_allowed(self, document, targets, endpoint):
+        if self.entry_binding:
+            raw, action, submitters = targets
+            return all(self.click_endpoint_allowed(document, url) for url in ([action] if raw else []) + list(submitters))
         return _generic_action_allowed(document, *targets)
 
     def click_endpoint_allowed(self, document, endpoint):
+        if self.entry_binding:
+            return bool(origin(document) == origin(endpoint) and clean_url(endpoint, navigation=True)
+                        and self.posting_matches(endpoint))
         return _target_allowed(document, endpoint)
 
     async def target(self, target, *, button=False, final=False):
@@ -223,7 +314,7 @@ class Audience:
                 if (!node.isConnected || !win || win !== win.top || doc !== document) return null;
                 if (button && node.matches('a[href]') && (!node.target || node.target === '_self'))
                     return [win.location.href, [node.getAttribute('href'), node.href, []],
-                            node.href, doc.__bp_autonomous_document, 'GET'];
+                            node.href, doc.__bp_autonomous_document, 'GET', ({POSTING_IDS_JS})()];
                 const form = node.form;
                 if (button && !['', '_self'].includes((node.getAttribute('formtarget') || form?.getAttribute('target') || '').toLowerCase())) return null;
                 const targets = ({_FORM_TARGETS_JS})(node);
@@ -232,13 +323,15 @@ class Audience:
                 const action = override !== null ? (override === '' ? doc.URL : node.formAction) : (targets[1] ?? doc.URL);
                 const nativePost = form
                     && (node.getAttribute('formmethod') || form.getAttribute('method') || 'get').toLowerCase() === 'post';
-                return [win.location.href, targets, action, doc.__bp_autonomous_document, nativePost ? 'POST' : ''];
+                return [win.location.href, targets, action, doc.__bp_autonomous_document, nativePost ? 'POST' : '', ({POSTING_IDS_JS})()];
             }}""", button, isolated_context=True)
         except Exception:
             raise ManualField() from None
         if not value or not self.form_allowed(value[0], value[1], value[2]):
             raise ManualField()
         live = clean_url(value[0], navigation=True)
+        if self.entry_binding and not self.posting_matches(value[0], value[5]):
+            raise ApplyError(SUPERVISED_REQUIRED)
         if not live or live != self.document or value[0] != self.live_url or value[3] != self.document_nonce or not self.write_recipient(live):
             raise ApplyError(SUPERVISED_REQUIRED)
         if not button:
@@ -255,10 +348,12 @@ class Audience:
         self.recheck()
         self.active = True
 
-    def arm_click(self, *, scripted: bool):
+    def arm_click(self, *, scripted: bool, account: bool = False):
         self.click_write = None
         self.scriptable = scripted and self.method != "GET"
         self.clicking = True
+        self.account_click = account
+        self.account_hops = 0
 
 
 _OPT_OUT = re.compile(r"marketing|newsletter|job alerts?|alertes? (?:emploi|offres?)|talent pool|vivier|partners?|partenaires?|(?:third[ -]part|tiers)|publicit|prospection|transfert", re.I)
