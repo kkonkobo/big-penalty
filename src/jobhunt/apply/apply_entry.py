@@ -216,12 +216,10 @@ class Probe:
         if ats == "workday":
             expected = {workday_requisition(item) for item in expected}
             declared = {workday_requisition(item) for item in declared}
-        if declared and expected and not declared <= expected:
+        if declared and not declared <= expected:
             return False
-        if not (ready or _ENTRY.search(urlsplit(target).path)):
-            return False
-        if len(expected) == 1 and ((identity and identity[1] in expected) or declared == expected
-                                  or _url_posting_ids(target) == expected):
+        if (ready or _ENTRY.search(urlsplit(target).path)) and len(expected) == 1 and (
+                (identity and identity[1] in expected) or declared == expected or _url_posting_ids(target) == expected):
             return "requisition"
         if self.clicked and target in self.visited and (self.same_site(target) or self.continuity_site(target)):
             return "continuity"

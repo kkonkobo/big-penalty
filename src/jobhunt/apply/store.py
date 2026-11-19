@@ -675,7 +675,7 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
         if any(exact or app_id not in confirmed_distinct for app_id, exact in duplicates.items()):
             raise ApplyError(NOT_ACTIVE)
         digest = _url_key(target)
-        if method == "requisition" and conn.execute("SELECT 1 FROM apply_reservations WHERE profile_id=? AND application_id<>?"
+        if conn.execute("SELECT 1 FROM apply_reservations WHERE profile_id=? AND application_id<>?"
                         " AND (released_at IS NULL OR receipt_outcome='confirmed' OR run_id IN"
                         " (SELECT sent_run_id FROM applications WHERE profile_id=? AND status='submitted'))"
                         " AND (url_key=? OR json_extract(binding_json, '$.landing_digest')=?)",

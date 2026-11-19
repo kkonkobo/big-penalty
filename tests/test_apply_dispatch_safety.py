@@ -17,7 +17,7 @@ from jobhunt.apply import apply_entry, engine, service, store
 from jobhunt.apply.facts import save_answers
 from jobhunt.apply.adapters import Receipt, Registry, Requisition
 from jobhunt.apply.autonomous import Audience
-from jobhunt.apply.destination import RecipientGuard, origin
+from jobhunt.apply.destination import RecipientGuard, clean_url, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.supervised import HAS_LOCAL_BRIDGE, call_local
 from jobhunt.apply.identity import dispatch_url, resolved_identity
@@ -42,6 +42,12 @@ def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes emba
     app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
     cvs.approve(app.id, app.current_rev)
     return job, app
+
+
+@pytest.mark.parametrize("target, allowed", [("%2Fapplication", True), ("%2F%2Fother.example%2Fapplication", False)])
+def test_talentsoft_login_return_is_same_host_and_not_persisted(target, allowed):
+    base = "https://example.test/Pages/Account.aspx"
+    assert clean_url(f"{base}?ReturnUrl={target}", navigation=True) == (base if allowed else "")
 
 
 @pytest.mark.parametrize("scenario", ["dry", "signin", "signup", "mixed", "wrong_requisition", "foreign", "otp"])
