@@ -203,7 +203,10 @@ _OUTSTANDING_RUNS = """
     SELECT run.*, app.id AS owner_application_id, EXISTS (
         SELECT 1 FROM application_runs retry WHERE retry.application_id = app.id
         AND retry.operator_not_sent_at IS NOT NULL
-    ) AS manual_retry FROM applications app
+    ) AS manual_retry, EXISTS (
+        SELECT 1 FROM application_runs handoff WHERE handoff.application_id = app.id
+        AND handoff.status IN ('needs_email', 'needs_human')
+    ) AS site_handoff FROM applications app
     LEFT JOIN application_runs run ON run.id = COALESCE(
         (SELECT v.run_id FROM apply_reservations v JOIN application_runs held ON held.id = v.run_id
          WHERE v.application_id = app.id AND held.application_id = app.id
@@ -238,14 +241,23 @@ def requires_manual_retry(application_id: int) -> bool:
                          (application_id,)).fetchone() is not None
 
 
-def queue_attempts(profile_id: int) -> tuple[dict[int, ApplyRun], set[int]]:
-    """Read verification holds and operator-directed manual retries for a queue."""
+def has_site_handoff(application_id: int) -> bool:
+    """A site handoff requires manual follow-up; unrelated attempts cannot clear it."""
+    with connect() as conn:
+        return conn.execute("SELECT 1 FROM application_runs WHERE application_id=? "
+                            "AND status IN ('needs_email', 'needs_human') LIMIT 1",
+                            (application_id,)).fetchone() is not None
+
+
+def queue_attempts(profile_id: int) -> tuple[dict[int, ApplyRun], set[int], set[int]]:
+    """Read verification holds, manual retries and site handoffs for a queue."""
     with connect() as conn:
         conn.create_function("owner_confirmed_dead", 1, _owner_confirmed_dead)
         rows = conn.execute(_OUTSTANDING_RUNS + " WHERE app.profile_id = ? AND app.status NOT IN ('submitted','withdrawn')",
                             (profile_id,)).fetchall()
     return ({row["owner_application_id"]: _from_row(row) for row in rows if row["id"] is not None},
-            {row["owner_application_id"] for row in rows if row["manual_retry"]})
+            {row["owner_application_id"] for row in rows if row["manual_retry"]},
+            {row["owner_application_id"] for row in rows if row["site_handoff"]})
 
 
 def auto_regens(application_id: int) -> int:

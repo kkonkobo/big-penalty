@@ -529,6 +529,20 @@ async def test_a_new_cv_revision_does_not_clear_a_site_handoff(env, profile, sta
     assert service._waiting_on_user(app.model_copy(update={"current_rev": app.current_rev + 1}), job, astore.last_run(app.id))
 
 
+@pytest.mark.parametrize("status", ["needs_email", "needs_human"])
+async def test_dry_run_or_refusal_cannot_clear_a_site_handoff(env, profile, status):
+    job = env.job(1)
+    app = paused_run(env, job, status)
+    for mode, outcome in (("dry_run", "ready"), ("submit", "blocked")):
+        attempt = astore.start_run(app.id, app.current_rev, mode, "user", lambda rid: env.tmp / "runs" / str(rid))
+        astore.finish_run(attempt.id, RunResult(status=outcome))
+        summary, _ = await daily(profile)
+        assert summary.paused == 1 and not env.runs
+        entry = next(item for item in service.queue(profile.id) if item.app.id == app.id)
+        assert not entry.auto
+        assert "intervention manuelle requise sur le site" in entry.problems
+
+
 async def test_a_technical_failure_without_a_click_is_retried_twice_per_revision(env, profile):
     job = env.job(1)
     env.run_status = "failed"

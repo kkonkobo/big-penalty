@@ -176,6 +176,8 @@ def _submit_problems(app: Application, job: MergedJob | None, *, trigger: Litera
     if trigger == "auto":
         if apply_store.requires_manual_retry(app.id):
             out.append("nouvel envoi manuel requis après vérification")
+        if apply_store.has_site_handoff(app.id):
+            out.append("intervention manuelle requise sur le site")
         if not s.apply_auto:
             out.append("envoi automatique désactivé")
         ok, reasons = service.is_eligible(app)

@@ -180,7 +180,7 @@ def _draft_problems(app: Application, job, reads: policy.QueuePolicyReads) -> li
 
 
 def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.QueuePolicyReads,
-          outstanding: ApplyRun | None, manual_retry: bool) -> QueueItem:
+          outstanding: ApplyRun | None, manual_retry: bool, site_handoff: bool) -> QueueItem:
     problems = [] if app.status in ("submitted", "failed") else _draft_problems(app, job, reads)
     pause = ""
     questions: list[Question] = []
@@ -198,6 +198,9 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
         questions = list(run_.result.questions) if run_.result else []
     elif untrusted:
         bucket, pause = "paused", "host"
+    elif site_handoff:
+        bucket = "blocked"
+        problems.append("intervention manuelle requise sur le site")
     elif problems:
         bucket = "blocked"
     elif run_ is not None and run_.status == "failed" and not run_.operator_not_sent_at:
@@ -209,7 +212,8 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
         app=app, bucket=bucket, score=job.score if job else None, origin_url=job.origin_url if job else None,  # type: ignore[arg-type]
         origin_host=_host(job.origin_url if job else None), origin_sha=origin_digest(job.origin_url if job else None), age_days=age_days(job) if job else None, last_run=run_,
         outstanding=outstanding,
-        auto=bool(not manual_retry and not outstanding and job and job.score is not None and job.score >= settings.apply_auto_min_score), problems=problems,
+        auto=bool(not (manual_retry or outstanding or site_handoff) and job and job.score is not None
+                  and job.score >= settings.apply_auto_min_score), problems=problems,
         questions=questions, pause_reason=pause, untrusted_host=untrusted if pause == "host" else "",
         selectable=bucket == "to_validate" or (bucket in ("paused", "failed") and open_ and pause != "host"))
 
@@ -228,11 +232,11 @@ def queue(profile_id: int | None = None) -> list[QueueItem]:
         if not visible:
             continue
         runs = apply_store.latest_runs(pid)
-        outstanding, manual_retry = apply_store.queue_attempts(pid)
+        outstanding, manual_retry, site_handoffs = apply_store.queue_attempts(pid)
         reads = policy.QueuePolicyReads(pid, profile_apps, jobs, apply_store.active_reservations(pid),
                                         apply_store.unconfirmed_application_ids(pid))
         items.extend(_item(app, jobs.get(app.job_id), runs.get(app.id), settings, reads, outstanding.get(app.id),
-                           app.id in manual_retry)
+                           app.id in manual_retry, app.id in site_handoffs)
                      for app in visible)
     items.sort(key=lambda i: (BUCKET_ORDER.index(i.bucket), -(i.score if i.score is not None else -1.0), -i.app.id))
     return items
@@ -886,7 +890,7 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         summary.waiting += 1
         emit(f"{tag} : bloquée (un envoi est déjà en cours pour cette candidature)")
         return
-    if _waiting_on_user(app, job, last):
+    if _waiting_on_user(app, job, last) or apply_store.has_site_handoff(app.id):
         summary.paused += 1
         summary.paused_by["en attente"] = summary.paused_by.get("en attente", 0) + 1
         emit(f"{tag} : en pause (en attente de votre réponse)")

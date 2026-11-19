@@ -196,7 +196,7 @@ def test_queue_buckets_and_order(profile, master, tmp_path):
     _, paused = new_app(profile, master, tmp_path, 6)
     finish(paused, "needs_input", questions=[Question(label="Permis ?")])
     _, paused_old_rev = new_app(profile, master, tmp_path, 7)
-    finish(paused_old_rev, "needs_email", rev=0)  # run of another revision: not paused any more
+    finish(paused_old_rev, "needs_email", rev=0)
     _, sending = new_app(profile, master, tmp_path, 8, approve=True)
     r = astore.start_run(sending.id, 1, "submit", "user", lambda rid: tmp_path / str(rid))
     _, stale = new_app(profile, master, tmp_path, 9)
@@ -215,8 +215,9 @@ def test_queue_buckets_and_order(profile, master, tmp_path):
     bucket = lambda a: items[a.id].bucket  # noqa: E731
     assert [bucket(a) for a in (ok_low, ok_high, errs, nopdf, old, paused, paused_old_rev, sending, stale, failed_run,
                                 failed_app, sent)] == [
-        "to_validate", "to_validate", "blocked", "blocked", "blocked", "paused", "to_validate", "sending", "to_validate",
+        "to_validate", "to_validate", "blocked", "blocked", "blocked", "paused", "blocked", "sending", "to_validate",
         "failed", "failed", "sent"]
+    assert "intervention manuelle requise sur le site" in items[paused_old_rev.id].problems
     assert items[errs.id].problems and any("erreur" in p for p in items[errs.id].problems)
     assert any("PDF" in p for p in items[nopdf.id].problems) and any("jours" in p for p in items[old.id].problems)
     p = items[paused.id]
