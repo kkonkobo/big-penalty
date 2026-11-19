@@ -106,6 +106,10 @@ class BrowserPool:
 
     @property
     def headless(self) -> bool:
+        # JOBHUNT_FORCE_HEADLESS=1 wins over everything: env.sh sets it for test runs from agent worktrees, so their
+        # "production" browser tests never open (and focus) Chrome on the operator's desktop. CI stays headful.
+        if os.environ.get("JOBHUNT_FORCE_HEADLESS", "").strip() == "1":
+            return True
         return self.settings.headless if self.headless_override is None else self.headless_override
 
     def has_session(self, profile_id: int, site: str) -> bool:

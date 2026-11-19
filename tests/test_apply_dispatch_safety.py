@@ -2,6 +2,7 @@
 
 from apply_cv_helpers import make_app, make_job
 import asyncio
+import os
 import json
 from contextlib import asynccontextmanager, closing
 from urllib.parse import urlsplit
@@ -45,6 +46,10 @@ def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes emba
 
 @pytest.fixture
 async def production_pool():
+    # These tests drive the real Google Chrome headful, which takes focus on the desktop. Agent runs on the operator's
+    # Mac set JOBHUNT_FORCE_HEADLESS=1 (env.sh) and skip them; CI runs them headful on every PR.
+    if os.environ.get("JOBHUNT_FORCE_HEADLESS", "").strip() == "1":
+        pytest.skip("headful production-browser test: runs in CI, skipped on the operator's desktop")
     pool = BrowserPool(headless=False)
     try:
         yield pool

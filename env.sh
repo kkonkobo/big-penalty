@@ -10,9 +10,10 @@ export JOBHUNT_DATA_DIR="$BP_ROOT/data"
 mkdir -p "$UV_CACHE_DIR" "$XDG_CACHE_HOME" "$TMPDIR" "$JOBHUNT_DATA_DIR"
 if [ -f "$BP_ROOT/.env" ]; then set -a; . "$BP_ROOT/.env"; set +a; fi
 
-# Test runs from other checkouts (agent worktrees) open their headful Chrome windows off-screen, so they don't pop up
-# on the desktop. Runs from this checkout (the local web app, the daily run, supervised applications) stay visible.
+# Test runs from other checkouts (agent worktrees) run Chrome headless (and off-screen as a fallback), so they never pop
+# up or take focus on the desktop. Runs from this checkout (the local web app, the daily run, supervised applications) stay visible.
 case "$PWD" in
   "$BP_ROOT"|"$BP_ROOT"/*) ;;
-  *) export JOBHUNT_WINDOW_POSITION="${JOBHUNT_WINDOW_POSITION:--32000,-32000}" ;;
+  *) export JOBHUNT_WINDOW_POSITION="${JOBHUNT_WINDOW_POSITION:--32000,-32000}"
+     export JOBHUNT_FORCE_HEADLESS="${JOBHUNT_FORCE_HEADLESS:-1}" ;;
 esac
