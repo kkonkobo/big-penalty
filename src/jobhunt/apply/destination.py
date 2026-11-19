@@ -72,9 +72,13 @@ RECIPIENT_REFUSED = ("Destination ou transmission non autorisée : fenêtre ferm
 
 
 class RecipientGuard:
-    def __init__(self, allowed: frozenset[str]):
+    def __init__(self, allowed: frozenset[str], *, audience=None):
         self.allowed = allowed
+        self.audience = audience
         self.refused = False
+        self.transmitted = False
+        self.final_started = False
+        self.final_response = False
         self._initial_url = ""
         self._next_url = ""
 
@@ -133,7 +137,11 @@ class RecipientGuard:
             if self.refused:
                 await route.abort()
                 return
-            if not self.allows(request.url):
+            write = request.method not in {"GET", "HEAD"}
+            permitted = self.allows(request.url)
+            if self.audience:
+                permitted = self.audience.request_allowed(request, page, initial=request.url == self._initial_url)
+            if not permitted:
                 if request.method not in {"GET", "HEAD"} or request.is_navigation_request():
                     await refuse(route)
                 else:
@@ -144,13 +152,28 @@ class RecipientGuard:
                 return
             response = None
             try:
+                if self.audience and (write or (self.audience.active and urlsplit(request.url).query)):
+                    self.audience.recheck()
+                    self.transmitted = True
+                final_request = self.final_started and write and request.is_navigation_request() and request.frame == page.main_frame
                 response = await route.fetch(max_redirects=0, max_retries=0)
+                if final_request and response.status in {301, 302, 303} and response.headers.get("location"):
+                    target = self.audience.confirmation_redirect(urljoin(request.url, response.headers["location"]))
+                    if not target:
+                        await refuse(route)
+                        return
+                    await response.dispose()
+                    response = None
+                    response = await page.context.request.get(target, max_redirects=0, max_retries=0, timeout=10000)
+                    if 200 <= response.status < 300 and self.audience.receipt_url(target):
+                        self.audience.final_receipt_url = target
                 if self.refusal_status(response.status):
                     target = urljoin(request.url, response.headers.get("location", ""))
                     if (300 <= response.status < 400 and response.headers.get("location")
                             and request.method in {"GET", "HEAD"} and request.url == self._initial_url
                             and request.is_navigation_request() and request.frame == page.main_frame
-                            and self.allows(target) and (safe_target := clean_url(target, navigation=True))):
+                            and (self.audience.initial_redirect(request.url, target) if self.audience else self.allows(target))
+                            and (safe_target := clean_url(target, navigation=True))):
                         self._next_url = safe_target
                         await route.fulfill(status=200, content_type="text/plain", body="")
                     else:
@@ -158,6 +181,9 @@ class RecipientGuard:
                 elif self.refused:
                     await route.abort()
                 else:
+                    if final_request and 200 <= response.status < 300:
+                        self.final_response = True
+                        self.audience.final_response = True
                     await route.fulfill(response=response)
             except Exception:
                 if not self.refused:

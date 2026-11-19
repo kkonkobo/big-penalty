@@ -23,6 +23,7 @@ datas = (
     collect_data_files("jobhunt")  # web templates, static files, ROME / location tables
     # Browser automation driver (Node + the patchright JS package) for this OS only.
     + collect_data_files("patchright", includes=["driver/**"])
+    + collect_data_files("tldextract", includes=[".tld_set_snapshot"])
 )
 
 a = Analysis(

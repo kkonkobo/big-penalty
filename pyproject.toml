@@ -24,6 +24,7 @@ dependencies = [
     "rapidfuzz>=3.14.6",
     "selectolax>=1.0.2",
     "tenacity>=9.2.1",
+    "tldextract>=5.4.0",
     "typer>=0.29.1",
     "uvicorn[standard]>=0.54.0",
 ]

@@ -152,6 +152,7 @@ class RunResult(BaseModel):
     status: RunStatus
     message: str = ""             # French, user-facing
     diagnostic_code: str = ""
+    consent_codes: list[str] = Field(default_factory=list)
     steps: list[StepLog] = Field(default_factory=list)
     questions: list[Question] = Field(default_factory=list)   # status == needs_input
     final_url: str = ""

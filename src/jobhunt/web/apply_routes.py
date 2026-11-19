@@ -40,7 +40,7 @@ RUN_STATUS_LABELS = {"running": "En cours", "ready": "Prêt (rien envoyé)", "su
                      "needs_email": "E-mail à confirmer", "needs_human": "CAPTCHA à résoudre", "blocked": "Bloquée", "failed": "Échec"}
 RUN_STATUS_CLASS = {"running": "src", "ready": "ok", "submitted": "ok", "needs_input": "warn", "needs_email": "warn",
                     "needs_human": "warn", "blocked": "bad", "failed": "bad"}
-MODE_LABELS = {"dry_run": "Essai à blanc", "submit": "Envoi via adaptateur", "supervised": "Envoi supervisé"}
+MODE_LABELS = {"dry_run": "Essai à blanc", "submit": "Envoi autonome", "supervised": "Envoi supervisé"}
 TRIGGER_LABELS = {"auto": "Automatique", "user": "Manuel"}
 PAUSE_STATUSES = ("needs_input", "needs_email", "needs_human")
 PAGE_KIND_LABELS = {"job_page": "Page de l'offre", "form": "Formulaire de candidature", "account_login": "Connexion à un compte",

@@ -51,6 +51,7 @@ class Attempt:
     dedupe_key: str = ""
     profile_id: int = 0
     receipt_kind: ReceiptType = "none"
+    autonomous: bool = False
 
 
 @dataclass(frozen=True)

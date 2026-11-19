@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from jobhunt import db
 from jobhunt.apply import accounts, policy
 from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Match, Receipt, WriteGate, clean_receipt, origin, registry
+from jobhunt.apply.autonomous import Audience
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url
@@ -191,7 +192,7 @@ def _draft_problems(app: Application, job, reads: policy.QueuePolicyReads) -> li
 
 
 def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.QueuePolicyReads,
-          outstanding: ApplyRun | None, manual_retry: bool, site_handoff: bool) -> QueueItem:
+          outstanding: ApplyRun | None, manual_retry: bool, site_handoff: bool, paused_hosts: set[str]) -> QueueItem:
     problems = [] if app.status in ("submitted", "failed") else _draft_problems(app, job, reads)
     pause = ""
     questions: list[Question] = []
@@ -220,14 +221,18 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
         bucket = "to_validate"
     open_ = app.status in ("draft", "approved") and not problems
     adapted = bool(job and _unattended(job))
+    generic = _generic_enabled(job, check_host=False) and _host(job.origin_url) not in paused_hosts
+    autonomous_ready = generic and app.status == "approved" and not site_handoff
+    if generic and run_ and run_.mode == "submit" and run_.status == "needs_human":
+        autonomous_ready = False
     return QueueItem(
         app=app, bucket=bucket, score=job.score if job else None, origin_url=clean_url(job.origin_url, navigation=True) if job else None,  # type: ignore[arg-type]
         origin_host=_host(job.origin_url if job else None), origin_sha=origin_digest(job.origin_url if job else None), age_days=age_days(job) if job else None, last_run=run_,
         outstanding=outstanding,
-        auto=bool(adapted and not (manual_retry or outstanding or site_handoff) and job and job.score is not None
+        auto=bool((adapted or autonomous_ready) and not (manual_retry or outstanding or site_handoff) and job and job.score is not None
                   and job.score >= settings.apply_auto_min_score), problems=problems,
         questions=questions, pause_reason=pause, untrusted_host=untrusted if pause == "host" else "",
-        selectable=adapted and (bucket == "to_validate" or (bucket in ("paused", "failed") and open_ and pause != "host")),
+        selectable=(adapted or autonomous_ready) and (bucket == "to_validate" or (bucket in ("paused", "failed") and open_ and pause != "host")),
         supervised=not adapted and open_ and not outstanding and bucket not in ("sending", "blocked"))
 
 
@@ -239,6 +244,7 @@ def queue(profile_id: int | None = None) -> list[QueueItem]:
     for app in apps:
         apps_by_profile.setdefault(app.profile_id, {})[app.id] = app
     jobs = db.get_jobs(app.job_id for app in apps)
+    paused_hosts = apply_store.paused_hosts() if settings.apply_autonomous and jobs else set()
     items = []
     for pid, profile_apps in apps_by_profile.items():
         visible = [app for app in profile_apps.values() if app.status != "withdrawn"]
@@ -249,7 +255,7 @@ def queue(profile_id: int | None = None) -> list[QueueItem]:
         reads = policy.QueuePolicyReads(pid, profile_apps, jobs, apply_store.active_reservations(pid),
                                         apply_store.unconfirmed_application_ids(pid))
         items.extend(_item(app, jobs.get(app.job_id), runs.get(app.id), settings, reads, outstanding.get(app.id),
-                           app.id in manual_retry, app.id in site_handoffs)
+                           app.id in manual_retry, app.id in site_handoffs, paused_hosts)
                      for app in visible)
     items.sort(key=lambda i: (BUCKET_ORDER.index(i.bucket), -(i.score if i.score is not None else -1.0), -i.app.id))
     return items
@@ -360,6 +366,12 @@ def _unattended(job) -> bool:
     return bool(match and match.capability == "unattended")
 
 
+def _generic_enabled(job, *, check_host: bool = True) -> bool:
+    return bool(get_settings().apply_autonomous and job and policy._usable_origin(job)
+                and clean_url(job.origin_url, navigation=True) and not registry.find(job.origin_url, job.origin_ats)
+                and (not check_host or not apply_store.host_paused(_host(job.origin_url))))
+
+
 def _distinct(ids: frozenset[int]) -> dict:
     return {"confirmed_distinct": ids} if ids else {}
 
@@ -408,7 +420,7 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     attempt = Attempt(run_.id, app.id, run_.rev, digest, url, host, secrets.token_urlsafe(24),
                       match.adapter.name if match else None, requisition.tenant if requisition else identity[0] if identity else "",
                       requisition.requisition_id if requisition else identity[1] if identity else None, dedupe_key, app.profile_id,
-                      match.receipt_kind if match else "none")
+                      match.receipt_kind if match else "none", autonomous=mode == "submit" and match is None)
     facts = tuple(CandidateFact(fact.key, fact.label, fact.value, tuple(fact.variants))
                   for fact in _candidate_facts(app, job).facts if fact.value and not fact.secret) if match else ()
     apply_store.reserve_send(run_.id, profile_id=app.profile_id, application_id=app.id, trigger=trigger,
@@ -458,14 +470,91 @@ async def fill_step(app_id: int, token: str, *, run_id: int | None = None) -> Ru
     return await _fill_session(app_id, run_id).run(token)
 
 
+async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifier, browser, out):
+    if not _generic_enabled(job):
+        return RunResult(status="needs_human", message=SUPERVISED_ONLY)
+    request = _reserve(run_, job, "submit", trigger)
+    attempt = request.attempt
+
+    def check():
+        live, _, _, _ = _check_boundary(run_, job, "submit", trigger, reserved=True)
+        eligible, reasons = cvs.is_eligible(live)
+        if not eligible:
+            raise ApplyError(" ; ".join(reasons))
+        if not get_settings().apply_autonomous or registry.find(job.origin_url, job.origin_ats) or not apply_store.binding_active(attempt):
+            raise ApplyError(SUPERVISED_ONLY)
+
+    async def recheck():
+        try:
+            check()
+        except ApplyError as exc:
+            return [str(exc)]
+        return []
+
+    metadata = job.extra.get("origin_resolution") if isinstance(job.extra, dict) else None
+    raw_urls = metadata.get("verified_urls") if isinstance(metadata, dict) and metadata.get("canonical_ok") is True else None
+    verified = [clean_url(url, navigation=True) for url in raw_urls if isinstance(url, str)] if isinstance(raw_urls, list) else []
+    audience = Audience(attempt.url, verified, check, pdf_bytes=request.pdf)
+    guard = RecipientGuard(frozenset({origin(attempt.url)}), audience=audience)
+    browser.append((attempt, guard))
+    facts = _candidate_facts(app, job)
+    email_fact = facts.get("account_email")
+    email = email_fact.value if email_fact else None
+    password_fact = facts.get("account_password")
+    if email and password_fact:
+        password_fact.value = "disponible"
+
+    def password(host):
+        return accounts.create_password(host, email) if email and host == _host(audience.document) and audience.write_recipient(audience.document) else ""
+
+    async def mark_submit():
+        apply_store.mark_autonomous_submit(attempt)
+        guard.final_started = True
+        audience.final_started = True
+
+    async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
+        await guard.install(page)
+        try:
+            await guard.navigate(page, attempt.url, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
+            if guard.refused or not audience.write_recipient(page.url):
+                raise ApplyError(SUPERVISED_ONLY)
+            audience.document = clean_url(page.url, navigation=True)
+            if not audience.initial_redirect(attempt.url, audience.document):
+                raise ApplyError(SUPERVISED_ONLY)
+            await audience.bind_document(page)
+            result = await run_application(
+                page, url=attempt.url, facts=facts, planner=planner if planner is not None else LLMPlanner(llm.get()),
+                verifier=verifier if verifier is not None or planner is not None else _default_verifier(llm),
+                uploads=Uploads(cv_pdf=cvs.safe_pdf(app), cv_bytes=request.pdf), mode="submit", current_step=True,
+                autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
+                job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
+                password=password if email else None, account_known=(lambda host: accounts.account_known(host, email)) if email else None,
+                host_allowed=lambda host: host == _host(audience.document), max_steps=get_settings().apply_max_steps,
+                choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
+        except ChallengeRequired:
+            result = RunResult(status="needs_human", message="Un défi anti-robot doit être résolu à la main.")
+        except Exception:
+            if not guard.refused and not page.is_closed():
+                raise
+            result = RunResult(status="needs_human", message=SUPERVISED_ONLY)
+        if guard.refused:
+            result = result.model_copy(update={"status": "needs_human", "message": RECIPIENT_REFUSED + " " + SUPERVISED_ONLY})
+        if out is not None:
+            out.append(result)
+    return result
+
+
 async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, pool, planner,
                  llm: _Llm, verifier=None, out: list[RunResult] | None = None,
                  receipts: list[Receipt] | None = None, confirmed_distinct: frozenset[int] = frozenset(),
-                 duplicate_confirmations: tuple[str, ...] = ()) -> RunResult:
+                 duplicate_confirmations: tuple[str, ...] = (), browser=None) -> RunResult:
     """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
     follows cannot lose it."""
     match = registry.find(job.origin_url, job.origin_ats) if mode != "dry_run" else None
     if mode == "submit":
+        if match is None and get_settings().apply_autonomous and browser is not None:
+            return await _drive_generic(app, job, run_, trigger=trigger, pool=pool, planner=planner, llm=llm,
+                                        verifier=verifier, browser=browser, out=out)
         if match is None or match.capability != "unattended":
             return RunResult(status="blocked", message=UNSUPPORTED_DISPATCH + " " + SUPERVISED_ONLY + ".")
         request = _reserve(run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct,
@@ -674,13 +763,14 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
     crashed = False
     returned: list[RunResult] = []  # the engine's own result, as soon as it exists
     receipts: list[Receipt] = []
+    browser = []
     try:
         try:
-            if own_pool and mode != "submit":
+            if own_pool and (mode != "submit" or _generic_enabled(job, check_host=False)):
                 pool = BrowserPool(headless=False if mode == "supervised" else headless)
             result = await _drive(app, job, run_, mode=mode, trigger=trigger, pool=pool, planner=planner,
                                   llm=shared_llm, verifier=verifier, out=returned, receipts=receipts,
-                                  confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations)
+                                  confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations, browser=browser)
         except ApplyError as e:
             result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
@@ -691,9 +781,10 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
             result, crashed = returned[0], False
         # Settlement is synchronous (no await): a cancellation arriving during the cleanup below cannot strand the run.
         try:
-            done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None)
+            done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None,
+                           browser=browser[0] if browser else None)
         except Exception:
-            if not receipts:
+            if not receipts and not browser:
                 raise
             current = apply_store.get_run(run_.id)
             if current is None:
@@ -701,9 +792,9 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
             if current.status != "running":
                 done = current
             else:
-                done = _settle(run_, mode, result.model_copy(update={
+                done = _settle(run_, mode, result.model_copy(update={"status": "failed",
                     "message": "Reçu vérifié, mais enregistrement impossible. Ne pas renvoyer cette candidature."
-                }), crashed)
+                }), crashed, browser=browser[0] if browser else None)
     finally:
         try:
             if own_pool and pool is not None:
@@ -736,13 +827,19 @@ def _drop_bad_origin(job) -> None:
                   (json.dumps(extra, ensure_ascii=False), job.id, job.profile_id))
 
 
-def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool, *, receipt: Receipt | None = None) -> ApplyRun:
+def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool, *, receipt: Receipt | None = None, browser=None) -> ApplyRun:
     if mode == "dry_run":
         return apply_store.finish_run(run_.id, result)
     row = apply_store.get_run(run_.id) if crashed else None
     if row is not None and row.result is not None:  # the engine gave no result: keep what it reported before (steps, deductions)
         result = result.model_copy(update={"steps": row.result.steps, "final_url": row.result.final_url,
                                            "submit_clicked": row.result.submit_clicked})
+    if browser:
+        attempt, guard = browser
+        confirmed = guard.final_response and not guard.refused and not crashed
+        clear = not guard.transmitted and not guard.final_started and not crashed
+        return apply_store.finish_and_settle(run_.id, result, browser_attempt=attempt,
+                                             browser_confirmed=confirmed, browser_clear=clear)
     return apply_store.finish_and_settle(run_.id, result, receipt=receipt)
 
 
@@ -821,13 +918,14 @@ async def _send_each(app_ids: list[int], *, headless, on_progress, pool, planner
                     if on_progress:
                         on_progress(app_id, res)
                     continue
-                if not live_job or not _unattended(live_job):
+                generic = _generic_enabled(live_job)
+                if not live_job or not (_unattended(live_job) or generic):
                     res = _refuse(app, live_job, "submit", "user", [SUPERVISED_ONLY])
                     runs.append(res)
                     if on_progress:
                         on_progress(app_id, res)
                     continue
-                if app.status == "draft":
+                if app.status == "draft" and not generic:
                     try:
                         cvs.approve(app.id, app.current_rev)
                     except CVError as e:
@@ -837,6 +935,7 @@ async def _send_each(app_ids: list[int], *, headless, on_progress, pool, planner
                             on_progress(app_id, res)
                         continue
                 res = await run(app_id, mode="submit", trigger="user", headless=headless, _lock_held=True,
+                                **({"pool": shared.get(), "planner": planner, "llm": llm, "verifier": verifier} if generic else {}),
                                 expected_rev=None if expected_revs is None else expected_revs.get(app_id, -1),
                                 expected_origin=None if expected_origins is None else expected_origins.get(app_id, ""))
             except ApplyError:
@@ -1131,7 +1230,8 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : bloquée (offre modifiée entre-temps)")
         return
     job = live
-    if not _unattended(job):
+    generic = _generic_enabled(job)
+    if not (_unattended(job) or generic):
         summary.supervised += 1
         emit(f"{tag} : {SUPERVISED_ONLY.lower()}")
         return
@@ -1153,7 +1253,7 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : bloquée (envoi automatique désactivé)")
         return
     threshold = max(s.apply_auto_min_score, min_score or 0)
-    if app.status == "draft" and (job.score or 0) >= threshold:
+    if app.status == "draft" and not generic and (job.score or 0) >= threshold:
         try:
             app = cvs.auto_approve(app.id, expected_rev=app.current_rev)
         except CVError as e:  # ApprovalError, StaleRevision, TransitionError: this job only
@@ -1168,7 +1268,8 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : bloquée (un autre envoi est en cours)")
         return
     try:
-        res = await run(app.id, mode="submit", trigger="auto", headless=headless, _lock_held=True)
+        res = await run(app.id, mode="submit", trigger="auto", headless=None if generic else headless, _lock_held=True,
+                        **({"pool": pool.pool, "planner": planner, "verifier": verifier, "llm": llm.llm} if generic else {}))
     except (ApplyError, CVError) as e:
         summary.waiting += 1
         emit(f"{tag} : bloquée ({e})")
