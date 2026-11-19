@@ -94,6 +94,10 @@ def test_login_nonce(h):
     ("POST", {"Origin": ORIGIN}, True),
     ("POST", {"Origin": "https://evil.example"}, False),
     ("POST", {"Origin": "null"}, False),
+    # What browsers really send for our own form posts under a no-referrer policy: Origin null + browser-set Sec-Fetch-Site.
+    ("POST", {"Origin": "null", "Sec-Fetch-Site": "same-origin"}, True),
+    ("POST", {"Origin": "null", "Sec-Fetch-Site": "cross-site"}, False),
+    ("POST", {"Origin": "null", "Sec-Fetch-Site": "same-site"}, False),
     ("POST", {"Origin": ORIGIN + "/"}, False),
     ("POST", {"Sec-Fetch-Site": "same-origin"}, True),
     ("POST", {"Sec-Fetch-Site": "same-site"}, False),

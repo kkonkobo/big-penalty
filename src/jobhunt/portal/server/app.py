@@ -37,7 +37,7 @@ SECURITY_HEADERS = {
                                "frame-ancestors 'none'",
     "x-frame-options": "DENY",
     "strict-transport-security": "max-age=31536000",
-    "referrer-policy": "no-referrer",
+    "referrer-policy": "same-origin",  # no-referrer makes browsers send `Origin: null` on our own form posts
     "x-content-type-options": "nosniff",
     "permissions-policy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
     "cross-origin-opener-policy": "same-origin",
