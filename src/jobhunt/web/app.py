@@ -752,3 +752,5 @@ async def master_cv_import(pid: int, file: UploadFile):
 from jobhunt.web import apply_routes  # noqa: E402 - needs `app` and `templates` defined above
 
 apply_routes.install(app, templates)
+from jobhunt.portal import web_routes as portal_web_routes  # noqa: E402
+portal_web_routes.install(app, templates)

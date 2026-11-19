@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% from "_macros.html" import intent_form, cancel_form, intent_status with context %}
+{% block title %}À faire{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>À faire</h1></div></div>
+
+{% if nothing %}<p class="panel">Rien à faire pour l'instant.</p>{% endif %}
+
+{% if snap.questions %}
+<section class="panel" id="questions">
+  <div class="panel-head plain"><h2>Il manque une réponse <span class="count">{{ open_questions|length }}</span></h2></div>
+  {% if open_questions %}
+  <p class="muted small">Vos réponses sont gardées pour tous les prochains formulaires.</p>
+  <form class="form" method="post" action="{{ base }}/a-faire/questions">
+    {% include "_csrf.html" %}
+    {% for q in open_questions %}
+    <label>{{ q.label }}
+      {% if q.company or q.title %}<span class="sub">{{ q.company }}{% if q.company and q.title %} · {% endif %}{{ q.title }}</span>{% endif %}
+      {% if q.options %}
+      <select name="q_{{ q.qid }}"><option value="">Choisir…</option>{% for o in q.options %}<option value="{{ o }}">{{ o }}</option>{% endfor %}</select>
+      {% else %}
+      <input type="text" name="q_{{ q.qid }}" maxlength="500" autocomplete="off">
+      {% endif %}
+    </label>
+    {% endfor %}
+    <button class="btn primary block" type="submit">Enregistrer mes réponses</button>
+  </form>
+  {% endif %}
+  {% for q in answered_questions %}
+  <div class="item"><h3>{{ q.label }}</h3>
+    <p class="muted small">{{ q.company }}{% if q.company and q.title %} · {% endif %}{{ q.title }}</p>
+    <span class="tag ok">Réponse envoyée, en attente du Mac</span></div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if snap.email_pauses %}
+<section class="panel" id="emails">
+  <div class="panel-head plain"><h2>Code par e-mail <span class="count">{{ snap.email_pauses|length }}</span></h2></div>
+  {% for e in snap.email_pauses %}
+  <div class="item">
+    <h3>{{ e.company or 'Entreprise non précisée' }}</h3>
+    <p class="lead-line">{{ e.title }}</p>
+    {% if e.host %}<p class="muted small">Site : {{ e.host }}</p>{% endif %}
+    {% if e.note %}<p class="small">{{ e.note }}</p>{% endif %}
+    <p>Ouvrez votre boîte mail et vérifiez la demande sur le site. Reprenez ensuite sur le Mac uniquement.</p>
+    {% if e.grant in view.intent_events %}{{ intent_status(view.intent_events[e.grant], view) }}
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if snap.unconfirmed %}
+<section class="panel" id="verifier">
+  <div class="panel-head plain"><h2>À vérifier <span class="count">{{ snap.unconfirmed|length }}</span></h2></div>
+  {% for u in snap.unconfirmed %}
+  <div class="item">
+    <h3>{{ u.company or 'Entreprise non précisée' }}</h3>
+    <p class="lead-line">{{ u.title }}</p>
+    <p class="muted small">{% if u.host %}Site : {{ u.host }}{% endif %}{% if u.when %} · {{ u.when|date_fr }}{% endif %}</p>
+    <p>Vérifiez sur le site de l'entreprise (ou dans vos e-mails) si la candidature est bien partie.</p>
+    {% set event_id = view.intent_events.get(u.grant_sent) or view.intent_events.get(u.grant_not_sent) %}
+    {% if event_id %}{{ intent_status(event_id, view) }}
+    {% else %}<div class="row">
+      {{ intent_form(u.grant_sent, 'Elle a bien été envoyée', 'a-faire', True) }}
+      {{ intent_form(u.grant_not_sent, "Elle n'a pas été envoyée", 'a-faire') }}
+    </div>{% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if info_groups %}
+<section class="panel" id="mac">
+  <div class="panel-head plain"><h2>À régler sur le Mac</h2></div>
+  <p class="muted small">Information seulement : rien à faire ici.</p>
+  {% for label, items in info_groups %}
+  <h3>{{ label }}</h3>
+  <ul class="plain-list">
+    {% for i in items %}<li class="item">{{ i.company or 'Entreprise non précisée' }}{% if i.title %} · {{ i.title }}{% endif %}{% if i.host %} <span class="muted small">({{ i.host }})</span>{% endif %}</li>{% endfor %}
+  </ul>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if pending_rows or results %}
+<section class="panel" id="actions">
+  <div class="panel-head plain"><h2>Mes dernières actions</h2></div>
+  {% for p in pending_rows %}
+  <div class="item">
+    <h3>{{ p.verb }}{% if p.label %} : {{ p.label }}{% endif %}</h3>
+    <span class="tag warn">{{ 'Annulation demandée' if p.cancelling else 'En attente du Mac' }}</span>
+    {% if p.cancel %}{{ cancel_form(p.cancel) }}{% endif %}
+  </div>
+  {% endfor %}
+  {% for r in results %}
+  <div class="item">
+    <h3>{{ r.label or 'Action' }}</h3>
+    {% if r.event_id in view.cancelling_intents %}<span class="tag warn">Annulation demandée</span>
+    {% else %}<span class="tag {{ r.status|status_class }}">{{ r.status|status_label }}</span>{% endif %}
+    <span class="muted small">{{ r.at|datetime_fr }}</span>
+    {% if r.message %}<p class="small">{{ r.message }}</p>{% endif %}
+    {% if r.event_id in view.cancellable_intents %}{{ cancel_form(r.event_id) }}{% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ext_link, cv_link with context %}
+{% block title %}Confirmer{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>{{ heading }}</h1>
+<p class="muted">Rien n'est fait tant que vous n'avez pas confirmé.</p></div></div>
+{% if omitted %}
+<p class="panel">{% if omitted == 1 %}1 candidature exclue : son CV n’est pas disponible sur le portail.{% else %}{{ omitted }} candidatures exclues : leurs CV ne sont pas disponibles sur le portail.{% endif %}</p>
+{% endif %}
+{% if entries %}
+<section class="panel">
+  {% for e in entries %}
+  <div class="item">
+    <h3>{{ e.company or 'Entreprise non précisée' }}</h3>
+    <p class="lead-line">{{ e.title }}</p>
+    {% if e.host %}<p class="muted small">Site de destination : {{ e.host }}</p>{% endif %}
+    {% if e.kind == 'send' %}
+    <p>Vous autorisez le Mac à envoyer cette version du CV lors d’un prochain passage, si l’envoi automatique est autorisé. Aucun formulaire n’est rempli ni envoyé depuis le portail.</p>
+    <div class="links">{{ cv_link(e.doc_id, docs) }}{{ ext_link(e.job_url, "Voir l'annonce") }}</div>
+    {% elif e.kind == 'sent' %}
+    <p>Elle sera marquée comme envoyée et ne sera pas renvoyée.</p>
+    {% else %}
+    <p>La candidature sera notée comme non envoyée. Toute nouvelle tentative doit être lancée manuellement.</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+<form class="stack" method="post" action="{{ base }}/intentions">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="retour" value="{{ retour }}">
+  {% for e in entries %}<input type="hidden" name="g" value="{{ e.grant }}">{% endfor %}
+  {% if entries|selectattr('kind', 'in', ['sent', 'not_sent'])|list %}
+  <label><input type="checkbox" name="verified" value="1" required> J’ai vérifié sur le site de l’entreprise le résultat de cet essai.</label>
+  {% endif %}
+  <button class="btn primary block" type="submit">Confirmer</button>
+  <a class="btn block" href="{{ base }}/{{ retour }}">Annuler</a>
+</form>
+{% else %}
+<a class="btn block" href="{{ base }}/{{ retour }}">Retour</a>
+{% endif %}
+{% endblock %}

@@ -171,12 +171,18 @@ async def update_application(app_id: int, *, rev: int, llm=None, **edits) -> App
             await llm.aclose()
 
 
-def approve(app_id: int, rev: int, *, ignore_errors: bool = False) -> Application:
+def approve(app_id: int, rev: int, *, ignore_errors: bool = False, expected_sha256: str | None = None,
+            portal: bool = False) -> Application:
     """Approve exactly revision `rev` (the current one) after re-hashing its PDF on disk."""
     app = store.get_application(app_id)
     if app is None:
         raise CVError("Candidature introuvable")
-    return store.approve_revision(app_id, rev, file_sha256=store.sha256_file(safe_pdf(app)), ignore_errors=ignore_errors)
+    digest = store.sha256_file(safe_pdf(app))
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise CVError("Le PDF a changé depuis l'approbation.")
+    return store.approve_revision(app_id, rev, file_sha256=digest, ignore_errors=ignore_errors,
+                                  confirm_auto=expected_sha256 is not None,
+                                  confirm_portal=portal and expected_sha256 is not None and not ignore_errors)
 
 
 def withdraw(app_id: int) -> Application:

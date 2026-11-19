@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field_control with context %}
+{% block title %}Mes réponses{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Mes réponses</h1>
+<p class="muted">Ces réponses servent à remplir tous les prochains formulaires.</p></div></div>
+<form method="post" action="{{ base }}/reponses" class="stack">
+  {% include "_csrf.html" %}
+  {% for title, rows in sections %}
+  <section class="panel">
+    <div class="panel-head plain"><h2>{{ title }}</h2></div>
+    <div class="form">
+      {% for r in rows %}
+      <label>{{ r.spec.label }}
+        {% if r.spec.write_only %}
+        <span class="state"><span class="tag {{ 'ok' if r.fv.is_set else '' }}">{{ 'Renseigné' if r.fv.is_set else 'Non renseigné' }}</span></span>
+        <span class="sub">Remplacer par…</span>
+        {% endif %}
+        {{ field_control(r.name, r.spec, r.fv.value, r.spec.write_only) }}
+        <input type="hidden" name="{{ r.tok }}" value="{{ r.fv.token }}">
+        {% if r.spec.help %}<small>{{ r.spec.help }}</small>{% endif %}
+        {% if r.fv.legacy %}<small>Valeur enregistrée : « {{ r.fv.legacy }} ». Elle est conservée tant que vous ne choisissez pas de date.</small>{% endif %}
+        {% if r.fv.pending %}<small><span class="tag warn">Modification en attente du Mac</span></small>{% endif %}
+      </label>
+      {% if r.spec.write_only and r.fv.is_set %}
+      <label class="check"><input type="checkbox" name="{{ r.clr }}" value="1"> Effacer cette réponse</label>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+
+  {% if customs %}
+  <section class="panel">
+    <div class="panel-head plain"><h2>Autres réponses enregistrées</h2></div>
+    <div class="form">
+      {% for c in customs %}
+      <div class="item">
+        <label>{{ c.question }}
+          {% if c.masked %}
+          <span class="state"><span class="tag ok">Renseigné</span></span>
+          <span class="sub">Remplacer par…</span>
+          <input type="text" name="cus_{{ c.custom_id }}" maxlength="500" placeholder="Remplacer par…" autocomplete="off">
+          {% else %}
+          <input type="text" name="cus_{{ c.custom_id }}" maxlength="500" value="{{ c.answer }}" autocomplete="off">
+          {% endif %}
+          <input type="hidden" name="ctok_{{ c.custom_id }}" value="{{ c.token }}">
+          {% if c.pending %}<small><span class="tag warn">Modification en attente du Mac</span></small>{% endif %}
+        </label>
+        <div class="row"><button class="btn quiet-bad" type="submit" name="retirer" value="{{ c.custom_id }}" formaction="{{ base }}/reponses/retirer">Retirer</button></div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+  <button class="btn primary block" type="submit">Enregistrer mes réponses</button>
+</form>
+{% endblock %}
