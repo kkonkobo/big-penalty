@@ -45,7 +45,7 @@ async def test_equest_phenom_workday(tmp_path):
     assert result.origin_resolution == {
         "state": "resolved", "confidence": 0.98, "ats": "workday", "frontend": "phenom",
         "posting_url": front, "apply_url": apply_url, "tenant": "orbitex", "requisition_id": "JR284", "site": "External",
-        "canonical_ok": True,
+        "submit_ats": "workday", "requisition": "JR284", "canonical_ok": True,
     }
 
 

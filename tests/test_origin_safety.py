@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from jobhunt import cli, db, origin, pipeline
+from jobhunt.apply.identity import resolved_identity
 from jobhunt.dedupe import MergedJob, Sighting
 from test_origin_direct import posting, resolver_with
 
@@ -706,20 +707,42 @@ async def test_request_deadline_covers_host_lock_acquisition(monkeypatch):
         await resolver.aclose()
 
 
-def test_reresolve_refuses_old_schema_without_migrating_or_changing_journal(profile, monkeypatch):
-    job = stored_job(profile)
-    path = db.DB_PATH_OVERRIDE
+@pytest.mark.parametrize(("url", "ats", "expected_identity"), [
+    (WORKDAY, "workday", ("orbitex", "jr284")),
+    ("https://jobs.smartrecruiters.com/Orbitex/743999-stage", "smartrecruiters", None),
+])
+def test_reresolve_writes_apply_identity_on_current_schema(profile, monkeypatch, url, ats, expected_identity):
+    job = stored_job(profile, url=url, ats=ats)
+    mock_resolver(monkeypatch, lambda request: httpx.Response(200))
+    result = CliRunner().invoke(cli.app, ["reresolve", str(profile.id), "--max-downgrades", "0"])
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(db.DB_PATH_OVERRIDE) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (db.SCHEMA_VERSION,)
+        extra = conn.execute("SELECT extra FROM jobs WHERE id=?", (job.id,)).fetchone()[0]
+    record = json.loads(extra)["origin_resolution"]
+    assert record["submit_ats"] == ats
+    assert record["requisition"] == record["requisition_id"]
+    assert record["canonical_ok"] is (expected_identity is not None)
+    assert resolved_identity(extra) == expected_identity
+
+
+@pytest.mark.parametrize("old_version", [9, 11])
+def test_reresolve_refuses_old_schema_without_migrating_or_changing_journal(profile, tmp_path, monkeypatch, old_version):
+    path = tmp_path / "old.sqlite3"
+    monkeypatch.setattr(db, "DB_PATH_OVERRIDE", path)
+    with monkeypatch.context() as old_schema:
+        old_schema.setattr(db, "SCHEMA_VERSION", old_version)
+        old_profile = db.save_profile(profile.model_copy(update={"id": None}))
+        job = stored_job(old_profile)
     with sqlite3.connect(path) as conn:
-        conn.execute("ALTER TABLE application_runs DROP COLUMN operator_not_sent_at")
-        conn.execute("PRAGMA user_version=9")
         conn.execute("PRAGMA journal_mode=DELETE")
     db._migrated.discard(str(path))
     original = path.read_bytes()
     mock_resolver(monkeypatch, lambda request: pytest.fail("old schema must be rejected before fetching"))
-    result = CliRunner().invoke(cli.app, ["reresolve", str(profile.id), "--max-downgrades", "0"])
-    assert result.exit_code == 1 and "schema v9; expected v10" in result.output
+    result = CliRunner().invoke(cli.app, ["reresolve", str(old_profile.id), "--max-downgrades", "0"])
+    assert result.exit_code == 1 and f"schema v{old_version}; expected v{db.SCHEMA_VERSION}" in result.output
     assert path.read_bytes() == original
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (9,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (old_version,)
         assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
         assert conn.execute("SELECT origin_ats FROM jobs WHERE id=?", (job.id,)).fetchone() == ("workday",)

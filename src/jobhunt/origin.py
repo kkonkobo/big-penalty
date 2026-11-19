@@ -310,10 +310,14 @@ class OriginEvidence:
 
 def _resolution_data(evidence: OriginEvidence) -> dict:
     data = asdict(evidence)
-    data["canonical_ok"] = _canonical_ok(data)
     if evidence.reason is None:
         data.pop("reason")
-    return data
+    return _resolution_record(data)
+
+
+def _resolution_record(evidence: dict) -> dict:
+    return {**evidence, "submit_ats": evidence.get("ats"), "requisition": evidence.get("requisition_id"),
+            "canonical_ok": _canonical_ok(evidence)}
 
 
 def _canonical_ok(evidence: dict) -> bool:
@@ -389,7 +393,7 @@ def store_origin(job, posting: JobPosting) -> bool:
         if not strong:
             job.extra["origin_observation"]["reason"] = "weaker_evidence"
             return False
-    evidence = {**evidence, "canonical_ok": _canonical_ok(evidence)}
+    evidence = _resolution_record(evidence)
     job.origin_url, job.origin_ats, job.origin_confidence = posting.origin_url, posting.origin_ats, posting.origin_confidence
     job.extra["origin_resolution"] = evidence
     return True
@@ -2440,7 +2444,8 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
     p = p.model_copy(update={"origin_url": None, "origin_ats": None, "origin_confidence": None, "origin_resolution": None})
     key = DiskCache.key(p.company, p.title, p.location, json.dumps([p.url, p.apply_url, p.company_website, p.remote]))
     if use_cache and r.cache and (hit := r.cache.get(key)):
-        cached_resolution = {key: value for key, value in (hit.get("origin_resolution") or {}).items() if key != "canonical_ok"}
+        cached_resolution = {key: value for key, value in (hit.get("origin_resolution") or {}).items()
+                             if key not in {"submit_ats", "requisition", "canonical_ok"}}
         evidence = OriginEvidence(**cached_resolution) if cached_resolution else None
         extra = Candidate(hit.get("origin_url") or "", p.title, hit["origin_ats"] or "", posted_at=_parse_date(hit.get("posted_at")),
                           description=hit.get("description"), evidence=evidence) if hit.get("origin_url") or evidence else None

@@ -208,6 +208,8 @@ MIGRATIONS: list[str] = [
     """,
 ]
 
+SCHEMA_VERSION = len(MIGRATIONS)
+
 
 def db_path() -> Path:
     return DB_PATH_OVERRIDE or get_settings().db_path
@@ -263,7 +265,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("BEGIN IMMEDIATE")
         try:
             v = conn.execute("PRAGMA user_version").fetchone()[0]
-            for i in range(v, len(MIGRATIONS)):
+            for i in range(v, SCHEMA_VERSION):
                 for stmt in _statements(MIGRATIONS[i]):
                     conn.execute(stmt)
                 conn.execute(f"PRAGMA user_version = {i + 1}")
@@ -720,8 +722,8 @@ def origin_connection(path: Path, *, write: bool = False) -> Iterator[sqlite3.Co
 
 def require_current_schema(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != len(MIGRATIONS):
-        raise ValueError(f"Job database schema v{version}; expected v{len(MIGRATIONS)}. Run the standard migration separately before reresolve writes.")
+    if version != SCHEMA_VERSION:
+        raise ValueError(f"Job database schema v{version}; expected v{SCHEMA_VERSION}. Run the standard migration separately before reresolve writes.")
 
 
 def _plan_origin_updates(conn: sqlite3.Connection, updates: list[tuple[MergedJob, MergedJob]]) -> tuple[list, list]:
