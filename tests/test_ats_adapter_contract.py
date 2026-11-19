@@ -373,6 +373,15 @@ async def test_workday_supervised_contract(step, workday_registry, server, page,
     job = make_job(profile, url=server.url("workday-experience" if step == "foreign-upload" else "workday-" + step))
     app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
     cvs.approve(app.id, app.current_rev)
+    observed_page_kinds = []
+    if step in {"auth", "otp"}:
+        save_progress = store.save_progress
+
+        def observe_progress(run_id, result):
+            observed_page_kinds.extend(report.page_kind for report in result.steps)
+            return save_progress(run_id, result)
+
+        monkeypatch.setattr(store, "save_progress", observe_progress)
     if step == "experience":
         check_pdf = service.is_bound_pdf
 
@@ -418,7 +427,8 @@ async def test_workday_supervised_contract(step, workday_registry, server, page,
     assert attempt and store.outstanding_attempt(app.id).id == result.id
     assert attempt.pdf_sha256 == hashlib.sha256(cvs.safe_pdf(app).read_bytes()).hexdigest()
     if step != "experience":
-        assert result.result.steps[-1].page_kind == ("email_verification" if step == "otp" else "account_login")
+        assert observed_page_kinds[-1:] == ["email_verification" if step == "otp" else "account_login"]
+        assert not result.result.steps
         return
 
     duplicate = make_job(profile, url=server.url("workday-information"), title="Different title", company="Different company")
@@ -607,10 +617,11 @@ async def test_smartrecruiters_supplied_boundaries_and_exact_recipients():
                      ("https://jobs.smartrecruiters.com/%69mport/indeed", False),
                      ("https://jobs.smartrecruiters.com/import/linkedin", False)]:
         assert not adapter.browser_request_allowed(attempt, url, "POST", nav)
-    assert adapter.boundaries["challenge"] == adapter.boundaries["final_submit"] == "pause_for_human"
+    assert adapter.boundaries["challenge"] == "pause_for_human"
+    assert adapter.boundaries["final_submit"] == "auto"
     assert adapter.boundaries["import_profile"] == adapter.boundaries["login_otp"] == "forbidden"
-    with pytest.raises(ValueError):
-        Registry().register(adapter, host="jobs.smartrecruiters.com", unattended_tenants={"fixtureco": "first_party_confirmation"})
+    match = production_registry.find(SMART_URL, "smartrecruiters")
+    assert match and match.capability == "unattended" and match.receipt_kind == "first_party_confirmation"
 
 
 @pytest.mark.parametrize("choice", ["known", "outside-options", "scoped", "stale-scoped"])
