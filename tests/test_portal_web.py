@@ -104,7 +104,7 @@ def test_page_enabled_review_with_items(client, portal):
 
 def test_page_shows_the_journal_with_before_after_and_statuses(client, portal):
     a, b = review_items(portal)
-    manage.review_apply(portal.profile_id, [a], journal=portal.journal)
+    manage.review_apply(portal.profile_id, [a], journal=portal.journal, client=portal.client)
     r = client.get(url(portal.profile_id))
     assert 'id="journal"' in r.text and "appliqué" in r.text and "à valider" in r.text and "Réponse" in r.text
     assert "Lyon" in r.text
@@ -251,7 +251,10 @@ def test_manage_errors_are_flashed(client, profile, monkeypatch, sub, name, data
     assert "error-box" in page and "Ce profil n&#39;est pas activé sur le portail." in page.replace("&#39;", "&#39;")
 
 
-def test_review_actions(client, portal):
+def test_review_actions(client, portal, monkeypatch):
+    from functools import partial
+
+    monkeypatch.setattr(manage, "review_apply", partial(manage.review_apply, client=portal.client))
     a, b = review_items(portal)
     r = client.post(url(portal.profile_id, f"/review/{a}/apply"))
     assert r.status_code == 303 and "1 action(s) traitée(s)" in follow(client, r).text
@@ -260,7 +263,10 @@ def test_review_actions(client, portal):
     assert "1 action(s) refusée(s)" in follow(client, r).text and manage.review_list(portal.profile_id, journal=portal.journal) == []
 
 
-def test_review_all(client, portal):
+def test_review_all(client, portal, monkeypatch):
+    from functools import partial
+
+    monkeypatch.setattr(manage, "review_apply", partial(manage.review_apply, client=portal.client))
     review_items(portal)
     assert "2 action(s) traitée(s)" in follow(client, client.post(url(portal.profile_id, "/review/apply-all"))).text
     portal.fake.edit_answer(portal.key, "country", "France")

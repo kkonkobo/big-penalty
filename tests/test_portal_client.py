@@ -37,10 +37,10 @@ def test_sends_bearer_and_json_headers_to_the_versioned_path():
 
     def handler(req):
         seen.update(path=req.url.path, auth=req.headers["authorization"], ct=req.headers.get("content-type"))
-        return httpx.Response(200, json={"protocol": 1, "version": "x", "profiles": []})
+        return httpx.Response(200, json={"protocol": 2, "version": "x", "profiles": []})
 
     client_for(handler).status()
-    assert seen["path"] == "/app/api/v1/status" and seen["auth"] == f"Bearer {TOKEN}"
+    assert seen["path"] == "/app/api/v2/status" and seen["auth"] == f"Bearer {TOKEN}"
 
 
 def test_pair_sends_no_bearer():
@@ -102,7 +102,7 @@ def test_409_codes_carry_current():
 
 
 def test_invalid_success_body_is_an_error():
-    for content in (b"not json", b'{"profiles": "x"}', b'{"protocol":1,"extra":1}'):
+    for content in (b"not json", b'{"profiles": []}', b'{"protocol":1,"profiles":[]}', b'{"protocol":2,"extra":1}'):
         with pytest.raises(PortalError) as e:
             client_for(lambda r, c=content: httpx.Response(200, content=c)).status()
         assert e.value.code == "bad_response"
@@ -122,14 +122,14 @@ def test_inbox_keeps_a_valid_envelope_with_an_invalid_body():
     good = {"seq": 1, "event_id": "1" * 32, "at": "2026-11-18T10:00:00Z", "kind": "answer", "path": "city", "value": "Lyon", "base_ver": "2" * 32}
     bad = {"seq": 2, "event_id": "3" * 32, "at": "2026-11-18T10:00:00Z", "kind": "answer", "path": "NOT A PATH"}
     page = client_for(lambda r: httpx.Response(200, json={"stream_id": "4" * 32, "last_seq": 2, "acked_seq": 0,
-                                                       "sessions_epoch": 0, "revoked_through_seq": 0,
+                                                       "sessions_epoch": 0, "revoked_through_seq": 0, "config_rev": 1, "enabled": True,
                                                         "held": True, "events": [good, bad]})).get_inbox(KEY, 0)
     assert page.held and page.acked_seq == 0 and page.last_seq == 2 and page.events[0].kind == "answer"
     assert type(page.events[1]).__name__ == "InvalidEvent" and page.events[1].seq == 2
     broken = {"seq": "x"}
     with pytest.raises(PortalError):
         client_for(lambda r: httpx.Response(200, json={"stream_id": "4" * 32, "last_seq": 1, "acked_seq": 0,
-                                                     "sessions_epoch": 0, "revoked_through_seq": 0,
+                                                     "sessions_epoch": 0, "revoked_through_seq": 0, "config_rev": 1, "enabled": True,
                                                       "events": [broken]})).get_inbox(KEY, 0)
 
 

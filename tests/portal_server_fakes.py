@@ -218,7 +218,8 @@ class Harness:
     def push_snapshot(self, device: Device, prof: Enabled, snapshot: Snapshot | None = None, *, rev: int | None = None,
                       acked_seq: int = 0, results: list[EventResult] | None = None, upload: bool = True):
         prof.rev = rev if rev is not None else prof.rev + 1
-        body = {"stream_id": prof.stream_id, "rev": prof.rev, "acked_seq": acked_seq,
+        body = {"stream_id": prof.stream_id, "sessions_epoch": prof.epoch, "revoked_through_seq": 0,
+                "rev": prof.rev, "acked_seq": acked_seq,
                 "results": [r.model_dump(mode="json") for r in results or []],
                 "snapshot": (snapshot or make_snapshot()).model_dump(mode="json")}
         r = self.client.put(f"{self.api}/profiles/{prof.key}/snapshot", headers=device.headers, json=body)

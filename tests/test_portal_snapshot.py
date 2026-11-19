@@ -148,12 +148,12 @@ def test_grants_follow_stream_and_epoch(jp, profile, master, tmp_path):
     assert build(jp, profile)[0].awaiting[0].grant != g1
 
 
-def test_sent_items_inferred_only_with_a_recorded_attempt(jp, profile, master, tmp_path):
+def test_sent_items_omit_historical_inference_text(jp, profile, master, tmp_path):
     job1, a1 = new_app(profile, master, tmp_path, 1, approve=True)
     job2, a2 = new_app(profile, master, tmp_path, 2, approve=True)
     facts.save_custom_answers(profile.id, [("Avez-vous une maladie chronique ?", "Réponse privée")])
     make_sent(a1, job1, submitted_at=NOW - timedelta(days=2), inferred=[
-        FilledField(label="Années d'expérience", op="fill", value="2", inferred=True, basis="CV"),
+        FilledField(label="Champ historique anodin", op="fill", value="Texte ancien", inferred=True, basis="Préfixe avec secret historique"),
         FilledField(label="Avez-vous un handicap ?", op="select", value="Non-secret", inferred=True, basis="déduit"),
         FilledField(label="Reconnaissance", op="select", fact="disability", value="Non-secret", inferred=True),
         FilledField(label="Champ libre", op="fill", value="Réponse privée", inferred=True),
@@ -162,8 +162,9 @@ def test_sent_items_inferred_only_with_a_recorded_attempt(jp, profile, master, t
     cvstore.mark_submitted(a2.id, a2.current_rev)  # no recorded sending attempt
     snap, docs = build(jp, profile)
     by = {s.company: s for s in snap.sent}
-    assert [i.label for i in by["Société 1"].inferred] == ["Années d'expérience"]
-    assert by["Société 2"].inferred is None and by["Société 2"].doc_id is None and by["Société 2"].url is None
+    assert by["Société 2"].doc_id is None and by["Société 2"].url is None
+    for text in ("inferred", "Champ historique anodin", "Texte ancien", "secret historique"):
+        assert text not in snap.model_dump_json()
     assert "Non-secret" not in snap.model_dump_json()
     assert "Réponse privée" not in snap.model_dump_json()
     assert by["Société 1"].host == "careers.exemple.test" and by["Société 1"].url.startswith("https://careers.exemple.test/jobs/1")

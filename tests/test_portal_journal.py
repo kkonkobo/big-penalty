@@ -28,10 +28,10 @@ def ev(seq, kind="answer", **kw):
 def test_migration_and_permissions(tmp_path):
     p = tmp_path / "d" / "portal.sqlite3"
     j = Journal(p)
-    assert j.schema_version() == 7
+    assert j.schema_version() == 8
     assert stat.S_IMODE(p.stat().st_mode) == 0o600 and stat.S_IMODE(p.parent.stat().st_mode) == 0o700
     Journal(p)  # opening again does not migrate twice or fail
-    assert j.schema_version() == 7
+    assert j.schema_version() == 8
     c = sqlite3.connect(p)
     assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     c.execute("PRAGMA user_version=99")

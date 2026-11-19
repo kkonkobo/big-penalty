@@ -85,6 +85,11 @@ CREATE INDEX used_login_nonces_expiry ON used_login_nonces(expires_at);
 """, """
 ALTER TABLE profiles ADD COLUMN revoked_through_seq INTEGER NOT NULL DEFAULT 0;
 UPDATE profiles SET revoked_through_seq=last_seq;
+""", """
+UPDATE profiles SET revoked_through_seq=last_seq, snapshot_digest=NULL, snapshot_at=NULL;
+DELETE FROM snapshots;
+DELETE FROM manifest;
+DELETE FROM documents;
 """]
 
 

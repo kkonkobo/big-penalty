@@ -1,4 +1,4 @@
-"""The Mac API under `<base>/api/v1` (DESIGN §4). Bodies are the models of `jobhunt.portal.protocol`.
+"""The Mac API under `<base>/api/v2` (DESIGN §4). Bodies are the models of `jobhunt.portal.protocol`.
 
 Every route authenticates first (bearer token, sha256 lookup, 120 requests per minute per device), then resolves
 `(device_id, profile_key)`: another device's profile is a plain 404. Errors are `{"error": code, "current": n?}` and never
@@ -210,6 +210,9 @@ def _put_profile(portal: Portal, device_id: str, key: str, cfg: ProfileConfig) -
                                                          or bytes.fromhex(cfg.passcode.hash) != bytes(row["passcode_hash"]))
             credentials_changed = (new_passcode or cfg.sessions_epoch != row["sessions_epoch"]
                                    or cfg.handle_sha256 != row["handle_sha256"])
+            if cfg.stream_id == row["stream_id"] and (cfg.sessions_epoch < row["sessions_epoch"] or (
+                    credentials_changed and cfg.sessions_epoch == row["sessions_epoch"])):
+                raise ApiError(409, "controls")
             if credentials_changed:
                 delete_profile_sessions(c, pid)
                 c.execute("UPDATE profiles SET revoked_through_seq=last_seq WHERE id=?", (pid,))
@@ -259,7 +262,7 @@ def _inbox(portal: Portal, device_id: str, key: str, after: int) -> Inbox:
         events = ops.load_events(conn, portal.cipher, row["id"], after, protocol.INBOX_PAGE)
         return Inbox(stream_id=row["stream_id"], last_seq=row["last_seq"], acked_seq=row["acked_seq"],
                      sessions_epoch=row["sessions_epoch"], revoked_through_seq=row["revoked_through_seq"],
-                     held=bool(row["held"]), events=events)
+                     config_rev=row["config_rev"], enabled=bool(row["enabled"]), held=bool(row["held"]), events=events)
 
 
 @router.get("/profiles/{profile_key}/inbox")
@@ -305,11 +308,13 @@ def _put_snapshot(portal: Portal, device_id: str, key: str, push: SnapshotPush) 
         pid = row["id"]
         if push.stream_id != row["stream_id"]:
             raise ApiError(409, "stream")
+        if (push.sessions_epoch, push.revoked_through_seq) != (row["sessions_epoch"], row["revoked_through_seq"]):
+            raise ApiError(409, "controls")
         if push.rev == row["snapshot_rev"] and row["snapshot_digest"] and hmac.compare_digest(row["snapshot_digest"].encode(), digest.encode()):
             return SnapshotPushResponse(rev=push.rev, missing_documents=_missing_documents(c, pid))
         if push.rev <= row["snapshot_rev"]:
             raise ApiError(409, "rev", row["snapshot_rev"])
-        if push.acked_seq < row["acked_seq"] or push.acked_seq > row["last_seq"]:
+        if push.acked_seq < max(row["acked_seq"], row["revoked_through_seq"]) or push.acked_seq > row["last_seq"]:
             raise ApiError(409, "ack", row["acked_seq"])
         stored_refs = {doc["doc_id"]: (doc["sha256"], doc["size"]) for doc in
                        c.execute("SELECT doc_id, sha256, size FROM manifest WHERE profile_id=?", (pid,))}
@@ -422,7 +427,7 @@ def _status(portal: Portal, device_id: str) -> ServerStatus:
     rows = portal.db.conn.execute(
         "SELECT p.*, (SELECT COUNT(*) FROM sessions s WHERE s.profile_id=p.id) AS n_sessions FROM profiles p "
         "WHERE p.device_id=? ORDER BY p.id", (device_id,)).fetchall()
-    return ServerStatus(version=portal.config.version, profiles=[
+    return ServerStatus(protocol=protocol.PROTOCOL_VERSION, version=portal.config.version, profiles=[
         ProfileStatus(profile_key=r["profile_key"], enabled=bool(r["enabled"]), held=bool(r["held"]), config_rev=r["config_rev"],
                       snapshot_rev=r["snapshot_rev"], last_seq=r["last_seq"], acked_seq=r["acked_seq"], sessions=r["n_sessions"])
         for r in rows])

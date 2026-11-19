@@ -110,7 +110,7 @@ class FakePortalServer:
         if device is None:
             return self._err(401, "unauthorized")
         if path == "/status":
-            return self._json(200, protocol.ServerStatus(version="fake", profiles=[
+            return self._json(200, protocol.ServerStatus(protocol=protocol.PROTOCOL_VERSION, version="fake", profiles=[
                 protocol.ProfileStatus(profile_key=k, enabled=p.enabled, held=p.held, config_rev=p.config_rev, snapshot_rev=p.snapshot_rev,
                                        last_seq=p.last_seq, acked_seq=p.acked, sessions=0)
                 for k, p in self.profiles.items() if p.device_id == device]))
@@ -133,7 +133,7 @@ class FakePortalServer:
             evs = [e for e in prof.events if e["seq"] > after][:protocol.INBOX_PAGE]
             return httpx.Response(200, json={"stream_id": prof.stream_id, "last_seq": prof.last_seq, "acked_seq": prof.acked,
                                              "sessions_epoch": prof.epoch, "revoked_through_seq": prof.revoked_through_seq,
-                                             "held": prof.held, "events": evs})
+                                             "config_rev": prof.config_rev, "enabled": prof.enabled, "held": prof.held, "events": evs})
         if sub == "/snapshot" and request.method == "PUT":
             return self._put_snapshot(request, prof)
         if doc and request.method == "PUT":
@@ -195,10 +195,12 @@ class FakePortalServer:
             return self._err(422, "invalid")
         if push.stream_id != prof.stream_id:
             return self._err(409, "stream", prof.config_rev)
+        if (push.sessions_epoch, push.revoked_through_seq) != (prof.epoch, prof.revoked_through_seq):
+            return self._err(409, "controls")
         digest = protocol.body_digest(push)
         if push.rev < prof.snapshot_rev or (push.rev == prof.snapshot_rev and digest != prof.snapshot_digest):
             return self._err(409, "rev", prof.snapshot_rev)
-        if push.acked_seq < prof.acked or push.acked_seq > prof.last_seq:
+        if push.acked_seq < max(prof.acked, prof.revoked_through_seq) or push.acked_seq > prof.last_seq:
             return self._err(409, "ack", prof.acked)
         self.snapshot_pushes += 1
         prof.snapshot_rev, prof.snapshot_digest, prof.acked = push.rev, digest, push.acked_seq

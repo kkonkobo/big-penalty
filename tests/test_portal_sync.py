@@ -248,7 +248,7 @@ def test_incomplete_second_inbox_page_applies_nothing(portal):
     srv(portal).last_seq += 1
     (rep,) = go(portal)
     assert not rep.ok and rep.error == sync.STREAM_MSG
-    assert portal.journal.get_event(first).state == "received"
+    assert portal.journal.get_event(first) is None and portal.journal.get_profile(portal.profile_id).cursor_seq == 0
     assert srv(portal).acked == 0 and stored_answer(portal.profile_id, "city") == ""
 
 
@@ -442,7 +442,7 @@ async def test_send_intent_end_to_end(portal, profile, master, tmp_path, engine)
     assert rep.ok and rep.executed == 1 and len(engine) == 1
     assert [(r.event_id, r.status, r.message) for r in srv(portal).results] == [(e, "done", "Envoyée.")]
     snap = srv(portal).snapshot  # pushed again after the batch
-    assert snap.awaiting == [] and [s.company for s in snap.sent] == ["Société 1"] and snap.sent[0].inferred == []
+    assert snap.awaiting == [] and [s.company for s in snap.sent] == ["Société 1"]
     assert cvstore.get_application(app.id).status == "submitted"
     await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(hours=1))
     assert len(engine) == 1  # an event is never executed twice

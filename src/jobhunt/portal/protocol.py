@@ -13,8 +13,8 @@ from typing import Annotated, Literal, Union
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints
 
-PROTOCOL_VERSION = 1
-API_PREFIX = "/api/v1"  # under the server's base path (PORTAL_BASE_PATH, "/app" in production)
+PROTOCOL_VERSION = 2
+API_PREFIX = f"/api/v{PROTOCOL_VERSION}"
 
 # ---------------------------------------------------------------- limits (enforced by both sides)
 MAX_JSON_BODY = 64 * 1024            # every JSON request except the snapshot push
@@ -23,6 +23,7 @@ MAX_DOCUMENT_BYTES = 1_500_000       # one PDF
 MAX_DOCUMENTS = 150                  # per profile
 MAX_DOCUMENTS_BYTES = 120 * 1024 * 1024  # per profile
 MAX_PENDING_EVENTS = 500             # per profile, waiting for the Mac
+CANCEL_RESERVE = 50
 MAX_RESULTS = 100                    # outcomes reported with a snapshot
 INBOX_PAGE = 200                     # events per GET inbox
 MAX_PROFILES_PER_DEVICE = 10
@@ -130,8 +131,8 @@ class PairResponse(Wire):
 
 
 class PasscodeVerifier(Wire):
-    salt: Hex32  # SCRYPT_SALT_BYTES bytes
-    hash: Hex64  # SCRYPT_DKLEN bytes
+    salt: Hex32 = Field(repr=False)
+    hash: Hex64 = Field(repr=False)
 
 
 class ProfileConfig(Wire):
@@ -226,12 +227,6 @@ class Awaiting(Wire):
     retry: bool = False  # the last attempt failed without any click that may have sent it: sending again is allowed
 
 
-class Inferred(Wire):
-    label: Line
-    value: Annotated[str, StringConstraints(max_length=1000)] = ""
-    basis: Line = ""
-
-
 class Prep(Wire):
     message: Annotated[str, StringConstraints(max_length=1000)]
     hint: Annotated[str, StringConstraints(max_length=1000)] = ""
@@ -245,7 +240,6 @@ class SentItem(Wire):
     host: Host = ""
     url: Url | None = None
     doc_id: Hex32 | None = None
-    inferred: list[Inferred] | None = Field(default=None, max_length=60)  # None: no recorded sending attempt to read them from
     prep: list[Prep] = Field(default_factory=list, max_length=40)
 
 
@@ -263,7 +257,7 @@ class Counts(Wire):
 
 
 class Snapshot(Wire):
-    protocol: int = PROTOCOL_VERSION
+    protocol: Literal[2] = PROTOCOL_VERSION
     display_name: Annotated[str, StringConstraints(max_length=80)] = ""
     synced_at: Timestamp
     auto_send_on: bool = False
@@ -335,11 +329,13 @@ EVENT_KINDS = ("answer", "question_answer", "custom_edit", "custom_delete", "int
 
 class Inbox(Wire):
     stream_id: Hex32
-    last_seq: int = Field(ge=0)
-    acked_seq: int = Field(ge=0)  # what the server recorded as taken by the Mac: lower than the Mac's own record = restored server
-    sessions_epoch: int = Field(ge=0)
-    revoked_through_seq: int = Field(ge=0)
-    held: bool = False  # admin hold on the server: the Mac starts no queued work for this profile
+    last_seq: int = Field(ge=0, strict=True)
+    acked_seq: int = Field(ge=0, strict=True)  # lower than the Mac's own record = restored server
+    sessions_epoch: int = Field(ge=0, strict=True)
+    revoked_through_seq: int = Field(ge=0, strict=True)
+    config_rev: int = Field(ge=1, strict=True)
+    enabled: bool = Field(strict=True)
+    held: bool = Field(strict=True)
     events: list[Event] = Field(default_factory=list, max_length=INBOX_PAGE)
 
 
@@ -364,6 +360,8 @@ class EventResult(Wire):
 
 class SnapshotPush(Wire):
     stream_id: Hex32
+    sessions_epoch: int = Field(ge=0, le=2 ** 53)
+    revoked_through_seq: int = Field(ge=0, le=2 ** 53)
     rev: int = Field(ge=1, le=2 ** 53)
     acked_seq: int = Field(ge=0, le=2 ** 53)
     results: list[EventResult] = Field(default_factory=list, max_length=MAX_RESULTS)
@@ -387,7 +385,7 @@ class ProfileStatus(Wire):
 
 
 class ServerStatus(Wire):
-    protocol: int = PROTOCOL_VERSION
+    protocol: Literal[2]
     version: Annotated[str, StringConstraints(max_length=80)] = ""
     profiles: list[ProfileStatus] = Field(default_factory=list, max_length=MAX_PROFILES_PER_DEVICE)
 

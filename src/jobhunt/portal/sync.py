@@ -53,13 +53,14 @@ def _pull(journal: Journal, client: PortalClient, pid: int, now: datetime, rep: 
     cursor, confirmed_ack = p.cursor_seq, p.confirmed_ack
     page = client.get_inbox(p.profile_key, cursor)
     target = page.last_seq
-    cutoff = page.revoked_through_seq
+    if target - cursor > protocol.MAX_PENDING_EVENTS + protocol.CANCEL_RESERVE:
+        raise StreamError("boîte de réception trop volumineuse")
+    cutoff, held = page.revoked_through_seq, page.held
+    buffered = []
     while True:
-        if page.stream_id != p.stream_id:
-            raise StreamError("flux inattendu")
-        if (page.sessions_epoch != p.epoch or page.revoked_through_seq != cutoff
-                or not p.revoked_through_seq <= cutoff <= target):
-            raise StreamError("version d’accès inattendue")
+        validate_controls(p, page)
+        if (page.revoked_through_seq, page.held) != (cutoff, held):
+            raise StreamError("contrôles modifiés pendant la lecture")
         if page.last_seq < max(cursor, target) or not confirmed_ack <= page.acked_seq <= cursor:
             raise StreamError("le serveur est revenu en arrière")
         confirmed_ack = page.acked_seq
@@ -69,18 +70,29 @@ def _pull(journal: Journal, client: PortalClient, pid: int, now: datetime, rep: 
         events = [event for event in page.events if event.seq <= target]
         if cursor < target and not events:
             raise StreamError("page manquante")
-        with journal.transaction() as scoped:
-            current = scoped.get_profile(pid)
-            if current is None or current.cursor_seq != cursor or current.revoked_through_seq > cutoff:
-                raise StreamError("curseur inattendu")
-            scoped.update_profile(pid, expected_stream=p.stream_id, expected_epoch=p.epoch, held=page.held,
-                                  confirmed_ack=confirmed_ack, revoked_through_seq=cutoff, control_time=now)
-            if events:
-                cursor = scoped.insert_page(pid, p.stream_id, [_to_new(e) for e in events], now)
-        rep.pulled += len(events)
+        buffered.extend(_to_new(event) for event in events)
+        cursor += len(events)
         if cursor == target:
-            return
+            break
         page = client.get_inbox(p.profile_key, cursor)
+    with journal.transaction() as scoped:
+        current = scoped.get_profile(pid)
+        if current != p or scoped.pending_config(pid):
+            raise StreamError("contrôles locaux modifiés pendant la lecture")
+        scoped.update_profile(pid, held=held, confirmed_ack=confirmed_ack, revoked_through_seq=cutoff, control_time=now)
+        if buffered:
+            scoped.insert_page(pid, p.stream_id, buffered, now)
+    rep.pulled += len(buffered)
+
+
+def validate_controls(profile, page) -> None:
+    if page.stream_id != profile.stream_id:
+        raise StreamError("flux inattendu")
+    if (not page.enabled or page.sessions_epoch != profile.epoch or page.config_rev != profile.config_rev
+            or not profile.revoked_through_seq <= page.revoked_through_seq <= page.last_seq
+            or not profile.confirmed_ack <= page.acked_seq <= profile.cursor_seq
+            or page.last_seq < profile.cursor_seq):
+        raise StreamError("version d’accès inattendue")
 
 
 def _push(journal: Journal, client: PortalClient, pid: int, now: datetime, rep: ProfileSyncReport) -> None:
@@ -89,7 +101,10 @@ def _push(journal: Journal, client: PortalClient, pid: int, now: datetime, rep: 
     results = _results_for_stream(journal, pid, p.stream_id)
     rev = p.snapshot_rev + 1
     for attempt in (1, 2):
-        push = protocol.SnapshotPush(stream_id=p.stream_id, rev=rev, acked_seq=p.cursor_seq, results=results, snapshot=snap)
+        if journal.get_profile(pid) != p or journal.pending_config(pid):
+            raise StreamError("contrôles locaux modifiés pendant la préparation")
+        push = protocol.SnapshotPush(stream_id=p.stream_id, sessions_epoch=p.epoch, revoked_through_seq=p.revoked_through_seq,
+                                     rev=rev, acked_seq=p.cursor_seq, results=results, snapshot=snap)
         try:
             resp = client.put_snapshot(p.profile_key, push)
             break

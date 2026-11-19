@@ -8,16 +8,6 @@
   <p class="muted small">{% if s.submitted_at %}Envoyée le {{ s.submitted_at|date_fr }}{% endif %}{% if s.host %} · Site : {{ s.host }}{% endif %}</p>
   <div class="links">{{ ext_link(s.url, "Voir l'annonce") }}{{ cv_link(s.doc_id, docs) }}</div>
 </div></div>
-<section class="panel">
-  <div class="panel-head plain"><h2>Réponses déduites (à connaître avant l'entretien)</h2></div>
-  {% if s.inferred is none %}<p>Le détail des réponses n'est pas disponible pour cette candidature.</p>
-  {% elif not s.inferred %}<p>Aucune réponse déduite.</p>
-  {% else %}
-  <dl class="defs">
-    {% for i in s.inferred %}<dt>{{ i.label }}</dt><dd>{{ i.value }}{% if i.basis %}<span class="sub">{{ i.basis }}</span>{% endif %}</dd>{% endfor %}
-  </dl>
-  {% endif %}
-</section>
 {% if s.prep %}
 <section class="panel">
   <div class="panel-head plain"><h2>Préparation entretien</h2></div>

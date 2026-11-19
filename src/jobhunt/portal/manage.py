@@ -7,6 +7,7 @@ and can be retried (a 409 on the configuration revision is adopted once)."""
 from __future__ import annotations
 
 import contextlib
+import hmac
 import os
 import warnings
 from dataclasses import dataclass, field
@@ -15,9 +16,9 @@ from functools import wraps
 from urllib.parse import urlsplit
 
 from jobhunt import db
-from jobhunt.portal import apply_events, protocol, secrets
+from jobhunt.portal import apply_events, protocol, secrets, sync
 from jobhunt.portal.client import PortalClient, PortalError, check_base_url, origin_of
-from jobhunt.portal.journal import EventRow, Journal, pass_lock
+from jobhunt.portal.journal import EventRow, Journal, StreamError, pass_lock
 
 
 class ManageError(Exception):
@@ -131,16 +132,17 @@ def _verifier(passcode: str) -> protocol.PasscodeVerifier:
 
 
 def _push_config(client: PortalClient, key: str, *, config_rev: int, enabled: bool, handle: str, passcode: protocol.PasscodeVerifier | None,
-                 epoch: int, stream_id: str, save_revision) -> int:
+                 epoch: int, stream_id: str, save_revision, rebase_revision: bool = True) -> int:
     rev = config_rev
     for attempt in (0, 1):
         cfg = protocol.ProfileConfig(config_rev=rev, enabled=enabled, handle_sha256=protocol.handle_digest(handle), passcode=passcode,
                                      sessions_epoch=epoch, stream_id=stream_id)
         try:
-            client.put_profile(key, cfg)
+            if client.put_profile(key, cfg).config_rev != rev:
+                raise PortalError("bad_response")
             return rev
         except PortalError as e:
-            if e.code == "config_rev" and e.current is not None and attempt == 0:
+            if rebase_revision and e.code == "config_rev" and e.current is not None and attempt == 0:
                 rev = max(rev, e.current + 1)
                 save_revision(rev)
                 continue
@@ -178,12 +180,28 @@ def _retry(journal: Journal, profile_id: int, operation: str) -> bool:
     return pending == operation
 
 
-def _publish(journal: Journal, row, client: PortalClient | None, *, enabled: bool, passcode: str | None = None) -> None:
+def _publish(journal: Journal, row, client: PortalClient | None, *, enabled: bool) -> None:
+    operation = journal.pending_config(row.profile_id)
+    verifier = journal.pending_verifier(row.profile_id)
+    if operation in ("enable", "rotate") and verifier is None:
+        raise ManageError("Modification d’une ancienne version : désactivez puis réactivez le profil.")
     with _client(journal, client) as remote:
         rev = _push_config(remote, row.profile_key, config_rev=row.config_rev, enabled=enabled, handle=row.handle,
-                           passcode=_verifier(passcode) if passcode is not None else None, epoch=row.epoch, stream_id=row.stream_id,
-                           save_revision=lambda value: journal.save_profile(row.profile_id, config_rev=value))
+                           passcode=verifier, epoch=row.epoch, stream_id=row.stream_id,
+                           save_revision=lambda value: journal.save_profile(row.profile_id, config_rev=value),
+                           rebase_revision=operation != "rotate")
     journal.complete_config(row.profile_id, db.now(), enabled=enabled, config_rev=rev, last_error=None)
+
+
+def _publish_credentials(journal: Journal, row, client: PortalClient | None, passcode: str | None) -> Credentials:
+    verifier = journal.pending_verifier(row.profile_id)
+    if verifier is not None and passcode is not None and not hmac.compare_digest(
+            protocol.passcode_hash(passcode, bytes.fromhex(verifier.salt)).hex(), verifier.hash):
+        raise ManageError("Ressaisissez le code initial ou relancez sans saisir de code.")
+    _publish(journal, row, client, enabled=True)
+    if passcode is None:
+        raise ManageError("Modification confirmée. Le code initial n’est pas récupérable : changez-le si vous ne le connaissez pas.")
+    return Credentials(_address(journal), row.handle, passcode)
 
 
 # ---------------------------------------------------------------- pairing
@@ -258,18 +276,16 @@ def enable(profile_id: int, passcode: str | None = None, review: bool = False, *
         raise ManageError("Ce profil est déjà activé : utilisez « portal passcode » pour changer le code.")
     if passcode is not None:
         _check_chosen(passcode)
-    else:
-        passcode = protocol.new_passcode()
     if not _retry(j, profile_id, "enable"):
+        passcode = passcode or protocol.new_passcode()
         key = profile_key or (row.profile_key if row else protocol.new_id())
         j.stage_config(profile_id, "enable", db.now(), profile_key=key, handle=protocol.new_handle(), stream_id=protocol.new_id(),
                        epoch=row.epoch + 1 if row else 0, config_rev=(row.config_rev if row else 0) + 1, enabled=False,
-                       review_mode=review, held=False)
+                       review_mode=review, held=False, verifier=_verifier(passcode))
     elif profile_key is not None and row.profile_key != profile_key:
         raise ManageError("Ce profil a déjà une activation en attente avec une autre clé.")
     row = _row(j, profile_id, enabled=False)
-    _publish(j, row, client, enabled=True, passcode=passcode)
-    return Credentials(_address(j), row.handle, passcode)
+    return _publish_credentials(j, row, client, passcode)
 
 
 @_serialized
@@ -280,12 +296,11 @@ def rotate_passcode(profile_id: int, passcode: str | None = None, *, journal: Jo
     row = _row(j, profile_id)
     if passcode is not None:
         _check_chosen(passcode)
-    else:
-        passcode = protocol.new_passcode()
     if not _retry(j, profile_id, "rotate"):
-        j.stage_config(profile_id, "rotate", db.now(), epoch=row.epoch + 1, config_rev=row.config_rev + 1)
-    _publish(j, _row(j, profile_id), client, enabled=True, passcode=passcode)
-    return Credentials(_address(j), row.handle, passcode)
+        passcode = passcode or protocol.new_passcode()
+        j.stage_config(profile_id, "rotate", db.now(), epoch=row.epoch + 1, config_rev=row.config_rev + 1,
+                       verifier=_verifier(passcode))
+    return _publish_credentials(j, _row(j, profile_id), client, passcode)
 
 
 @_serialized
@@ -411,12 +426,34 @@ def review_list(profile_id: int, *, journal: Journal | None = None) -> list[Even
     return _journal(journal).events(profile_id, ("awaiting_review",))
 
 
-def review_apply(profile_id: int, event_ids: list[str] | None = None, *, journal: Journal | None = None) -> apply_events.ApplyReport:
+@_serialized
+def review_apply(profile_id: int, event_ids: list[str] | None = None, *, journal: Journal | None = None,
+                 client: PortalClient | None = None) -> apply_events.ApplyReport:
     j = _journal(journal)
     with pass_lock("sync.lock") as got:
         if not got:
             raise ManageError("Une synchronisation est en cours : réessayez dans un instant.")
-        return apply_events.apply_reviewed(j, profile_id, event_ids, True)
+        profile, stop = j.controls(profile_id)
+        if stop and stop != "profil suspendu":
+            return apply_events.ApplyReport(skipped_reason=stop)
+        selected = [event.event_id for event in j.events(profile_id, ("awaiting_review",))
+                    if event_ids is None or event.event_id in event_ids]
+        now = db.now()
+        try:
+            with _client(j, client) as remote:
+                page = remote.get_inbox(profile.profile_key, profile.cursor_seq)
+            sync.validate_controls(profile, page)
+            with j.transaction() as scoped:
+                if scoped.get_profile(profile_id) != profile or scoped.pending_config(profile_id):
+                    raise StreamError("contrôles locaux modifiés")
+                scoped.update_profile(profile_id, held=page.held, confirmed_ack=page.acked_seq,
+                                      revoked_through_seq=page.revoked_through_seq, control_time=now)
+                validated = scoped.get_profile(profile_id)
+        except PortalError as error:
+            raise ManageError(str(error)) from None
+        except StreamError:
+            raise ManageError(sync.STREAM_MSG) from None
+        return apply_events.apply_reviewed(j, profile_id, selected, True, now, validated=validated)
 
 
 def review_reject(profile_id: int, event_ids: list[str] | None = None, *, journal: Journal | None = None) -> int:

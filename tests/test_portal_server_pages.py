@@ -14,7 +14,7 @@ from portal_server_fakes import (CUSTOM_ID, CUSTOM_MASKED, DOC_A, DOC_B, GRANT_E
 from starlette.testclient import TestClient
 
 from jobhunt.portal import protocol
-from jobhunt.portal.protocol import (AnswerValue, Awaiting, CustomAnswer, EmailPause, EventResult, FieldSpec, InfoItem, Inferred, Prep,
+from jobhunt.portal.protocol import (AnswerValue, Awaiting, CustomAnswer, EmailPause, EventResult, FieldSpec, InfoItem, Prep,
                                      SentItem, Unconfirmed)
 from jobhunt.portal.server import auth, ops, pages
 
@@ -119,13 +119,12 @@ def rich_snapshot(xss: str = "") -> protocol.Snapshot:
     snap = make_snapshot()
     sent = [
         SentItem(ref=REF_1, company="Bureau Test" + xss, title="Ingénieur" + xss, host="ats.example",
-                 submitted_at=datetime(2027, 1, 10, 9, 0, tzinfo=UTC), url=JOB_URL, doc_id=DOC_B, inferred=None,
+                 submitted_at=datetime(2027, 1, 10, 9, 0, tzinfo=UTC), url=JOB_URL, doc_id=DOC_B,
                  prep=[Prep(message="Préparez votre disponibilité" + xss, hint="Indice" + xss)]),
-        SentItem(ref=REF_2, company="Atelier Sans Réponse", title="Technicien", host="ats.example", inferred=[],
+        SentItem(ref=REF_2, company="Atelier Sans Réponse", title="Technicien", host="ats.example",
                  submitted_at=datetime(2027, 1, 12, 9, 0, tzinfo=UTC)),
         SentItem(ref=REF_3, company="Usine Déduite", title="Alternant", host="jobs.example",
-                 submitted_at=datetime(2027, 1, 14, 9, 0, tzinfo=UTC),
-                 inferred=[Inferred(label="Permis B" + xss, value="Oui" + xss, basis="Profil" + xss)]),
+                 submitted_at=datetime(2027, 1, 14, 9, 0, tzinfo=UTC)),
     ]
     snap = snap.model_copy(update={
         "sent": sent,
@@ -314,11 +313,8 @@ def test_pages_render_from_a_rich_snapshot(h, user, prof):
     assert "14 janvier 2027" in t and f"/app/candidatures/{REF_1}" in t
 
     t = user.get(f"/app/candidatures/{REF_1}").text
-    assert "Le détail des réponses n'est pas disponible pour cette candidature." in t and "Préparation entretien" in t
+    assert "Préparation entretien" in t
     assert "Préparez votre disponibilité" in t and "Indice" in t and f"/app/documents/{DOC_B}" in t and JOB_URL in t
-    assert "Aucune réponse déduite." in user.get(f"/app/candidatures/{REF_2}").text
-    t = user.get(f"/app/candidatures/{REF_3}").text
-    assert "Réponses déduites (à connaître avant l'entretien)" in t and "Permis B" in t and "Profil" in t
     for bad in ("0" * 32, "zz", REF_1.upper(), "e1" * 15):
         assert user.get(f"/app/candidatures/{bad}").status_code == 404
 

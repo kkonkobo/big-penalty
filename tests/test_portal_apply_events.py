@@ -444,11 +444,11 @@ def test_review_approve_applies_and_reject_does_not(jp, profile, feed):
     jp.save_profile(profile.id, review_mode=True)
     a, b = feed.answer("city", "Lyon"), feed.answer("postal_code", "69000")
     run(jp, profile)
-    rep = apply_reviewed(jp, profile.id, [a], True)
+    rep = apply_reviewed(jp, profile.id, [a], True, validated=jp.get_profile(profile.id))
     assert rep.applied_answers and feed.state(a) == "applied" and feed.state(b) == "awaiting_review"
     apply_reviewed(jp, profile.id, None, False)
     assert feed.state(b) == "rejected" and stored_answer(profile.id, "postal_code") == ""
-    assert apply_reviewed(jp, profile.id, [a], True).states == {}  # an event is handled once
+    assert apply_reviewed(jp, profile.id, [a], True, validated=jp.get_profile(profile.id)).states == {}
 
 
 def test_review_approved_answer_still_checks_the_version(jp, profile, feed):
@@ -456,7 +456,7 @@ def test_review_approved_answer_still_checks_the_version(jp, profile, feed):
     a = feed.answer("city", "Lyon")
     run(jp, profile)
     facts.save_answers(profile.id, {"city": "Nantes"})  # the Mac changed meanwhile
-    apply_reviewed(jp, profile.id, None, True)
+    apply_reviewed(jp, profile.id, None, True, validated=jp.get_profile(profile.id))
     assert feed.state(a) == "conflict" and stored_answer(profile.id, "city") == "Nantes"
 
 
@@ -466,7 +466,7 @@ def test_review_intent_is_requeued_not_executed(jp, profile, feed, master, tmp_p
     e = feed.add("intent", grant=grant(jp, profile, "send", app))
     run(jp, profile)
     assert feed.state(e) == "awaiting_review" and jp.get_event(e).label.startswith("Société 1")
-    apply_reviewed(jp, profile.id, None, True)
+    apply_reviewed(jp, profile.id, None, True, validated=jp.get_profile(profile.id))
     assert feed.state(e) == "queued"
 
 
@@ -513,7 +513,7 @@ def test_disable_between_review_selection_and_transaction_refuses_apply(jp, prof
             yield
 
     monkeypatch.setattr(apply_events, "answers_lock", disable_before_lock)
-    assert apply_reviewed(jp, profile.id, [event], True).skipped_reason == "profil désactivé"
+    assert apply_reviewed(jp, profile.id, [event], True, validated=jp.get_profile(profile.id)).skipped_reason == "profil désactivé"
     assert not jp.get_event(event).approved and feed.state(event) == "awaiting_review"
     assert stored_answer(profile.id, "city") == ""
 
@@ -541,7 +541,7 @@ def test_cancel_of_queued_and_awaiting_review(jp, profile, feed, master, tmp_pat
     c2 = feed.add("cancel", target=j)
     run(jp, profile)
     assert feed.state(j) == feed.state(c2) == "awaiting_review"
-    apply_reviewed(jp, profile.id, [c2], True)
+    apply_reviewed(jp, profile.id, [c2], True, validated=jp.get_profile(profile.id))
     assert feed.state(j) == "cancelled" and feed.state(c2) == "done"
 
 

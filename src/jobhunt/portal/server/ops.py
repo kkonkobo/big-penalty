@@ -38,7 +38,6 @@ MSG_FULL = "Trop de demandes en attente : réessayez quand l'ordinateur aura syn
 MSG_NO_SNAPSHOT = "Aucune donnée n'est encore synchronisée."
 MSG_LOST = "Perdu lors d'une réinitialisation : à refaire."
 MSG_REVOKED = "Annulée : les accès au portail ont changé."
-CANCEL_RESERVE = 50
 CANCELLABLE_STATUSES = ("received", "queued", "awaiting_review")
 CHAINABLE_ANSWER_STATUSES = ("received", "awaiting_review")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -374,7 +373,7 @@ def _mutate(portal: Portal, profile_id: int | Session, now: float, plan, needs_s
             return out
         limit = protocol.MAX_PENDING_EVENTS
         if all(event.kind == "cancel" for event in ctx.planned):
-            limit += CANCEL_RESERVE
+            limit += protocol.CANCEL_RESERVE
         if pending_before + len(ctx.planned) > limit:
             out.inbox_full = True
             return out

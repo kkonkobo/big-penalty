@@ -40,7 +40,7 @@ from zoneinfo import ZoneInfo
 from jobhunt.config import get_settings
 from jobhunt.portal import protocol
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 PARIS = ZoneInfo("Europe/Paris")
 INTERRUPTED_MESSAGE = "Résultat inconnu : vérifiez avant de réessayer."
 LOST_MESSAGE = "À refaire : la synchronisation a été réinitialisée."
@@ -231,7 +231,9 @@ CREATE TABLE budget(profile_id INTEGER NOT NULL, day TEXT NOT NULL, count INTEGE
           event_id TEXT NOT NULL, PRIMARY KEY(profile_id, app_id, run_id, event_id));""",
     5: "ALTER TABLE grants ADD COLUMN used_by TEXT;",
     6: "ALTER TABLE events ADD COLUMN before_hash TEXT;\nALTER TABLE events ADD COLUMN planned_hash TEXT;",
-    7: "ALTER TABLE profiles ADD COLUMN revoked_through_seq INTEGER NOT NULL DEFAULT 0;"}
+    7: "ALTER TABLE profiles ADD COLUMN revoked_through_seq INTEGER NOT NULL DEFAULT 0;",
+    8: """CREATE TABLE pending_verifiers (
+    profile_id INTEGER PRIMARY KEY, salt TEXT NOT NULL, hash TEXT NOT NULL);"""}
 
 
 class Journal:
@@ -295,10 +297,10 @@ class Journal:
                 for stmt in _MIGRATIONS[n].split(";\n"):
                     if stmt.strip():
                         c.execute(stmt)
-                if n == 7:
+                if n in (7, 8):
                     now = datetime.now(UTC)
                     for row in c.execute("SELECT profile_id FROM profiles").fetchall():
-                        self._retire_epoch_work(c, row[0], now)
+                        self._retire_epoch_work(c, row[0], now, reconcile=False)
                 c.execute(f"PRAGMA user_version={n}")
 
     def schema_version(self) -> int:
@@ -355,16 +357,27 @@ class Journal:
     def pending_config(self, profile_id: int) -> str | None:
         return self.get_setting(self._config_key(profile_id))
 
-    def stage_config(self, profile_id: int, operation: str, now: datetime, **fields: Any) -> None:
+    def pending_verifier(self, profile_id: int) -> protocol.PasscodeVerifier | None:
+        with self._read() as connection:
+            row = connection.execute("SELECT salt, hash FROM pending_verifiers WHERE profile_id=?", (profile_id,)).fetchone()
+        return protocol.PasscodeVerifier(salt=row["salt"], hash=row["hash"]) if row else None
+
+    def stage_config(self, profile_id: int, operation: str, now: datetime, *,
+                     verifier: protocol.PasscodeVerifier | None = None, **fields: Any) -> None:
         with self.transaction() as journal:
             journal.save_profile(profile_id, control_time=now, **fields)
             journal.void_grants(profile_id, now)
             journal.set_setting(self._config_key(profile_id), operation)
+            connection = journal._connection
+            connection.execute("DELETE FROM pending_verifiers WHERE profile_id=?", (profile_id,))
+            if verifier is not None:
+                connection.execute("INSERT INTO pending_verifiers VALUES (?,?,?)", (profile_id, verifier.salt, verifier.hash))
 
     def complete_config(self, profile_id: int, now: datetime, **fields: Any) -> None:
         with self.transaction() as journal:
             journal.save_profile(profile_id, control_time=now, **fields)
             journal.delete_settings(self._config_key(profile_id))
+            journal._connection.execute("DELETE FROM pending_verifiers WHERE profile_id=?", (profile_id,))
 
     def disable_for_unpair(self, now: datetime) -> None:
         with self.transaction() as journal:
@@ -372,6 +385,7 @@ class Journal:
                 journal.save_profile(profile.profile_id, enabled=False, control_time=now)
                 journal.void_grants(profile.profile_id, now)
                 journal.delete_settings(self._config_key(profile.profile_id))
+            journal._connection.execute("DELETE FROM pending_verifiers")
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[Journal]:
@@ -407,8 +421,10 @@ class Journal:
         scoped._connection = connection
         reconcile_write_plans(scoped, profile_id, now)
 
-    def _retire_epoch_work(self, connection, profile_id: int, now: datetime, *, through: int | None = None) -> None:
-        self._reconcile_before_control(connection, profile_id, now)
+    def _retire_epoch_work(self, connection, profile_id: int, now: datetime, *, through: int | None = None,
+                           reconcile: bool = True) -> None:
+        if reconcile:
+            self._reconcile_before_control(connection, profile_id, now)
         self._void_grants(connection, profile_id, now, cancel_queued=through is None)
         connection.execute("UPDATE events SET state='cancelled', message=?, updated_at=? WHERE profile_id=? "
                            "AND stream_id=(SELECT stream_id FROM profiles WHERE profile_id=?) "

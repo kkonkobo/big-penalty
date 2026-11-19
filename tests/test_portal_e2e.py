@@ -1155,7 +1155,8 @@ def test_18_a_second_device_cannot_touch_the_first_devices_profile(w, profile, m
         dev2 = anon.pair(second_code, "Autre Mac", protocol.sha256_hex(token2)).device_id
     assert dev2 != Journal().get_setting("device_id")
     snap = srv_snap(w)
-    push = protocol.SnapshotPush(stream_id=row["stream_id"], rev=99, acked_seq=0, snapshot=snap)
+    push = protocol.SnapshotPush(stream_id=row["stream_id"], sessions_epoch=row["sessions_epoch"],
+                                 revoked_through_seq=row["revoked_through_seq"], rev=99, acked_seq=0, snapshot=snap)
     cfg = protocol.ProfileConfig(config_rev=50, enabled=False, handle_sha256=row["handle_sha256"], sessions_epoch=9, stream_id=protocol.new_id(),
                                  passcode=None)
     with PortalClient(live.base_url, token2) as c2:
@@ -1388,17 +1389,17 @@ def test_21_documents_of_one_profile_are_not_readable_by_the_other(w, profile, m
 
 # ================================================================ 22. limits
 def test_22_oversized_snapshot_clean_error_on_both_sides(w, monkeypatch):
-    from jobhunt.portal.protocol import Inferred, SentItem
+    from jobhunt.portal.protocol import Prep, SentItem
 
     live, mac, pid, seeker = w.live, w.mac, w.profile_id, w.seeker
     mac.sync_one(pid)
     row_before = live.profile_row(w.key)["snapshot_rev"]
     real = sync.build_snapshot
-    big = SentItem(ref="e1" * 16, company="Société", title="Poste", inferred=[Inferred(label="x" * 500, value="y" * 1000, basis="z" * 500)] * 60)
+    big = SentItem(ref="e1" * 16, company="Société", title="Poste", prep=[Prep(message="x" * 1000, hint="y" * 1000)] * 40)
 
     def inflate(j, p, now):
         snap, docs = real(j, p, now)
-        return snap.model_copy(update={"sent": [big] * 40}), docs
+        return snap.model_copy(update={"sent": [big] * 60}), docs
 
     monkeypatch.setattr(sync, "build_snapshot", inflate)
     out = seeker.edit("city", "Lyon")

@@ -181,10 +181,6 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
     ps = get_portal_settings()
     schema, fields = _schema(ps.write_only)
     answers = facts.load_answers(profile_id)
-    private_values = {facts.norm_question(facts.get_answer(answers, path) or "") for path in ps.write_only}
-    private_values.update(facts.norm_question(entry["answer"]) for entry in facts.custom_answers(profile_id)
-                          if is_masked_question(entry["question"]))
-    private_values.discard("")
     local = db.get_profile(profile_id)
     items = service.queue(profile_id)
     grant = lambda action, **b: journal.find_or_create_grant(profile, action, now, **b)  # noqa: E731
@@ -270,21 +266,9 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
         a = it.app
         run = apply_store.sent_run(a.id)
         did = doc_for(a.id, a) if n < protocol.SENT_DOCUMENTS and run is not None and run.rev == a.current_rev else None
-        inferred = None
-        if run is not None:
-            inferred = []
-            seen: set[str] = set()
-            for field in (field for step in (run.result.steps if run.result else []) for field in step.filled):
-                if not field.inferred or field.label in seen or len(inferred) >= 60:
-                    continue
-                if field.fact in ps.write_only or any(is_masked_question(text) or facts.norm_question(text or "") in private_values
-                                                      for text in (field.label, field.value, field.basis)):
-                    continue
-                seen.add(field.label)
-                inferred.append(protocol.Inferred(label=_t(field.label, 500), value=_t(field.value, 1000), basis=_t(field.basis, 500)))
         sent.append(protocol.SentItem(
             ref=journal.ref_for(profile_id, "sent", a.id), company=_t(a.company, 300), title=_t(a.job_title, 300), submitted_at=a.submitted_at,
-            host=_t(_sent_host(it), 255), url=_sent_url(it), doc_id=did, inferred=inferred,
+            host=_t(_sent_host(it), 255), url=_sent_url(it), doc_id=did,
             prep=[protocol.Prep(message=_t(p.message, 1000), hint=_t(p.hint, 1000)) for p in a.preps[:40]]))
 
     # --- questions

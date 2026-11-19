@@ -109,7 +109,8 @@ def test_every_profile_route_is_scoped_to_the_device(h):
     other = h.add_device()
     base = f"{h.api}/profiles/{prof.key}"
     unknown = f"{h.api}/profiles/{'f' * 32}"
-    snap = {"stream_id": prof.stream_id, "rev": 99, "acked_seq": 0, "snapshot": make_snapshot().model_dump(mode="json")}
+    snap = {"stream_id": prof.stream_id, "sessions_epoch": prof.epoch, "revoked_through_seq": 0,
+            "rev": 99, "acked_seq": 0, "snapshot": make_snapshot().model_dump(mode="json")}
     for root in (base, unknown):
         for method, suffix, kwargs in (("GET", "/inbox", {}), ("PUT", "/snapshot", {"json": snap}),
                                        ("PUT", f"/documents/{DOC_A}", {"content": PDF_A, "headers_extra": {"Content-Type": "application/pdf"}}),
@@ -182,7 +183,7 @@ def test_new_passcode_epoch_and_disable_side_effects(h):
     out2 = h.login(prof)
     assert out2.kind == "ok"
     # a new passcode wipes sessions, known browsers and the login throttle
-    prof.config_rev, prof.passcode = 4, "new-passcode-123"
+    prof.config_rev, prof.epoch, prof.passcode = 4, 1, "new-passcode-123"
     assert h.put_profile(dev, prof).status_code == 200
     assert auth.resolve_session(h.portal, [out2.session_id], h.clock()) is None and n_known() == 0
     assert h.portal.db.conn.execute("SELECT COUNT(*) FROM throttle WHERE bucket LIKE 'h:%'").fetchone()[0] == 0
@@ -230,7 +231,8 @@ def test_stream_change_converts_pending_work_to_lost_results(h):
     assert {r.label for r in results.values() if r.kind == "intent" and r.event_id not in ("1" * 32,)} == {"Société Exemple — Technicien mécatronique"}
     # old stream is refused, the new one restarts at seq 1, and the lost results survive the next push
     assert h.client.put(f"{h.api}/profiles/{prof.key}/snapshot", headers=dev.headers, json={
-        "stream_id": old_stream, "rev": 1, "acked_seq": 0, "snapshot": make_snapshot().model_dump(mode="json")}).json() == {"error": "stream"}
+        "stream_id": old_stream, "sessions_epoch": prof.epoch, "revoked_through_seq": 0,
+        "rev": 1, "acked_seq": 0, "snapshot": make_snapshot().model_dump(mode="json")}).json() == {"error": "stream"}
     assert h.push_snapshot(dev, prof, rev=1).status_code == 200
     assert sum(r.status == "lost" for r in ops.load_view(h.portal, prof.row_id, h.clock()).results) == 3
     assert ops.answer_questions(h.portal, prof.row_id, [(QID, "Non")], h.clock()).stored == 1
@@ -279,6 +281,25 @@ def test_snapshot_ack_rules_and_event_deletion(h):
     assert h.push_snapshot(dev, prof, acked_seq=0).json() == {"error": "ack", "current": 1}  # never backwards
     assert h.push_snapshot(dev, prof, acked_seq=2).status_code == 200
     assert h.client.get(f"{h.api}/profiles/{prof.key}/inbox?after=0", headers=dev.headers).json()["events"] == []
+
+
+def test_snapshot_control_fence_precedes_revision_replay_and_ack(h):
+    dev = h.pair()
+    prof = h.enable(dev)
+    url = f"{h.api}/profiles/{prof.key}/snapshot"
+    body = {"stream_id": prof.stream_id, "sessions_epoch": prof.epoch, "revoked_through_seq": 0,
+            "rev": prof.rev + 1, "acked_seq": 0, "snapshot": make_snapshot().model_dump(mode="json")}
+    assert h.client.put(url, headers=dev.headers, json=body).status_code == 200
+    assert ops.answer_questions(h.portal, prof.row_id, [(QID, "Oui")], h.clock()).stored == 1
+    prof.config_rev += 1
+    prof.epoch += 1
+    assert h.put_profile(dev, prof).status_code == 200
+    assert h.client.put(url, headers=dev.headers, json=body).json() == {"error": "controls"}
+    current = {**body, "sessions_epoch": prof.epoch, "rev": body["rev"] + 1, "acked_seq": 1}
+    assert h.client.put(url, headers=dev.headers, json=current).json() == {"error": "controls"}
+    inbox = h.client.get(f"{h.api}/profiles/{prof.key}/inbox", headers=dev.headers).json()
+    assert inbox["acked_seq"] == 0 and [event["seq"] for event in inbox["events"]] == [1]
+    assert h.client.put(url, headers=dev.headers, json={**current, "revoked_through_seq": 1}).status_code == 200
 
 
 def test_snapshot_documents_missing_and_dropped(h):
@@ -513,7 +534,7 @@ def test_unexpected_exception_is_generic_and_leaks_nothing(h, caplog):
     assert_headers(page)
     ours = "\n".join(r.getMessage() for r in caplog.records if r.name == "bigpenalty.portal")
     assert secret not in ours and "RuntimeError" in ours
-    assert "GET /app/api/v1/boom 500" in ours  # the route template, never the raw path / query
+    assert "GET /app/api/v2/boom 500" in ours  # the route template, never the raw path / query
 
 
 def test_validation_errors_never_echo_input(h):

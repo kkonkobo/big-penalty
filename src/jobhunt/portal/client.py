@@ -26,6 +26,7 @@ MESSAGES = {
     "rev": "Le portail a déjà une version plus récente de l'instantané.",
     "ack": "Le portail refuse l'accusé de réception : resynchronisez le profil.",
     "stream": "Le portail utilise un autre flux : resynchronisez le profil.",
+    "controls": "Les contrôles du portail ont changé : synchronisez le profil.",
     "handle_taken": "Cet identifiant est déjà pris sur le portail.",
     "too_large": "Le portail a refusé ou renvoyé des données trop volumineuses.",
     "invalid": "Le portail a refusé la demande (données invalides).",
@@ -68,6 +69,8 @@ class InboxPage:
     events: list
     sessions_epoch: int
     revoked_through_seq: int
+    config_rev: int
+    enabled: bool
 
 
 class _Envelope(BaseModel):
@@ -158,7 +161,7 @@ class PortalClient:
             err = None
         known = {401: "unauthorized", 404: "not_found", 413: "too_large", 422: "invalid", 429: "throttled"}
         if status == 409:
-            code = err.error if err and err.error in ("config_rev", "rev", "ack", "stream", "handle_taken") else "http_error"
+            code = err.error if err and err.error in ("config_rev", "rev", "ack", "stream", "controls", "handle_taken") else "http_error"
             return PortalError(code, status, err.current if err else None)
         return PortalError(known.get(status, "http_error"), status)
 
@@ -208,7 +211,7 @@ class PortalClient:
                     raise PortalError("bad_response") from None
                 events.append(InvalidEvent(env.seq, env.event_id, env.kind, env.at))
         return InboxPage(head.stream_id, head.last_seq, head.acked_seq, head.held, events,
-                         head.sessions_epoch, head.revoked_through_seq)
+                         head.sessions_epoch, head.revoked_through_seq, head.config_rev, head.enabled)
 
     def put_snapshot(self, profile_key: str, push: protocol.SnapshotPush) -> protocol.SnapshotPushResponse:
         data = self._request("PUT", f"/profiles/{self._key(profile_key)}/snapshot", body=self._json(push),

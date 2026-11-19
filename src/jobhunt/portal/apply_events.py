@@ -395,7 +395,7 @@ def _apply_one(ctx: _Ctx, ev: EventRow) -> None:
 
 
 # ---------------------------------------------------------------- entry points
-def _process(ctx: _Ctx, candidate: EventRow, decision: bool | None = None) -> None:
+def _process(ctx: _Ctx, candidate: EventRow, decision: bool | None = None, *, validated: ProfileRow | None = None) -> None:
     lock = answers_lock(ctx.pid) if candidate.kind in _ANSWERS and decision is not False else contextlib.nullcontext()
     try:
         with lock, ctx.j.transaction() as journal:
@@ -404,8 +404,12 @@ def _process(ctx: _Ctx, candidate: EventRow, decision: bool | None = None) -> No
             if stop:
                 ctx.report.skipped_reason = stop
                 return
+            if decision is True and (validated is None or profile != validated):
+                ctx.report.skipped_reason = "contrôles non validés"
+                return
             ev = journal.get_event(candidate.event_id)
-            if ev is None or ev.profile_id != ctx.pid or ev.stream_id != profile.stream_id or ev.state not in OPEN_STATES:
+            if (ev is None or ev.profile_id != ctx.pid or ev.stream_id != profile.stream_id or ev.state not in OPEN_STATES
+                    or (decision is not False and not profile.revoked_through_seq < ev.seq <= profile.cursor_seq)):
                 return
             if decision is not None:
                 if ev.state != "awaiting_review":
@@ -444,7 +448,8 @@ def apply_pending(journal: Journal, profile_id: int, now: datetime) -> ApplyRepo
     return report
 
 
-def apply_reviewed(journal: Journal, profile_id: int, event_ids: list[str] | None, approve: bool, now: datetime | None = None) -> ApplyReport:
+def apply_reviewed(journal: Journal, profile_id: int, event_ids: list[str] | None, approve: bool, now: datetime | None = None,
+                   *, validated: ProfileRow | None = None) -> ApplyReport:
     """The operator's decision on `awaiting_review` events (all of them when `event_ids` is None)."""
     now = now or db.now()
     report = ApplyReport()
@@ -452,8 +457,11 @@ def apply_reviewed(journal: Journal, profile_id: int, event_ids: list[str] | Non
     if stop:
         report.skipped_reason = stop
         return report
+    if approve and validated is None:
+        report.skipped_reason = "contrôles non validés"
+        return report
     ctx = _Ctx(journal, profile_id, now, report)
     chosen = [e for e in journal.events(profile_id, ("awaiting_review",)) if event_ids is None or e.event_id in event_ids]
     for ev in sorted(chosen, key=lambda item: item.kind != "cancel"):
-        _process(ctx, ev, approve)
+        _process(ctx, ev, approve, validated=validated)
     return report

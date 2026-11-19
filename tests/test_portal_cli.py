@@ -27,7 +27,7 @@ def run(*args, input=None):
 @pytest.fixture
 def online(monkeypatch, paired):
     """The commands that talk to the server get the fake server's client; the journal is the default one (same temp data dir)."""
-    for name in ("enable", "rotate_passcode", "revoke", "disable", "resync", "recover"):
+    for name in ("enable", "rotate_passcode", "revoke", "disable", "resync", "recover", "review_apply"):
         monkeypatch.setattr(manage, name, functools.partial(getattr(manage, name), client=paired))
     monkeypatch.setattr(sync, "sync_all", functools.partial(sync.sync_all, client=paired))
     return paired
@@ -230,7 +230,7 @@ def test_review_nothing_to_review(portal):
     assert "Aucune action" in run("review", str(portal.profile_id)).output
 
 
-def test_review_apply_all_and_reject_all(portal):
+def test_review_apply_all_and_reject_all(portal, online):
     _with_review_items(portal)
     res = run("review", str(portal.profile_id), "--apply-all")
     assert res.exit_code == 0 and "Appliqué" in res.output and "2 appliqué" in res.output
