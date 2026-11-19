@@ -106,6 +106,8 @@ class BrowserPool:
 
     @property
     def headless(self) -> bool:
+        if os.environ.get("JOBHUNT_FORCE_HEADLESS", "").strip() == "1":
+            return True
         return self.settings.headless if self.headless_override is None else self.headless_override
 
     def has_session(self, profile_id: int, site: str) -> bool:
@@ -126,7 +128,8 @@ class BrowserPool:
                 return self._contexts[key]
             if self._pw is None:
                 self._pw = await async_playwright().start()
-            headless = self.headless if headless is None else headless
+            headless = True if os.environ.get("JOBHUNT_FORCE_HEADLESS", "").strip() == "1" else (
+                self.headless if headless is None else headless)
             kwargs = dict(
                 user_data_dir="" if site.startswith(("applydry-", "apply-supervised-", "apply-auto-")) else str(self.profile_dir(profile_id, site)),
                 headless=headless,

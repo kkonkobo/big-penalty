@@ -70,6 +70,8 @@ class FormField(BaseModel):
     choice_options: list[tuple[str, str, bool, str]] = Field(default_factory=list, exclude=True, repr=False)
     selected: list[int] = Field(default_factory=list, exclude=True, repr=False)
     live_ref: str = Field(default="", exclude=True, repr=False)
+    automation_id: str = Field(default="", exclude=True, repr=False)
+    widget_candidate: bool = Field(default=False, exclude=True, repr=False)
 
 
 class PageSnapshot(BaseModel):

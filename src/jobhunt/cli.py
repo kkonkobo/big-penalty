@@ -652,9 +652,12 @@ def apply_fill_step(app_id: Annotated[int, typer.Argument(help="numéro de candi
         preview = asyncio.run(call_local(app_id, "preview"))
         console.print(f"Offre réservée : {preview['company']} · {preview['title']} · {preview['reserved_url']}", markup=False)
         console.print(f"Page ouverte : {preview['page_url']}", markup=False)
+        if not preview["requires_confirmation"]:
+            console.print(f"Poste vérifié : {preview['tenant']} · {preview['requisition_id']}", markup=False)
         if preview["warning"]:
             console.print("ATTENTION : le titre de la page ne ressemble ni au poste ni à l’entreprise réservés.", style="bold yellow")
-        if not typer.confirm("Confirmez-vous que la page ouverte concerne cette offre et autorisez-vous la saisie de cette étape ?"):
+        if preview["requires_confirmation"] and not typer.confirm(
+                "Confirmez-vous que la page ouverte concerne cette offre et autorisez-vous la saisie de cette étape ?"):
             raise typer.Exit(1)
         result = asyncio.run(call_local(app_id, "fill", preview["token"]))
     except ApplyError as exc:
@@ -663,7 +666,7 @@ def apply_fill_step(app_id: Annotated[int, typer.Argument(help="numéro de candi
     if result["status"] in ("blocked", "failed", "needs_human"):
         console.print("Saisie interrompue. Consultez l’essai ; si la fenêtre est ouverte, vérifiez le poste avant de reconfirmer.")
         raise typer.Exit(1)
-    console.print("Étape vérifiée. Poursuivez dans la fenêtre supervisée ; aucun bouton n’a été cliqué.")
+    console.print("Étape vérifiée. Poursuivez dans la fenêtre supervisée ; aucun clic de navigation ou d’envoi.")
 
 
 @apply_app.command("send")
@@ -701,13 +704,21 @@ def apply_send(app_ids: Annotated[list[int], typer.Argument(help="numéros de ca
 
 @apply_app.command("resolve")
 def apply_resolve(app_id: int, run_id: Annotated[int, typer.Option("--run-id", min=1)],
-                  sent: Annotated[bool, typer.Option("--sent/--not-sent", help="résultat vérifié : envoyée / non envoyée")]) -> None:
+                  sent: Annotated[bool, typer.Option("--sent/--not-sent", help="résultat vérifié : envoyée / non envoyée")],
+                  workday_posting: Annotated[str, typer.Option("--workday-posting", help=(
+                      "URL de l’offre vérifiée dans Candidate Home, uniquement si la candidature est envoyée (pas un brouillon)."))] = "") -> None:
     """Confirme le résultat de l'essai indiqué, uniquement après avoir vérifié sa réception ou sa non-réception."""
     from jobhunt.apply.errors import ApplyError
-    from jobhunt.apply.service import resolve_unconfirmed
+    from jobhunt.apply.service import reconcile_workday_submission, resolve_unconfirmed
     from jobhunt.cv.errors import CVError
 
     try:
+        if workday_posting:
+            if not sent:
+                raise ApplyError("--workday-posting exige --sent et une candidature envoyée dans Candidate Home.")
+            receipt = asyncio.run(reconcile_workday_submission(app_id, run_id, workday_posting))
+            console.print(f"Candidature Workday confirmée dans Candidate Home : {receipt.reference}.", markup=False)
+            return
         out = resolve_unconfirmed(app_id, sent=sent, run_id=run_id)
     except (ApplyError, CVError) as e:
         console.print(f"Erreur : {e}", markup=False)

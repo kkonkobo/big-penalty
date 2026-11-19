@@ -137,6 +137,7 @@ class FixtureServer:
         self.sent: list[dict] = []          # EVERY request that carries candidate data: a GET with a query string, any POST
         self.post_pages: dict[str, str] = {}  # POST path -> fixture served in answer (default: confirmation.html)
         self.post_json: dict[str, dict] = {}
+        self.get_pages: dict[str, str] = {}
         self.redirects: dict[str, str] = {}
         self.html: dict[str, str] = {}
         outer = self
@@ -178,7 +179,7 @@ class FixtureServer:
                     return self._html("confirmation.html")
                 if path.startswith("/recaptcha/"):
                     return self._html("recaptcha_stub.html")
-                name = path.strip("/") + ".html"
+                name = outer.get_pages.get(path, path.strip("/") + ".html")
                 if path != "/" and (FIXTURES / name).is_file():
                     return self._html(name)
                 self.send_response(404)

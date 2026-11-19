@@ -144,7 +144,7 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
     guard.probe = probe
     accepted = False
     try:
-        if guard.read_only:
+        if guard.inspection_only:
             await page.context.set_offline(False)
         state = await page.evaluate_handle(_POSTING, isolated_context=True)
         data = await state.get_properties()
@@ -217,7 +217,7 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
             for tab in set(page.context.pages) - baseline:
                 with contextlib.suppress(Exception):
                     await tab.close()
-        if guard.read_only:
+        if guard.inspection_only:
             with contextlib.suppress(Exception):
                 await page.context.set_offline(True)
     return None, "apply_target_unverified"

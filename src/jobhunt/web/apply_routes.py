@@ -461,6 +461,11 @@ async def apply_resolve(request: Request, app_id: str):
     if form.get("verified") != "1":
         return web._flash("/apply", error="Confirmer d'abord que vous avez vérifié le résultat de cet essai")
     try:
+        if form.get("workday_posting") is not None:
+            if sent != "1":
+                raise ApplyError("Le reçu Candidate Home doit confirmer un envoi.")
+            await apply_service.reconcile_workday_submission(aid, run_id, str(form["workday_posting"]))
+            return web._flash("/apply", notice="Reçu Candidate Home enregistré.")
         resolved = apply_service.resolve_unconfirmed(aid, sent=sent == "1", run_id=run_id)
     except (ApplyError, cvs.CVError) as e:
         return web._flash("/apply", error=str(e))
@@ -520,11 +525,13 @@ def apply_run_page(request: Request, run_id: str):
     a = cvstore.get_application(run.application_id)
     last = apply_store.last_run(run.application_id)
     outstanding = apply_store.outstanding_attempt(a.id) if a and a.status not in ("submitted", "withdrawn") else None
+    binding = apply_store.held_binding(run.id) if outstanding and outstanding.id == run.id else None
     can_send = bool(a and not outstanding and run.mode == "dry_run" and run.status == "ready" and a.status in ("draft", "approved")
                     and last is not None and last.id == run.id)
     response = web.render(request, "apply_run.html", run=run, a=a, steps=run.result.steps if run.result else [],
                           kinds=PAGE_KIND_LABELS, triggers=TRIGGER_LABELS, can_send=can_send,
                           verification=bool(outstanding and outstanding.id == run.id),
+                          workday_receipt=bool(binding and binding.adapter == "workday" and run.mode == "supervised"),
                           origin_sha=apply_service.origin_digest(db.get_job(a.job_id).origin_url if a and db.get_job(a.job_id) else None))
     response.headers.update(EVIDENCE_HEADERS)
     return response

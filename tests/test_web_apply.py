@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from jobhunt import db
 from jobhunt.apply import service as apply_service
 from jobhunt.apply import store as apply_store
+from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.service import QueueItem
 from jobhunt.apply.types import FilledField, Question, RunResult, StepLog
@@ -607,6 +608,37 @@ def test_resolve_route_both_ways(client, profile, master, tmp_path):
     assert "Réponse invalide" in client.post(f"/applications/{b.id}/apply/resolve", data={"sent": "2", "run_id": last_id(b)}, follow_redirects=True).text
     assert "pas en échec" in client.post(f"/applications/{b.id}/apply/resolve", data={"sent": "1", "run_id": last_id(b), "verified": "1"}, follow_redirects=True).text
     assert client.post("/applications/9999/apply/resolve", data={"sent": "1", "run_id": "1"}).status_code == 404
+
+
+def test_workday_candidate_home_form_settles_only_verified_matching_posting(client, profile, master, tmp_path):
+    posting = "https://demo.wd5.myworkdayjobs.com/fr-FR/Careers/job/Paris/Technicien_JR123"
+    job = make_job(profile, url=posting)
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+    run = apply_store.start_run(app.id, app.current_rev, "supervised", "user", lambda rid: tmp_path / str(rid))
+    binding = Attempt(run.id, app.id, app.current_rev, app.pdf_sha256, posting, "demo.wd5.myworkdayjobs.com",
+                      "fixture-nonce", "workday", "demo.wd5.myworkdayjobs.com/careers", "JR123", "fixture-dedupe",
+                      profile.id, "candidate_home_listing")
+    apply_store.reserve_send(run.id, profile_id=profile.id, application_id=app.id, trigger="user", role_key="workday",
+                             url_key="workday-url", daily_cap=9, binding=binding)
+    apply_store.finish_and_settle(run.id, RunResult(status="failed", message="À vérifier"))
+
+    run_path = f"/apply/runs/{run.id}"
+    receipt_input = soup(client.get(run_path).text).select_one("#verification input[name=workday_posting]")
+    assert receipt_input and receipt_input.has_attr("required")
+    form = receipt_input.find_parent("form")
+    assert form.select_one("input[name=run_id]")["value"] == str(run.id)
+    assert form.select_one("button[name=sent]")["value"] == "1"
+    payload = {"run_id": str(run.id), "sent": "1", "workday_posting": posting}
+    for override in ({}, {"verified": "1", "sent": "0"},
+                     {"verified": "1", "workday_posting": posting.replace("JR123", "JR124")}):
+        client.post(form["action"], data={**payload, **override})
+        assert apply_store.outstanding_attempt(app.id).id == run.id
+
+    response = client.post(form["action"], data={**payload, "verified": "1"}, follow_redirects=True)
+    assert "Reçu Candidate Home enregistré" in response.text
+    assert cvstore.get_application(app.id).status == "submitted" and db.get_job(job.id).status == "applied"
+    assert not soup(client.get(run_path).text).select_one("input[name=workday_posting]")
 
 
 def test_verification_links_to_local_evidence_with_exact_resolution(client, profile, master, tmp_path):

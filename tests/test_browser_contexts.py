@@ -42,3 +42,9 @@ async def test_dry_run_contexts_block_service_workers_too(pool):
 async def test_other_contexts_keep_the_default(pool):
     await pool.context(1, "linkedin")
     assert "service_workers" not in pool.chromium.calls[-1]
+
+
+async def test_forced_headless_wins_over_context_override(pool, monkeypatch):
+    monkeypatch.setenv("JOBHUNT_FORCE_HEADLESS", "1")
+    await pool.context(1, "apply-supervised-example.test", headless=False)
+    assert pool.chromium.calls[-1]["headless"] is True

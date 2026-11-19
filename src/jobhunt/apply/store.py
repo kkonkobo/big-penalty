@@ -376,8 +376,10 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
                     cvstore.tx_mark_submitted(c, run["application_id"], run["rev"], sent_origin_url=audit_url(browser_attempt.url))
                     c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (run_id, run["application_id"]))
                     c.execute("UPDATE jobs SET status='applied' WHERE id=(SELECT job_id FROM applications WHERE id=?)", (run["application_id"],))
-                    c.execute("UPDATE apply_reservations SET receipt_kind='first_party_confirmation', receipt_outcome='confirmed', receipt_at=? WHERE id=?",
-                              (ts, held["id"]))
+                    kind = result.dispatch_diagnostics.receipt_kind if result.dispatch_diagnostics else 'none'
+                    c.execute("UPDATE apply_reservations SET receipt_kind=?, receipt_outcome='confirmed', receipt_at=? WHERE id=?",
+                              (kind if kind in {'first_party_confirmation', 'candidate_home_listing'} else 'first_party_confirmation',
+                               ts, held["id"]))
                     verified = True
                 elif browser_clear and not run["submit_clicked_at"] and not run["nav_clicked_at"] and not result.submit_clicked:
                     c.execute("UPDATE apply_reservations SET released_at=? WHERE id=?", (ts, held["id"]))
