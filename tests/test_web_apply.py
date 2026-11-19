@@ -926,7 +926,7 @@ def test_pending_questions_are_listed_deduplicated_and_saved_as_custom_answers(c
         shown = permis if label == "Permis B ?" else label
         data.update({f"pql_{idx[label]}": shown, f"pqa_{idx[label]}": answer})
     r = save(client, profile, data)
-    assert "2 candidatures en pause peuvent reprendre" in r.text
+    assert "Réponses enregistrées" in r.text and "peuvent reprendre" not in r.text
     assert sorted((x["question"].lower().rstrip(" ?"), x["answer"]) for x in apply_facts.custom_answers(profile.id)) == [
         ("date de naissance", "4 mars 1999"), ("permis b", "Oui")]
     s = soup(client.get(answers_url(profile)).text)
@@ -938,6 +938,34 @@ def test_a_question_that_nobody_asked_is_refused(client, profile, master, tmp_pa
     make_run(a, tmp_path, mode="submit", status="needs_input", questions=[Question(label="Ville ?")])
     r = save(client, profile, {"pql_0": "Question inventée", "pqa_0": "x", "ans_city": "Albi"})
     assert "Page périmée" in r.text and apply_facts.load_answers(profile.id) == {}
+
+
+def test_missing_fact_groups_link_to_existing_fields_and_disappear_on_save(client, profile, master, tmp_path):
+    first, second, superseded = (mk_app(profile, master, tmp_path, number) for number in (1, 2, 3))
+    make_run(first, tmp_path, status="needs_input", questions=[Question(label="Ville de résidence"),
+             Question(label="City of residence"), Question(label="Ville souhaitée", options=["Ville fictive"]),
+             Question(label="Country of residence?"), Question(label="Expected graduation date")])
+    make_run(second, tmp_path, mode="submit", status="needs_input", questions=[Question(label="City of residence")])
+    make_run(superseded, tmp_path, status="needs_input", questions=[Question(label="City of residence")])
+    make_run(superseded, tmp_path, status="ready")
+    apply_facts.save_answers(profile.id, {"graduation_date": "2028-06-30"})
+    apply_facts.save_custom_answers(profile.id, [("Country of residence", "Pays fictif")])
+    before = apply_facts.answers_path(profile.id).read_bytes()
+    page = soup(client.get(answers_url(profile)).text)
+    group = page.select_one('#missing-answers [data-fact-key="city"]')
+    assert group.select_one(".tag").text == "2 candidatures potentiellement débloquées"
+    assert group.select_one('a[href="#ans_city"]') and page.select_one('input#ans_city[name="ans_city"]')["value"] == ""
+    assert [link["href"] for link in group.select("details a")] == [f"/applications/{first.id}", f"/applications/{second.id}"]
+    assert len(page.select("#missing-answers [data-fact-key]")) == 1
+    assert "Pays fictif" not in page.select_one("#missing-answers").text
+    assert "Ville souhaitée" in page.select_one("#pending").text
+    assert "City of residence" not in page.select_one("#pending").text
+    assert apply_facts.answers_path(profile.id).read_bytes() == before
+
+    response = save(client, profile, {"ans_city": "Ville-Test"})
+    assert response.status_code == 200 and soup(response.text).select_one("#missing-answers") is None
+    assert apply_facts.load_answers(profile.id)["city"] == "Ville-Test"
+    assert apply_store.last_run(first.id).status == "needs_input"
 
 
 def test_custom_answers_can_be_edited_and_removed_by_stable_id(client, profile):

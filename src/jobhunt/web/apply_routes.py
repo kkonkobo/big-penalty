@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 
 from jobhunt import db
-from jobhunt.apply import accounts, facts
+from jobhunt.apply import accounts, facts, missing_answers
 from jobhunt.apply import service as apply_service
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.errors import ApplyError
@@ -484,8 +484,9 @@ def _displayed(f, stored: str | None) -> str:
     return stored or ""
 
 
-def _answers_context(pid: int) -> dict[str, Any]:
-    answers = facts.load_answers(pid)
+def _answers_context(pid: int, answers: dict | None = None) -> dict[str, Any]:
+    if answers is None:
+        answers = facts.load_answers(pid)
     sections = []
     for name in facts.ANSWER_SECTIONS:
         rows = []
@@ -500,6 +501,21 @@ def _answers_context(pid: int) -> dict[str, Any]:
             "hosts": facts.trusted_hosts(pid)}
 
 
+def _pending_answer_prompts(items: list[QueueItem], grouped_keys: set[str], answered_labels: set[str]) -> list[dict[str, Any]]:
+    prompts = {}
+    affected: dict[str, set[int]] = {}
+    for item in items:
+        for question in item.questions:
+            key = facts.norm_question(question.label)
+            if not key or key in answered_labels or missing_answers.fact_key(question) in grouped_keys:
+                continue
+            affected.setdefault(key, set()).add(item.app.id)
+            prompts.setdefault(key, {"app": item.app, "q": question, "i": len(prompts)})
+    for key, prompt in prompts.items():
+        prompt["count"] = len(affected[key])
+    return sorted(prompts.values(), key=lambda prompt: -prompt["count"])
+
+
 @router.get("/profiles/{pid}/answers", response_class=HTMLResponse)
 def answers_page(request: Request, pid: str, f: str | None = None):
     web = _web()
@@ -507,22 +523,28 @@ def answers_page(request: Request, pid: str, f: str | None = None):
     profile = web._profile_or_404(profile_id)
     notice, error = web._take_flash(f)
     errors = [error] if error else []
+    recorded_keys = None
     try:
-        ctx = _answers_context(profile_id)
+        answers = facts.load_answers(profile_id)
+        ctx = _answers_context(profile_id, answers)
+        recorded_keys = {key for key in missing_answers.ALIASES if facts.get_answer(answers, key)}
     except ApplyError as e:  # unreadable answers.yaml
         ctx = {"sections": [], "country_suggestion": "", "custom": [], "hosts": []}
         errors.append(str(e))
+    groups, pending, resumable = [], [], []
     try:
-        counts = apply_service.question_counts(profile_id)
-        pending = [{"app": a, "run": r, "q": q, "i": i, "count": counts.get(facts.norm_question(q.label), 1)}
-                   for i, (a, r, q) in enumerate(apply_service.pending_questions(profile_id))]
-        resumable = apply_service.resumable(profile_id)
+        resumable = list(missing_answers.input_pauses(profile_id, apply_service.queue(profile_id)))
+        if recorded_keys is not None:
+            answered = {facts.norm_question(entry["question"]) for entry in ctx["custom"] if entry["answer"].strip()}
+            groups = missing_answers.project(profile_id, resumable, recorded_fact_keys=recorded_keys, answered_labels=answered)
+            pending = _pending_answer_prompts(resumable, {group.fact_key for group in groups},
+                                              {facts.norm_question(entry["question"]) for entry in ctx["custom"]})
     except Exception as e:  # noqa: BLE001 - the form itself must still render
         log.exception("pending questions failed")
-        pending, resumable = [], []
+        groups, pending, resumable = [], [], []
         errors.append(_msg(e))
     return web.render(request, "apply_answers.html", profile=profile, pending=pending, resumable=resumable, notice=notice,
-                      errors=errors, mode_labels=MODE_LABELS, **ctx)
+                      errors=errors, mode_labels=MODE_LABELS, missing_groups=groups, answer_fields=facts.ANSWER_BY_PATH, **ctx)
 
 
 STALE_ANSWER = "cette réponse a changé entre-temps"
@@ -598,10 +620,7 @@ async def answers_save(request: Request, pid: str):
     saved = len(changes) + len(pairs) + edited
     if stale:
         return web._flash(back, error=("Enregistré : " + str(saved) + ". " if saved else "") + "Non écrasé : " + " ; ".join(stale))
-    n = len(apply_service.resumable(profile_id))
     msg = "Réponses enregistrées" if saved else "Aucun changement"
-    if n:
-        msg += f" : {n} candidature{'s' if n > 1 else ''} en pause peu{'vent' if n > 1 else 't'} reprendre"
     return web._flash(back, notice=msg)
 
 

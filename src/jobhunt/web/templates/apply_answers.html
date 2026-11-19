@@ -4,8 +4,7 @@
 <div class="page-head">
   <div>
     <h1>Réponses aux formulaires</h1>
-    <p class="muted">L'outil déduit seul les réponses ordinaires d'un formulaire ; il ne s'arrête que pour les informations ci-dessous quand elles sont inconnues.
-      Les renseigner une fois supprime ces pauses pour toutes les candidatures de {{ profile.name }}.</p>
+    <p class="muted">Renseignez les informations confirmées de {{ profile.name }} pour les réutiliser dans les formulaires.</p>
   </div>
   <div class="row">
     <a class="btn" href="/profiles/{{ profile.id }}">Retour au profil</a>
@@ -14,6 +13,24 @@
 </div>
 {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
 {% for e in errors %}<div class="error-box">{{ e }}</div>{% endfor %}
+{% if missing_groups %}
+<section class="panel" id="missing-answers">
+  <div class="panel-head plain"><h2>Informations à confirmer</h2></div>
+  <p class="muted small">Chaque réponse peut lever un blocage. Une candidature peut figurer dans plusieurs lignes et rester en pause pour d'autres raisons.</p>
+  <ul class="plain-list">
+  {% for group in missing_groups %}
+    {% set count = group.application_count %}
+    <li data-fact-key="{{ group.fact_key }}">
+      <a href="#ans_{{ group.fact_key }}">Renseigner : {{ answer_fields[group.fact_key].label }}</a>
+      <span class="tag warn">{{ count }} candidature{{ 's' if count > 1 }} potentiellement débloquée{{ 's' if count > 1 }}</span>
+      <details><summary>Voir les candidatures concernées</summary>
+        <ul>{% for app_id in group.application_ids %}<li><a href="/applications/{{ app_id }}">Candidature nº {{ app_id }}</a></li>{% endfor %}</ul>
+      </details>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
 {% if resumable %}
 <section class="panel" id="resumable">
   <div class="panel-head plain"><h2>Candidatures en pause <span class="count">{{ resumable|length }}</span></h2></div>
@@ -42,7 +59,7 @@
 {% if pending %}
 <section class="panel" id="pending">
   <div class="panel-head plain"><h2>Questions les plus fréquentes <span class="count">{{ pending|length }}</span></h2></div>
-  <p class="muted small">Ces questions ont arrêté des envois, les plus fréquentes d'abord : y répondre en premier débloque le plus de candidatures. Vos réponses sont gardées pour tous les prochains formulaires.</p>
+  <p class="muted small">Ces questions n'ont pas été regroupées par information manquante. Ne répondez qu'après avoir vérifié le sens de la question. Les réponses sont conservées pour les prochains formulaires.</p>
   <div class="form">
     {% for p in pending %}
     <label>{{ p.q.label }}
@@ -64,14 +81,14 @@
     {% for r in sec.rows %}{% set f = r.f %}
     <label>{{ f.label }}
       {% if f.widget == 'select' %}
-      <select name="{{ r.name }}">{% for o in f.options %}<option value="{{ o }}" {% if o == r.value %}selected{% endif %}>{{ o or 'Non renseigné' }}</option>{% endfor %}
+      <select id="{{ r.name }}" name="{{ r.name }}">{% for o in f.options %}<option value="{{ o }}" {% if o == r.value %}selected{% endif %}>{{ o or 'Non renseigné' }}</option>{% endfor %}
         {% if r.extra_option %}<option value="{{ r.stored }}" selected>{{ r.stored }}</option>{% endif %}</select>
       {% elif f.widget == 'date' %}
-      <input type="date" name="{{ r.name }}" value="{{ r.value }}">
+      <input type="date" id="{{ r.name }}" name="{{ r.name }}" value="{{ r.value }}">
       {% elif f.widget == 'textarea' %}
-      <textarea name="{{ r.name }}" rows="3" maxlength="{{ f.max_len }}">{{ r.value }}</textarea>
+      <textarea id="{{ r.name }}" name="{{ r.name }}" rows="3" maxlength="{{ f.max_len }}">{{ r.value }}</textarea>
       {% else %}
-      <input name="{{ r.name }}" maxlength="{{ f.max_len }}" value="{{ r.value }}" placeholder="{{ f.placeholder }}">
+      <input id="{{ r.name }}" name="{{ r.name }}" maxlength="{{ f.max_len }}" value="{{ r.value }}" placeholder="{{ f.placeholder }}">
       {% endif %}
       <input type="hidden" name="prev_{{ r.name[4:] }}" value="{{ r.value }}">
       {% if r.legacy %}<small>Valeur enregistrée : « {{ r.stored }} ». Elle est conservée tant que vous ne choisissez pas de date.</small>{% endif %}
