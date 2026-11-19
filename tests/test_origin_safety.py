@@ -580,6 +580,42 @@ async def test_normal_search_compares_origin_snapshot_before_persisting(profile,
     assert refreshed.extra["origin_observation"]["write_reason"] == "snapshot_conflict"
 
 
+async def test_normal_search_preserves_concurrent_description_and_sighting_link(profile, monkeypatch):
+    from pipeline_fakes import patch_registry
+    from test_pipeline import FakeLLM
+
+    job = MergedJob.from_posting(posting(description=None))
+    db.save_jobs(profile.id, [job])
+    patch_registry(monkeypatch, ["boarda"])
+    apply_url = WORKDAY + "/apply"
+    description = "A richer verified description from the employer."
+
+    async def resolve(postings, ctx):
+        before = db.get_job(job.id)
+        after = deepcopy(before)
+        after.description = description
+        after.sightings[0].apply_url = apply_url
+        db.save_origin_updates([(before, after)])
+        assert db.get_job(job.id).sightings[0].apply_url == apply_url
+        return postings
+
+    monkeypatch.setattr(origin, "resolve_origins", resolve)
+    run = await pipeline.run_search(profile.id, llm=FakeLLM())
+    assert run.stage == "done", run.errors
+    refreshed = db.get_job(job.id)
+    assert (refreshed.description, refreshed.sightings[0].apply_url) == (description, apply_url)
+
+
+def test_smartrecruiters_hosted_posting_rejects_other_positions_publication():
+    hosted = "https://jobs.smartrecruiters.com/Orbitex/743999-stage"
+    post = posting()
+    html = f'''<main><h1>{post.title}</h1><section><h2>Another position</h2>
+        <a href="/oneclick-ui/company/Orbitex/publication/pub-85">Apply</a>
+        </section></main>'''
+    observed = origin._resolution_data(origin._page_evidence(hosted, html, posting=post))
+    assert (observed["apply_url"], observed["requisition_id"], observed["canonical_ok"]) == (None, "743999", False)
+
+
 async def test_smartrecruiters_hosted_mapping_uses_only_publication_key(profile, monkeypatch):
     hosted = "https://jobs.smartrecruiters.com/Orbitex/743999-stage"
     publication = "https://jobs.smartrecruiters.com/oneclick-ui/company/Orbitex/publication/pub-84"

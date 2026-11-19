@@ -313,6 +313,37 @@ def test_second_pass_disabled_by_setting(profile, monkeypatch):
     assert called == []
 
 
+async def test_search_saves_linkedin_enrichment_when_followup_resolution_fails(profile, monkeypatch):
+    from pipeline_fakes import patch_registry
+    from test_pipeline import FakeLLM
+
+    job = stored(profile, 7)
+    db.save_jobs(profile.id, [job])
+    patch_registry(monkeypatch, ["boarda"])
+    monkeypatch.setattr(pipeline.get_settings(), "linkedin_detail_cmd", "fetch {id}")
+    monkeypatch.setattr(pipeline.get_settings(), "linkedin_detail_max_per_run", 2)
+    monkeypatch.setattr(pipeline.get_settings(), "apply_prepare_min_score", 0)
+    apply_url = "https://orbitex.talentview.io/jobs/abc?id=7"
+    real_fetch = ld.fetch_job_detail
+
+    async def fetch(job_id, **kwargs):
+        return await real_fetch(job_id, runner=runner_returning(payload()))
+
+    async def resolve(postings, ctx):
+        if any(p.apply_url == apply_url for p in postings):
+            raise RuntimeError("fixture follow-up failure")
+        return postings
+
+    monkeypatch.setattr(ld, "fetch_job_detail", fetch)
+    monkeypatch.setattr(origin, "resolve_origins", resolve)
+    run = await pipeline.run_search(profile.id, llm=FakeLLM())
+    assert run.stage == "done", run.errors
+    assert run.linkedin_links == 1
+    assert any("fixture follow-up failure" in error for error in run.errors)
+    refreshed = db.get_job(job.id)
+    assert (refreshed.apply_url, refreshed.sightings[0].apply_url, refreshed.origin_url) == (apply_url, apply_url, None)
+
+
 async def test_enrich_cap_and_skip_rules(profile):
     jobs = [stored(profile, i) for i in range(1, 6)]
     with_link = stored(profile, 6)

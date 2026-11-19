@@ -439,6 +439,7 @@ def _job_from_row(r: sqlite3.Row, sightings: list[Sighting]) -> MergedJob:
         sightings=sightings, changed=False,
     )
     _remember_origin(job)
+    _remember_enrichment(job)
     return job
 
 
@@ -491,7 +492,7 @@ def save_jobs(profile_id: int, jobs: list[MergedJob], *, removed: list[MergedJob
               consolidate_origins: bool = False) -> None:
     """Save jobs; reconcile live decisions atomically before deleting origin duplicates.
 
-    Compare origins with their load-time snapshots before writing or merging. Consolidation
+    Compare origins and enrichment with their load-time snapshots before writing or merging. Consolidation
     also uses the highest-precedence decision, including decisions made since load time.
     """
     ts = _iso(now())
@@ -512,6 +513,7 @@ def save_jobs(profile_id: int, jobs: list[MergedJob], *, removed: list[MergedJob
                     continue
                 current = _origin_job_from_row(row)
                 conflicts |= _guard_search_origin(job, current)
+                _guard_search_enrichment(c, job, current.description)
                 current_rows[job.id] = current
                 live.append(job)
             return live
@@ -584,6 +586,7 @@ def save_jobs(profile_id: int, jobs: list[MergedJob], *, removed: list[MergedJob
             j.changed = False
             j.sighted = False
             _remember_origin(j)
+            _remember_enrichment(j)
         for j in removed:
             if j.id is not None:
                 c.execute("DELETE FROM jobs WHERE id=? AND profile_id=?", (j.id, profile_id))
@@ -620,6 +623,31 @@ def _origin_metadata(job: MergedJob) -> dict:
 
 def _remember_origin(job: MergedJob) -> None:
     job.persisted_origin = deepcopy((_origin_snapshot(job), _origin_metadata(job)))
+
+
+def _remember_enrichment(job: MergedJob) -> None:
+    job.persisted_enrichment = (job.description, {(item.source, item.source_id): (item.url, item.apply_url)
+                                                 for item in job.sightings})
+
+
+def _guard_search_enrichment(conn: sqlite3.Connection, job: MergedJob, live_description: str | None) -> None:
+    description, links = job.persisted_enrichment or (None, {})
+    if live_description != description:
+        job.description = live_description
+    if not job.sightings:
+        return
+    live_links = {(row["source"], row["source_id"]): (row["url"], row["apply_url"]) for row in conn.execute(
+        "SELECT source, source_id, url, apply_url FROM sightings WHERE job_id=?", (job.id,))}
+    for item in job.sightings:
+        key = (item.source, item.source_id)
+        if key not in live_links:
+            continue
+        live_url, live_apply = live_links[key]
+        old_url, old_apply = links.get(key, (None, None))
+        if live_url != old_url:
+            item.url = live_url
+        if live_apply != old_apply:
+            item.apply_url = live_apply
 
 
 def _guard_search_origin(job: MergedJob, current: MergedJob) -> bool:

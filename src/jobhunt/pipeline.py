@@ -733,15 +733,20 @@ async def _linkedin_second_pass(jobs: list[MergedJob], ctx: SourceContext, resul
     cand.sort(key=lambda j: -(j.score or 0))
     try:
         stats = await enrich_linkedin_jobs(cand, max_calls=cap)
-        result.linkedin_detail_calls, result.linkedin_links = stats.calls, stats.links
-        got = [j for j in cand if j.apply_url and j.extra.get("apply_source") == "linkedin_offsite" and not j.origin_url]
+    except Exception as e:  # noqa: BLE001
+        log.warning("linkedin detail pass failed: %s", e)
+        result.errors.append(f"Détails LinkedIn: {type(e).__name__}: {e}")
+        return False
+
+    result.linkedin_detail_calls, result.linkedin_links = stats.calls, stats.links
+    got = [j for j in cand if j.apply_url and j.extra.get("apply_source") == "linkedin_offsite" and not j.origin_url]
+    try:
         if got:
             mod = importlib.import_module("jobhunt.origin")
             resolved = await mod.resolve_origins([origin_posting(j) for j in got], ctx)
             for j, p in zip(got, resolved):
                 _store_origin(j, p)
-        return stats.calls > 0
     except Exception as e:  # noqa: BLE001
-        log.warning("linkedin detail pass failed: %s", e)
-        result.errors.append(f"Détails LinkedIn: {type(e).__name__}: {e}")
-        return False
+        log.warning("linkedin follow-up origin resolution failed: %s", e)
+        result.errors.append(f"Origines LinkedIn: {type(e).__name__}: {e}")
+    return stats.calls > 0

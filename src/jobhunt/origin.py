@@ -571,9 +571,9 @@ def _page_evidence(url: str, html: str, status: int = 200, posting: JobPosting |
             continue
         tenant, req, _ = _identity(ats, target)
         hosted_tenant, hosted_req, _ = _identity(ats, url) if local else (None, None, None)
-        same_hosted_posting = (local == ats == "smartrecruiters" and scoped and hosted_req
+        same_hosted_posting = (local == ats == "smartrecruiters" and bound and hosted_req
                                and not _smart_publication(url) and _smart_publication(target)
-                               and hosted_tenant == tenant)
+                               and hosted_tenant and hosted_tenant == tenant)
         if local and _continuity_rejection(url, target) and not same_hosted_posting:
             continue
         local_req = hosted_req if local else _identity(ats, url)[1] if ats == "successfactors" else front_id
