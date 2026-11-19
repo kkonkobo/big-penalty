@@ -104,7 +104,7 @@ async def test_combobox_options(page, server):
     await page.goto(server.url("combo"))
     snap, resolve = await take_snapshot(page)
     c = next(f for f in snap.fields if f.kind == "combobox")
-    assert c.label == "Ville souhaitée" and c.required and [o.label for o in c.options] == ["Paris", "Lyon", "Toulouse"]
+    assert c.label == "Ville de résidence" and c.required and [o.label for o in c.options] == ["Paris", "Lyon", "Toulouse"]
     assert not any(f.kind == "text" for f in snap.fields)
 
 

@@ -153,8 +153,9 @@ async def test_combobox(page, server, fast, cv_pdf, tmp_path):
                                                                act(snap, r"Envoyer", "click", role="submit")])
     res = await go(page, server, ScriptedPlanner([plan("toulouse")]), tmp_path, cv_pdf, start="combo")
     assert res.status == "ready" and await page.input_value("#city") == "Toulouse"
-    res = await go(page, server, ScriptedPlanner([plan("Marseille")]), tmp_path, cv_pdf, start="combo")
-    assert res.status == "needs_input" and res.questions[0].label == "Ville souhaitée"  # not among the options
+    res = await go(page, server, ScriptedPlanner([plan("Marseille")]), tmp_path, cv_pdf, start="combo",
+                   facts=sample_facts(city="Marseille"))
+    assert res.status == "needs_input" and res.questions[0].label == "Ville de résidence"
 
 
 # ------------------------------------------------------------------ guardrails on the planner's actions
@@ -842,9 +843,9 @@ TRIGGERS = {
     "checkbox": '<label><input type=checkbox name=rgpd onchange="f.submit()"> J\'accepte le traitement de mes données personnelles (RGPD) *</label>',
     "select": '<label for=sit>Situation *</label><select id=sit name=s onchange="f.submit()"><option value="">Choisir...</option>'
               '<option value=alt>Alternance</option><option value=stage>Stage</option></select>',
-    "combobox_click": '<label for=city>Ville souhaitée *</label><input id=city role=combobox aria-controls=lb autocomplete=off onclick="f.submit()">'
+    "combobox_click": '<label for=city>Ville de résidence *</label><input id=city role=combobox aria-controls=lb autocomplete=off onclick="f.submit()">'
                       '<ul id=lb role=listbox><li role=option>Toulouse</li></ul>',
-    "combobox_option": '<label for=city>Ville souhaitée *</label><input id=city role=combobox aria-controls=lb autocomplete=off>'
+    "combobox_option": '<label for=city>Ville de résidence *</label><input id=city role=combobox aria-controls=lb autocomplete=off>'
                        '<ul id=lb role=listbox><li role=option onclick="f.submit()">Toulouse</li></ul>',
 }
 TRIGGER_ACTIONS = {
