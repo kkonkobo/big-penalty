@@ -43,8 +43,7 @@ ALIASES = {
                           "Telefon Gerätetyp", "Telefon Gerätetyp (privat)"),
     "work_authorization": ("Décrivez votre autorisation de travail en France", "Describe your work authorization in France",
                            "Beschreiben Sie Ihre Arbeitserlaubnis in Frankreich"),
-    "needs_visa_sponsorship": ("Do you need visa sponsorship?", "Do you require visa sponsorship?",
-                              "Avez-vous besoin d'un visa ou d'un permis de travail ?"),
+    "needs_visa_sponsorship": ("Do you need visa sponsorship?", "Do you require visa sponsorship?"),
 }
 _LABEL_KEYS = {norm_question(label): key for key, labels in ALIASES.items() for label in labels}
 _KINDS = {

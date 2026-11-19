@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from jobhunt.apply.missing_answers import MissingAnswer, capture, fact_key, project
-from jobhunt.apply.prompt_rules import decision_key, international_calling_code
+from jobhunt.apply.prompt_rules import decision_key, international_calling_code, technical_key
 from jobhunt.apply.service import QueueItem
 from jobhunt.apply.store import ApplyRun
 from jobhunt.apply.types import FormField, Question
@@ -42,11 +42,17 @@ def pause(app_id, *labels, profile_id=1, rev=2, status="needs_input", bucket="pa
     ("Graduation date", "date", None),
     ("Expected graduation year", "number", None),
     ("Internship agreement required by employer?", "radio", None),
+    ("Avez-vous besoin d'un visa ou d'un permis de travail ?", "radio", None),
     ("Can your school provide an internship agreement?", "file", None),
 ])
 def test_only_explicit_required_fact_questions_match(label, kind, expected):
     assert fact_key(Question(label=label, kind=kind, ref="city", options=["Fictional option"])) == expected
     assert fact_key(Question(label=label, kind=kind, required=False)) is None
+
+
+@pytest.mark.parametrize("label", ["One-time code", "Code de vérification", "Bestätigungscode"])
+def test_verification_codes_are_technical(label):
+    assert technical_key(label, "text") == "credentials"
 
 
 def test_projection_deduplicates_distinct_apps_and_uses_only_current_input_pauses():

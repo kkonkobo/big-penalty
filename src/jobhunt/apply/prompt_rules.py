@@ -16,6 +16,9 @@ def technical_key(label: str, kind: str = "") -> str | None:
     label = norm_question(label)
     if kind == "password" or re.search(r"mot de passe|password|passwort|kennwort|contrase[nñ]a|senha|wachtwoord|\bmdp\b|passcode", label):
         return "credentials"
+    if re.search(r"\b(?:otp|totp|one time code|one time password|verification code|security code|code de verification|"
+                 r"code de securite|code a usage unique|code de connexion|einmalcode|bestatigungscode|sicherheitscode)\b", label):
+        return "credentials"
     if label in {"confirmation", "confirm", "bestatigung", "wiederholen", "repeat", "confirmer"}:
         return "credentials"
     if re.search(r"compte requis|creation de compte|connexion (?:impossible|requise)|login|log in|sign in|account (?:required|creation)|"
