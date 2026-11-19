@@ -56,12 +56,15 @@ def posting_form(action):
             '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>')
 
 
-@pytest.mark.parametrize("target", ["iframe", "action", "changed_action", "missing_id", "other_id", "other_origin", "other_base"])
+@pytest.mark.parametrize("target", ["iframe", "action", "changed_action", "missing_id", "other_id", "other_origin", "other_base",
+                                    "query_other", "formaction"])
 async def test_production_generic_skips_unbound_targets(target, production_pool, server, profile, tmp_path, fast, monkeypatch):
     server.html["/jobs/200"] = '<label for="other">Autre prénom</label><input id="other" name="other">'
     action = {"action": "/jobs/200", "missing_id": "/apply", "other_id": "/jobs/100/REQ-2",
-              "other_origin": "https://other.example.test/jobs/100", "other_base": "../100"}.get(target, "/jobs/100/apply")
-    other = f'<form action="{action}">{server.html["/jobs/200"]}</form>'
+              "other_origin": "https://other.example.test/jobs/100", "other_base": "../100",
+              "query_other": "/jobs/100?jobId=200"}.get(target, "/jobs/100/apply")
+    submitter = '<button formaction="/jobs/200">Postuler</button>' if target == "formaction" else ""
+    other = f'<form action="{action}">{server.html["/jobs/200"]}{submitter}</form>'
     server.html["/jobs/100"] = posting_form("#") + ('<iframe src="/jobs/200"></iframe>' if target == "iframe" else other)
     if target == "other_base":
         server.html["/jobs/100"] += '<base href="https://other.example.test/jobs/100/">'
@@ -85,13 +88,49 @@ async def test_production_generic_skips_unbound_targets(target, production_pool,
     try:
         result = await confirm_step(app.id)
         assert result.status == "needs_input" and "à remplir à la main" in result.steps[0].note
-        assert await opened.input_value("#name")
+        # With a foreign <base href>, the main form's action="#" submits to that other origin too: it stays manual.
+        assert bool(await opened.input_value("#name")) is (target != "other_base")
         manual = opened.frame_locator("iframe").locator("#other") if target == "iframe" else opened.locator("#other")
         assert not await manual.input_value() and not server.posts
     finally:
         await opened.close()
         result = await asyncio.wait_for(task, 10)
     assert store.outstanding_attempt(app.id).id == result.id
+
+
+async def test_production_generic_hash_action_resolves_against_base(production_pool, server, profile, tmp_path, fast):
+    """`action="#"` under a same-origin `<base href>` for another posting submits to that posting: leave it manual."""
+    server.html["/jobs/100"] = '<base href="/jobs/200">' + posting_form("#")
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                           planner=ScriptedPlanner(lambda snapshot: StepPlan(
+                                               page_kind="form", actions=[act(snapshot, "^Prénom", "fill", "first_name")]))))
+    opened = await wait_for_supervised(app.id, task)
+    try:
+        result = await confirm_step(app.id)
+        assert result.status == "needs_input" and "à remplir à la main" in result.steps[0].note
+        assert not await opened.input_value("#name") and not server.posts
+    finally:
+        await opened.close()
+        result = await asyncio.wait_for(task, 10)
+    assert store.outstanding_attempt(app.id).id == result.id
+
+
+@pytest.mark.parametrize(("document", "raw", "resolved", "submitters", "allowed"), [
+    ("https://jobs.test/jobs/100", None, None, [], True),
+    ("https://jobs.test/jobs/100", "#", "https://jobs.test/jobs/100#", [], True),
+    ("https://jobs.test/jobs/100", "#", "https://jobs.test/jobs/200#", [], False),
+    ("https://jobs.test/jobs/100", "?jobId=200", "https://jobs.test/jobs/100?jobId=200", [], False),
+    ("https://jobs.test/jobs/100", "apply", "https://jobs.test/jobs/100/apply", [], True),
+    ("https://jobs.test/jobs/100", "apply", "https://jobs.test/jobs/100/apply", ["https://jobs.test/jobs/200"], False),
+    ("https://jobs.test/careers/engineer", "/apply", "https://jobs.test/apply", [], True),
+    ("https://jobs.test/careers?jobId=100", "/apply?jobId=100", "https://jobs.test/apply?jobId=100", [], True),
+    ("https://jobs.test/careers?jobId=100", "/apply?jobId=200", "https://jobs.test/apply?jobId=200", [], False),
+    ("https://jobs.test/jobs/100", "https://other.test/jobs/100", "https://other.test/jobs/100", [], False),
+])
+def test_generic_action_target_rules(document, raw, resolved, submitters, allowed):
+    from jobhunt.apply.supervised import _generic_action_allowed
+    assert _generic_action_allowed(document, raw, resolved, submitters) is allowed
 
 
 @pytest.mark.parametrize("navigation", ["reload", "replace", "same_path_push_state", "during_scan"])

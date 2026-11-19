@@ -39,19 +39,35 @@ def _posting_ids(value: str) -> set[str]:
     return {identifier.casefold() for identifier in _POSTING_ID.findall(unquote(value))}
 
 
-def _generic_action_allowed(document_url: str, raw_action: str | None, action_url: str | None) -> bool:
-    if raw_action is None or raw_action.strip() in {"", "#"}:
-        return True
-    if not action_url or origin(action_url) != origin(document_url):
+def _url_posting_ids(url: str) -> set[str]:
+    parts = urlsplit(url)
+    found = _posting_ids(parts.path)
+    for _, value in parse_qsl(parts.query, keep_blank_values=True):
+        found.update(_posting_ids(value))
+    return found
+
+
+def _target_allowed(document_url: str, target_url: str | None) -> bool:
+    """A browser-resolved submission URL may receive this form only if it names no other posting than the page.
+
+    Posting identifiers are read from the path AND the query of both URLs, so `/jobs/100?jobId=200` is refused on
+    `/jobs/100`. The fragment is ignored. A different path is accepted only when it names exactly the same postings."""
+    if not target_url or origin(target_url) != origin(document_url):
         return False
-    document = urlsplit(clean_url(document_url))
-    action = urlsplit(action_url)
-    if action.path == document.path:
-        return True
-    expected = _posting_ids(document.path)
-    for _, value in parse_qsl(document.query):
-        expected.update(_posting_ids(value))
-    return _posting_ids(action.path) == expected
+    expected, found = _url_posting_ids(document_url), _url_posting_ids(target_url)
+    if not found <= expected:
+        return False
+    return urlsplit(target_url).path == urlsplit(document_url).path or found == expected
+
+
+def _generic_action_allowed(document_url: str, raw_action: str | None, action_url: str | None,
+                            submitter_urls: list[str] | tuple[str, ...] = ()) -> bool:
+    """`action_url` and `submitter_urls` are resolved by the browser, so `<base href>` is taken into account
+    (`action="#"` under `<base href="/jobs/200">` submits to job 200). An absent or empty action submits to the
+    document URL itself. Submit controls carrying `formaction` override the form's action and are checked too."""
+    targets = [] if raw_action is None or not raw_action.strip() else [action_url]
+    targets.extend(submitter_urls or ())
+    return all(_target_allowed(document_url, target) for target in targets)
 
 
 def require_posting(match: Match, attempt: Attempt, *urls: str) -> None:
@@ -178,8 +194,11 @@ class Session:
                         if (!view || view !== view.top || doc !== document || !node.isConnected) return null;
                         const form = node.form;
                         const action = form && Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action').get.call(form);
+                        const submitters = form ? Array.from(form.elements).filter(e =>
+                            (e.type === 'submit' || e.type === 'image') && (e.getAttribute('formaction') ?? '').trim() !== ''
+                        ).map(e => e.formAction) : [];
                         return [[view.location.href, doc.title, ({_VISIBLE_HEADING})(doc), doc[key] ?? ''],
-                                form?.getAttribute('action') ?? null, action];
+                                form?.getAttribute('action') ?? null, action, submitters];
                     }}""", self._document_key, isolated_context=True)
                 except Exception:
                     pass
