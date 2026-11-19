@@ -124,8 +124,12 @@ class AdapterAudience(Audience):
         return None
 
     async def document_receipt(self, page, snapshot, *, positive_text):
-        receipt_url = self.final_receipt_url or page.url
-        if not self.write_recipient(page.url) or not self.write_recipient(receipt_url):
+        live = page.url
+        if live != snapshot.url or not self.write_recipient(live):
             return 'none'
-        return await self.adapter.browser_receipt(self.attempt, page, receipt_url, positive_text,
-                                                  self.posting(page.url))
+        native_final = self.method == 'POST' and live == self.endpoint
+        receipt_url = self.final_receipt_url if native_final and self.final_receipt_url else live
+        same_final_document = (live == self.click_source or native_final) and self.posting(live)
+        if not self.receipt_url(receipt_url) and not same_final_document:
+            return 'none'
+        return await self.adapter.browser_receipt(self.attempt, page, receipt_url, positive_text, same_final_document)

@@ -1835,14 +1835,15 @@ class _Run:
                 if not self.autonomous.final_response:
                     trace.receipt_reason = "no_final_response"
                 elif document_receipt:
-                    editable_form = any(field.form and field.kind in FILLABLE for field in snap.fields)
-                    kind = await document_receipt(self.page, snap,
-                                                  positive_text=not has_form and not editable_form and self._confirmed(snap, self.last_sent))
+                    form_present = has_form or any(field.form for field in snap.fields) or not self._form_gone(snap)
+                    error_present = any(field.error for field in snap.fields) or await self._banner_error()
+                    kind = 'none' if form_present or error_present else await document_receipt(
+                        self.page, snap, positive_text=self._confirmed(snap, self.last_sent))
                     if kind != 'none' and self.autonomous.receipt_settled():
                         trace.receipt_kind = kind
                         trace.receipt_reason = 'attested'
                         return self._end('submitted', 'Candidature envoyée.')
-                    trace.receipt_reason = 'form_still_present' if has_form else 'no_confirmation'
+                    trace.receipt_reason = 'form_still_present' if form_present or error_present else 'no_confirmation'
                 elif self.autonomous.final_json and not (has_form and (
                         any(f.error for f in snap.fields) or await self._banner_error()
                         or {(_norm(_label(f)), f.kind) for f in snap.fields if f.kind in FILLABLE}

@@ -41,6 +41,9 @@ def install_adapter(monkeypatch, server, workday_site):
     base = workday.WorkdayAdapter if workday_site else smartrecruiters.SmartRecruitersAdapter
 
     class LoopbackAdapter(base):
+        def dedupe_identity(self, url):
+            return super().dedupe_identity(real_origin + url[len(server.base):]) if workday_site else None
+
         def resolve(self, url, markers):
             if workday_site:
                 return super().resolve(url, markers)
@@ -87,10 +90,13 @@ def workday_flow(server, scenario):
         content = ('<h1>Verification code</h1><input autocomplete="one-time-code">' if scenario == 'otp' and index == 2
                    else '<h1>Your application has been submitted</h1>' if index == 8 and scenario != 'missing'
                    else '<h1>Processing</h1>' if index == 8 else '')
-        if index == 8 and scenario == 'candidate_home':
+        if index == 8 and scenario in {'candidate_home', 'draft'}:
             next_path = path.split('/job/', 1)[0] + '/candidateHome'
+            status = 'Draft' if scenario == 'draft' else 'Submitted'
             content = (f'<article data-automation-id="candidateHomeApplication"><a href="{path}">Engineer</a>'
-                       '<span data-automation-id="applicationStatus">Submitted</span></article>')
+                       f'<span data-automation-id="applicationStatus">{status}</span></article>')
+        if index == 8 and scenario == 'next_step':
+            next_path = path + '/apply/applicationQuestions'
         action = 'account' if index == 2 else 'submit' if index == 8 else 'draft'
         buttons = next_button if 3 <= index < 8 else ''
         server.html[path + suffix] = (
@@ -106,21 +112,26 @@ def workday_flow(server, scenario):
     return path
 
 
-@pytest.mark.parametrize('scenario', ['success', 'candidate_home', 'otp', 'changed', 'missing'])
+@pytest.mark.parametrize('scenario', ['success', 'candidate_home', 'otp', 'changed', 'missing', 'draft', 'next_step', 'metadata_mismatch'])
 async def test_workday_browser_flow(scenario, adapter_pool, server, profile, tmp_path, fast, monkeypatch):
     install_adapter(monkeypatch, server, True)
     monkeypatch.setattr(service.accounts, 'create_password', lambda host, email: 'fixture-password')
     monkeypatch.setattr(service.accounts, 'account_known', lambda host, email: True)
     path = workday_flow(server, scenario)
-    _, app = approved_fixture(profile, tmp_path, server.base + path)
+    metadata = {'canonical_ok': True, 'submit_ats': 'workday', 'tenant': 'demo',
+                'requisition': 'JR999' if scenario == 'metadata_mismatch' else 'JR123'}
+    _, app = approved_fixture(profile, tmp_path, server.base + path, extra={'origin_resolution': metadata})
     if scenario == 'success':
         save_answers(profile.id, {'race_ethnicity': 'Black'})
     result = await service.run(app.id, mode='submit', trigger='user', pool=adapter_pool)
+    if scenario == 'metadata_mismatch':
+        assert result.status in {'blocked', 'needs_human'} and not server.requests and not server.posts
+        return
     assert result.status == {'success': 'submitted', 'candidate_home': 'submitted', 'otp': 'needs_email',
-                             'changed': 'needs_human', 'missing': 'failed'}[scenario], (
+                             'changed': 'needs_human', 'missing': 'failed', 'draft': 'failed', 'next_step': 'failed'}[scenario], (
         result.result.dispatch_diagnostics, [(step.index, step.page_kind, step.note) for step in result.result.steps],
         server.requests, [post['path'] for post in server.posts])
-    assert bool(result.submit_clicked_at) == (scenario in {'success', 'candidate_home', 'missing'})
+    assert bool(result.submit_clicked_at) == (scenario in {'success', 'candidate_home', 'missing', 'draft', 'next_step'})
     assert store.held_binding(result.id) is not None
     if result.status == 'submitted':
         assert result.result.dispatch_diagnostics.receipt_kind == (
@@ -130,6 +141,11 @@ async def test_workday_browser_flow(scenario, adapter_pool, server, profile, tmp
         assert service.cvs.safe_pdf(app).read_bytes() in uploads[0]['body']
         expected = b'black' if scenario == 'success' else b'optout'
         assert any(b'name="ethnicity"\r\n\r\n' + expected + b'\r\n' in post['body'] for post in server.posts)
+    if scenario == 'success':
+        _, duplicate = approved_fixture(profile, tmp_path, server.base + path + '/apply', title='Duplicate synthetic role')
+        post_count = len(server.posts)
+        duplicate_run = await service.run(duplicate.id, mode='submit', trigger='user', pool=adapter_pool)
+        assert duplicate_run.status == 'blocked' and len(server.posts) == post_count
 
 
 async def test_smartrecruiters_browser_batch(adapter_pool, server, profile, tmp_path, fast, monkeypatch):
