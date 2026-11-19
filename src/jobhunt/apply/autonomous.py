@@ -191,8 +191,14 @@ _PRIVACY = re.compile(r"privacy (?:policy|notice)|politique de confidentialite|p
 _DATA = re.compile(r"processing|retention|traitement|conservation", re.I)
 _TERMS = re.compile(r"conditions|terms", re.I)
 _ACCEPT = re.compile(r"accept|agree|acknowledge|consent|lu et|prise de connaissance", re.I)
-_EEO = re.compile(r"eeo|equal opportunit|self.identif|disabilit|handicap|ethnic|race|gender|genre|veteran", re.I)
-_PREFER_NOT = re.compile(r"prefer not to (?:say|answer|disclose)|decline to (?:answer|disclose|self.identify)|je ne souhaite pas (?:repondre|le preciser)", re.I)
+_RACE = re.compile(r"\b(?:race|racial|ethnic\w*|ethniqu\w*|ethnisch\w*|ethnie)\b", re.I)
+_OTHER_EEO = re.compile(r"disabilit|handicap|gender|genre|veteran|geschlecht|behinder", re.I)
+_SELF_ID = re.compile(r"(?:self|auto)[ -]?identif", re.I)
+_EEO = re.compile(r"\beeo\b|equal opportunit", re.I)
+_PREFER_NOT = re.compile(r"(?:i )?prefer not to (?:say|answer|disclose)|decline to (?:answer|disclose|self identify)|"
+                         r"(?:je )?ne souhaite pas (?:repondre|le preciser)|keine angabe", re.I)
+_BLACK_LABELS = frozenset({"black", "black or african american", "black african american", "black african",
+                           "black or african", "noir", "noire", "schwarz"})
 
 
 def blocked_consent(text):
@@ -200,18 +206,48 @@ def blocked_consent(text):
 
 
 def eeo_field(text):
-    return bool(_EEO.search(text))
+    return any(pattern.search(text) for pattern in (_EEO, _RACE, _OTHER_EEO, _SELF_ID))
 
 
-def decision(field, fold):
+def _option_text(value, fold):
+    return " ".join(re.findall(r"[a-z0-9]+", fold(value)))
+
+
+def race_ethnicity_field(field, fold):
+    label, group = fold(field.label), fold(field.group)
+    if _OTHER_EEO.search(label) or (not _RACE.search(label) and _OTHER_EEO.search(group)):
+        return False
+    if _RACE.search(label):
+        return True
+    return bool(_SELF_ID.search(f"{label} {group}") and
+                any(_option_text(option.label, fold) in _BLACK_LABELS for option in field.options))
+
+
+def _live_option(field, index):
+    option = field.options[index]
+    return sum(candidate.value == option.value for candidate in field.options) == 1 and (
+        not field.choice_options or
+        [(label, disabled) for value, label, disabled, _ in field.choice_options
+         if value == option.value] == [(option.label, False)])
+
+
+def decision(field, fold, *, race_ethnicity=None):
     text = fold(f"{field.label} {field.group}")
     if field.kind == "checkbox" and field.required and not blocked_consent(text) and _ACCEPT.search(text):
         if _PRIVACY.search(text) or (_APPLICATION.search(text) and _DATA.search(text)):
             return "application_privacy", -1
         if _TERMS.search(text) and (_APPLICATION.search(text) or re.fullmatch(r"j['’ ]?accepte les conditions[ .]*", text.strip())):
             return "application_terms", -1
-    if field.kind in {"select", "radio"} and _EEO.search(text):
-        options = [i for i, option in enumerate(field.options) if _PREFER_NOT.fullmatch(fold(option.label).strip(" ."))]
-        if len(options) == 1:
+    if field.kind in {"select", "radio"} and not field.multiple and eeo_field(text):
+        declared = _option_text(race_ethnicity or "", fold)
+        if declared and race_ethnicity_field(field, fold):
+            equivalent = _BLACK_LABELS if declared in _BLACK_LABELS else {declared}
+            options = [index for index, option in enumerate(field.options)
+                       if _option_text(option.label, fold) in equivalent]
+            if len(options) == 1 and _live_option(field, options[0]):
+                return "eeo_race_ethnicity", options[0]
+        options = [index for index, option in enumerate(field.options)
+                   if _PREFER_NOT.fullmatch(_option_text(option.label, fold))]
+        if len(options) == 1 and _live_option(field, options[0]):
             return "eeo_opt_out", options[0]
     return None

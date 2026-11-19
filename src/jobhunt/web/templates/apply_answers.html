@@ -22,6 +22,7 @@
 {% endmacro %}
 <section class="panel" id="missing-answers">
   <div class="panel-head plain"><h2>À compléter une fois</h2></div>
+  {% if sections %}<p class="muted small"><a href="#ans_race_ethnicity">Renseigner ou modifier l’origine ethnique (facultatif)</a></p>{% endif %}
   {% if missing_groups %}
   <p class="muted small">Chaque réponse peut lever un blocage. Une candidature peut figurer dans plusieurs lignes et rester en pause pour d'autres raisons.</p>
   <ul class="plain-list">

@@ -28,6 +28,11 @@ async def verify_receipt(self, attempt: Attempt, *, evidence: object = None) -> 
 Add a synthetic loopback fixture factory to `tests/test_ats_adapter_contract.py`. Cover verified delivery, page text alone, mismatched receipt, interruption, stale approval or destination and an absent registry entry. Assert that the first transmission observes the durable reservation with the same nonce, destination, revision and PDF digest. Add adapter-specific tests for confusing or spoofed receipts, changed destinations and any nontrivial transmission sequence. Never exercise the contract on a real ATS or with real applicant data.
 
 The registry is a trusted code boundary, not a sandbox. Reviews must establish that the adapter obeys its declaration, uses the bound destination and authenticates receipt evidence; checking that a `Receipt` object matches the attempt is not a substitute for that review.
+
+### Optional race and ethnicity disclosure
+
+`race_ethnicity` is the optional standing answer exposed through `FactSheet.get("race_ethnicity")` and the approved adapter dispatch facts. It is not inferred from a name, nationality, or CV. For profile 1, the coordinator should set the requested value (`Black`) in **Réponses aux formulaires → À compléter une fois → Origine ethnique**; there is no automatic seed. Clear the field to withdraw the standing answer. Use the stored value only on an identified race or ethnicity question with a unique equivalent enabled option in the live, scoped option set. Otherwise use an explicit opt-out if present, or leave a required question for manual input. Do not use this fact to answer other demographic questions.
+
 ## Supervised fill-step API
 
 - `await service.preview_fill_step(app_id: int, *, run_id: int | None = None) -> FillPreview` checks the active browser and reservation. `FillPreview` carries `token`, `run_id`, `application_id`, `company`, `title`, `reserved_url`, `page_url`, `warning`, and `requires_confirmation`. URLs shown to the operator omit opaque paths and secret-bearing parameters. The operator can inspect the full address in the supervised window itself.

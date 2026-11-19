@@ -27,7 +27,9 @@ from patchright.async_api import ElementHandle, Locator, Page
 from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt
-from jobhunt.apply.autonomous import SUPERVISED_REQUIRED, blocked_consent, decision as autonomous_decision, eeo_field
+from jobhunt.apply.autonomous import (
+    SUPERVISED_REQUIRED, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
+)
 from jobhunt.apply.destination import clean_text, clean_url
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
@@ -35,7 +37,7 @@ from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
 from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code, technical_key
 from jobhunt.apply.scoped_choices import field_choices
-from jobhunt.apply.snapshot import Resolver, live_button, take_snapshot
+from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
 from jobhunt.apply.store import binding_active
 from jobhunt.apply.types import (Action, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan)
@@ -609,6 +611,8 @@ class _Run:
         for field in pub.fields:
             if technical_key(field.label, field.kind, group=field.group, autocomplete=field.autocomplete) == "credentials":
                 field.value = SECRET_LOG if field.value else ""
+            if race_ethnicity_field(field, fold):
+                field.value = ""
             field.destination = field.choice_destination = None
             field.choice_options = []
         return pub, masked
@@ -734,14 +738,19 @@ class _Run:
 
     def _planner_facts(self) -> FactSheet:
         """The facts the planner sees: ours plus the derived `account_exists` of the CURRENT page host (when we can tell)."""
+        facts = [fact for fact in self.facts.facts if fact.key != "race_ethnicity"]
         if self.account_known is None:
-            return self.facts
+            return FactSheet(facts=facts)
         try:
             known = bool(self.account_known(self._host()))
         except Exception:
-            return self.facts
+            return FactSheet(facts=facts)
         extra = Fact(key="account_exists", label="Un compte existe déjà sur ce site pour le candidat", value="oui" if known else "non")
-        return FactSheet(facts=[*self.facts.facts, extra])
+        return FactSheet(facts=[*facts, extra])
+
+    def _autonomous_decision(self, field: FormField):
+        fact = self.facts.get("race_ethnicity")
+        return autonomous_decision(field, fold, race_ethnicity=fact.value if fact else None)
 
     def _identity_needles(self) -> dict[str, list[str]]:
         """What identifies the candidate's own data in a field value: his names, e-mail addresses and phone digits. A page
@@ -827,7 +836,7 @@ class _Run:
         clicks: list[tuple[FormField, str]] = []
         for field in snap.fields:
             if self.autonomous:
-                selected = autonomous_decision(field, fold)
+                selected = self._autonomous_decision(field)
                 if selected:
                     code, index = selected
                     seen.add(field.ref)
@@ -946,7 +955,7 @@ class _Run:
             return (field.kind != "password" and _question(field).category == "credentials"
                     and (field.required or active))
         if _site_consent(field):
-            if self.autonomous and (autonomous_decision(field, fold) or (
+            if self.autonomous and (self._autonomous_decision(field) or (
                     not field.required and not active and blocked_consent(fold(f"{field.label} {field.group}")))):
                 return False
             return field.required or active
@@ -1028,6 +1037,8 @@ class _Run:
     def _check(self, a: Action, f: FormField, v: _Validated, snap: PageSnapshot, resolve: Resolver | None) -> _Item | None:
         drop = lambda why, ask=True: self._drop(v, f, why, ask)  # noqa: E731
         op, k = a.op, f.kind
+        if a.fact == "race_ethnicity":
+            return drop("origine ethnique : sélection contrôlée uniquement")
         if _question(f).category == "credentials" and k != "password":
             return drop("mot de passe et champ incompatibles" if a.fact == "account_password"
                         else "identifiant technique à saisir sur le site")
@@ -1346,22 +1357,16 @@ class _Run:
                 if a.op == "check":
                     self.consent_codes.add(it.used)
                 return "true" if a.op == "check" else "false"
-            if f.kind == "radio" and it.used == "eeo_opt_out":
-                option = f.options[it.option_index]
-                handle = await loc.evaluate_handle("""(node, value) => {
-                    const matches = [...node.ownerDocument.querySelectorAll('input[type=radio]')].filter(input =>
-                        input.form === node.form && input.name === node.name && input.value === value && !input.disabled);
-                    return matches.length === 1 ? matches[0] : null;
-                }""", option.value, isolated_context=True)
+            if it.used in {"eeo_opt_out", "eeo_race_ethnicity"}:
+                await self._before_mutation(a.op, loc)
                 try:
-                    radio = handle.as_element()
-                    if radio is None:
-                        raise ManualField()
-                    await self._before_mutation(a.op, radio)
-                    await radio.check(timeout=T)
-                finally:
-                    await handle.dispose()
-                return option.label
+                    applied = await apply_demographic_choice(loc, f, it.option_index, url=snap.url,
+                                                            nonce=self.autonomous.document_nonce)
+                except Exception:
+                    applied = False
+                if not applied:
+                    raise _DecisionHold(self._end("blocked", "Une question ou sa sélection a changé : action annulée."))
+                return f.options[it.option_index].label
             if f.kind not in {"select", "text", "email", "tel", "url", "number", "date", "textarea", "password"}:
                 raise ManualField()
         if self.mode == "supervised":
@@ -2105,7 +2110,8 @@ class _Run:
                         self.uploaded_files.append((self._host(), _norm(_label(it.field)), fold(Path(shown).stem)))
                     handled.add(it.field.ref)
                     log.filled.append(FilledField(label=self._r(_label(it.field)), op=it.act.op, fact=it.used or it.act.fact,
-                                                  value="Choix confirmé" if it.used == "confirmed_form_choice" else self._r(shown),
+                                                  value="Choix confirmé" if it.used in {"confirmed_form_choice", "eeo_race_ethnicity"}
+                                                  else self._r(shown),
                                                   inferred=it.inferred, basis=self._r(it.basis)))
                 if self.mode == "dry_run" and self.blocked_requests:  # (also when the aborted navigation made the action fail)
                     break

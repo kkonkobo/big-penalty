@@ -13,6 +13,7 @@ from cv_fakes import save_confirmed
 
 from jobhunt import db
 from jobhunt.apply import engine, service, store
+from jobhunt.apply.facts import save_answers
 from jobhunt.apply.adapters import Registry, Requisition
 from jobhunt.apply.destination import RecipientGuard, origin
 from jobhunt.apply.errors import ApplyError
@@ -79,6 +80,94 @@ async def test_production_autonomous_submits_with_receipt_and_scoped_decisions(p
     assert len(server.posts) == 1
     assert b"privacy=on" in server.posts[0]["body"] and b"eeo=private" in server.posts[0]["body"]
     assert b"marketing=" not in server.posts[0]["body"]
+
+
+@pytest.mark.parametrize(("question", "option_html", "stored", "expected"), [
+    ("Race or ethnicity", '<option value="listed">Black or African American</option>', "Black", "listed"),
+    ("Origine ethnique", '<option value="listed">Noire</option>', "Black", "listed"),
+    ("Ethnische Herkunft", '<option value="listed">Schwarz</option>', "Black", "listed"),
+    ("Voluntary self-identification", '<option value="listed">Black / African</option>', "Black", "listed"),
+    ("Race or ethnicity", '<option value="unrelated">African American</option>', "Black", "private"),
+    ("Race or ethnicity", '<option value="listed">Black</option>', "", "private"),
+    ("Gender", '<option value="unrelated">Black</option>', "Black", "private"),
+    ("Race or ethnicity", '<option value="unrelated">No equivalent</option>', "Black", None),
+    ("Race or ethnicity", '<option value="listed" disabled>Black</option>', "Black", "private"),
+    ("Race or ethnicity", '<option value="one">Black</option><option value="two">Noire</option>', "Black", "private"),
+])
+async def test_production_autonomous_race_ethnicity_choice(
+    question, option_html, stored, expected, production_pool, server, profile, tmp_path, fast, monkeypatch,
+):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    job, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    save_answers(profile.id, {"race_ethnicity": stored})
+    fact = service._candidate_facts(app, job).get("race_ethnicity")
+    assert (fact.value or "") == stored
+    opt_out = '<option value="private">Prefer not to say</option>' if expected is not None else ""
+    server.html["/jobs/100"] = posting_form("/jobs/100").replace("<button>", f"""
+        <label for="eeo">{question}</label><select id="eeo" name="eeo" required>
+          <option value="">Choose</option>{option_html}{opt_out}
+        </select><button>""")
+
+    class LocalPlanner(ScriptedPlanner):
+        async def plan(self, snap, facts, **kwargs):
+            assert facts.get("race_ethnicity") is None
+            return await super().plan(snap, facts, **kwargs)
+
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=LocalPlanner(form))
+    if expected is None:
+        assert result.status == "needs_input" and not server.posts
+    else:
+        assert result.status == "submitted", result.message
+        assert f"eeo={expected}".encode() in server.posts[0]["body"]
+        if expected == "listed":
+            selected = next(field for field in result.result.steps[0].filled if field.fact == "eeo_race_ethnicity")
+            assert selected.value == "Choix confirmé"
+
+
+@pytest.mark.parametrize("control,change", [("select", False), ("radio", False), ("select", True), ("radio", True)])
+async def test_production_race_ethnicity_revalidates_exact_options_at_write(
+    control, change, production_pool, server, profile, tmp_path, fast, monkeypatch,
+):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    save_answers(profile.id, {"race_ethnicity": "Black"})
+    if control == "select":
+        question = ('<label for="eeo">Race or ethnicity</label><select id="eeo" name="eeo" required>'
+                    '<option value="">Choose</option><option value="listed">Black</option>'
+                    '<option id="other" value="private">Prefer not to say</option></select>')
+    else:
+        question = ('<fieldset><legend>Race or ethnicity</legend>'
+                    '<label><input type="radio" name="eeo" value="listed" required>Black</label>'
+                    '<label><input type="radio" name="eeo" value="private"><span id="other">Prefer not to say</span></label>'
+                    '</fieldset>')
+    server.html["/jobs/100"] = posting_form("/jobs/100").replace("<button>", question + "<button>") + """
+        <script>document.addEventListener('change', event => {
+          if (event.target.name === 'eeo') document.body.dataset.choice = event.target.value;
+        });</script>"""
+    before = engine._Run._before_mutation
+    apply_choice = engine.apply_demographic_choice
+    observed = []
+
+    async def change_after_check(run, op, target):
+        await before(run, op, target)
+        if change and op == "select":
+            await run.page.locator("#other").evaluate("node => { node.textContent = 'Changed option'; }")
+
+    async def observe_choice(target, *args, **kwargs):
+        applied = await apply_choice(target, *args, **kwargs)
+        observed.append(await target.evaluate("node => node.ownerDocument.body.dataset.choice || ''"))
+        return applied
+
+    monkeypatch.setattr(engine._Run, "_before_mutation", change_after_check)
+    monkeypatch.setattr(engine, "apply_demographic_choice", observe_choice)
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+    assert observed == ([""] if change else ["listed"])
+    if change:
+        assert result.status == "blocked", result.message
+        assert not server.posts
+    else:
+        assert result.status == "submitted", result.message
+        assert any(b"eeo=listed" in post["body"] for post in server.posts)
 
 
 @pytest.mark.parametrize("restriction", ["cap", "breaker", "kill", "duplicate", "captcha"])

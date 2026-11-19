@@ -891,6 +891,16 @@ def test_answers_page_renders_every_section_and_field(client, profile):
     assert [o.text for o in s.select('select[name="ans_civility"] option')] == ["Non renseigné", "M.", "Mme"]
 
 
+def test_race_ethnicity_standing_answer_can_be_set_and_cleared(client, profile):
+    page = soup(client.get(answers_url(profile)).text)
+    assert page.select_one('#missing-answers a[href="#ans_race_ethnicity"]')
+    assert not page.select_one('#ans_race_ethnicity')["value"]
+    save(client, profile, {"ans_race_ethnicity": "Black"})
+    assert apply_facts.load_answers(profile.id)["race_ethnicity"] == "Black"
+    save(client, profile, {"ans_race_ethnicity": ""})
+    assert "race_ethnicity" not in apply_facts.load_answers(profile.id)
+
+
 def test_answers_page_shows_stored_values_and_never_another_profiles(client, profile):
     other = other_profile()
     apply_facts.save_answers(profile.id, {"birth_place": "Albi", "birth_date": "1999-03-04", "civility": "Mme"})
