@@ -4,14 +4,17 @@ and `apply_reservations`: one per attempted send (quota + duplicate guard), pend
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sys
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from pydantic import BaseModel
 
+from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.types import Mode, RunResult, RunStatus
 from jobhunt.db import _dt, _iso, connect, now
@@ -106,7 +109,8 @@ def start_run(application_id: int, rev: int, mode: str, trigger: str, out_dir_fo
                 raise ApplyError("Un envoi est déjà en cours pour cette candidature")
             c.execute("UPDATE application_runs SET status='failed', message='interrompu', finished_at=? WHERE id=?",
                       (_iso(ts), r["id"]))
-            if r["submit_clicked_at"] is not None or r["nav_clicked_at"] is not None:
+            if (r["submit_clicked_at"] is not None or r["nav_clicked_at"] is not None or c.execute(
+                    "SELECT 1 FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (r["id"],)).fetchone()):
                 possibly_sent = True
                 c.execute("UPDATE apply_reservations SET pending=0 WHERE run_id=? AND released_at IS NULL", (r["id"],))
         if possibly_sent:
@@ -152,12 +156,12 @@ def save_progress(run_id: int, result: RunResult) -> None:
             raise ApplyError(NOT_ACTIVE)
 
 
-def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | None = None) -> ApplyRun:
+def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | None = None,
+                      receipt: Receipt | None = None) -> ApplyRun:
     """Preserve any possible send atomically; no generic engine result is an attempt-bound receipt.
 
-    The legacy URL argument is not receipt evidence. Only operator settlement currently confirms
-    a send or releases its hold. A new adapter must authenticate and correlate its receipt before
-    automatic settlement can be introduced here.
+    Only a typed receipt authenticated by a registered adapter and matching a live, durable
+    reservation can settle automatically. Generic statuses and the legacy URL argument are not evidence.
     """
     from jobhunt.cv import store as cvstore  # noqa: PLC0415 - cv.store does not import this module; kept lazy anyway
     from jobhunt.cv.errors import CVError  # noqa: PLC0415
@@ -170,11 +174,37 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
         if (run is None or run["status"] != "running"
                 or c.execute("SELECT MAX(id) FROM application_runs WHERE application_id=?", (run["application_id"],)).fetchone()[0] != run_id):
             raise ApplyError(NOT_ACTIVE)
-        if run["mode"] == "submit":
-            held = c.execute("SELECT 1 FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (run_id,)).fetchone()
-            clicked = bool(held or result.submit_clicked or result.status == "submitted"
+        if run["mode"] in ("submit", "supervised"):
+            held = c.execute("SELECT * FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (run_id,)).fetchone()
+            verified = False
+            if (receipt and held and run["mode"] == "submit" and receipt.attempt.adapter and clean_receipt(receipt, receipt.attempt)
+                    and receipt.attempt.run_id == run_id and receipt.attempt.application_id == run["application_id"]
+                    and receipt.attempt.rev == run["rev"] and held["binding_json"] == json.dumps(asdict(receipt.attempt))
+                    and _binding_current(c, run, receipt.attempt)):
+                _save_receipt(c, run_id, receipt)
+                if receipt.outcome == "confirmed":
+                    cvstore.tx_mark_submitted(c, run["application_id"], run["rev"], sent_origin_url=held["url_key"])
+                    c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (run_id, run["application_id"]))
+                    c.execute("UPDATE jobs SET status='applied' WHERE id=(SELECT job_id FROM applications WHERE id=?)",
+                              (run["application_id"],))
+                    result = RunResult(status="submitted", message="Candidature envoyée (reçu vérifié).")
+                else:
+                    c.execute("UPDATE apply_reservations SET released_at=? WHERE id=?", (ts, held["id"]))
+                    c.execute("UPDATE application_runs SET operator_not_sent_at=? WHERE id=?", (ts, run_id))
+                    cvstore.tx_set_status(c, run["application_id"], "draft")
+                    result = RunResult(status="blocked", message="Non-envoi vérifié. Tout nouvel essai doit être lancé manuellement.")
+                verified = True
+            elif held and held["binding_json"]:
+                with _suppress(CVError):
+                    cvstore.tx_force_failed(c, run["application_id"], UNCONFIRMED_NOTE)
+                status = "needs_input" if run["mode"] == "supervised" and result.status == "needs_input" else "failed"
+                result = result.model_copy(update={"status": status, "submit_clicked": False,
+                                                   "message": UNCONFIRMED_NOTE + ". " + result.message})
+                c.execute("UPDATE apply_reservations SET receipt_kind='none', receipt_outcome='uncertain', receipt_at=? WHERE id=?",
+                          (ts, held["id"]))
+            clicked = bool((held and not held["binding_json"]) or result.submit_clicked or result.status == "submitted"
                            or run["submit_clicked_at"] or run["nav_clicked_at"])
-            if clicked:
+            if clicked and not verified and run["mode"] == "submit":
                 c.execute("UPDATE apply_reservations SET pending=0 WHERE run_id=? AND released_at IS NULL", (run_id,))
                 if not run["submit_clicked_at"]:
                     c.execute("UPDATE application_runs SET submit_clicked_at=? WHERE id=?", (ts, run_id))
@@ -197,6 +227,7 @@ _OUTSTANDING_RUNS = """
     LEFT JOIN application_runs run ON run.id = COALESCE(
         (SELECT v.run_id FROM apply_reservations v JOIN application_runs held ON held.id = v.run_id
          WHERE v.application_id = app.id AND held.application_id = app.id
+         AND app.sent_run_id IS NOT held.id
          AND (held.status != 'running' OR owner_confirmed_dead(held.pid))
          AND v.released_at IS NULL ORDER BY v.pending, v.id DESC LIMIT 1),
         (SELECT r.id FROM application_runs r WHERE r.application_id = app.id AND app.status = 'failed'
@@ -271,7 +302,18 @@ def sent_run(application_id: int) -> ApplyRun | None:
     return _from_row(r) if r else None
 
 
-def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = None) -> None:
+def _save_receipt(conn, run_id: int, receipt: Receipt) -> None:
+    conn.execute("UPDATE apply_reservations SET receipt_kind=?, receipt_outcome=?, receipt_at=?"
+                 " WHERE run_id=? AND released_at IS NULL", (receipt.kind, receipt.outcome, _iso(now()), run_id))
+
+
+def held_binding(run_id: int) -> Attempt | None:
+    with connect() as conn:
+        row = conn.execute("SELECT binding_json FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (run_id,)).fetchone()
+    return Attempt(**json.loads(row["binding_json"])) if row and row["binding_json"] else None
+
+
+def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = None, receipt: Receipt | None = None) -> None:
     """Human decision after a possibly-sent attempt, in ONE transaction (reservation,
     application status, job status). It is bound to the OUTSTANDING attempt (`outstanding_attempt`): `run_id`
     must be that run, else "page périmée". Without any such attempt: refused. Only that attempt's reservation is touched.
@@ -281,7 +323,7 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
 
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        a = c.execute("SELECT status, profile_id, job_id FROM applications WHERE id=?", (application_id,)).fetchone()
+        a = c.execute("SELECT status, profile_id, job_id, current_rev FROM applications WHERE id=?", (application_id,)).fetchone()
         if a is None:
             raise ApplyError("Candidature introuvable")
         if a["status"] not in ("failed", "draft", "approved"):
@@ -293,13 +335,22 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
             raise ApplyError("Cette candidature n'a jamais atteint le clic d'envoi : rien à confirmer")
         if out["id"] != run_id:
             raise ApplyError("Page périmée : un autre essai a eu lieu depuis, recharger la page")
-        for running in c.execute("SELECT id, pid FROM application_runs WHERE application_id=? AND mode='submit' AND status='running'",
+        for running in c.execute("SELECT id, pid FROM application_runs WHERE application_id=? AND mode IN ('submit','supervised') AND status='running'",
                                  (application_id,)).fetchall():
             if running["id"] != run_id or not _owner_confirmed_dead(running["pid"]):
                 raise ApplyError("Un envoi est encore en cours : vérifier de nouveau après sa fin")
             c.execute("UPDATE application_runs SET status='failed', message='interrompu', finished_at=? WHERE id=?",
                       (_iso(now()), run_id))
-        held = c.execute("SELECT url_key FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (out["id"],)).fetchone()
+        held = c.execute("SELECT url_key, binding_json FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (out["id"],)).fetchone()
+        if receipt:
+            attempt = receipt.attempt
+            job = c.execute("SELECT origin_url FROM jobs WHERE id=? AND profile_id=?", (a["job_id"], a["profile_id"])).fetchone()
+            if (not held or not attempt.adapter or not clean_receipt(receipt, attempt) or attempt.run_id != run_id
+                    or attempt.application_id != application_id or attempt.rev != a["current_rev"]
+                    or not job or job["origin_url"] != attempt.url
+                    or held["binding_json"] != json.dumps(asdict(attempt)) or sent != (receipt.outcome == "confirmed")):
+                raise ApplyError("Reçu périmé ou différent de la réservation.")
+            _save_receipt(c, run_id, receipt)
         if a["status"] != "failed":
             cvstore.tx_force_failed(c, application_id, UNCONFIRMED_NOTE)
         if sent:
@@ -307,6 +358,11 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
             c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (out["id"], application_id))
             c.execute("UPDATE apply_reservations SET pending=0 WHERE run_id=? AND released_at IS NULL", (out["id"],))
             c.execute("UPDATE jobs SET status='applied' WHERE id=? AND profile_id=?", (a["job_id"], a["profile_id"]))
+            if receipt:
+                result = RunResult(status="submitted", message="Candidature envoyée (reçu vérifié après rapprochement).",
+                                   finished_at=now())
+                c.execute("UPDATE application_runs SET status=?, message=?, result_json=? WHERE id=?",
+                          (result.status, result.message, result.model_dump_json(), run_id))
         else:
             resolved_at = _iso(now())
             c.execute("UPDATE apply_reservations SET released_at=? WHERE run_id=? AND released_at IS NULL", (resolved_at, run_id))
@@ -343,8 +399,27 @@ def latest_runs(profile_id: int) -> dict[int, ApplyRun]:
     return {r["application_id"]: _from_row(r) for r in rows}
 
 
+def _binding_current(conn, run, attempt: Attempt) -> bool:
+    row = conn.execute("SELECT a.status, a.updated_at, a.current_rev, a.approved_rev, a.approved_sha256, j.origin_url,"
+                       " j.status AS job_status FROM applications a JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id"
+                       " WHERE a.id=?", (attempt.application_id,)).fetchone()
+    return bool(row and row["status"] == "approved" and row["updated_at"] == run["application_version"]
+                and row["current_rev"] == row["approved_rev"] == attempt.rev
+                and row["approved_sha256"] == attempt.pdf_sha256 and row["origin_url"] == attempt.url
+                and row["job_status"] not in ("applied", "rejected"))
+
+
+def binding_active(attempt: Attempt) -> bool:
+    with connect() as conn:
+        run = conn.execute("SELECT r.* FROM application_runs r JOIN apply_reservations v ON v.run_id=r.id"
+                           " WHERE r.id=? AND r.status='running' AND v.released_at IS NULL AND v.binding_json=?",
+                           (attempt.run_id, json.dumps(asdict(attempt)))).fetchone()
+        return bool(run and run["application_id"] == attempt.application_id and run["rev"] == attempt.rev
+                    and _binding_current(conn, run, attempt))
+
+
 def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: str, role_key: str, url_key: str,
-                 daily_cap: int, pending: bool = False, at: datetime | None = None) -> None:
+                 daily_cap: int, pending: bool = False, at: datetime | None = None, binding: Attempt | None = None) -> None:
     """The last gate before a click that may send the form, in ONE `BEGIN IMMEDIATE` transaction. The run must still be
     `running`, belong to the application and be its newest run (else ApplyError). Idempotent per run: a run that already holds
     an unreleased reservation only gets it upgraded (pending -> firm) and never fails on its own reservation. Otherwise: for
@@ -359,12 +434,20 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
     ts = at or now()
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        run = c.execute("SELECT status, application_id FROM application_runs WHERE id=?", (run_id,)).fetchone()
+        run = c.execute("SELECT * FROM application_runs WHERE id=?", (run_id,)).fetchone()
         if (run is None or run["status"] != "running" or run["application_id"] != application_id
                 or c.execute("SELECT MAX(id) FROM application_runs WHERE application_id=?", (application_id,)).fetchone()[0] != run_id):
             raise ApplyError(NOT_ACTIVE)
+        if binding and (binding.run_id != run_id or binding.application_id != application_id or binding.rev != run["rev"]
+                        or binding.profile_id != profile_id or not binding.dedupe_key
+                        or run["trigger"] != trigger or run["mode"] not in ("submit", "supervised")
+                        or (run["mode"] == "submit" and not binding.adapter)
+                        or not _binding_current(c, run, binding)):
+            raise ApplyError("Approbation ou destination modifiée avant l'envoi")
         own = c.execute("SELECT id, pending FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (run_id,)).fetchone()
         if own is not None:
+            if binding:
+                raise ApplyError("Cet essai a déjà été réservé")
             if not pending:
                 c.execute("UPDATE apply_reservations SET pending=0 WHERE id=?", (own["id"],))
                 c.execute("UPDATE application_runs SET submit_clicked_at=COALESCE(submit_clicked_at, ?) WHERE id=?", (_iso(ts), run_id))
@@ -380,9 +463,18 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
                 raise ApplyError("Un envoi de cette candidature a déjà été tenté : vérifier sur le site de l'entreprise")
             if (role_key and role_key != "|" and r["role_key"] == role_key) or (url_key and r["url_key"] == url_key):
                 raise ApplyError("Candidature déjà envoyée (ou tentée) pour la même offre")
-        c.execute("INSERT INTO apply_reservations(profile_id, application_id, run_id, trigger, role_key, url_key, created_at, pending)"
-                  " VALUES (?,?,?,?,?,?,?,?)",
-                  (profile_id, application_id, run_id, trigger, role_key or "", url_key or "", _iso(ts), 1 if pending else 0))
+        if binding and c.execute("SELECT 1 FROM apply_reservations WHERE dedupe_key=? AND released_at IS NULL",
+                                 (binding.dedupe_key,)).fetchone():
+            raise ApplyError("Un essai existe déjà pour ce poste chez cet employeur.")
+        if binding and trigger == "auto" and c.execute(
+                "SELECT 1 FROM apply_reservations WHERE dedupe_key=? AND released_at IS NOT NULL", (binding.dedupe_key,)).fetchone():
+            raise ApplyError("Nouvel essai manuel requis pour ce poste.")
+        c.execute("INSERT INTO apply_reservations(profile_id, application_id, run_id, trigger, role_key, url_key, created_at, pending, binding_json, dedupe_key)"
+                  " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (profile_id, application_id, run_id, trigger, role_key or "", url_key or "", _iso(ts), 1 if pending else 0,
+                   json.dumps(asdict(binding)) if binding else None, binding.dedupe_key if binding else None))
+        if binding:
+            return
         col = "nav_clicked_at" if pending else "submit_clicked_at"
         c.execute(f"UPDATE application_runs SET {col}=COALESCE({col}, ?) WHERE id=?", (_iso(ts), run_id))
 

@@ -196,6 +196,14 @@ MIGRATIONS: list[str] = [
     ALTER TABLE application_runs ADD COLUMN origin_sha TEXT;
     ALTER TABLE application_runs ADD COLUMN application_version TEXT;
     """,
+    """
+    ALTER TABLE apply_reservations ADD COLUMN binding_json TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN dedupe_key TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN receipt_kind TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN receipt_outcome TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN receipt_at TEXT;
+    CREATE UNIQUE INDEX idx_active_requisition ON apply_reservations(dedupe_key) WHERE released_at IS NULL;
+    """,
 ]
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import html
 import random
 import re
@@ -24,12 +25,14 @@ from urllib.parse import quote, quote_plus, urldefrag, urlparse
 from patchright.async_api import ElementHandle, Locator, Page
 from pydantic import BaseModel
 
+from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload
 from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, live_button, take_snapshot
+from jobhunt.apply.store import binding_active
 from jobhunt.apply.types import (Action, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan)
 from jobhunt.browser import human_pause
@@ -350,6 +353,7 @@ class Letter:
 class Uploads:
     cv_pdf: Path
     letter: Callable[[], Awaitable[Letter | None]] | None = None
+    cv_bytes: bytes | None = None
 
 
 @dataclass
@@ -1253,10 +1257,17 @@ class _Run:
         return live is not None and live[1] and live[2] and _norm(live[0]) == _norm(f.label)
 
     # ------------------------------------------------------------ execution
-    async def _execute(self, it: _Item, loc: Locator, snap: PageSnapshot, log: StepLog) -> str:
+    async def _execute(self, it: _Item, loc: Locator | ElementHandle, snap: PageSnapshot, log: StepLog) -> str:
         """Carry out one validated action. Returns the (redacted) value for the log; raises _Skip when it cannot be done."""
         a, f = it.act, it.field
         T = ACTION_TIMEOUT_MS
+        if self.mode == "supervised":
+            if a.op == "upload_cv" and f.kind == "file" and self.uploads.cv_bytes is not None:
+                await loc.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": self.uploads.cv_bytes}, timeout=T)
+                self.uploaded = True
+                return "CV.pdf"
+            if f.kind not in ("select", "text", "email", "tel", "url", "number", "date", "textarea") or a.op not in ("fill", "select"):
+                raise _Skip("à compléter à la main")
         if a.op == "upload_cv":
             await self._set_files(loc, f, self.uploads.cv_pdf)
             return self.uploads.cv_pdf.name
@@ -1334,8 +1345,11 @@ class _Run:
             return SECRET_LOG
         text = it.value or ""
         if fact is not None and fact.exact and fact.variants:
-            ml = await loc.get_attribute("maxlength", timeout=T)
-            pat = await loc.get_attribute("pattern", timeout=T)
+            if isinstance(loc, ElementHandle):
+                ml, pat = await loc.evaluate("e => [e.getAttribute('maxlength'), e.getAttribute('pattern')]")
+            else:
+                ml = await loc.get_attribute("maxlength", timeout=T)
+                pat = await loc.get_attribute("pattern", timeout=T)
             text = pick_variant(fact, f, int(ml) if ml and ml.isdigit() else None, pat)
         await self._type(loc, f, text)
         return text
@@ -1375,7 +1389,7 @@ class _Run:
         T = ACTION_TIMEOUT_MS
         if f.kind != "textarea":
             text = text.replace("\r", " ").replace("\n", " ")  # never a stray Enter in a single-line field
-        if f.kind in ("date", "number") or len(text) > 120:
+        if self.mode == "supervised" or f.kind in ("date", "number") or len(text) > 120:
             await loc.fill(text, timeout=T)
         else:
             await loc.click(timeout=T)
@@ -1524,6 +1538,8 @@ class _Run:
             res = self._end("blocked", UNSUPPORTED_DISPATCH)
             res.finished_at = datetime.now()
             return res
+        if self.mode == "supervised" and (self.before_submit is None or self.uploads.cv_bytes is None):
+            return self._end("blocked", UNSUPPORTED_DISPATCH)
         ctx = self.page.context
         offline = False
 
@@ -1562,8 +1578,9 @@ class _Run:
         try:
             try:
                 await (self.goto or _default_goto)(self.page, self.url)
-                offline = True
-                await ctx.set_offline(True)
+                if self.mode == "dry_run":
+                    offline = True
+                    await ctx.set_offline(True)
                 res = await self._loop()
             except LLMError as e:
                 res = self._end("failed", f"Planificateur indisponible ({e.code}).")
@@ -1816,7 +1833,7 @@ class _Run:
             if self.final_clicked:
                 await self._shot(log)
                 return self._unconfirmed()
-            if self.mode == "dry_run" and kind in ACCOUNT_KINDS:  # nothing at all is entered on an account page
+            if self.mode != "submit" and kind in ACCOUNT_KINDS:
                 await self._shot(log)
                 return self._end("blocked", DRY_UNTESTED)
 
@@ -1850,8 +1867,24 @@ class _Run:
                     return bad
             dirty = False
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
-            for it in v.items if self.mode == "submit" else ():
+            for it in v.items if self.mode in ("submit", "supervised") else ():
                 try:
+                    if self.mode == "supervised":
+                        reasons = await self.before_submit()
+                        if reasons:
+                            return self._end("blocked", " ; ".join(reasons))
+                        bad = await self._dest_result(resolve, [it.field.ref], None)
+                        if bad is not None:
+                            return bad
+                        destination = it.field.destination
+                        urls = (self.page.url, self._frame_url(resolve, it.field.ref), destination[0] if destination else "")
+                        expected = urlparse(self.url)
+                        if any(not _secure_url(url) or (urlparse(url).scheme, urlparse(url).netloc) != (expected.scheme, expected.netloc)
+                               for url in urls):
+                            return self._end("blocked", "Destination du champ non vérifiée : saisie annulée.")
+                        target = await self._el(resolve, it.field.ref)
+                        if target is None:
+                            return self._end("blocked", "Champ introuvable : saisie annulée.")
                     await self._live_decisions(snap, it.field, approved_choices, pending=pending_choices, applying=it)
                 except _DecisionHold as hold:
                     return hold.result
@@ -1862,7 +1895,7 @@ class _Run:
                 if plan.page_kind not in ACCOUNT_KINDS and not (it.fact and (it.fact.secret or it.fact.key.startswith("account_"))):
                     self.app_touched = True
                 try:
-                    shown = await self._execute(it, resolve(it.field.ref), snap, log)
+                    shown = await self._execute(it, target if self.mode == "supervised" else resolve(it.field.ref), snap, log)
                 except _Skip as e:
                     if it.used == "confirmed_form_choice":
                         return self._end("blocked", "Le choix confirmé n’a pas pu être appliqué : action annulée.")
@@ -1965,7 +1998,7 @@ class _Run:
                 bad = await self._dest_result(resolve, [], v.click[0])
                 if bad is not None:
                     return bad
-            if guarded:
+            if guarded or self.mode == "supervised":
                 questions = list(v.questions)
                 questions += [q for q in plan.unknown if q.required]
                 # Required fields of ANOTHER <form> than the one being sent (e.g. the "déjà inscrit ?" login box next to the
@@ -1987,11 +2020,13 @@ class _Run:
             if v.notes:
                 log.note = self._r("; ".join(([log.note] if log.note else []) + v.notes))[:900]
             await self._shot(log)
-            if v.questions and (guarded or self.mode == "dry_run"):
+            if v.questions and (guarded or self.mode != "submit"):
                 return self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
                                  v.questions)
             if self.mode == "dry_run":
                 return self._end("blocked", DRY_UNTESTED)
+            if self.mode == "supervised":
+                return self._end("ready", "Vérifiez le formulaire. Vous seul pouvez cliquer sur Envoyer.")
 
             if v.click is None:
                 idle = 0 if handled else idle + 1
@@ -2124,12 +2159,27 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           allowed_hosts: set[str] | None = None, host_allowed: Callable[[str], bool] | None = None,
                           max_steps: int = 12, goto: Callable[[Page, str], Awaitable[None]] | None = None,
                           on_progress: Callable[[RunResult], Awaitable[None]] | None = None, captcha_wait_s: float = 0.0,
-                          account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None) -> RunResult:
-    """Inspect `url` on the caller's open page without submitting or interacting.
+                          account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None,
+                          supervised_attempt: Attempt | None = None) -> RunResult:
+    """Inspect `url` or fill a reserved, attended form. Never submit it.
 
     Legacy dispatch callbacks do not authorize generic live sends. Dry callers
     should supply a fresh headless context, as the apply service does.
     """
+    if mode == "supervised":
+        if (not supervised_attempt or supervised_attempt.adapter or supervised_attempt.url != url or not uploads.cv_bytes
+                or hashlib.sha256(uploads.cv_bytes).hexdigest() != supervised_attempt.pdf_sha256 or before_submit is None
+                or not binding_active(supervised_attempt)):
+            return RunResult(status="blocked", message="Réservation supervisée absente ou périmée.")
+        policy_check = before_submit
+
+        async def recheck() -> list[str]:
+            problems = await policy_check()
+            if not problems and not binding_active(supervised_attempt):
+                return ["Réservation supervisée périmée."]
+            return problems
+
+        before_submit = recheck
     if host_allowed is None and allowed_hosts:
         hosts = {h.lower() for h in allowed_hosts}
         host_allowed = lambda h: h.lower() in hosts  # noqa: E731

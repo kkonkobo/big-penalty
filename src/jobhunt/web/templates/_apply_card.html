@@ -1,3 +1,4 @@
+{% from "_apply_supervised.html" import launch_supervised %}
 {% macro status_box(st) -%}
 {% if st.running %}
 <div id="apply-status" class="notice" role="status" hx-get="/apply/status" hx-trigger="every 3s" hx-swap="outerHTML">
@@ -9,7 +10,7 @@
 {%- endmacro %}
 {#- Included by application.html: variable `item` (QueueItem or None). -#}
 {% if item is defined %}
-<div class="card">
+<div class="card" id="apply-state">
   <h2>Envoi sur le site de l'entreprise</h2>
   {% if item %}
     {% set lr = item.last_run %}
@@ -38,8 +39,13 @@
     {% endif %}
     <div class="row">
       {% if item.bucket == 'paused' %}<a class="btn" href="/apply">Répondre dans la file d'envoi</a>{% endif %}
-      {% if item.selectable and item.app.status != 'failed' and item.bucket in ('to_validate', 'failed') %}
+      {% if item.supervised and item.app.status == 'approved' %}
+      {{ launch_supervised(item.app.id, item.app.current_rev, item.origin_sha) }}
+      {% elif item.supervised %}<span class="muted small">Approuvez le CV pour envoyer en mode supervisé.</span>{% endif %}
+      {% if (item.selectable or item.supervised) and item.app.status != 'failed' and item.bucket in ('to_validate', 'failed') %}
       <form method="post" action="/applications/{{ item.app.id }}/apply/dry-run"><button class="btn">Essai à blanc</button></form>
+      {% endif %}
+      {% if item.selectable and item.app.status != 'failed' and item.bucket in ('to_validate', 'failed') %}
       <form method="post" action="/apply/send" onsubmit="return confirm('Envoyer cette candidature sur le site de l\'entreprise ?')">
         <input type="hidden" name="app_id" value="{{ item.app.id }}"><input type="hidden" name="rev_{{ item.app.id }}" value="{{ item.app.current_rev }}"><input type="hidden" name="origin_{{ item.app.id }}" value="{{ item.origin_sha }}">
         <button class="btn">Envoyer cette candidature</button></form>

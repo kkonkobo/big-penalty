@@ -40,7 +40,7 @@ RUN_STATUS_LABELS = {"running": "En cours", "ready": "Prêt (rien envoyé)", "su
                      "needs_email": "E-mail à confirmer", "needs_human": "CAPTCHA à résoudre", "blocked": "Bloquée", "failed": "Échec"}
 RUN_STATUS_CLASS = {"running": "src", "ready": "ok", "submitted": "ok", "needs_input": "warn", "needs_email": "warn",
                     "needs_human": "warn", "blocked": "bad", "failed": "bad"}
-MODE_LABELS = {"dry_run": "Essai à blanc", "submit": "Envoi"}
+MODE_LABELS = {"dry_run": "Essai à blanc", "submit": "Envoi via adaptateur", "supervised": "Envoi supervisé"}
 TRIGGER_LABELS = {"auto": "Automatique", "user": "Manuel"}
 PAUSE_STATUSES = ("needs_input", "needs_email", "needs_human")
 PAGE_KIND_LABELS = {"job_page": "Page de l'offre", "form": "Formulaire de candidature", "account_login": "Connexion à un compte",
@@ -193,10 +193,11 @@ async def _single(app_id: int, mode: str, headless: bool | None, bound: dict[str
     try:
         kw: dict[str, Any] = {}
         if bound is not None:
-            last = apply_store.last_run(app_id)
-            if last is None or last.id != bound["run_id"] or last.mode != mode or not (
-                    last.status in PAUSE_STATUSES or apply_service.untrusted_host_of(last)):
-                raise ApplyError("Page périmée : l'état de cette candidature a changé, recharger la page")
+            if "run_id" in bound:
+                last = apply_store.last_run(app_id)
+                if last is None or last.id != bound["run_id"] or last.mode != mode or not (
+                        last.status in PAUSE_STATUSES or apply_service.untrusted_host_of(last)):
+                    raise ApplyError("Page périmée : l'état de cette candidature a changé, recharger la page")
             kw = {"expected_rev": bound["rev"], "expected_origin": bound.get("origin")}
         await apply_service.run(app_id, mode=mode, trigger="user", headless=headless, **kw)  # type: ignore[arg-type]
     except Exception as e:  # noqa: BLE001
@@ -221,6 +222,8 @@ def _resume(app_id: int, flash_ok: str, last, origin: str | None = None):
     """Resume the paused run `last` (validated by the caller against the page the user saw): its id, mode and revision are
     handed to the background task, never looked up again at launch."""
     web = _web()
+    if last.mode == "supervised":
+        return web._flash("/apply", notice="Pour un nouvel essai, vérifiez le précédent puis utilisez « Ouvrir en mode supervisé ».")
     headless = False if last.status == "needs_human" else None
     err = _launch(app_id, last.mode, headless, {"run_id": last.id, "rev": last.rev, "origin": origin})
     return web._flash("/apply", error=err) if err else web._flash("/apply", notice=flash_ok)
@@ -233,7 +236,9 @@ def _launch_chain(rows: list[tuple[Any, str]]) -> tuple[int, list[str]]:
     jobs, skipped = [], []
     for last, origin in rows:
         aid = last.application_id
-        if SENDING["running"] and aid in SENDING["ids"]:
+        if last.mode == "supervised":
+            skipped.append(apply_service.SUPERVISED_ONLY)
+        elif SENDING["running"] and aid in SENDING["ids"]:
             skipped.append("Cette candidature fait partie d'un envoi en cours")
         elif (APPLYING.get(aid) or {}).get("running"):
             skipped.append("Un essai est déjà en cours pour cette candidature")
@@ -335,6 +340,23 @@ async def apply_send(request: Request):
     SENDING["task"] = asyncio.create_task(_batch(ids, revs, origins))
     n = len(ids)
     return web._flash("/apply", notice=f"Envoi lancé pour {n} candidature{'s' if n > 1 else ''}")
+
+
+@router.post("/applications/{app_id}/apply/supervised")
+async def apply_supervised(request: Request, app_id: str):
+    web = _web()
+    _require_local_evidence(request)
+    aid = _id_or_404(app_id)
+    app = web._application_or_404(aid)
+    form = await request.form()
+    rev = safe_id(str(form.get("rev") or ""))
+    origin = _origin_field(form)
+    job = db.get_job(app.job_id)
+    problems = apply_service._bound_problems(app, job, rev or -1, origin) or apply_service._gate(app, job, "supervised", "user")
+    if problems:
+        return web._flash("/apply", error=" ; ".join(problems))
+    err = _launch(aid, "supervised", False, {"rev": rev, "origin": origin})
+    return web._flash("/apply", error=err) if err else web._flash("/apply", notice=apply_service.SUPERVISED_HANDOFF)
 
 
 @router.post("/applications/{app_id}/apply/dry-run")

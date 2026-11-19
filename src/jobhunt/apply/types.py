@@ -122,7 +122,7 @@ class StepPlan(BaseModel):
 
 
 # ---------------------------------------------------------------- run result
-Mode = Literal["dry_run", "submit"]
+Mode = Literal["dry_run", "submit", "supervised"]
 # ready = dry run reached the final submit button with everything filled; needs_input = unknown required question(s);
 # needs_email = the site waits for an e-mail verification link; needs_human = visible CAPTCHA / bot challenge;
 # blocked = refused by a guardrail (before_submit hook, job closed); failed = technical failure.

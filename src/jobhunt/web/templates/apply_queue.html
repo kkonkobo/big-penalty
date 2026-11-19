@@ -135,12 +135,14 @@
         <td><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
           <div class="muted small">{{ it.app.job_title or 'Offre ' ~ it.app.job_id }}</div>
           {% if it.auto %}<span class="tag src">automatique</span>{% endif %}
-          {% if not it.selectable %}<span class="tag warn" {% if it.problems %}title="{{ it.problems|join(' ; ') }}"{% endif %}>non envoyable</span>{% endif %}</td>
+          {% if it.supervised %}<span class="tag warn">À envoyer en mode supervisé</span>
+          {% elif not it.selectable %}<span class="tag warn" {% if it.problems %}title="{{ it.problems|join(' ; ') }}"{% endif %}>non envoyable</span>{% endif %}</td>
         <td class="num">{{ it.score|round|int if it.score is not none else '—' }}</td>
         <td class="num">{% if it.age_days is not none %}{{ it.age_days|round|int }} j{% else %}—{% endif %}</td>
         <td>{% if it.origin_url|http_url %}<a href="{{ it.origin_url|http_url }}" target="_blank" rel="noopener noreferrer">{{ it.origin_host or (it.origin_url|host) }}<svg class="ic"><use href="#i-out"/></svg></a>{% else %}<span class="muted">—</span>{% endif %}</td>
         <td><a href="/applications/{{ it.app.id }}/pdf">PDF</a></td>
-        <td>{% if it.selectable %}<button class="btn small" formaction="/applications/{{ it.app.id }}/apply/dry-run">Essai à blanc</button>{% endif %}</td>
+        <td>{% if it.supervised %}<a class="btn small" href="/applications/{{ it.app.id }}#apply-state">Envoi supervisé</a>
+          {% elif it.selectable %}<button class="btn small" formaction="/applications/{{ it.app.id }}/apply/dry-run">Essai à blanc</button>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

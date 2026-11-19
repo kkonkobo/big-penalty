@@ -21,7 +21,7 @@
     {% endif %}
   </div>
 </div>
-{% if run.mode == 'dry_run' and run.status == 'ready' %}<div class="notice">Formulaire rempli, rien n'a été envoyé</div>{% endif %}
+{% if run.mode == 'dry_run' %}<div class="notice">Inspection seule : aucun champ rempli, aucun document joint, aucun clic.</div>{% endif %}
 {% if verification %}
 <section class="card" id="verification">
   <h2>À vérifier · Essai n°{{ run.id }}</h2>

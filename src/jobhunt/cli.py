@@ -558,7 +558,7 @@ def apply_diagnostics(
 
 @apply_app.command("dry-run")
 def apply_dry_run(app_id: int, headless: HeadlessOpt = None) -> None:
-    """Simulation : remplit le formulaire de l'entreprise avec le CV approuvé, sans jamais envoyer."""
+    """Inspecte le formulaire sans saisir de données, joindre de document ni cliquer."""
     from jobhunt.apply.errors import ApplyError
     from jobhunt.apply.service import run
 
@@ -572,10 +572,37 @@ def apply_dry_run(app_id: int, headless: HeadlessOpt = None) -> None:
         raise typer.Exit(1)
 
 
+@apply_app.command("supervised")
+def apply_supervised(app_id: int) -> None:
+    """Ouvre une candidature approuvée dans un navigateur visible. Vous cliquez sur Envoyer."""
+    from jobhunt import db
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.service import SUPERVISED_HANDOFF, origin_digest, run
+    from jobhunt.cv.store import get_application
+
+    app = get_application(app_id)
+    if app is None:
+        raise typer.BadParameter("candidature introuvable")
+    job = db.get_job(app.job_id)
+    console.print(f"Candidature {app.id} · CV révision {app.current_rev} · {job.origin_url if job else 'destination inconnue'}", markup=False)
+    console.print(SUPERVISED_HANDOFF, markup=False)
+    if not typer.confirm("La saisie et le dépôt du CV peuvent transmettre des données avant le clic final. Continuer ?"):
+        raise typer.Exit(1)
+    try:
+        result = asyncio.run(run(app_id, mode="supervised", trigger="user", headless=False, expected_rev=app.current_rev,
+                                 expected_origin=origin_digest(job.origin_url if job else None)))
+    except ApplyError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(1) from None
+    _print_run(result)
+    if result.status == "blocked":
+        raise typer.Exit(1)
+
+
 @apply_app.command("send")
 def apply_send(app_ids: Annotated[list[int], typer.Argument(help="numéros de candidature")], headless: HeadlessOpt = None,
                yes: Annotated[bool, typer.Option("--yes", "-y", help="ne pas demander confirmation")] = False) -> None:
-    """Envoie les candidatures choisies (approuve le CV courant des brouillons, puis remplit et envoie)."""
+    """Envoie les candidatures choisies via un adaptateur. Sans adaptateur, utilisez supervised."""
     from jobhunt.apply.service import send_selected
     from jobhunt.cv.store import get_application
 

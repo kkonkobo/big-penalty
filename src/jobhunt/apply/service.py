@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import json
 import os
+import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Literal
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from jobhunt import db
 from jobhunt.apply import accounts, policy
+from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Match, Receipt, WriteGate, clean_receipt, origin, registry
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.errors import ApplyError
@@ -41,7 +43,7 @@ from jobhunt.db import now
 from jobhunt.filelock import try_lock, unlock
 from jobhunt.freshness import age_days
 from jobhunt.llm import LLMError, get_llm
-from jobhunt.origin import ats_of_host
+from jobhunt.origin import MIN_CONFIDENCE, ats_of_host
 from jobhunt.sources.base import ChallengeRequired
 
 # Where an application stands in the sending queue (one bucket per application):
@@ -54,6 +56,9 @@ from jobhunt.sources.base import ChallengeRequired
 #   failed      = a technical failure, with no outstanding send to settle
 #   blocked     = cannot be sent as is (CV errors to fix, job too old / closed, duplicate, no company link)
 Bucket = Literal["to_validate", "paused", "sending", "sent", "needs_verification", "failed", "blocked"]
+SUPERVISED_ONLY = "À envoyer en mode supervisé"
+SUPERVISED_HANDOFF = ("Vérifiez le formulaire et complétez-le si nécessaire. Vous seul pouvez cliquer sur Envoyer. "
+                      "Fermez ensuite le navigateur et confirmez le résultat dans Big Penalty.")
 
 
 class QueueItem(BaseModel):
@@ -72,6 +77,7 @@ class QueueItem(BaseModel):
     pause_reason: str = ""             # "input" | "email" | "human" | "host" | ""
     untrusted_host: str = ""           # pause_reason "host": the host the form lives on
     selectable: bool = False           # may be ticked for "Envoyer les N sélectionnées"
+    supervised: bool = False
 
 
 class ApplySummary(BaseModel):
@@ -82,6 +88,7 @@ class ApplySummary(BaseModel):
     waiting: int = 0                   # applications waiting for the user's OK
     paused: int = 0                    # runs waiting for an answer / e-mail link / CAPTCHA
     failed: int = 0
+    supervised: int = 0
     to_check: int = 0                  # sent attempts left unconfirmed: verify on the company's site
     to_fix: int = 0                    # CV with blocking errors: skipped until corrected
     paused_by: dict[str, int] = Field(default_factory=dict)   # pause reason (question / e-mail / CAPTCHA / compte / site non approuvé) -> n
@@ -95,8 +102,9 @@ class ApplySummary(BaseModel):
     def breakdown(self) -> str:
         """One line the owner can act on: sent, paused by reason, to check, to fix, blocked, technical failures."""
         paused = f"{self.paused} en pause" + (" (" + ", ".join(f"{k} {v}" for k, v in sorted(self.paused_by.items())) + ")" if self.paused_by else "")
+        supervised = f" · {self.supervised} à envoyer en mode supervisé" if self.supervised else ""
         return (f"{self.sent} envoyée(s) · {paused} · {self.to_check} à vérifier · {self.to_fix} à corriger · "
-                f"{self.waiting} bloquée(s) · {self.failed} échec(s) technique(s)")
+                f"{self.waiting} bloquée(s) · {self.failed} échec(s) technique(s){supervised}")
 
 
 BUCKET_ORDER: tuple[str, ...] = ("needs_verification", "to_validate", "paused", "sending", "failed", "blocked", "sent")
@@ -208,14 +216,16 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
     else:
         bucket = "to_validate"
     open_ = app.status in ("draft", "approved") and not problems
+    adapted = bool(job and _unattended(job))
     return QueueItem(
         app=app, bucket=bucket, score=job.score if job else None, origin_url=job.origin_url if job else None,  # type: ignore[arg-type]
         origin_host=_host(job.origin_url if job else None), origin_sha=origin_digest(job.origin_url if job else None), age_days=age_days(job) if job else None, last_run=run_,
         outstanding=outstanding,
-        auto=bool(not (manual_retry or outstanding or site_handoff) and job and job.score is not None
+        auto=bool(adapted and not (manual_retry or outstanding or site_handoff) and job and job.score is not None
                   and job.score >= settings.apply_auto_min_score), problems=problems,
         questions=questions, pause_reason=pause, untrusted_host=untrusted if pause == "host" else "",
-        selectable=bucket == "to_validate" or (bucket in ("paused", "failed") and open_ and pause != "host"))
+        selectable=adapted and (bucket == "to_validate" or (bucket in ("paused", "failed") and open_ and pause != "host")),
+        supervised=not adapted and open_ and not outstanding and bucket not in ("sending", "blocked"))
 
 
 def queue(profile_id: int | None = None) -> list[QueueItem]:
@@ -299,8 +309,11 @@ def _gate(app: Application, job, mode: Mode, trigger: str) -> list[str]:
         return ["candidature déjà envoyée"]
     if app.status == "withdrawn":
         return ["candidature retirée"]
-    if mode == "submit":
-        return policy.submit_problems(app, job, trigger=trigger)  # type: ignore[arg-type]
+    if mode in ("submit", "supervised"):
+        if mode == "supervised" and (trigger != "user" or app.approved_by != "user"):
+            return ["Le mode supervisé nécessite l'approbation de ce CV par l'utilisateur."]
+        problems = policy.submit_problems(app, job, trigger=trigger)  # type: ignore[arg-type]
+        return problems or (cvs.is_eligible(app)[1] if mode == "supervised" else [])
     out: list[str] = []
     if job is None or job.profile_id != app.profile_id or job.id != app.job_id:
         return ["offre introuvable pour ce profil"]
@@ -337,18 +350,95 @@ def _default_verifier(llm: _Llm):
     return LLMAnswerVerifier(llm.get())
 
 
-async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, pool, planner,
-                 llm: _Llm, verifier=None, out: list[RunResult] | None = None) -> RunResult:
-    """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
-    follows cannot lose it."""
-    if mode == "submit":
-        return RunResult(status="blocked", message=UNSUPPORTED_DISPATCH)
+def _unattended(job) -> bool:
+    match = registry.find(job.origin_url, job.origin_ats)
+    return bool(match and match.capability == "unattended")
+
+
+def _check_boundary(run_: ApplyRun, started_job, mode: Mode, trigger: str, *, reserved: bool = False):
+    live = cvstore.get_application(run_.application_id)
+    job = db.get_job(started_job.id)
+    if live is None or job is None or live.current_rev != run_.rev or job != started_job:
+        raise ApplyError("La candidature ou la destination a changé.")
+    problems = policy.submit_problems(live, job, trigger=trigger, run_id=run_.id if reserved else None)
+    if mode == "supervised":
+        problems += cvs.is_eligible(live)[1]
+        if live.approved_by != "user" or _unattended(job):
+            problems.append("Mode supervisé indisponible pour cette approbation ou cette destination.")
+    if problems:
+        raise ApplyError(" ; ".join(dict.fromkeys(problems)))
+    parsed = urlparse(job.origin_url or "")
+    if (not parsed.hostname or parsed.username is not None or parsed.password is not None or
+            (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}))
+            or (job.origin_confidence or 0) < MIN_CONFIDENCE):
+        raise ApplyError("Destination de l'offre non vérifiée.")
+    return live, job, parsed.hostname
+
+
+def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match | None = None) -> Dispatch:
+    app, job, host = _check_boundary(run_, started_job, mode, trigger)
+    pdf_path = cvs.safe_pdf(app)
+    if pdf_path is None:
+        raise ApplyError("PDF absent")
+    pdf = pdf_path.read_bytes()
+    digest = hashlib.sha256(pdf).hexdigest()
+    if digest != app.approved_sha256 or digest != app.pdf_sha256:
+        raise ApplyError("PDF différent de celui approuvé")
+    requisition = match.requisition if match else None
+    canonical = (["req", requisition.tenant, requisition.requisition_id] if requisition and requisition.requisition_id
+                 else ["job", job.id])
+    dedupe_key = hashlib.sha256(json.dumps([app.profile_id, *canonical]).encode()).hexdigest()
+    attempt = Attempt(run_.id, app.id, run_.rev, digest, job.origin_url, host, secrets.token_urlsafe(24),
+                      match.adapter.name if match else None, requisition.tenant if requisition else "",
+                      requisition.requisition_id if requisition else None, dedupe_key, app.profile_id)
+    facts = tuple(CandidateFact(fact.key, fact.label, fact.value, tuple(fact.variants))
+                  for fact in _candidate_facts(app, job).facts if fact.value and not fact.secret) if match else ()
+    apply_store.reserve_send(run_.id, profile_id=app.profile_id, application_id=app.id, trigger=trigger,
+                             role_key=policy.normalize_role(job.company, job.title), url_key=policy._canon(job.origin_url),
+                             daily_cap=get_settings().apply_daily_cap, binding=attempt)
+    return Dispatch(attempt, pdf, facts)
+
+
+def _write_gate(request: Dispatch, run_: ApplyRun, job, mode: Mode, trigger: str, match: Match) -> WriteGate:
+    def recheck() -> None:
+        _check_boundary(run_, job, mode, trigger, reserved=True)
+        if not apply_store.binding_active(request.attempt) or registry.find(job.origin_url, job.origin_ats) != match:
+            raise ApplyError("Réservation ou politique d'adaptateur périmée.")
+
+    destinations = frozenset({origin(request.attempt.url), *match.requisition.write_origins})
+    if any(not value or origin(value) != value for value in destinations):
+        raise ApplyError("Destination d'adaptateur non vérifiée.")
+    return WriteGate(capability=match.capability, policies=match.adapter.boundaries, origins=destinations, recheck=recheck)
+
+
+def _candidate_facts(app: Application, job):
     profile = db.get_profile(app.profile_id)
     try:
         master = load_master(app.profile_id)
     except MasterError:
         master = None
-    facts = build_facts(profile, master if master and master.is_confirmed else None, load_answers(app.profile_id), job)  # type: ignore[arg-type]
+    return build_facts(profile, master if master and master.is_confirmed else None, load_answers(app.profile_id), job)
+
+
+async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, pool, planner,
+                 llm: _Llm, verifier=None, out: list[RunResult] | None = None,
+                 receipts: list[Receipt] | None = None) -> RunResult:
+    """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
+    follows cannot lose it."""
+    match = registry.find(job.origin_url, job.origin_ats) if mode != "dry_run" else None
+    if mode == "submit":
+        if match is None or match.capability != "unattended":
+            return RunResult(status="blocked", message=UNSUPPORTED_DISPATCH + " " + SUPERVISED_ONLY + ".")
+        request = _reserve(run_, job, mode, trigger, match)
+        gate = _write_gate(request, run_, job, mode, trigger, match)
+        evidence = await match.adapter.dispatch(request, gate)
+        receipt = await match.adapter.verify_receipt(request.attempt, evidence=evidence)
+        if (gate.final_called and not gate.stopped and isinstance(receipt, Receipt)
+                and clean_receipt(receipt, request.attempt) and receipts is not None):
+            receipts.append(receipt)
+        return RunResult(status="failed", message="Aucun reçu authentifié pour cet essai.")
+    request = _reserve(run_, job, mode, trigger, match) if mode == "supervised" else None
+    facts = _candidate_facts(app, job) if not match else None
     cv_pdf = cvs.safe_pdf(app)
     assert cv_pdf is not None and job.origin_url
     started_origin = job.origin_url
@@ -366,22 +456,52 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
         trusted = trusted_hosts(app.profile_id)
     except ApplyError:
         trusted = []
-    host_allowed = make_host_allowed(started_origin, trusted)
+    host_allowed = (lambda name: name == host) if request else make_host_allowed(started_origin, trusted)
 
-    if planner is None:
+    async def recheck() -> list[str]:
+        try:
+            _check_boundary(run_, job, mode, trigger, reserved=True)
+        except ApplyError as exc:
+            return [str(exc)]
+        return []
+
+    if planner is None and not match:
         planner = LLMPlanner(llm.get())
         if verifier is None:
             verifier = _default_verifier(llm)
-    site = "applydry-" + accounts.registrable_host(host)
-    async with pool.page(app.profile_id, site, True) as page:
-        res = await run_application(
-            page, url=started_origin, facts=facts, planner=planner, uploads=Uploads(cv_pdf=cv_pdf), mode="dry_run",
-            out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)), job_title=job.title, company=job.company or "",
-            host_allowed=host_allowed, verifier=verifier,
-            max_steps=get_settings().apply_max_steps, goto=goto,
-            choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(started_origin)) if trigger == "user" else None)
+    site = f"apply-supervised-{host}" if request else "applydry-" + accounts.registrable_host(host)
+    async with pool.page(app.profile_id, site, not request) as page:
+        if request and match:
+            gate = _write_gate(request, run_, job, mode, trigger, match)
+            try:
+                res = await match.adapter.supervise(page, request, gate)
+            except ApplyError as exc:
+                res = _blocked_result([str(exc)])
+        else:
+            res = await run_application(
+                page, url=started_origin, facts=facts, planner=planner,
+                uploads=Uploads(cv_pdf=cv_pdf, cv_bytes=request.pdf if request else None), mode=mode,
+                before_submit=recheck if request else None, supervised_attempt=request.attempt if request else None,
+                out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)), job_title=job.title, company=job.company or "",
+                host_allowed=host_allowed, verifier=verifier,
+                max_steps=get_settings().apply_max_steps, goto=goto,
+                choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(started_origin))
+                if trigger == "user" else None)
         if out is not None:
             out.append(res)
+        if request and not page.is_closed():
+            with contextlib.suppress(Exception):
+                await page.evaluate("""message => {
+                    const banner = document.createElement('aside');
+                    banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;pointer-events:none';
+                    const notice = document.createElement('div');
+                    notice.style.cssText = 'background:#152c4a;color:white;padding:12px;font:16px system-ui';
+                    notice.textContent = message;
+                    banner.attachShadow({mode:'closed'}).append(notice);
+                    document.documentElement.append(banner);
+                }""", SUPERVISED_HANDOFF)
+            if not page.is_closed():
+                await page.wait_for_event("close", timeout=0)
     if challenge and res.status == "failed":
         res = res.model_copy(update={"status": "needs_human", "message": "Un défi anti-robot doit être résolu à la main."})
     return res
@@ -401,15 +521,17 @@ async def run(app_id: int, *, mode: Mode, trigger: Literal["auto", "user"], head
     if app is None:
         raise ApplyError("Candidature introuvable")
     job = db.get_job(app.job_id)
-    if mode == "submit" and app.status == "failed":  # an unresolved attempt: no new row, the outstanding run stays the one to settle
+    if mode != "dry_run":
         pending = apply_store.outstanding_attempt(app.id)
         if pending is not None:
             return pending.model_copy(update={"status": "blocked", "result": None, "message": UNRESOLVED})
     reasons = _bound_problems(app, job, expected_rev, expected_origin) or _gate(app, job, mode, trigger)
+    if mode == "supervised" and (headless is True or _lock_held):
+        reasons = ["Le mode supervisé exige un navigateur visible et un lancement individuel."]
     if reasons:
         return _refuse(app, job, mode, trigger, reasons)
     try:
-        with send_lock() if mode == "submit" and not _lock_held else contextlib.nullcontext():
+        with send_lock() if mode != "dry_run" and not _lock_held else contextlib.nullcontext():
             return await _run_locked(app, job, mode=mode, trigger=trigger, headless=headless, pool=pool, planner=planner,
                                      llm=llm, verifier=verifier, attended=attended)
     except SendLocked as e:
@@ -425,12 +547,15 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
     reraise: BaseException | None = None
     crashed = False
     returned: list[RunResult] = []  # the engine's own result, as soon as it exists
+    receipts: list[Receipt] = []
     try:
         try:
-            if own_pool:
-                pool = BrowserPool(headless=headless)
+            if own_pool and mode != "submit":
+                pool = BrowserPool(headless=False if mode == "supervised" else headless)
             result = await _drive(app, job, run_, mode=mode, trigger=trigger, pool=pool, planner=planner,
-                                  llm=shared_llm, verifier=verifier, out=returned)
+                                  llm=shared_llm, verifier=verifier, out=returned, receipts=receipts)
+        except ApplyError as e:
+            result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
             result, crashed = RunResult(status="failed", message=f"Erreur technique ({type(e).__name__})."), True
         except asyncio.CancelledError as e:  # the row must not stay `running`: settle it, then let the cancellation through
@@ -438,7 +563,7 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
         if crashed and returned:  # the engine had finished: cleanup failed or was cancelled afterwards, its result stands
             result, crashed = returned[0], False
         # Settlement is synchronous (no await): a cancellation arriving during the cleanup below cannot strand the run.
-        done = _settle(run_, mode, result, crashed)
+        done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None)
     finally:
         try:
             if own_pool and pool is not None:
@@ -471,14 +596,14 @@ def _drop_bad_origin(job) -> None:
                   (json.dumps(extra, ensure_ascii=False), job.id, job.profile_id))
 
 
-def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool) -> ApplyRun:
-    if mode != "submit":
+def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool, *, receipt: Receipt | None = None) -> ApplyRun:
+    if mode == "dry_run":
         return apply_store.finish_run(run_.id, result)
     row = apply_store.get_run(run_.id) if crashed else None
     if row is not None and row.result is not None:  # the engine gave no result: keep what it reported before (steps, deductions)
         result = result.model_copy(update={"steps": row.result.steps, "final_url": row.result.final_url,
                                            "submit_clicked": row.result.submit_clicked})
-    return apply_store.finish_and_settle(run_.id, result)
+    return apply_store.finish_and_settle(run_.id, result, receipt=receipt)
 
 
 # ---------------------------------------------------------------- batches
@@ -556,6 +681,12 @@ async def _send_each(app_ids: list[int], *, headless, on_progress, pool, planner
                     if on_progress:
                         on_progress(app_id, res)
                     continue
+                if not live_job or not _unattended(live_job):
+                    res = _refuse(app, live_job, "submit", "user", [SUPERVISED_ONLY])
+                    runs.append(res)
+                    if on_progress:
+                        on_progress(app_id, res)
+                    continue
                 if app.status == "draft":
                     try:
                         cvs.approve(app.id, app.current_rev)
@@ -565,8 +696,7 @@ async def _send_each(app_ids: list[int], *, headless, on_progress, pool, planner
                         if on_progress:
                             on_progress(app_id, res)
                         continue
-                res = await run(app_id, mode="submit", trigger="user", headless=headless, pool=shared.get(), planner=planner,
-                                llm=shared_llm.get(), verifier=verifier, _lock_held=True,
+                res = await run(app_id, mode="submit", trigger="user", headless=headless, _lock_held=True,
                                 expected_rev=None if expected_revs is None else expected_revs.get(app_id, -1),
                                 expected_origin=None if expected_origins is None else expected_origins.get(app_id, ""))
             except ApplyError:
@@ -598,6 +728,28 @@ def resolve_unconfirmed(app_id: int, *, sent: bool, run_id: int | None = None) -
     """Settle the exact attempt after the operator checks the outcome; never approve or resend here."""
     apply_store.resolve_attempt(app_id, sent=sent, run_id=run_id)
     return cvstore.get_application(app_id)  # type: ignore[return-value]
+
+
+async def reconcile_attempt(run_id: int) -> Receipt | None:
+    """Check a held adapter attempt without dispatching or opening a new write boundary."""
+    with send_lock():
+        attempt = apply_store.held_binding(run_id)
+        if not attempt or not attempt.adapter:
+            return None
+        outstanding = apply_store.outstanding_attempt(attempt.application_id)
+        app = cvstore.get_application(attempt.application_id)
+        job = db.get_job(app.job_id) if app else None
+        if not outstanding or outstanding.id != run_id or not job or job.origin_url != attempt.url:
+            return None
+        match = registry.find(attempt.url, job.origin_ats)
+        if (not match or match.adapter.name != attempt.adapter or match.requisition.tenant != attempt.tenant
+                or match.requisition.requisition_id != attempt.requisition_id):
+            return None
+        receipt = await match.adapter.verify_receipt(attempt)
+        if not isinstance(receipt, Receipt) or not clean_receipt(receipt, attempt):
+            return None
+        apply_store.resolve_attempt(attempt.application_id, run_id=run_id, sent=receipt.outcome == "confirmed", receipt=receipt)
+        return receipt
 
 
 def inferred_answers(app_id: int) -> list[FilledField]:
@@ -722,9 +874,8 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
     start at once), the others are prepared and sent one after the other. One French progress line per application
     (`[n/N] Société — Poste : envoyée | en pause (…) | à vérifier | à corriger | bloquée (raison)`), then the counts. Never
     raises for one job's failure.
-    `headless=False`: visible windows (many career sites block headless browsers). `limit`: stop after that many applications
-    SENT. `min_score`: only jobs scoring at least that (raises, never lowers, the prepare / auto thresholds). `attended`: a
-    person is at the visible window, so it waits `apply_captcha_wait_s` for a CAPTCHA (an unattended pass never waits)."""
+    `limit`: stop after that many applications SENT. `min_score`: raises the prepare / auto thresholds.
+    Legacy browser options never switch this pass into supervised mode or enable a CAPTCHA wait."""
     s = get_settings()
     summary = ApplySummary(profile_id=profile_id)
     try:
@@ -839,6 +990,10 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : bloquée (offre modifiée entre-temps)")
         return
     job = live
+    if not _unattended(job):
+        summary.supervised += 1
+        emit(f"{tag} : {SUPERVISED_ONLY.lower()}")
+        return
     def broken(a: Application) -> bool:
         return a.status == "draft" and (bool(a.errors) or cvs.safe_pdf(a) is None)
 
@@ -872,8 +1027,7 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : bloquée (un autre envoi est en cours)")
         return
     try:
-        res = await run(app.id, mode="submit", trigger="auto", headless=headless, pool=pool.get(), planner=planner,
-                        llm=llm.get(), verifier=verifier, _lock_held=True, attended=attended)
+        res = await run(app.id, mode="submit", trigger="auto", headless=headless, _lock_held=True)
     except (ApplyError, CVError) as e:
         summary.waiting += 1
         emit(f"{tag} : bloquée ({e})")
@@ -881,6 +1035,9 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
     if res.status == "submitted":
         summary.sent += 1
         emit(f"{tag} : envoyée")
+    elif apply_store.outstanding_attempt(app.id) is not None:
+        summary.to_check += 1
+        emit(f"{tag} : à vérifier (envoi non confirmé : {res.message})")
     elif res.status in PAUSE_REASON or untrusted_host_of(res):  # the pass never trusts a host by itself
         summary.paused += 1
         reason = pause_reason_label(res)
