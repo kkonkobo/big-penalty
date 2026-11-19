@@ -131,6 +131,9 @@ class FakeVerifier:
 class FixtureServer:
     """Serve static fixture HTML and synthetic receipts without any HTTP redirects."""
 
+    _used_ports: set[int] = set()
+    _port_lock = threading.Lock()
+
     def __init__(self):
         self.posts: list[dict] = []
         self.requests: list[str] = []
@@ -220,9 +223,16 @@ class FixtureServer:
                 receipt = self.headers.get("X-Fixture-Nonce", "") if self.path == "/apply" and name == "confirmation.html" else ""
                 self._html(name, receipt=receipt)
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        with self._port_lock:
+            while True:
+                self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+                if self.httpd.server_port not in self._used_ports:
+                    self._used_ports.add(self.httpd.server_port)
+                    break
+                self.httpd.server_close()
         self.base = f"http://127.0.0.1:{self.httpd.server_port}"
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._thread.start()
 
     def url(self, name: str) -> str:
         return f"{self.base}/{name}"
@@ -233,6 +243,7 @@ class FixtureServer:
     def close(self) -> None:
         self.httpd.shutdown()
         self.httpd.server_close()
+        self._thread.join()
 
 
 class FixtureFlow(engine._Run):
@@ -372,9 +383,11 @@ HOST_RULES = ["--host-resolver-rules=MAP thirdparty.test 127.0.0.1",
 # ------------------------------------------------------------------ fixtures (import into test modules)
 @pytest.fixture
 def server():
-    s = FixtureServer()
-    yield s
-    s.close()
+    server = FixtureServer()
+    try:
+        yield server
+    finally:
+        server.close()
 
 
 @pytest.fixture

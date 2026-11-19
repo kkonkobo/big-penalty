@@ -15,7 +15,7 @@ from cv_fakes import save_confirmed
 from jobhunt import db
 from jobhunt.apply import apply_entry, engine, service, store
 from jobhunt.apply.facts import save_answers
-from jobhunt.apply.adapters import Receipt, Registry, Requisition
+from jobhunt.apply.adapters import Attempt, Receipt, Registry, Requisition
 from jobhunt.apply.autonomous import Audience
 from jobhunt.apply.destination import RecipientGuard, clean_url, origin
 from jobhunt.apply.errors import ApplyError
@@ -368,6 +368,44 @@ async def test_landing_dedupe_keeps_released_confirmed_attempt(server, profile, 
                                planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
     assert result.status != "submitted"
     assert [post["path"] for post in server.posts] == ["/apply"]
+
+
+@pytest.mark.parametrize("first_direct", [True, False])
+@pytest.mark.parametrize("match_by", ["workday_variant", "landing_digest"])
+def test_reservation_and_landing_dedupe_in_both_orders(profile, tmp_path, first_direct, match_by):
+    workday = match_by == "workday_variant"
+    direct = ("https://acme.wd3.myworkdayjobs.com/External/job/Paris/Engineer_R123-1" if workday
+              else "https://jobs.example.test/apply")
+    landing = direct + "/apply/applyManually" if workday else direct
+    metadata = {"origin_resolution": {"tenant": "acme", "requisition": "R123-1"}} if workday else {}
+    _, ats_app = approved_fixture(profile, tmp_path, direct, extra=metadata)
+    _, careers_app = approved_fixture(profile, tmp_path, "https://careers.acme.example/jobs/123",
+                                     title="Analyste comptable")
+
+    def prepare(app, url, tenant="", requisition=None):
+        app = cvstore.get_application(app.id)
+        run = store.start_run(app.id, app.current_rev, "submit", "user", lambda run_id: tmp_path / str(run_id))
+        return Attempt(run.id, app.id, app.current_rev, app.approved_sha256, url, urlsplit(url).hostname,
+                       "fixture-nonce", None, tenant, requisition, f"legacy-key-{app.id}", profile.id, autonomous=True)
+
+    def reserve(attempt):
+        store.reserve_send(attempt.run_id, profile_id=profile.id, application_id=attempt.application_id, trigger="user",
+                           role_key="", url_key=store._url_key(attempt.url), daily_cap=9, binding=attempt)
+
+    ats_attempt = prepare(ats_app, direct, "acme" if workday else "", "R123-1" if workday else None)
+    careers_attempt = prepare(careers_app, "https://careers.acme.example/jobs/123")
+    if first_direct:
+        reserve(ats_attempt)
+        reserve(careers_attempt)
+        with pytest.raises(ApplyError) as refused:
+            store.bind_apply_landing(careers_attempt, landing)
+        assert str(refused.value) == store.NOT_ACTIVE
+    else:
+        reserve(careers_attempt)
+        bound = store.bind_apply_landing(careers_attempt, landing)
+        assert bound.requisition_id == ("r123" if workday else None)
+        with pytest.raises(ApplyError, match="Un essai existe déjà"):
+            reserve(ats_attempt)
 
 
 async def test_autonomous_noncanonical_job_refuses_real_fuzzy_duplicate(server, profile, tmp_path, monkeypatch):

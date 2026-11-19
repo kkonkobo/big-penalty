@@ -29,7 +29,7 @@ from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url, is_bound_pdf
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.identity import canonical_identity, dispatch_url, resolved_identity
+from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, resolved_identity
 from jobhunt.apply.facts import answers_path as facts_answers_path
 from jobhunt.apply.facts import build_facts, custom_answers, load_answers, norm_question, save_custom_answers, trusted_hosts
 from jobhunt.apply.missing_answers import editable_custom
@@ -435,15 +435,16 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     requisition = match.requisition if match else None
     resolved = resolved_identity(job.extra)
     adapter_identity = canonical_identity(requisition.tenant, requisition.requisition_id) if requisition else None
-    dedupe_identity = getattr(match.adapter, "dedupe_identity", None) if adapter_identity else None
-    if dedupe_identity:
-        adapter_identity = dedupe_identity(url) or adapter_identity
+    adapter_dedupe = getattr(match.adapter, "dedupe_identity", None) if adapter_identity else None
+    if adapter_dedupe:
+        adapter_identity = adapter_dedupe(url) or adapter_identity
     metadata = job.extra.get("origin_resolution") if isinstance(job.extra, dict) else None
     if resolved and adapter_identity and (resolved != adapter_identity or (
             browser_adapter and metadata.get("canonical_ok") is True and metadata.get("submit_ats") != match.adapter.name)):
         raise ApplyError("Identité du poste incohérente : envoi annulé.")
     identity = resolved or adapter_identity
-    canonical = ["req", *identity] if identity else ["job", job.id]
+    dedupe = dedupe_identity(identity)
+    canonical = ["req", *dedupe] if dedupe else ["job", job.id]
     dedupe_key = hashlib.sha256(json.dumps([app.profile_id, *canonical]).encode()).hexdigest()
     autonomous = mode == "submit" and (not match or match.capability != "unattended")
     if autonomous:

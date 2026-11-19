@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
 from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.identity import canonical_identity, dispatch_url, posting_fingerprint, resolved_identity, similar_role
+from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, posting_fingerprint, resolved_identity, similar_role
 from jobhunt.apply.types import Mode, RunResult, RunStatus
 from jobhunt.db import _dt, _iso, connect, now
 from jobhunt.dedupe import canonical_url
@@ -671,15 +671,11 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
                            " AND v.released_at IS NULL AND v.binding_json=?", (attempt.run_id, _binding_json(attempt))).fetchone()
         if not run or not _binding_current(conn, run, attempt) or _host_paused(conn, host):
             raise ApplyError(NOT_ACTIVE)
-        duplicates = _potential_duplicates(conn, attempt.profile_id, attempt.application_id, canonical)
-        if any(exact or app_id not in confirmed_distinct for app_id, exact in duplicates.items()):
-            raise ApplyError(NOT_ACTIVE)
         digest = _url_key(target)
-        if conn.execute("SELECT 1 FROM apply_reservations WHERE profile_id=? AND application_id<>?"
-                        " AND (released_at IS NULL OR receipt_outcome='confirmed' OR run_id IN"
-                        " (SELECT sent_run_id FROM applications WHERE profile_id=? AND status='submitted'))"
-                        " AND (url_key=? OR json_extract(binding_json, '$.landing_digest')=?)",
-                        (attempt.profile_id, attempt.application_id, attempt.profile_id, digest, digest)).fetchone():
+        duplicates = _potential_duplicates(conn, attempt.profile_id, attempt.application_id,
+                                           canonical or canonical_identity(attempt.tenant, attempt.requisition_id),
+                                           target_digests=(digest,))
+        if any(exact or app_id not in confirmed_distinct for app_id, exact in duplicates.items()):
             raise ApplyError(NOT_ACTIVE)
         updated = replace(attempt, landing_host=host, landing_digest=digest, landing_binding=method,
                           tenant=canonical[0] if canonical else attempt.tenant,
@@ -731,14 +727,17 @@ def mark_autonomous_submit(attempt: Attempt) -> None:
         conn.execute("UPDATE application_runs SET submit_clicked_at=? WHERE id=?", (_iso(now()), attempt.run_id))
 
 
-def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=None) -> dict[int, bool]:
+def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=None, *, target_digests=()) -> dict[int, bool]:
     current = conn.execute("SELECT j.id, j.company, j.title, j.extra, j.origin_url FROM applications a JOIN jobs j"
                            " ON j.id=a.job_id AND j.profile_id=a.profile_id WHERE a.id=? AND a.profile_id=?",
                            (application_id, profile_id)).fetchone()
     if current is None:
         return {}
-    canonical = canonical or resolved_identity(current["extra"])
+    identities = {dedupe_identity(canonical), dedupe_identity(resolved_identity(current["extra"]))} - {None}
     current_url = clean_url(current["origin_url"])
+    digests = {digest for digest in target_digests if digest}
+    if current_url:
+        digests.add(_url_key(current_url))
     rows = conn.execute("""SELECT a.id, a.job_id, COALESCE(j.company,a.company) AS company,
         COALESCE(j.title,a.job_title) AS title, j.extra, j.origin_url, a.sent_origin_url,
         v.binding_json, v.url_key FROM applications a LEFT JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id
@@ -754,8 +753,13 @@ def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=
             binding = json.loads(row["binding_json"] or "{}")
         except ValueError:
             binding = {}
-        held = canonical_identity(binding.get("tenant"), binding.get("requisition_id")) if isinstance(binding, dict) else None
-        exact = (current["id"] == row["job_id"] or bool(canonical and canonical in (held, resolved_identity(row["extra"])))
+        if not isinstance(binding, dict):
+            binding = {}
+        held = dedupe_identity((binding.get("tenant"), binding.get("requisition_id")))
+        resolved = dedupe_identity(resolved_identity(row["extra"]))
+        exact = (current["id"] == row["job_id"] or held in identities or resolved in identities
+                 or any(digest in digests for digest in (row["url_key"], binding.get("url_digest"), binding.get("landing_digest"))
+                        if isinstance(digest, str))
                  or bool(current_url and (row["url_key"] in (_url_key(current_url), canonical_url(current_url))
                          or any(current_url == clean_url(row[key]) for key in ("origin_url", "url_key", "sent_origin_url")))))
         if exact or similar_role(current["company"], current["title"], row["company"], row["title"]):
@@ -820,7 +824,8 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
             if binding.autonomous and _host_paused(c, binding.host):
                 raise ApplyError("À envoyer en mode supervisé")
             duplicates = _potential_duplicates(c, profile_id, application_id,
-                                               canonical_identity(binding.tenant, binding.requisition_id))
+                                               canonical_identity(binding.tenant, binding.requisition_id),
+                                               target_digests=(_url_key(binding.url), binding.landing_digest))
             if any(duplicates.values()):
                 raise ApplyError("Un essai existe déjà pour ce poste chez cet employeur.")
             if trigger == "user":
@@ -857,9 +862,14 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
         if binding and c.execute("SELECT 1 FROM apply_reservations WHERE dedupe_key=? AND released_at IS NULL",
                                  (binding.dedupe_key,)).fetchone():
             raise ApplyError("Un essai existe déjà pour ce poste chez cet employeur.")
-        if binding and trigger == "auto" and c.execute(
-                "SELECT 1 FROM apply_reservations WHERE dedupe_key=? AND released_at IS NOT NULL", (binding.dedupe_key,)).fetchone():
-            raise ApplyError("Nouvel essai manuel requis pour ce poste.")
+        if binding and trigger == "auto":
+            identity = dedupe_identity((binding.tenant, binding.requisition_id))
+            released = c.execute("""SELECT dedupe_key, json_extract(binding_json, '$.tenant') AS tenant,
+                    json_extract(binding_json, '$.requisition_id') AS requisition
+                FROM apply_reservations WHERE profile_id=? AND released_at IS NOT NULL""", (profile_id,))
+            if any(row["dedupe_key"] == binding.dedupe_key or (
+                    identity and identity == dedupe_identity((row["tenant"], row["requisition"]))) for row in released):
+                raise ApplyError("Nouvel essai manuel requis pour ce poste.")
         c.execute("INSERT INTO apply_reservations(profile_id, application_id, run_id, trigger, role_key, url_key, created_at, pending, binding_json, dedupe_key)"
                   " VALUES (?,?,?,?,?,?,?,?,?,?)",
                   (profile_id, application_id, run_id, trigger, role_key or "", url_key or "", _iso(ts), 1 if pending else 0,

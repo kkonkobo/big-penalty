@@ -24,6 +24,14 @@ def canonical_identity(tenant, requisition) -> tuple[str, str] | None:
     return values[0], values[1]
 
 
+def dedupe_identity(identity: tuple[str, str] | None) -> tuple[str, str] | None:
+    """Compare Workday posting variants without changing adapter or receipt identifiers."""
+    from jobhunt.origin import workday_requisition
+
+    canonical = canonical_identity(*identity) if identity else None
+    return (canonical[0], workday_requisition(canonical[1])) if canonical else None
+
+
 def resolved_identity(extra) -> tuple[str, str] | None:
     if isinstance(extra, str):
         try:
