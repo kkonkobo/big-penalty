@@ -790,8 +790,8 @@ def _pause_detail(res: ApplyRun) -> str:
 async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_now, llm=None, pool=None, planner=None,
                       verifier=None, headless: bool = True, limit: int | None = None, min_score: float | None = None,
                       attended: bool = False) -> ApplySummary:
-    """Automatic pass (daily run, or `apply auto`): prepare CVs for the best fresh jobs, auto-approve and (if automatic
-    sending is on) send those at or above the auto threshold, within the daily cap. Jobs that already have a CV come FIRST (sends
+    """Automatic pass (daily run, or `apply auto`): prepare CVs for the best fresh jobs. If automatic sending is on,
+    auto-approve and send those at or above the auto threshold, within the daily cap. Jobs that already have a CV come FIRST (sends
     start at once), the others are prepared and sent one after the other. One French progress line per application
     (`[n/N] Société — Poste : envoyée | en pause (…) | à vérifier | à corriger | bloquée (raison)`), then the counts. Never
     raises for one job's failure.
@@ -924,6 +924,10 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
     if broken(app):
         summary.to_fix += 1
         emit(f"{tag} : à corriger ({len(app.errors)} erreur(s) bloquante(s) dans le CV)" if app.errors else f"{tag} : à corriger (PDF absent)")
+        return
+    if not s.apply_auto:
+        summary.waiting += 1
+        emit(f"{tag} : bloquée (envoi automatique désactivé)")
         return
     threshold = max(s.apply_auto_min_score, min_score or 0)
     if app.status == "draft" and (job.score or 0) >= threshold:

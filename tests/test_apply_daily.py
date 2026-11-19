@@ -126,14 +126,15 @@ async def test_preparation_cap(env, profile, settings, monkeypatch):
     assert len(store.list_applications(profile.id)) == 2
 
 
-async def test_auto_switch_off_approves_good_scores_only_and_sends_nothing(env, profile, settings, monkeypatch):
+async def test_auto_switch_off_prepares_without_approving_or_sending(env, profile, settings, monkeypatch):
     monkeypatch.setattr(settings, "apply_auto", False)
     hi, lo = env.job(1, 75), env.job(2, 50)
+    existing = env.draft(env.job(3, 90))
     s, _ = await daily(profile)
-    assert not env.runs and (s.sent, s.waiting, s.prepared) == (0, 2, 2)
+    assert not env.runs and (s.sent, s.waiting, s.prepared) == (0, 3, 2)
     apps = {a.job_id: a for a in store.list_applications(profile.id)}
-    assert apps[hi.id].status == "approved" and apps[hi.id].approved_by == "auto"
-    assert apps[lo.id].status == "draft"  # < 60: never auto-approved, never sent
+    assert all(app.status == "draft" and app.approved_rev is None for app in apps.values())
+    assert set(apps) == {hi.id, lo.id, existing.job_id}
 
 
 async def test_low_score_is_never_sent_even_if_the_user_approved_it(env, profile):
