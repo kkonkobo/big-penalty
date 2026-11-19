@@ -135,6 +135,7 @@ class FixtureServer:
         self.requests: list[str] = []
         self.sent: list[dict] = []          # EVERY request that carries candidate data: a GET with a query string, any POST
         self.post_pages: dict[str, str] = {}  # POST path -> fixture served in answer (default: confirmation.html)
+        self.redirects: dict[str, str] = {}
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -148,12 +149,18 @@ class FixtureServer:
                 self.send_header("Content-Length", str(len(body)))
                 if receipt:
                     self.send_header("X-Fixture-Receipt", receipt)
+                    self.send_header("X-Fixture-Requisition", self.headers.get("X-Application-Requisition", ""))
                 self.end_headers()
                 self.wfile.write(body)
 
             def do_GET(self):
                 path = self.path.split("?")[0]
                 outer.requests.append(self.path)
+                if path in outer.redirects:
+                    self.send_response(307)
+                    self.send_header("Location", outer.redirects[path])
+                    self.end_headers()
+                    return
                 if "?" in self.path:
                     outer.sent.append({"method": "GET", "path": self.path})
                 if path == "/collect":
@@ -171,9 +178,15 @@ class FixtureServer:
                 body = self.rfile.read(n)
                 outer.posts.append({"path": self.path, "body": body})
                 outer.sent.append({"method": "POST", "path": self.path, "body": body})
-                if self.path == "/adapter-contract" and body.startswith(b"%PDF-") and self.headers.get("X-Fixture-Nonce"):
+                if self.path in outer.redirects:
+                    self.send_response(307)
+                    self.send_header("Location", outer.redirects[self.path])
+                    self.end_headers()
+                    return
+                if self.path == "/adapter-contract" and body.startswith(b"%PDF-") and self.headers.get("X-Application-Attempt"):
                     self.send_response(200)
-                    self.send_header("X-Fixture-Receipt", self.headers["X-Fixture-Nonce"])
+                    self.send_header("X-Fixture-Receipt", self.headers["X-Application-Attempt"])
+                    self.send_header("X-Fixture-Requisition", "req-1")
                     self.end_headers()
                     self.wfile.write(b"<p>Candidature recue (fixture).</p>")
                     return
@@ -208,13 +221,13 @@ class FixtureFlow(engine._Run):
 
     async def _execute(self, item, target, snapshot, log):
         boundary = "cv_upload_parse" if item.act.op.startswith("upload_") else "draft_write"
-        return await self.write_gate.perform(boundary, self.url, lambda: super(FixtureFlow, self)._execute(item, target, snapshot, log))
+        self.write_gate._enter(boundary, self.url)
+        return await super()._execute(item, target, snapshot, log)
 
     async def _click(self, target, *, recheck=None):
         boundary = "final_submit" if self.final_clicked else "draft_write"
-        async def operation():
-            await super(FixtureFlow, self)._click(target, recheck=recheck)
-        await self.write_gate.perform(boundary, self.url, operation)
+        self.write_gate._enter(boundary, self.url)
+        await super()._click(target, recheck=recheck)
 
 
 class LoopbackFlowAdapter:
@@ -236,7 +249,7 @@ class LoopbackFlowAdapter:
         return float(parsed.scheme == "http" and parsed.netloc == self.fixture.netloc and parsed.hostname == "127.0.0.1")
 
     def resolve(self, url, dom_markers):
-        return Requisition(self.tenant, urlsplit(url).path) if self.matches(url, dom_markers) else None
+        return Requisition(self.tenant, "fixture" + urlsplit(url).path) if self.matches(url, dom_markers) else None
 
     async def dispatch(self, request, gate):
         return await self._drive(request, gate, "submit")
@@ -245,8 +258,8 @@ class LoopbackFlowAdapter:
         return await self._drive(request, gate, "dry_run")
 
     async def verify_receipt(self, attempt, *, evidence=None):
-        if isinstance(evidence, tuple) and attempt.nonce in evidence[1]:
-            return Receipt(attempt, "confirmed", "first_party_confirmation", "fixture-apply")
+        if isinstance(evidence, tuple) and (attempt.nonce, attempt.requisition_id) in evidence[1]:
+            return Receipt(attempt, "confirmed", "first_party_confirmation", "fixture-apply", attempt.nonce, attempt.requisition_id)
         return Receipt(attempt, "uncertain")
 
     async def _drive(self, request, gate, mode):
@@ -263,7 +276,7 @@ class LoopbackFlowAdapter:
 
         def observe(response):
             if response.url == self.server.url("apply") and response.request.method == "POST":
-                receipt_nonces.append(response.headers.get("x-fixture-receipt"))
+                receipt_nonces.append((response.headers.get("x-fixture-receipt"), response.headers.get("x-fixture-requisition")))
 
         async def local_only(route, browser_request):
             target = urlsplit(browser_request.url)
@@ -279,6 +292,7 @@ class LoopbackFlowAdapter:
                 headers = {key: value for key, value in browser_request.headers.items() if key != "x-fixture-nonce"}
                 if gate.final_called and not gate.stopped and browser_request.method == "POST" and target.path == "/apply":
                     headers["x-fixture-nonce"] = request.attempt.nonce
+                    headers["x-application-requisition"] = request.attempt.requisition_id or ""
                 await route.continue_(headers=headers)
             else:
                 await route.continue_()
@@ -359,6 +373,7 @@ async def page():
 @pytest.fixture(autouse=False)
 def fast(monkeypatch):
     """No human-like pauses in tests."""
+    monkeypatch.setenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS", "1")
     async def nop(*a, **k):
         return None
     monkeypatch.setattr(engine, "human_pause", nop)

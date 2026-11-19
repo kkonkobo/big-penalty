@@ -7,9 +7,10 @@ answer from general knowledge: every answer must cite the fact that justifies it
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Protocol
 
-from jobhunt.apply.types import FactSheet, PageSnapshot, StepLog, StepPlan
+from jobhunt.apply.types import Fact, FactSheet, FormField, PageSnapshot, StepLog, StepPlan
 
 SECRET_PLACEHOLDER = "(mot de passe géré par le système)"
 
@@ -103,6 +104,18 @@ class Planner(Protocol):
                    mode: str) -> StepPlan: ...
 
 
+def inspection_inputs(snapshot: PageSnapshot, facts: FactSheet | list[dict[str, Any]]) -> tuple[PageSnapshot, FactSheet]:
+    entries = facts_payload(facts)
+    values = {entry.get("value") for entry in entries if isinstance(entry.get("value"), str) and entry["value"]}
+    if isinstance(facts, FactSheet):
+        values.update(value for fact in facts.facts for value in [fact.value, *fact.variants] if value)
+    pattern = re.compile("|".join(re.escape(value) for value in sorted(values, key=len, reverse=True)), re.I) if values else None
+    fields = [FormField(ref=field.ref, kind=field.kind,
+                        label=pattern.sub("[masqué]", field.label) if pattern else field.label)
+              for field in snapshot.fields]
+    return PageSnapshot(url="", fields=fields), FactSheet(facts=[Fact(key=entry["key"], label="") for entry in entries])
+
+
 def facts_payload(facts: FactSheet | list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Facts as the LLM sees them. Secret values are NEVER included. Pre-serialised lists (facts_for_llm) pass through."""
     if not isinstance(facts, FactSheet):
@@ -140,7 +153,15 @@ class LLMPlanner:
 
     async def plan(self, snapshot: PageSnapshot, facts: FactSheet | list[dict[str, Any]], *, job_title: str, company: str,
                    history: list[StepLog], mode: str) -> StepPlan:
-        user = {"job": {"title": job_title, "company": company}, "mode": mode, "facts": facts_payload(facts),
-                "page": snapshot_payload(snapshot), "history": history_payload(history)}
-        return await self.llm.structured(StepPlan, system_text=SYSTEM, user_text=json.dumps(user, ensure_ascii=False),
+        system = SYSTEM
+        if mode == "dry_run":
+            snapshot, facts = inspection_inputs(snapshot, facts)
+            user = {"mode": mode, "facts": [{"key": fact.key, "type": "string"} for fact in facts.facts],
+                    "page": {"fields": [{"ref": field.ref, "label": field.label, "kind": field.kind}
+                                        for field in snapshot.fields]}}
+            system += "\nInspection only: map labels to fact keys without supplying values or choices. If values are needed, omit that action (non testé)."
+        else:
+            user = {"job": {"title": job_title, "company": company}, "mode": mode, "facts": facts_payload(facts),
+                    "page": snapshot_payload(snapshot), "history": history_payload(history)}
+        return await self.llm.structured(StepPlan, system_text=system, user_text=json.dumps(user, ensure_ascii=False),
                                          max_tokens=self.max_tokens)

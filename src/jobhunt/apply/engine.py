@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import hashlib
 import html
+import os
 import random
 import re
 import time
@@ -26,9 +27,10 @@ from patchright.async_api import ElementHandle, Locator, Page
 from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt
+from jobhunt.apply.destination import clean_text, clean_url
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import capture, fact_key
-from jobhunt.apply.planner import Planner, facts_payload
+from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
 from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, live_button, take_snapshot
@@ -525,6 +527,7 @@ class _Run:
         self.page, self.url, self.facts, self.planner, self.uploads, self.mode = page, url, facts, planner, uploads, mode
         self.out_dir, self.job_title, self.company, self.password = out_dir, job_title, company, password
         self.before_submit, self.on_submit_click, self.on_nav_click = before_submit, on_submit_click, on_nav_click
+        self.before_field: Callable[[str], None] | None = None
         self.verifier, self.host_allowed = verifier, host_allowed
         self.max_steps, self.goto = max_steps, goto
         self.on_progress, self.captcha_wait_s = on_progress, captcha_wait_s
@@ -572,7 +575,7 @@ class _Run:
             # as typed, URL-encoded (query string), half-decoded by a script ("+" for a space), HTML-escaped
             for form in {sec, quote(sec, safe=""), quote_plus(sec), quote(sec), sec.replace(" ", "+"), html.escape(sec), html.escape(sec, quote=False)}:
                 s = re.sub(re.escape(form), SECRET_LOG, s, flags=re.I)
-        return TOKEN_RE.sub("", s)
+        return clean_text(TOKEN_RE.sub("", s))
 
     def _scrub(self, obj: Any) -> None:
         """Mask the secrets (and the token) in every string of a pydantic model / list, in place."""
@@ -594,6 +597,7 @@ class _Run:
         """The snapshot as the planner may see it (secrets masked) and whether anything had to be masked."""
         pub = snap.model_copy(deep=True)
         self._scrub(pub)
+        pub.url = self._r(clean_url(snap.url))
         masked = bool(self.secrets) and pub.model_dump_json() != snap.model_dump_json()
         for field in pub.fields:
             if technical_key(field.label, field.kind, group=field.group, autocomplete=field.autocomplete) == "credentials":
@@ -632,7 +636,7 @@ class _Run:
         return RunResult(status=status, message=self._r(message), questions=bound)
 
     async def _shot(self, log: StepLog) -> None:
-        if log.screenshot:
+        if log.screenshot or os.getenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS") != "1":
             return
         if self.secrets:  # a page may display a typed password in ways the snapshot cannot see (CSS content, canvas...)
             if not self.no_shot_noted:
@@ -1323,6 +1327,12 @@ class _Run:
                                               ".map(o => (o.label || o.textContent).trim())", o.value)
                 if not matching or any(" ".join(label.split()) != " ".join(o.label.split()) for label in matching):
                     raise _Skip("options du formulaire modifiées depuis la lecture")
+                if self.mode == "supervised":
+                    reasons = await self.before_submit()
+                    if reasons:
+                        raise _DecisionHold(self._end("blocked", " ; ".join(reasons)))
+                    if self.before_field:
+                        self.before_field(a.op)
             await loc.select_option(value=o.value, timeout=T) if o.value else await loc.select_option(label=o.label, timeout=T)
             shown = str(await loc.evaluate("e => { const o = e.selectedOptions[0]; return o ? (o.label || o.textContent).trim() : ''; }") or "")
             if _norm(shown) != _norm(o.label):  # read back what the control really holds: log THAT, and never keep another choice
@@ -1809,15 +1819,19 @@ class _Run:
                 snap, resolve = out
                 pub, _ = self._public(snap)
                 log.url = pub.url
-            plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
-                                           history=self.steps[:-1], mode=self.mode)
+            if self._inspection_only:
+                inspection, keys = inspection_inputs(pub, self._planner_facts())
+                plan = await self.planner.plan(inspection, keys, job_title="", company="", history=[], mode=self.mode)
+            else:
+                plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
+                                               history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
             if (self.pre_steps < PRE_STEP_CAP and not self.touched and not self.app_touched
                     and (kind == "job_page" or kind in ACCOUNT_KINDS
                          or (plan.actions and all(a.op == "click" and a.click_role == "cookies" for a in plan.actions)))):
                 self.pre_steps += 1   # a pure pre-data step (cookie banner, open_form, account page): the budget is for the application
                 self.consumed -= 1
-            if plan.note:
+            if plan.note and not (self._inspection_only or self.mode == "supervised"):
                 log.note = f"{log.note}; {self._r(plan.note[:300])}"
             errors = any(f.error for f in snap.fields)
             if kind in ("other", "closed", "error") and not self.touched and AGGREGATOR_RE.search(fold(plan.note or "")):
@@ -1836,7 +1850,7 @@ class _Run:
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if kind == "email_verification":
                 await self._shot(log)
-                return self._end("needs_email", plan.note or "Le site attend la validation d'un lien envoyé par e-mail.")
+                return self._end("needs_email", "Le site attend la validation d'un lien envoyé par e-mail.")
             if kind == "closed":
                 await self._shot(log)
                 return self._end("blocked", "Offre clôturée")
@@ -1853,7 +1867,8 @@ class _Run:
                 return self._account_handoff()
 
             v = self._validate(plan, snap, resolve)
-            await self._verify(v)
+            if not self._inspection_only:
+                await self._verify(v)
             if v.items and not (_secure_url(self.page.url) and all(_secure_url(self._frame_url(resolve, it.field.ref), self.page.url)
                                                                    for it in v.items)):
                 log.note = f"{log.note}; page non sécurisée"
@@ -1877,6 +1892,11 @@ class _Run:
                 v.items = uploads_first
             if self._inspection_only:
                 handled.update(it.field.ref for it in v.items)
+                value_dependent = {it.field.ref for it in v.items if it.llm}
+                untested = [_label(field) for field in snap.fields if field.kind not in ("button", "link", "password")
+                            and _label(field) and (field.ref not in handled or field.ref in value_dependent)]
+                if untested:
+                    log.note += self._r(" ; Champs non testés : " + ", ".join(dict.fromkeys(untested)))[:500]
             if self.mode == "submit" and v.items:  # policy gate BEFORE the first field interaction of the step (a tick / choice can
                 bad = await self._gate(n)           # trigger page behaviour): nothing is entered when it says no
                 if bad is not None:
@@ -1886,22 +1906,26 @@ class _Run:
             for it in v.items if not self._inspection_only else ():
                 try:
                     if self.mode == "supervised":
-                        reasons = await self.before_submit()
-                        if reasons:
-                            return self._end("blocked", " ; ".join(reasons))
                         bad = await self._dest_result(resolve, [it.field.ref], None)
                         if bad is not None:
                             return bad
                         destination = it.field.destination
                         urls = (self.page.url, self._frame_url(resolve, it.field.ref), destination[0] if destination else "")
                         expected = urlparse(self.url)
-                        if any(not _secure_url(url) or (urlparse(url).scheme, urlparse(url).netloc) != (expected.scheme, expected.netloc)
+                        if any(not clean_url(url, navigation=True) or not _secure_url(url)
+                               or (urlparse(url).scheme, urlparse(url).netloc) != (expected.scheme, expected.netloc)
                                for url in urls):
                             return self._end("blocked", "Destination du champ non vérifiée : saisie annulée.")
                         target = await self._el(resolve, it.field.ref)
                         if target is None:
                             return self._end("blocked", "Champ introuvable : saisie annulée.")
                     await self._live_decisions(snap, it.field, approved_choices, pending=pending_choices, applying=it)
+                    if self.mode == "supervised":
+                        reasons = await self.before_submit()
+                        if reasons:
+                            return self._end("blocked", " ; ".join(reasons))
+                        if self.before_field:
+                            self.before_field(it.act.op)
                 except _DecisionHold as hold:
                     return hold.result
                 except Exception:
@@ -1912,6 +1936,8 @@ class _Run:
                     self.app_touched = True
                 try:
                     shown = await self._execute(it, target if self.mode == "supervised" else resolve(it.field.ref), snap, log)
+                except _DecisionHold as hold:
+                    return hold.result
                 except _Skip as e:
                     if it.used == "confirmed_form_choice":
                         return self._end("blocked", "Le choix confirmé n’a pas pu être appliqué : action annulée.")
@@ -2176,14 +2202,18 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           max_steps: int = 12, goto: Callable[[Page, str], Awaitable[None]] | None = None,
                           on_progress: Callable[[RunResult], Awaitable[None]] | None = None, captcha_wait_s: float = 0.0,
                           account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None,
-                          supervised_attempt: Attempt | None = None) -> RunResult:
+                          supervised_attempt: Attempt | None = None,
+                          before_field: Callable[[str], None] | None = None) -> RunResult:
     """Inspect `url` or fill a reserved, attended form. Never submit it.
 
     Legacy dispatch callbacks do not authorize generic live sends. Dry callers
     should supply a fresh headless context, as the apply service does.
     """
+    url = clean_url(url, navigation=True)
+    if not url:
+        return RunResult(status="blocked", message="Lien de candidature non autorisé.")
     if mode == "supervised":
-        if (not supervised_attempt or supervised_attempt.adapter or supervised_attempt.url != url or not uploads.cv_bytes
+        if (not supervised_attempt or supervised_attempt.url != url or not uploads.cv_bytes
                 or hashlib.sha256(uploads.cv_bytes).hexdigest() != supervised_attempt.pdf_sha256 or before_submit is None
                 or not binding_active(supervised_attempt)):
             return RunResult(status="blocked", message="Réservation supervisée absente ou périmée.")
@@ -2199,8 +2229,10 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     if host_allowed is None and allowed_hosts:
         hosts = {h.lower() for h in allowed_hosts}
         host_allowed = lambda h: h.lower() in hosts  # noqa: E731
-    return await _Run(page, url=url, facts=facts, planner=planner, uploads=uploads, mode=mode, out_dir=out_dir,
+    flow = _Run(page, url=url, facts=facts, planner=planner, uploads=uploads, mode=mode, out_dir=out_dir,
                       job_title=job_title, company=company, password=password, before_submit=before_submit,
                       on_submit_click=on_submit_click, on_nav_click=on_nav_click, verifier=verifier,
                       host_allowed=host_allowed, max_steps=max_steps, goto=goto, on_progress=on_progress,
-                      captcha_wait_s=captcha_wait_s, account_known=account_known, choices=choices).run()
+                      captcha_wait_s=captcha_wait_s, account_known=account_known, choices=choices)
+    flow.before_field = before_field
+    return await flow.run()

@@ -47,15 +47,15 @@ def _app_keys(other: Application, other_job: MergedJob | None) -> tuple[str, str
     return normalize_role(company, title), url
 
 
-def duplicate_of(app: Application, job: MergedJob) -> Application | None:
+def duplicate_of(app: Application, job: MergedJob, *, confirmed_distinct: frozenset[int] = frozenset()) -> Application | None:
     """Another application of the same profile already SENT (submitted, or a send attempt that reached the final click and
     was not released) for the same job, company + role, or origin URL. Works when the job row of the other application was
     deleted or merged: its reservation and `sent_origin_url` keep the role and the URL."""
-    reserved = apply_store.active_reservations(app.profile_id)
+    reserved = [row for row in apply_store.active_reservations(app.profile_id) if row["application_id"] not in confirmed_distinct]
     reserved_ids = {r["application_id"] for r in reserved}
     return _find_duplicate(app, job, reserved, store.get_application,
                            lambda: (other for other in store.list_applications(app.profile_id)
-                                    if other.status == "submitted" or other.id in reserved_ids),
+                                    if other.id not in confirmed_distinct and (other.status == "submitted" or other.id in reserved_ids)),
                            lambda other: _app_keys(other, db.get_job(other.job_id)))
 
 
@@ -117,13 +117,13 @@ def _expired(job: MergedJob, now: datetime | None) -> bool:
 
 
 def submit_problems(app: Application, job: MergedJob | None, *, trigger: Literal["auto", "user"], now: datetime | None = None,
-                    run_id: int | None = None) -> list[str]:
+                    run_id: int | None = None, confirmed_distinct: frozenset[int] = frozenset()) -> list[str]:
     """French reasons why this application must NOT be sent now (empty = OK). `user`: a manual override approval is allowed
     and neither the score, the expiry nor the provenance of the link applies. `auto`: also needs the master switch, a clean
     eligible approval, a known age, a trusted origin link, the minimum score and room under the daily cap. Both: age <= 14.0 days
     (strict, no tolerance), job not rejected / applied, no earlier unconfirmed send attempt. `run_id`: the run that is asking (its
     own pending / firm reservation neither counts against the daily cap nor as an unconfirmed earlier attempt)."""
-    return _submit_problems(app, job, trigger=trigger, now=now, run_id=run_id)
+    return _submit_problems(app, job, trigger=trigger, now=now, run_id=run_id, confirmed_distinct=confirmed_distinct)
 
 
 def queue_problems(app: Application, job: MergedJob | None, reads: QueuePolicyReads) -> list[str]:
@@ -132,7 +132,8 @@ def queue_problems(app: Application, job: MergedJob | None, reads: QueuePolicyRe
 
 
 def _submit_problems(app: Application, job: MergedJob | None, *, trigger: Literal["auto", "user"], now: datetime | None = None,
-                     run_id: int | None = None, queue_reads: QueuePolicyReads | None = None) -> list[str]:
+                     run_id: int | None = None, queue_reads: QueuePolicyReads | None = None,
+                     confirmed_distinct: frozenset[int] = frozenset()) -> list[str]:
     s = get_settings()
     out: list[str] = []
     if job is None or job.profile_id != app.profile_id or job.id != app.job_id:
@@ -156,7 +157,8 @@ def _submit_problems(app: Application, job: MergedJob | None, *, trigger: Litera
     if app.status != "submitted" and (app.id in queue_reads.unconfirmed if queue_reads is not None
                                       else apply_store.has_unconfirmed_click(app.id, except_run_id=run_id)):
         out.append("un envoi précédent n'a pas été confirmé : vérifier sur le site de l'entreprise")
-    dup = queue_reads.duplicate(app, job) if queue_reads is not None else duplicate_of(app, job)
+    dup = queue_reads.duplicate(app, job) if queue_reads is not None else duplicate_of(
+        app, job, confirmed_distinct=confirmed_distinct if trigger == "user" else frozenset())
     if dup is not None:
         out.append(f"candidature déjà envoyée pour la même offre (n°{dup.id})")
     if app.status != "approved" or app.approved_rev is None:

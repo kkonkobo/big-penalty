@@ -639,7 +639,7 @@ async def test_password_echoed_by_the_page_never_reaches_the_planner_or_the_resu
     from urllib.parse import quote, quote_plus
     forms = [secret, quote(secret, safe=""), quote_plus(secret), quote(secret), secret.replace(" ", "+")]
     echoed = planner.calls[1]["snapshot"]
-    assert "password=" in echoed.url and "•••" in echoed.url  # the page DID echo it (URL, text, revealed text field)
+    assert "password=" in page.url and echoed.url == server.url("login_get")
     assert "•••" in echoed.text and any(f.value == "•••" for f in echoed.fields if f.kind == "text" and "Mot de passe" in f.label)
     blob = "\n".join(json.dumps(c["snapshot"].model_dump(), ensure_ascii=False) for c in planner.calls) + res.model_dump_json()
     for form in forms:
@@ -667,7 +667,7 @@ async def test_password_is_asked_for_the_host_of_the_frame_holding_the_field(pag
 async def test_password_never_goes_into_a_field_revealed_as_text(page, server, fast, cv_pdf, tmp_path):
     def plan(snap):
         return StepPlan(page_kind="account_login", actions=[act(snap, r"Mot de passe saisi", "fill", "account_password")])
-    res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="login_get?password=x",
+    res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="login_revealed",
                    mode="submit", max_steps=3)
     assert await page.input_value("#shown") == "x" and "incompatibles" in " ".join(s.note for s in res.steps)
 

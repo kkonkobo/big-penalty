@@ -571,7 +571,8 @@ def application_page(request: Request, app_id: int, f: str | None = None):
     return render(request, "application.html", a=a, job=job, master=master, labels=source_labels(), notice=notice, error=error,
                   checked={n.lower() for g in a.tailored.skill_groups for n in g.items}, eligible=eligible,
                   not_eligible_reasons=reasons, revisions=cvstore.list_revisions(a.id), fit=a.fit_notes,
-                  apply_item=apply_routes.queue_item(a.id), apply_inferred=inferred)
+                  apply_item=apply_routes.queue_item(a.id), apply_inferred=inferred,
+                  apply_duplicates=apply_routes.supervised_duplicates(a))
 
 
 @app.get("/applications/{app_id}/preview", response_class=HTMLResponse)

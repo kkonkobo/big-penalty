@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from apply_fakes import FACT_PASSWORD, ScriptedPlanner, sample_facts
 from cv_fakes import fake_llm
 from jobhunt.apply.planner import SECRET_PLACEHOLDER, SYSTEM, LLMPlanner, facts_payload
 from jobhunt.apply.types import Action, FormField, FieldOption, PageSnapshot, StepLog, StepPlan
+from jobhunt.llm import LLMError
 
 
 def snapshot() -> PageSnapshot:
@@ -23,7 +25,7 @@ async def test_one_call_with_facts_fields_history_and_no_secret():
     llm, prov = fake_llm({"StepPlan": plan})
     history = [StepLog(index=1, url="u", page_kind="job_page", clicked="Postuler")]
     out = await LLMPlanner(llm).plan(snapshot(), sample_facts(), job_title="Technicien", company="Exemple SA", history=history,
-                                     mode="dry_run")
+                                     mode="supervised")
     assert out == plan and len(prov.calls) == 1 and prov.calls[0]["cls"] == "StepPlan"
     call = prov.calls[0]
     assert call["system"] == SYSTEM
@@ -36,6 +38,31 @@ async def test_one_call_with_facts_fields_history_and_no_secret():
     assert user["page"]["fields"][1]["options"] == ["Alternance"] and "value" not in user["page"]["fields"][2]
     assert user["history"] == [{"step": 1, "page_kind": "job_page", "clicked": "Postuler", "fields_filled": 0}]
     assert FACT_PASSWORD not in call["user"] and FACT_PASSWORD not in call["system"]
+
+
+async def test_dry_planner_sends_only_field_and_fact_schema():
+    snap = snapshot()
+    snap.text = "Page text contains OTP 123456"
+    snap.fields[0].label = "Prénom (Camille)"
+    snap.fields[0].value = "Camille"
+    llm, provider = fake_llm({"StepPlan": StepPlan(page_kind="form")})
+    await LLMPlanner(llm).plan(snap, sample_facts(), job_title="Technicien", company="Exemple SA", history=[], mode="dry_run")
+    payload = json.loads(provider.calls[0]["user"])
+    assert set(payload) == {"mode", "page", "facts"}
+    assert set(payload["page"]) == {"fields"}
+    assert all(set(field) == {"ref", "label", "kind"} for field in payload["page"]["fields"])
+    assert all(set(fact) == {"key", "type"} for fact in payload["facts"])
+    assert "Camille" not in str(payload) and "123456" not in str(payload)
+
+
+async def test_dry_planner_respects_first_provider_only(monkeypatch):
+    llm, primary = fake_llm(error=LLMError("fixture unavailable"))
+    _, secondary = fake_llm({"StepPlan": StepPlan(page_kind="form")})
+    llm.providers.append(secondary)
+    monkeypatch.setattr(llm.settings, "cv_allow_failover", False)
+    with pytest.raises(LLMError):
+        await LLMPlanner(llm).plan(snapshot(), sample_facts(), job_title="", company="", history=[], mode="dry_run")
+    assert len(primary.calls) == 1 and not secondary.calls
 
 
 def test_facts_payload_accepts_preserialised_lists():

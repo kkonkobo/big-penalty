@@ -343,7 +343,8 @@ def test_single_application_rejects_legacy_option_not_on_form(client, profile, m
 
 
 # ------------------------------------------------------------------ run page + screenshots
-def test_run_page_shows_steps_fields_and_send_button(client, profile, master, tmp_path):
+def test_run_page_shows_steps_fields_and_send_button(client, profile, master, tmp_path, monkeypatch):
+    monkeypatch.setenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS", "1")
     a = mk_app(profile, master, tmp_path)
     run, _ = make_run(a, tmp_path)
     r = client.get(f"/apply/runs/{run.id}")
@@ -369,7 +370,8 @@ def test_run_page_without_send_button_when_submitted_or_not_ready(client, profil
     assert client.get("/apply/runs/9999").status_code == 404
 
 
-def test_screenshot_served_and_refused(client, profile, master, tmp_path):
+def test_screenshot_served_and_refused(client, profile, master, tmp_path, monkeypatch):
+    monkeypatch.setenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS", "1")
     a = mk_app(profile, master, tmp_path)
     run, out = make_run(a, tmp_path)
     r = client.get(f"/apply/runs/{run.id}/shots/0")

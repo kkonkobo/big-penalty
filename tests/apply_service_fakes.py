@@ -71,26 +71,25 @@ class LedgerAdapter:
         attempt = request.attempt
 
         async def noop():
-            pass
+            gate._enter("draft_write", attempt.url)
 
         async def before_submit():
             try:
-                await gate.perform("draft_write", attempt.url, noop)
+                await noop()
             except ApplyError as exc:
                 return [str(exc)]
             return []
 
         async def submit():
-            async def accept():
-                if self.confirm:
-                    self.received.add(attempt.nonce)
-            await gate.perform("final_submit", attempt.url, accept)
+            gate._enter("final_submit", attempt.url)
+            if self.confirm:
+                self.received.add(attempt.nonce)
 
         async def progress(value):
             astore.save_progress(attempt.run_id, value)
 
         kw = {"url": attempt.url, "before_submit": before_submit, "on_submit_click": submit,
-              "on_nav_click": lambda: gate.perform("draft_write", attempt.url, noop), "on_progress": progress}
+              "on_nav_click": noop, "on_progress": progress}
         self.calls.append(kw)
         if self.hook:
             await self.hook(kw)
@@ -103,7 +102,7 @@ class LedgerAdapter:
 
     async def verify_receipt(self, attempt, *, evidence=None):
         if attempt.nonce in self.received and self.confirm:
-            return Receipt(attempt, "confirmed", "first_party_confirmation", "synthetic-ledger")
+            return Receipt(attempt, "confirmed", "first_party_confirmation", "synthetic-ledger", attempt.nonce, attempt.requisition_id)
         return Receipt(attempt, "uncertain")
 
 

@@ -1,21 +1,22 @@
 """Supply a loopback-only fixture factory here for every new adapter."""
 
+import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from urllib.parse import urlsplit
 
-import httpx
 import pytest
 
 from apply_cv_helpers import make_app, make_job
-from apply_fakes import server  # noqa: F401
+from apply_fakes import FixtureServer, ScriptedPlanner, act, fast, page, server  # noqa: F401
 from apply_service_fakes import FakePool
 from cv_fakes import save_confirmed
 from jobhunt import db
 from jobhunt.apply import service, store
 from jobhunt.apply.adapters import Dispatch, Receipt, Registry, Requisition
+from jobhunt.apply.types import StepPlan
 from jobhunt.config import get_settings
 from jobhunt.cv import service as cvs
 
@@ -36,10 +37,11 @@ class FixtureAdapter:
     def resolve(self, url, dom_markers):
         return Requisition("fixture-tenant", "req-1")
 
-    async def supervise(self, page, request, gate):
-        await gate.perform("final_submit", request.attempt.url, lambda: self._post(request))
+    async def supervise(self, request, fill):
+        assert not hasattr(fill, "click") and not hasattr(fill, "evaluate")
+        raise service.ApplyError("Pas de primitive de clic.")
 
-    async def _post(self, request: Dispatch):
+    async def _post(self, request: Dispatch, gate):
         assert self.matches(request.attempt.url, frozenset())
         with db.connect() as conn:
             row = conn.execute("SELECT binding_json FROM apply_reservations WHERE run_id=? AND released_at IS NULL",
@@ -50,8 +52,7 @@ class FixtureAdapter:
                 assert binding[key] == getattr(request.attempt, key)
         assert hashlib.sha256(request.pdf).hexdigest() == request.attempt.pdf_sha256
         self.sent.append(request)
-        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
-            response = await client.post(self.url, content=request.pdf, headers={"X-Fixture-Nonce": request.attempt.nonce})
+        response = await gate.perform("final_submit", self.url, attach_pdf=True)
         if self.scenario == "interrupt":
             raise RuntimeError("fixture interrupted")
         self.evidence = response
@@ -61,16 +62,14 @@ class FixtureAdapter:
         if self.scenario == "blocker":
             gate.stop("captcha")
         if self.scenario == "redirect":
-            return await gate.perform("final_submit", "https://unapproved.example.test/", lambda: self._post(request))
+            return await gate.perform("final_submit", "https://unapproved.example.test/", attach_pdf=True)
         if self.scenario == "paused-write":
-            return await gate.perform("draft_write", request.attempt.url, lambda: self._post(request))
+            return await gate.perform("draft_write", request.attempt.url, attach_pdf=True)
         if self.scenario == "policy-change":
-            async def invalidate():
-                with db.connect() as conn:
-                    conn.execute("UPDATE applications SET approved_sha256=NULL WHERE id=?", (request.attempt.application_id,))
-
-            await gate.perform("cv_upload_parse", request.attempt.url, invalidate)
-        return await gate.perform("final_submit", request.attempt.url, lambda: self._post(request))
+            with db.connect() as conn:
+                conn.execute("UPDATE applications SET approved_sha256=NULL WHERE id=?", (request.attempt.application_id,))
+            return await gate.perform("final_submit", request.attempt.url, attach_pdf=True)
+        return await self._post(request, gate)
 
     async def verify_receipt(self, attempt, *, evidence=None):
         later = evidence is None
@@ -83,7 +82,9 @@ class FixtureAdapter:
         attempt = replace(attempt, nonce="different") if self.scenario == "wrong-attempt" else attempt
         if self.scenario == "reconcile-not-sent":
             return Receipt(attempt, "not_sent", "candidate_home_listing", "synthetic-rejection")
-        return Receipt(attempt, "confirmed", "candidate_home_listing" if later else "first_party_confirmation", "synthetic-receipt")
+        kind = "candidate_home_listing" if later or self.scenario == "wrong-receipt-kind" else "first_party_confirmation"
+        requisition = "different" if self.scenario == "wrong-requisition" else evidence.headers.get("X-Fixture-Requisition", "")
+        return Receipt(attempt, "confirmed", kind, "synthetic-receipt", evidence.headers["X-Fixture-Receipt"], requisition)
 
 
 @pytest.fixture(params=[FixtureAdapter], ids=lambda factory: factory.name)
@@ -93,7 +94,7 @@ def adapter_factory(request):
 
 @pytest.mark.parametrize("scenario", ["verified", "text-only", "wrong-attempt", "interrupt", "stale", "unregistered", "default",
                                       "wrong-tenant", "paused-write", "redirect", "blocker", "policy-change", "duplicate",
-                                      "reconcile", "reconcile-not-sent"])
+                                      "wrong-receipt-kind", "wrong-requisition", "reconcile", "reconcile-not-sent"])
 async def test_adapter_contract(adapter_factory, scenario, server, profile, tmp_path, monkeypatch):
     master = save_confirmed(profile.id)
     job = make_job(profile, url=server.url("adapter-contract"))
@@ -103,7 +104,7 @@ async def test_adapter_contract(adapter_factory, scenario, server, profile, tmp_
     registry = Registry()
     if scenario != "unregistered":
         allowlist = None if scenario == "default" else {("other" if scenario == "wrong-tenant" else "fixture-tenant"):
-                                                         "first_party_confirmation"}
+                                                         ("candidate_home_listing" if scenario.startswith("reconcile") else "first_party_confirmation")}
         registry.register(adapter, host="127.0.0.1", origin_ats="lever", unattended_tenants=allowlist)
     monkeypatch.setattr(service, "registry", registry)
     monkeypatch.setattr(get_settings(), "apply_auto", True)
@@ -111,10 +112,10 @@ async def test_adapter_contract(adapter_factory, scenario, server, profile, tmp_
     if scenario == "stale":
         original = service._reserve
 
-        def changed(*args):
+        def changed(*args, **kwargs):
             with db.connect() as conn:
                 conn.execute("UPDATE jobs SET origin_url=? WHERE id=?", (server.url("other"), job.id))
-            return original(*args)
+            return original(*args, **kwargs)
 
         monkeypatch.setattr(service, "_reserve", changed)
 
@@ -175,3 +176,53 @@ async def test_default_supervised_adapter_cannot_use_final_boundary(adapter_fact
     result = await service.run(app.id, mode="supervised", trigger="user", pool=Pool())
     assert not adapter.sent and not server.sent
     assert store.outstanding_attempt(app.id).id == result.id
+
+
+async def test_adapter_transport_does_not_replay_post_on_307(server, profile, tmp_path, monkeypatch):
+    foreign = FixtureServer()
+    try:
+        master = save_confirmed(profile.id)
+        job = make_job(profile, url=server.url("adapter-contract"))
+        app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+        cvs.approve(app.id, app.current_rev)
+        adapter = FixtureAdapter(job.origin_url, "verified")
+        registry = Registry()
+        registry.register(adapter, host="127.0.0.1", unattended_tenants={"fixture-tenant": "first_party_confirmation"})
+        monkeypatch.setattr(service, "registry", registry)
+        server.redirects["/adapter-contract"] = foreign.url("collect")
+        result = await service.run(app.id, mode="submit", trigger="user")
+        assert len(server.posts) == 1 and not foreign.posts and not foreign.requests
+        assert store.outstanding_attempt(app.id).id == result.id and result.status != "submitted"
+    finally:
+        foreign.close()
+
+
+async def test_supervised_adapter_fill_uses_live_consent_guard(server, page, profile, tmp_path, fast, monkeypatch):
+    master = save_confirmed(profile.id)
+    job = make_job(profile, url=server.url("adapter_consent"))
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+
+    class SupervisedFixture(FixtureAdapter):
+        capability = "supervised"
+        boundaries = {"draft_write": "auto", "final_submit": "pause_for_human"}
+
+        async def supervise(self, request, fill):
+            def plan(snapshot):
+                return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"),
+                                                           act(snapshot, "consentement", "check", "consent_required"),
+                                                           act(snapshot, "Envoyer", "click", role="submit")])
+            return await fill(ScriptedPlanner(plan))
+
+    registry = Registry()
+    registry.register(SupervisedFixture(job.origin_url, "ignored"), host="127.0.0.1")
+    monkeypatch.setattr(service, "registry", registry)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page)))
+    try:
+        await page.locator("aside").wait_for(timeout=6000)
+        assert await page.input_value("#name") == "" and not await page.is_checked("#consent")
+        assert not server.posts
+    finally:
+        await page.close()
+        result = await asyncio.wait_for(task, timeout=6)
+    assert result.status == "needs_input" and store.outstanding_attempt(app.id).id == result.id
