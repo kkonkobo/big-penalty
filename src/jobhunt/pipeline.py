@@ -8,13 +8,14 @@ import importlib
 import inspect
 import json
 import logging
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from jobhunt import db
 from jobhunt.config import get_settings
-from jobhunt.dedupe import MergedJob, canonical_url, consolidate, merge_postings
+from jobhunt.dedupe import MergedJob, canonical_url, merge_postings
 from jobhunt.fetch import is_http_url
 from jobhunt.llm import LLMClient, get_llm
 from jobhunt.models import JobPosting, SearchQuery
@@ -314,8 +315,7 @@ async def run_search(
         result.stage = "origin"
         await _emit(progress, result, event="stage")
         jobs = await _resolve_origins(jobs, ctx, result)
-        jobs, removed = consolidate(jobs)
-        db.save_jobs(profile_id, jobs, removed=removed)
+        db.save_jobs(profile_id, jobs, consolidate_origins=True)
         result.unique_jobs = len(jobs)
         result.new_jobs = max(0, len(jobs) - n_before)
 
@@ -325,11 +325,9 @@ async def run_search(
         await _score_jobs(profile, jobs, llm, result, progress)
         result.llm_stats = getattr(llm, "stats", {})
         result.errors.extend(e for e in llm.errors if e not in result.errors)
+        db.save_scores(profile_id, jobs)
         if await _linkedin_second_pass(jobs, ctx, result):
-            jobs, removed = consolidate(jobs)
-            db.save_jobs(profile_id, jobs, removed=removed)
-        else:
-            db.save_jobs(profile_id, jobs)
+            db.save_jobs(profile_id, jobs, consolidate_origins=True)
 
         result.stage = "done"
         db.update_run(result.run_id, stats=result.stats_dict(), status="done", finished=True)
@@ -368,7 +366,7 @@ async def rescore(profile_id: int, *, llm: LLMClient | None = None, progress: Pr
         await _score_jobs(profile, jobs, llm, result, progress)
         result.llm_stats = getattr(llm, "stats", {})
         result.errors.extend(e for e in llm.errors if e not in result.errors)
-        db.save_jobs(profile_id, jobs)
+        db.save_scores(profile_id, jobs)
     finally:
         if hasattr(llm, "aclose"):
             await llm.aclose()
@@ -557,6 +555,7 @@ async def reresolve_origins(
         report.with_origin_after = report.with_origin_before
         return report
     before = {id(j): origin_status(j, force) or "missing" for j in todo}
+    snapshots = [deepcopy(job) for job in todo] if not dry_run else []
     for job in todo:
         if before[id(job)] == "aggregator":
             job.origin_url, job.origin_ats, job.origin_confidence = None, None, None
@@ -608,13 +607,12 @@ async def reresolve_origins(
 
     stamp = db.now().isoformat()
     for job, res, posting in zip(todo, results, postings):
-        job.apply_origin(res.posting)
+        found = job.apply_origin(res.posting)
         job.recompute_posted_at()
-        found = bool(res.posting.origin_url) and job.origin_url == res.posting.origin_url
         if found:
             job.extra["origin_via"] = res.via or "inconnu"
             job.extra["origin_date_checked"] = stamp
-        else:
+        elif not job.origin_url:
             job.extra.pop("origin_via", None)
         job.extra["origin_attempted_at"] = stamp
         job.extra["origin_fingerprint"] = origin_fingerprint(job)
@@ -631,8 +629,7 @@ async def reresolve_origins(
     report.found = sum(1 for r in report.rows if r.found)
     report.with_origin_after = sum(1 for j in eligible if origin_status(j) is None)
     if not dry_run:
-        merged, removed = consolidate(jobs)
-        db.save_jobs(profile_id, merged, removed=removed)
+        db.save_origin_updates(list(zip(snapshots, todo)))
     return report
 
 
@@ -736,15 +733,20 @@ async def _linkedin_second_pass(jobs: list[MergedJob], ctx: SourceContext, resul
     cand.sort(key=lambda j: -(j.score or 0))
     try:
         stats = await enrich_linkedin_jobs(cand, max_calls=cap)
-        result.linkedin_detail_calls, result.linkedin_links = stats.calls, stats.links
-        got = [j for j in cand if j.apply_url and j.extra.get("apply_source") == "linkedin_offsite" and not j.origin_url]
+    except Exception as e:  # noqa: BLE001
+        log.warning("linkedin detail pass failed: %s", e)
+        result.errors.append(f"Détails LinkedIn: {type(e).__name__}: {e}")
+        return False
+
+    result.linkedin_detail_calls, result.linkedin_links = stats.calls, stats.links
+    got = [j for j in cand if j.apply_url and j.extra.get("apply_source") == "linkedin_offsite" and not j.origin_url]
+    try:
         if got:
             mod = importlib.import_module("jobhunt.origin")
             resolved = await mod.resolve_origins([origin_posting(j) for j in got], ctx)
             for j, p in zip(got, resolved):
                 _store_origin(j, p)
-        return stats.calls > 0
     except Exception as e:  # noqa: BLE001
-        log.warning("linkedin detail pass failed: %s", e)
-        result.errors.append(f"Détails LinkedIn: {type(e).__name__}: {e}")
-        return False
+        log.warning("linkedin follow-up origin resolution failed: %s", e)
+        result.errors.append(f"Origines LinkedIn: {type(e).__name__}: {e}")
+    return stats.calls > 0

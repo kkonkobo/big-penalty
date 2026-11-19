@@ -52,7 +52,7 @@ class SourceContext:
         """Async HTTP client with French browser-like headers. Use as `async with ctx.http() as c:`."""
         headers = {**FR_HEADERS, **kw.pop("headers", {})}
         return httpx.AsyncClient(
-            headers=headers, timeout=kw.pop("timeout", 30), follow_redirects=True, http2=False, **kw
+            headers=headers, timeout=kw.pop("timeout", 30), follow_redirects=kw.pop("follow_redirects", True), http2=False, **kw
         )
 
 

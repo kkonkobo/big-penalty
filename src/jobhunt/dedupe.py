@@ -155,6 +155,9 @@ class MergedJob:
     last_seen: datetime | None = None
     changed: bool = True  # needs saving
     sighted: bool = False  # transient: sighted by the current search (db bumps last_seen only then)
+    persisted_origin: tuple | None = field(default=None, repr=False, compare=False)
+    persisted_enrichment: tuple[str | None, dict[tuple[str, str], tuple[str, str | None]]] | None = field(
+        default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.dedupe_key:
@@ -222,7 +225,9 @@ class MergedJob:
         if pa and (self.posted_at is None or pa < self.posted_at):
             self.posted_at = pa
         self.apply_url = self.apply_url or p.apply_url
-        if p.origin_url and (not self.origin_url or (p.origin_confidence or 0) > (self.origin_confidence or 0)):
+        if p.origin_resolution:
+            self.apply_origin(p)
+        elif p.origin_url and not self.origin_url:
             self.origin_url, self.origin_ats, self.origin_confidence = p.origin_url, p.origin_ats, p.origin_confidence
         for k in ("postal_code", "department", "experience_level", "company_website", "apply_method"):
             v = getattr(p, k, None)
@@ -251,7 +256,10 @@ class MergedJob:
                 self.posted_at = _utc(b)
         if other.origin_url and not self.origin_url:
             self.origin_url, self.origin_ats, self.origin_confidence = other.origin_url, other.origin_ats, other.origin_confidence
+            self.extra.pop("origin_resolution", None)
         for k, v in other.extra.items():
+            if k == "origin_resolution" and other.origin_url != self.origin_url:
+                continue
             self.extra.setdefault(k, v)
 
     def to_posting(self) -> JobPosting:
@@ -273,13 +281,12 @@ class MergedJob:
         if new != self.posted_at:
             self.posted_at, self.changed = new, True
 
-    def apply_origin(self, p: JobPosting) -> None:
+    def apply_origin(self, p: JobPosting) -> bool:
         # posted_at stays the earliest SOURCE date; the origin ATS date lives in extra["origin_posted_at"].
-        if p.origin_url and p.origin_url != self.origin_url and (
-                not self.origin_url or (p.origin_confidence or 0) >= (self.origin_confidence or 0)):
-            self.origin_url, self.origin_ats, self.origin_confidence = p.origin_url, p.origin_ats, p.origin_confidence
-            self.changed = True
-        if p.origin_posted_at and p.origin_url == self.origin_url:
+        from jobhunt.origin import store_origin
+
+        promoted = store_origin(self, p)
+        if p.origin_posted_at and promoted:
             iso = _utc(p.origin_posted_at).isoformat()
             if self.extra.get("origin_posted_at") != iso:
                 self.extra["origin_posted_at"] = iso
@@ -289,6 +296,7 @@ class MergedJob:
         if p.description and len(p.description) > len(self.description or ""):
             self.description = p.description
             self.changed = True
+        return promoted
 
 
 def _contract_compatible(a: ContractType, b: ContractType) -> bool:

@@ -1,5 +1,3 @@
-import sys
-import types
 
 from jobhunt import db
 from jobhunt.llm import LLMClient
@@ -87,8 +85,9 @@ async def test_runs_without_api_key_end_to_end(monkeypatch, profile):
 
 
 async def test_origin_module_is_called_when_present(monkeypatch, profile):
+    from jobhunt import origin
+
     patch_registry(monkeypatch, ["boarda"])
-    mod = types.ModuleType("jobhunt.origin")
     seen = []
 
     async def resolve_origins(postings, ctx):
@@ -96,8 +95,7 @@ async def test_origin_module_is_called_when_present(monkeypatch, profile):
         return [p.model_copy(update={"origin_url": "https://careers.airbus.test/jobs/1", "origin_ats": "careers_site",
                                      "origin_confidence": 0.9}) for p in postings]
 
-    mod.resolve_origins = resolve_origins
-    monkeypatch.setitem(sys.modules, "jobhunt.origin", mod)
+    monkeypatch.setattr(origin, "resolve_origins", resolve_origins)
     await run_search(profile.id, llm=FakeLLM())
     jobs = db.load_jobs(profile.id)
     assert seen and all(j.origin_url == "https://careers.airbus.test/jobs/1" for j in jobs)
@@ -105,14 +103,14 @@ async def test_origin_module_is_called_when_present(monkeypatch, profile):
 
 
 async def test_origin_failure_does_not_kill_run(monkeypatch, profile):
+    from jobhunt import origin
+
     patch_registry(monkeypatch, ["boarda"])
-    mod = types.ModuleType("jobhunt.origin")
 
     async def resolve_origins(postings, ctx):
         raise RuntimeError("nope")
 
-    mod.resolve_origins = resolve_origins
-    monkeypatch.setitem(sys.modules, "jobhunt.origin", mod)
+    monkeypatch.setattr(origin, "resolve_origins", resolve_origins)
     res = await run_search(profile.id, llm=FakeLLM())
     assert res.stage == "done" and any("origine" in e.lower() for e in res.errors)
 
