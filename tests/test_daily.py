@@ -55,11 +55,14 @@ def run(profile_ids=None, search=None, **kw):
 
 
 def test_summary_counts_top5_log_headless_and_notification(profile):
+    original_headless_env = os.getenv("JOBHUNT_HEADLESS")
+    original_headless = get_settings().headless
     jobs = [(95, "Stage A"), (50, "Stage B"), (72, "Stage C"), (80, "Stage D"), (60, "Stage E"), (65, "Stage F"), (10, "Stage G")]
     search = fake_search({profile.id: jobs})
     report, out, notes = run(search=search)
     assert search.calls == [(profile.id, True)]  # headless passed explicitly to the pipeline
-    assert "JOBHUNT_HEADLESS" not in os.environ and get_settings().headless is False  # nothing leaked
+    assert os.getenv("JOBHUNT_HEADLESS") == original_headless_env
+    assert get_settings().headless is original_headless
     s = report.profiles[0]
     assert (s.new, s.high) == (7, 3) and len(s.top) == 5
     assert [t.title for t in s.top][:2] == ["Stage A", "Stage D"]  # by rank (all equally fresh -> by score)

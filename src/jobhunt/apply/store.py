@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
 from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.identity import canonical_identity, posting_fingerprint, resolved_identity, similar_role
+from jobhunt.apply.identity import canonical_identity, dispatch_url, posting_fingerprint, resolved_identity, similar_role
 from jobhunt.apply.types import Mode, RunResult, RunStatus
 from jobhunt.db import _dt, _iso, connect, now
 from jobhunt.dedupe import canonical_url
@@ -59,8 +59,38 @@ _DIAGNOSTICS = {
     "duplicate": "Candidature déjà envoyée (ou tentée) pour la même offre.",
     "potential_duplicate": "Doublon possible : confirmez « ce n'est pas un doublon ».",
     "daily_cap": "Le plafond d’envois automatiques par jour est atteint.",
+    "aggregator_origin": "Le lien est celui d'un agrégateur, pas du site de l'entreprise.",
+    "origin_not_usable": "Il n’y a pas de lien exploitable vers le site de l’entreprise.",
+    "job_page_no_apply_control": "Aucun lien de candidature vérifiable sur la page de l’offre.",
+    "cross_domain_apply_target": "Lien de candidature sur une autre origine non vérifiée.",
+    "duplicate_unconfirmed": "Doublon possible : confirmez « ce n'est pas un doublon ».",
+    "approval_binding_changed": "Approbation ou destination modifiée avant l'envoi",
+    "reservation_exists": "Cet essai a déjà été réservé",
+    "destination_unverified": "Destination de l'offre non vérifiée.",
+    "duplicate_reserved": "Un essai existe déjà pour ce poste chez cet employeur.",
+    "recipient_refused_ats_navigation": RECIPIENT_REFUSED,
+    "recipient_refused_other_navigation": RECIPIENT_REFUSED,
+    "recipient_refused_other_write": RECIPIENT_REFUSED,
+    "recipient_refused_ats_write": RECIPIENT_REFUSED,
+    "recipient_refused_same_site_write": RECIPIENT_REFUSED,
+    "recipient_refused_same_site_navigation": RECIPIENT_REFUSED,
+    "recipient_refused_redirect": RECIPIENT_REFUSED,
+    "recipient_refused_response": RECIPIENT_REFUSED,
+    "recipient_refused_transport": RECIPIENT_REFUSED,
+    "required_fields": "Informations requises à compléter.",
+    "verification_required": "Validation par e-mail ou par code requise.",
+    "human_required": "Une intervention humaine est nécessaire.",
+    "form_actions_missing": "Aucune action possible sur le formulaire.",
+    "step_limit": "Trop d'étapes : limite atteinte.",
+    "job_closed": "Offre clôturée.",
+    "manual_retry_required": "Nouvel essai manuel requis pour ce poste.",
+    "prior_attempt_unverified": "Un envoi de cette candidature a déjà été tenté : vérifier sur le site de l'entreprise.",
+    "requisition_conflict": "Identité du poste incohérente : envoi annulé.",
+    "job_missing": "Offre introuvable pour ce profil.",
+    "application_withdrawn": "Candidature retirée.",
+    "no_attested_receipt": "Aucun reçu authentifié pour cet essai.",
 }
-_EXACT_DIAGNOSTICS = {message: code for code, message in _DIAGNOSTICS.items()}
+_EXACT_DIAGNOSTICS = {message: code for code, message in _DIAGNOSTICS.items() if not code.startswith("recipient_refused_")}
 _DIAGNOSTIC_PATTERNS = (
     (r"Erreur technique \([A-Za-z_]+\)\.", "technical"),
     (r"Interrompu\.", "interrupted"),
@@ -68,7 +98,14 @@ _DIAGNOSTIC_PATTERNS = (
     (r"Lien de l'offre inexploitable : .*", "bad_origin"),
     (r"Doublon possible : .*", "potential_duplicate"),
     (r"(?:candidature déjà envoyée pour la même offre \(n°\d+\)|Candidature déjà envoyée \(ou tentée\) pour la même offre)", "duplicate"),
-    (r"plafond de \d+ envois automatiques par jour atteint", "daily_cap"),
+    (r"[Pp]lafond de \d+ envois automatiques par jour atteint", "daily_cap"),
+    (r"PDF différent de celui approuvé", "pdf_changed"),
+    (r"Un envoi de cette candidature a déjà été tenté : vérifier sur le site de l'entreprise", "prior_attempt_unverified"),
+    (r"Aucune action possible sur cette page\.", "form_actions_missing"),
+    (r"Offre clôturée", "job_closed"),
+    (r"Un CAPTCHA doit être résolu à la main\.", "challenge"),
+    (r"offre introuvable pour ce profil", "job_missing"),
+    (r"candidature retirée", "application_withdrawn"),
     (r"\d+ erreur\(s\) bloquante\(s\)(?: dans le CV)?", "cv_errors"),
     (r"\d+ erreur\(s\) à corriger avant d'approuver \(ou cocher « Ignorer et approuver »\)", "cv_errors"),
 )
@@ -77,7 +114,11 @@ _HOST = re.compile(r"(?:[a-z0-9-]+\.)*[a-z0-9-]+|[a-f0-9:]+", re.I)
 
 def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
     message = result.message
-    if (contains_verification_code(message) or any(
+    explicit = result.diagnostic_code
+    exception = re.fullmatch(r"exception:[A-Za-z_][A-Za-z_0-9]{0,63}@\d{1,5}/[a-z_]{1,32}", explicit)
+    if explicit in _DIAGNOSTICS or exception:
+        code = explicit
+    elif (contains_verification_code(message) or any(
         step.page_kind in {"account_login", "account_signup", "email_verification"} or contains_verification_code(step.note)
         for step in result.steps
     )):
@@ -89,8 +130,14 @@ def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
         code = next((known for reason in reasons if (known := _EXACT_DIAGNOSTICS.get(reason))), "")
         if not code:
             code = next((known for pattern, known in _DIAGNOSTIC_PATTERNS if any(re.fullmatch(pattern, reason) for reason in reasons)), "")
-        code = code or result.status
-    message = _DIAGNOSTICS[code]
+        if code == "potential_duplicate":
+            code = "duplicate_unconfirmed"
+        code = code or ("required_fields" if result.status == "needs_input" else
+                        "verification_required" if result.status == "needs_email" else
+                        "human_required" if result.status == "needs_human"
+                        else f"{result.status}_at_{result.dispatch_diagnostics.control}")
+    message = _DIAGNOSTICS.get(code, _DIAGNOSTICS.get(result.status, _DIAGNOSTICS["technical"]) if not exception
+                               else _DIAGNOSTICS["technical"])
     if held and code != "unconfirmed":
         message = UNCONFIRMED_NOTE + ". " + message
     return RunResult(status=result.status, diagnostic_code=code, message=message, final_url=origin(result.final_url),
@@ -127,6 +174,9 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
         return value
 
     payload = result.model_dump(include=_RESULT_FIELDS)
+    if result.status.startswith("needs_"):
+        failure = _failure_result(result)
+        payload.update(diagnostic_code=failure.diagnostic_code, message=failure.message)
     payload["consent_codes"] = _safe_consents(result)
     sensitive = {"account_login", "account_signup", "email_verification"}
     credential_page = contains_verification_code(result.message)
@@ -470,13 +520,13 @@ def _save_receipt(conn, run_id: int, receipt: Receipt) -> None:
 
 def held_binding(run_id: int) -> Attempt | None:
     with connect() as conn:
-        row = conn.execute("SELECT v.binding_json, j.origin_url FROM apply_reservations v JOIN applications a"
+        row = conn.execute("SELECT v.binding_json, j.origin_url, j.extra FROM apply_reservations v JOIN applications a"
                            " ON a.id=v.application_id JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id"
                            " WHERE v.run_id=? AND v.released_at IS NULL", (run_id,)).fetchone()
     if not row or not row["binding_json"]:
         return None
     data = json.loads(row["binding_json"])
-    url = clean_url(row["origin_url"], navigation=True)
+    url = dispatch_url(row["origin_url"], row["extra"], autonomous=data.get("autonomous") is True)
     if not url or data.pop("url_digest", None) != _url_key(url):
         return None
     return Attempt(**{**data, "url": url})
@@ -572,12 +622,13 @@ def latest_runs(profile_id: int) -> dict[int, ApplyRun]:
 
 
 def _binding_current(conn, run, attempt: Attempt) -> bool:
-    row = conn.execute("SELECT a.status, a.updated_at, a.current_rev, a.approved_rev, a.approved_sha256, j.origin_url,"
+    row = conn.execute("SELECT a.status, a.updated_at, a.current_rev, a.approved_rev, a.approved_sha256, j.origin_url, j.extra,"
                        " j.status AS job_status FROM applications a JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id"
                        " WHERE a.id=?", (attempt.application_id,)).fetchone()
     return bool(row and row["status"] == "approved" and row["updated_at"] == run["application_version"]
                 and row["current_rev"] == row["approved_rev"] == attempt.rev
-                and row["approved_sha256"] == attempt.pdf_sha256 and clean_url(row["origin_url"], navigation=True) == attempt.url
+                and row["approved_sha256"] == attempt.pdf_sha256
+                and dispatch_url(row["origin_url"], row["extra"], autonomous=attempt.autonomous) == attempt.url
                 and row["job_status"] not in ("applied", "rejected"))
 
 

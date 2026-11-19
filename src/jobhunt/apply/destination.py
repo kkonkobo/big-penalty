@@ -72,10 +72,12 @@ RECIPIENT_REFUSED = ("Destination ou transmission non autorisée : fenêtre ferm
 
 
 class RecipientGuard:
-    def __init__(self, allowed: frozenset[str], *, audience=None):
+    def __init__(self, allowed: frozenset[str], *, audience=None, read_only=False):
         self.allowed = allowed
         self.audience = audience
+        self.read_only = read_only
         self.refused = False
+        self.refusal_code = "recipient_refused_transport"
         self.transmitted = False
         self.final_started = False
         self.final_response = False
@@ -126,8 +128,9 @@ class RecipientGuard:
             });
         })();""" % json.dumps(sorted(self.allowed)))
 
-        async def refuse(route):
+        async def refuse(route, code="recipient_refused_transport"):
             self.refused = True
+            self.refusal_code = code
             await route.abort()
             for opened in page.context.pages:
                 with contextlib.suppress(Exception):
@@ -138,6 +141,9 @@ class RecipientGuard:
                 await route.abort()
                 return
             write = request.method not in {"GET", "HEAD"}
+            if self.read_only and write:
+                await route.abort()
+                return
             permitted = self.allows(request.url)
             if self.audience:
                 try:
@@ -146,7 +152,12 @@ class RecipientGuard:
                     permitted = False
             if not permitted:
                 if request.method not in {"GET", "HEAD"} or request.is_navigation_request():
-                    await refuse(route)
+                    from jobhunt.origin import classify_ats
+
+                    category = ("same_site" if self.allows(request.url) or
+                                (self.audience and self.audience.write_recipient(request.url)) else
+                                "ats" if classify_ats(request.url) else "other")
+                    await refuse(route, f"recipient_refused_{category}_{'write' if write else 'navigation'}")
                 else:
                     await route.abort()
                 return
@@ -163,7 +174,7 @@ class RecipientGuard:
                 if final_request and request.is_navigation_request() and response.status in {301, 302, 303} and response.headers.get("location"):
                     target = self.audience.confirmation_redirect(urljoin(request.url, response.headers["location"]))
                     if not target:
-                        await refuse(route)
+                        await refuse(route, "recipient_refused_redirect")
                         return
                     await response.dispose()
                     response = None
@@ -179,8 +190,12 @@ class RecipientGuard:
                             and (safe_target := clean_url(target, navigation=True))):
                         self._next_url = safe_target
                         await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif (self.audience and not self.audience.active and not write
+                          and not request.is_navigation_request()):
+                        await route.abort()
                     else:
-                        await refuse(route)
+                        await refuse(route, "recipient_refused_redirect" if 300 <= response.status < 400 else
+                                     "recipient_refused_response")
                 elif self.refused:
                     await route.abort()
                 else:

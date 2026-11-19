@@ -4,9 +4,10 @@ import json
 import hashlib
 import re
 from difflib import SequenceMatcher
+from urllib.parse import parse_qsl, urlsplit
 
 from jobhunt.dedupe import normalize_company, normalize_title
-from jobhunt.apply.destination import origin
+from jobhunt.apply.destination import clean_url, origin
 
 _ID = re.compile(r"[a-z0-9][a-z0-9_.:/-]{0,127}\Z")
 
@@ -37,6 +38,40 @@ def resolved_identity(extra) -> tuple[str, str] | None:
         return None
     return canonical_identity(resolved.get("canonical_tenant", resolved.get("tenant")),
                               resolved.get("requisition_id", resolved.get("requisition")))
+
+
+def ats_target(url: str) -> tuple[str | None, tuple[str, str] | None]:
+    from jobhunt.origin import _identity, classify_ats
+
+    parsed = urlsplit(url)
+    ats = classify_ats(url)
+    if (not ats and parsed.hostname in {"www.smartrecruiters.com", "smartrecruiters.com"}
+            and parsed.path.startswith("/oneclick-ui/company/")):
+        ats = "smartrecruiters"
+    identity = canonical_identity(*_identity(ats, url)[:2]) if ats else None
+    if identity and any(value.casefold() != identity[1] for _, value in parse_qsl(parsed.query)):
+        identity = None
+    return ats, identity
+
+
+def dispatch_url(original: str | None, extra, *, autonomous: bool) -> str:
+    fallback = clean_url(original, navigation=True)
+    if not autonomous or not fallback or not resolved_identity(extra):
+        return fallback
+    from jobhunt.origin import MIN_CONFIDENCE
+
+    if isinstance(extra, str):
+        extra = json.loads(extra)
+    resolution = extra["origin_resolution"]
+    target = clean_url(resolution.get("apply_url") if isinstance(resolution.get("apply_url"), str) else None, navigation=True)
+    posting = clean_url(resolution.get("posting_url") if isinstance(resolution.get("posting_url"), str) else None, navigation=True)
+    confidence = resolution.get("confidence")
+    ats = resolution.get("submit_ats")
+    if (resolution.get("canonical_ok") is not True or resolution.get("state") != "resolved"
+            or not isinstance(confidence, (int, float)) or not MIN_CONFIDENCE <= confidence <= 1
+            or fallback not in (posting, target) or not origin(target) or not ats):
+        return fallback
+    return target if ats_target(target) == (ats, resolved_identity(extra)) else fallback
 
 
 def posting_fingerprint(row) -> str:

@@ -12,6 +12,7 @@ import tldextract
 
 from jobhunt.apply.destination import clean_url, origin
 from jobhunt.apply.errors import ApplyError, ManualField
+from jobhunt.apply.identity import ats_target
 from jobhunt.apply.supervised import _FORM_TARGETS_JS, _generic_action_allowed, _posting_ids, _target_allowed, _url_posting_ids
 from jobhunt.origin import ats_of_host
 
@@ -96,19 +97,28 @@ class Audience:
             return False
         original = urlsplit(self.reserved_url)
         live = urlsplit(target)
+        original_ats, original_identity = ats_target(self.reserved_url)
+        target_ats, target_identity = ats_target(target)
+        if original_identity and any(value.casefold() != original_identity[1] for _, value in parse_qsl(live.query)):
+            return False
+        if target_ats and original_ats == target_ats and original_identity and target_identity:
+            return original_identity == target_identity and self.write_recipient(target)
         expected = _posting_ids(original.path + "?" + original.query)
         live_ids = _posting_ids(live.path + "?" + live.query)
         if expected and expected != live_ids:
             return False
-        if target in self.verified_urls:
+        if target in self.verified_urls and self.write_recipient(target):
             return True
-        if not self.write_recipient(target) and not ats_of_host(live.hostname or ""):
+        if not self.write_recipient(target):
             return False
         if origin(target) == origin(self.reserved_url) and (live.path.rstrip("/"), live.query) == (original.path.rstrip("/"), original.query):
             return True
         if live.hostname != original.hostname and (ats_of_host(original.hostname or "") or ats_of_host(live.hostname or "")):
             return False
         return bool(expected and live_ids == expected)
+
+    def apply_navigation(self, target):
+        return bool(target and target != self.document and self.initial_redirect(self.document, target))
 
     def request_allowed(self, request, page, *, initial):
         if initial and request.method in {"GET", "HEAD"} and request.is_navigation_request():

@@ -524,6 +524,8 @@ BUCKET_FR = {"to_validate": "à valider", "paused": "en pause", "sending": "en c
 
 def _print_run(run) -> None:
     console.print(f"Statut : {run.status} — {run.message}", markup=False, highlight=False)
+    if run.result and run.result.diagnostic_code:
+        console.print(f"Motif : {run.result.diagnostic_code}", markup=False, highlight=False)
     if run.result and run.result.untrusted_host:
         console.print(f"Site non approuvé : {run.result.untrusted_host} — `big-penalty apply trust PROFIL {run.result.untrusted_host}` "
                       "pour lui faire confiance, puis relancer.", markup=False, highlight=False)

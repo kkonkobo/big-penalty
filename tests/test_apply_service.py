@@ -167,7 +167,8 @@ async def test_other_failures_leave_the_application_approved_and_never_raise(pro
     assert r.status == "failed" and store.get_application(app.id).status == "approved"
     stub_engine(monkeypatch, raises=RuntimeError("secret page content"))
     r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
-    assert r.status == "failed" and r.result.diagnostic_code == "technical" and r.message == "Erreur technique."
+    assert r.status == "failed" and r.result.diagnostic_code == "exception:RuntimeError@0/reservation"
+    assert r.message == "Erreur technique." and "secret page content" not in r.result.model_dump_json()
     assert store.get_application(app.id).status == "approved"
 
 

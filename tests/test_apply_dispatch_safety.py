@@ -20,7 +20,7 @@ from jobhunt.apply.autonomous import Audience
 from jobhunt.apply.destination import RecipientGuard, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.supervised import HAS_LOCAL_BRIDGE, call_local
-from jobhunt.apply.identity import resolved_identity
+from jobhunt.apply.identity import dispatch_url, resolved_identity
 from jobhunt.apply.engine import DRY_UNTESTED, UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.types import RunResult, StepLog, StepPlan
 from jobhunt.browser import BrowserPool
@@ -46,6 +46,8 @@ def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes emba
 
 @pytest.fixture
 async def production_pool():
+    if os.getenv("JOBHUNT_HEADLESS") == "1":
+        pytest.skip("production headful pool disabled by JOBHUNT_HEADLESS=1")
     # These tests drive the real Google Chrome headful, which takes focus on the desktop. Agent runs on the operator's
     # Mac set JOBHUNT_FORCE_HEADLESS=1 (env.sh) and skip them; CI runs them headful on every PR.
     if os.environ.get("JOBHUNT_FORCE_HEADLESS", "").strip() == "1":
@@ -61,6 +63,72 @@ def posting_form(action):
     return (f'<title>Ingénieur systèmes embarqués</title><form action="{action}" method="post">'
             '<label for="name">Prénom</label><input id="name" name="first_name">'
             '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>')
+
+
+@pytest.mark.parametrize("target", ["/jobs/100/apply", "/jobs/200/apply", "/jobs/100/apply?jobId=200"])
+async def test_readonly_inspection_follows_only_bound_apply_link(target, server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = f'''<form><label>Contrat <input required></label>
+        <label>Localisation du poste <input required></label></form>
+        <a href="{target}" onclick="fetch('/clicked', {{method:'POST'}})">Postuler</a>
+        <script>fetch('/beacon', {{method:'POST'}}).catch(() => {{}})</script>'''
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    planner = ScriptedPlanner([StepPlan(page_kind="job_page"), form])
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True, planner=planner)
+    assert result.result.diagnostic_code == ("dry_untested" if target == "/jobs/100/apply" else "job_page_no_apply_control")
+    assert len(planner.calls) == (2 if target == "/jobs/100/apply" else 1)
+    assert not server.posts and not server.sent and not store.outstanding_attempt(app.id)
+
+
+async def test_autonomous_skips_search_filters_and_reserves_noncanonical_job(server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"), extra={"origin_resolution": {
+        "submit_ats": "successfactors", "canonical_ok": False, "requisition": "100", "tenant": None,
+    }})
+    server.html["/jobs/100"] = '''<form action="/search" method="post">
+        <label>Contrat <input required></label><label>Localisation du poste <input required></label></form>
+        <script src="/legacy.js"></script><a href="/jobs/100/apply">Je postule</a>'''
+    server.redirects["/legacy.js"] = "/unverified.js"
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    planner = ScriptedPlanner([StepPlan(page_kind="job_page"), form])
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=planner)
+    assert result.status == "submitted"
+    assert [post["path"] for post in server.posts] == ["/jobs/100/apply"]
+    assert "/legacy.js" in server.requests and "/unverified.js" not in server.requests
+
+
+async def test_autonomous_noncanonical_job_refuses_real_fuzzy_duplicate(server, profile, tmp_path, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    _, first = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    _, second = approved_fixture(profile, tmp_path, server.url("jobs/200"), title="Ingénieur système embarqué",
+                                 extra={"origin_resolution": {"submit_ats": "successfactors", "canonical_ok": False}})
+    legacy = store.start_run(first.id, first.current_rev, "submit", "user", lambda run_id: tmp_path / "legacy")
+    store.reserve_send(legacy.id, profile_id=profile.id, application_id=first.id, trigger="user",
+                       role_key="", url_key="", daily_cap=9)
+    store.finish_and_settle(legacy.id, RunResult(status="failed"))
+    result = await service.run(second.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(form))
+    assert result.status == "blocked" and result.result.diagnostic_code == "duplicate_unconfirmed"
+    assert not server.requests and not store.outstanding_attempt(second.id)
+
+
+def test_verified_apply_target_requires_matching_metadata_and_requisition():
+    posting = "https://careers.example.com/job/100"
+    target = "https://example.wd1.myworkdayjobs.com/en-US/careers/job/Paris/Role_R100/apply"
+    metadata = dict(posting_url=posting, apply_url=target, tenant="example", requisition="R100",
+                    canonical_ok=True, state="resolved", submit_ats="workday", confidence=0.99)
+    assert dispatch_url(posting, {"origin_resolution": metadata}, autonomous=True) == target
+    for invalid in (dict(canonical_ok=False), dict(posting_url=posting + "0"), dict(requisition="R200")):
+        assert dispatch_url(posting, {"origin_resolution": metadata | invalid}, autonomous=True) == posting
+
+
+def test_smartrecruiters_redirect_requires_same_tenant_and_requisition():
+    posting = "https://jobs.smartrecruiters.com/Example/744000000001-engineer"
+    audience = Audience(posting, (), lambda: None)
+    apply = "https://www.smartrecruiters.com/oneclick-ui/company/Example/publication/744000000001"
+    assert audience.initial_redirect(posting, apply)
+    assert not audience.initial_redirect(posting, apply.replace("Example", "Other"))
+    assert not audience.initial_redirect(posting, apply.replace("0001", "0002"))
+    assert not audience.initial_redirect(posting, apply + "?jobId=744000000002")
 
 
 @pytest.mark.parametrize("scenario", ["json", "no_receipt", "foreign", "wrong_posting", "late_foreign", "url", "text",

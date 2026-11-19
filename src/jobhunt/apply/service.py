@@ -27,7 +27,7 @@ from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.identity import canonical_identity, resolved_identity
+from jobhunt.apply.identity import canonical_identity, dispatch_url, resolved_identity
 from jobhunt.apply.facts import answers_path as facts_answers_path
 from jobhunt.apply.facts import build_facts, custom_answers, load_answers, norm_question, save_custom_answers, trusted_hosts
 from jobhunt.apply.missing_answers import editable_custom
@@ -48,7 +48,7 @@ from jobhunt.db import now
 from jobhunt.filelock import try_lock, unlock
 from jobhunt.freshness import age_days
 from jobhunt.llm import LLMError, get_llm
-from jobhunt.origin import MIN_CONFIDENCE, ats_of_host
+from jobhunt.origin import MIN_CONFIDENCE, ats_of_host, is_aggregator
 from jobhunt.sources.base import ChallengeRequired
 
 # Where an application stands in the sending queue (one bucket per application):
@@ -222,7 +222,8 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
         bucket = "to_validate"
     open_ = app.status in ("draft", "approved") and not problems
     adapted = bool(job and _unattended(job))
-    generic = _generic_enabled(job, check_host=False) and _host(job.origin_url) not in paused_hosts
+    generic = (_generic_enabled(job, check_host=False)
+               and _host(dispatch_url(job.origin_url, job.extra, autonomous=True)) not in paused_hosts)
     autonomous_ready = generic and app.status == "approved" and not site_handoff
     if generic and run_ and run_.mode == "submit" and run_.status == "needs_human":
         autonomous_ready = False
@@ -295,7 +296,10 @@ def _blocked_result(reasons: list[str]) -> RunResult:
 def _refuse(app: Application, job, mode: Mode, trigger: str, reasons: list[str]) -> ApplyRun:
     """A refusal is a finished `blocked` run (recorded, no browser)."""
     run_ = apply_store.start_run(app.id, app.current_rev, mode, trigger, lambda rid: _run_dir(app.job_id, rid))
-    return apply_store.finish_run(run_.id, _blocked_result(reasons))
+    result = _blocked_result(reasons)
+    if job and not policy._usable_origin(job):
+        result.diagnostic_code = "aggregator_origin" if is_aggregator(job.origin_url) else "origin_not_usable"
+    return apply_store.finish_run(run_.id, result)
 
 
 def _run_dir(job_id: int, run_id: int) -> Path:
@@ -370,7 +374,7 @@ def _unattended(job) -> bool:
 def _generic_enabled(job, *, check_host: bool = True) -> bool:
     return bool(get_settings().apply_autonomous and job and policy._usable_origin(job)
                 and clean_url(job.origin_url, navigation=True) and not _unattended(job)
-                and (not check_host or not apply_store.host_paused(_host(job.origin_url))))
+                and (not check_host or not apply_store.host_paused(_host(dispatch_url(job.origin_url, job.extra, autonomous=True)))))
 
 
 def _distinct(ids: frozenset[int]) -> dict:
@@ -419,6 +423,9 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     canonical = ["req", *identity] if identity else ["job", job.id]
     dedupe_key = hashlib.sha256(json.dumps([app.profile_id, *canonical]).encode()).hexdigest()
     autonomous = mode == "submit" and (not match or match.capability != "unattended")
+    if autonomous:
+        url = dispatch_url(job.origin_url, job.extra, autonomous=True)
+        host = _host(url)
     dispatch_match = None if autonomous else match
     tenant, requisition_id = ((requisition.tenant, requisition.requisition_id) if requisition and not autonomous
                               else identity or ("", None))
@@ -523,6 +530,18 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     diagnostics.control = "navigation"
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
         await guard.install(page)
+        async def open_apply(target, source, nonce):
+            if (page.url != source or source != audience.live_url or not nonce or nonce != audience.document_nonce
+                    or not audience.apply_navigation(target)):
+                return False
+            check()
+            await guard.navigate(page, target, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
+            audience.document = clean_url(page.url, navigation=True)
+            if guard.refused or not audience.initial_redirect(attempt.url, audience.document):
+                raise ApplyError("Destination de l'offre non vérifiée.")
+            await audience.bind_document(page)
+            return True
+
         try:
             await guard.navigate(page, attempt.url, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
             if guard.refused or not audience.write_recipient(page.url):
@@ -538,6 +557,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
                 password=password, account_known=account_known, diagnostics=diagnostics,
+                apply_navigation=open_apply,
                 host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
@@ -551,6 +571,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             diagnostics.receipt_kind = "none"
             diagnostics.receipt_reason = "recipient_refused"
             result = result.model_copy(update={"status": "needs_human", "message": RECIPIENT_REFUSED + " " + SUPERVISED_ONLY,
+                                               "diagnostic_code": guard.refusal_code,
                                                "dispatch_diagnostics": diagnostics})
         if out is not None:
             out.append(result)
@@ -603,7 +624,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
     facts = _candidate_facts(app, job)
     cv_pdf = cvs.safe_pdf(app)
     assert cv_pdf is not None and job.origin_url
-    started_origin = clean_url(job.origin_url, navigation=True)
+    started_origin = dispatch_url(job.origin_url, job.extra, autonomous=mode == "dry_run" and not _unattended(job))
     host = _host(started_origin)
     challenge: list[bool] = []
 
@@ -645,17 +666,49 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             await browser_guard.install(page)
 
         if not request:
+            inspect_navigation = None
+            if mode == "dry_run" and isinstance(pool, BrowserPool):
+                audience = Audience(started_origin, (), lambda: None)
+                guard = RecipientGuard(frozenset({origin(started_origin)}), audience=audience, read_only=True)
+                await guard.install(page)
+
+                async def inspect_goto(tab, url):
+                    try:
+                        await guard.navigate(tab, url, lambda p, u: pool.goto(p, u, challenge_timeout_s=0))
+                    except ChallengeRequired:
+                        challenge.append(True)
+                        raise
+                    audience.document = clean_url(tab.url, navigation=True)
+                    if not guard.refused:
+                        await audience.bind_document(tab)
+
+                async def inspect_navigation(target, source, nonce):
+                    if (page.url != source or source != audience.live_url or not nonce or nonce != audience.document_nonce
+                            or not audience.apply_navigation(target)):
+                        return False
+                    await page.context.set_offline(False)
+                    try:
+                        await inspect_goto(page, target)
+                        return not guard.refused
+                    finally:
+                        if not page.is_closed():
+                            await page.context.set_offline(True)
+
             res = await run_application(page, url=started_origin, facts=facts, planner=planner,
                                         uploads=Uploads(cv_pdf=cv_pdf), mode=mode, verifier=verifier,
                                         out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)),
                                         job_title=job.title, company=job.company or "", host_allowed=host_allowed,
-                                        max_steps=get_settings().apply_max_steps, goto=goto,
+                                        max_steps=get_settings().apply_max_steps, goto=inspect_goto if inspect_navigation else goto,
+                                        apply_navigation=inspect_navigation,
                                         choices=scoped_choices.load(app.profile_id, app.id, app.current_rev,
                                                                    origin_digest(started_origin)) if trigger == "user" else None)
+            if inspect_navigation and guard.refused:
+                res = res.model_copy(update={"status": "needs_human", "diagnostic_code": guard.refusal_code,
+                                             "message": RECIPIENT_REFUSED})
+            if challenge and res.status == "failed":
+                res = res.model_copy(update={"status": "needs_human", "diagnostic_code": "challenge"})
             if out is not None:
                 out.append(res)
-            if challenge and res.status == "failed":
-                return res.model_copy(update={"status": "needs_human", "message": "Un défi anti-robot doit être résolu à la main."})
             return res
 
         session = None
@@ -806,7 +859,8 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
         except ApplyError as e:
             result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
-            result, crashed = RunResult(status="failed", message=f"Erreur technique ({type(e).__name__})."), True
+            result, crashed = RunResult(status="failed", message="Erreur technique.",
+                                        diagnostic_code=diagnostics.exception_code(e)), True
         except asyncio.CancelledError as e:  # the row must not stay `running`: settle it, then let the cancellation through
             result, reraise, crashed = RunResult(status="failed", message="Interrompu."), e, True
         if crashed and returned:  # the engine had finished: cleanup failed or was cancelled afterwards, its result stands
