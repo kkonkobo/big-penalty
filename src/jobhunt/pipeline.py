@@ -608,13 +608,12 @@ async def reresolve_origins(
 
     stamp = db.now().isoformat()
     for job, res, posting in zip(todo, results, postings):
-        job.apply_origin(res.posting)
+        found = job.apply_origin(res.posting)
         job.recompute_posted_at()
-        found = bool(res.posting.origin_url) and job.origin_url == res.posting.origin_url
         if found:
             job.extra["origin_via"] = res.via or "inconnu"
             job.extra["origin_date_checked"] = stamp
-        else:
+        elif not job.origin_url:
             job.extra.pop("origin_via", None)
         job.extra["origin_attempted_at"] = stamp
         job.extra["origin_fingerprint"] = origin_fingerprint(job)

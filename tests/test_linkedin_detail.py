@@ -172,10 +172,10 @@ async def test_offsite_link_refused_when_aggregator_tracker_linkedin_or_homepage
         await r.aclose()
 
 
-async def test_offsite_tracker_is_followed_and_final_url_trusted():
+async def test_offsite_tracker_is_followed_to_corroborated_employer():
     def handler(request):
         if request.url.host == "click.appcast.io":
-            return httpx.Response(302, headers={"location": "https://jobs.randomats.example/offre/77?utm_source=x"})
+            return httpx.Response(302, headers={"location": "https://jobs.orbitex.example/offre/77?utm_source=x"})
         return httpx.Response(200)
 
     r = resolver(handler)

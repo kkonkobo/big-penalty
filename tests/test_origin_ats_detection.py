@@ -64,7 +64,7 @@ async def test_equest_phenom_workday(tmp_path):
     ("https://emploi.orbitex.example/20235/1/stage",
      '<script src="/assets/gestmax-template.js"></script>', "gestmax", "20235"),
     ("https://jobs.orbitex.example/jobs/743999-stage",
-     '<a href="https://jobs.smartrecruiters.com/oneclick-ui/company/Orbitex/publication/pub-84">Postuler</a>',
+     '<a data-job-id="743999" href="https://jobs.smartrecruiters.com/oneclick-ui/company/Orbitex/publication/pub-84">Postuler</a>',
      "smartrecruiters", "pub-84"),
 ])
 async def test_branded_vacancy(url, html, ats, req, tmp_path):

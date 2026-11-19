@@ -144,7 +144,7 @@ async def test_follow_tracker_uses_head_and_returns_final_url():
 
     r = resolver_with(handler)
     try:
-        assert await r.follow("https://jsv3.recruitics.com/redirect?id=1") == "https://careers.orbitex.example/jobs/42?utm_source=x"
+        assert await r.follow("https://jsv3.recruitics.com/redirect?id=1", posting=posting()) == "https://careers.orbitex.example/jobs/42?utm_source=x"
         assert [m for m, _ in seen] == ["HEAD", "HEAD", "HEAD"]
     finally:
         await r.aclose()
@@ -160,7 +160,7 @@ async def test_follow_falls_back_to_get_and_reads_meta_refresh():
 
     r = resolver_with(handler)
     try:
-        assert await r.follow("https://www.jobijoba.com/fr/annonce/abc") == "https://careers.orbitex.example/jobs/7"
+        assert await r.follow("https://www.jobijoba.com/fr/annonce/abc", posting=posting()) == "https://careers.orbitex.example/jobs/7"
     finally:
         await r.aclose()
 

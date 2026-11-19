@@ -178,13 +178,18 @@ def rescore(profile_id: int) -> None:
 def reresolve(
     profile_id: Annotated[Optional[int], typer.Argument(help="profil (par défaut : tous)")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="compte les transitions sans écrire")] = False,
+    explain: Annotated[int, typer.Option("--explain", min=0, help="affiche les motifs de rejet des N premières offres par transition")] = 0,
 ) -> None:
     """Reclasse les ATS des offres enregistrées sans relancer la recherche."""
     from jobhunt.origin import reresolve_stored
 
-    counts = asyncio.run(reresolve_stored(profile_id, dry_run=dry_run))
+    explanations = {}
+    counts = asyncio.run(reresolve_stored(profile_id, dry_run=dry_run, explain=explain, explanations=explanations))
     for (before, after), count in sorted(counts.items()):
         typer.echo(f"{before} → {after}: {count}")
+        for attempts in explanations.get((before, after), ()):
+            if attempts:
+                typer.echo("  " + "; ".join(f"{attempt['host'] or '—'}: {attempt['reason']}" for attempt in attempts))
 
 
 @app.command("origins")

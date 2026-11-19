@@ -222,7 +222,9 @@ class MergedJob:
         if pa and (self.posted_at is None or pa < self.posted_at):
             self.posted_at = pa
         self.apply_url = self.apply_url or p.apply_url
-        if p.origin_url and (not self.origin_url or (p.origin_confidence or 0) > (self.origin_confidence or 0)):
+        if p.origin_resolution:
+            self.apply_origin(p)
+        elif p.origin_url and not self.origin_url:
             self.origin_url, self.origin_ats, self.origin_confidence = p.origin_url, p.origin_ats, p.origin_confidence
         for k in ("postal_code", "department", "experience_level", "company_website", "apply_method"):
             v = getattr(p, k, None)
@@ -276,17 +278,12 @@ class MergedJob:
         if new != self.posted_at:
             self.posted_at, self.changed = new, True
 
-    def apply_origin(self, p: JobPosting) -> None:
+    def apply_origin(self, p: JobPosting) -> bool:
         # posted_at stays the earliest SOURCE date; the origin ATS date lives in extra["origin_posted_at"].
-        if p.origin_url and (p.origin_url != self.origin_url or p.origin_resolution) and (
-                p.origin_url == self.origin_url or
-                not self.origin_url or (p.origin_confidence or 0) >= (self.origin_confidence or 0)):
-            self.origin_url, self.origin_ats, self.origin_confidence = p.origin_url, p.origin_ats, p.origin_confidence
-            self.changed = True
-        if p.origin_resolution and (p.origin_url == self.origin_url or not self.origin_url):
-            self.extra["origin_resolution"] = p.origin_resolution
-            self.changed = True
-        if p.origin_posted_at and p.origin_url == self.origin_url:
+        from jobhunt.origin import store_origin
+
+        promoted = store_origin(self, p)
+        if p.origin_posted_at and promoted:
             iso = _utc(p.origin_posted_at).isoformat()
             if self.extra.get("origin_posted_at") != iso:
                 self.extra["origin_posted_at"] = iso
@@ -296,6 +293,7 @@ class MergedJob:
         if p.description and len(p.description) > len(self.description or ""):
             self.description = p.description
             self.changed = True
+        return promoted
 
 
 def _contract_compatible(a: ContractType, b: ContractType) -> bool:

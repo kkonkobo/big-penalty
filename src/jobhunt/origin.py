@@ -28,6 +28,7 @@ from collections import Counter
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse, urlunparse
 
@@ -248,9 +249,21 @@ def _under(host: str, *domains: str) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in domains)
 
 
+def _safe_origin_url(url: str | None) -> bool:
+    if not is_http_url(url) or any(char.isspace() or ord(char) < 32 for char in url) or "\\" in url:
+        return False
+    try:
+        parsed = urlparse(url)
+        return (parsed.username is None and parsed.password is None
+                and parsed.port in (None, 443 if parsed.scheme.lower() == "https" else 80)
+                and bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]*", parsed.hostname or "", re.I)))
+    except ValueError:
+        return False
+
+
 def classify_ats(url: str, html: str | None = None) -> str | None:
     """Stable ATS id for a URL (and optionally its HTML). None if not a known ATS."""
-    if not url:
+    if not _safe_origin_url(url):
         return None
     try:
         p = urlparse(url)
@@ -293,6 +306,59 @@ class OriginEvidence:
     tenant: str | None = None
     requisition_id: str | None = None
     site: str | None = None
+    reason: str | None = None
+
+
+def _resolution_data(evidence: OriginEvidence) -> dict:
+    data = asdict(evidence)
+    if evidence.reason is None:
+        data.pop("reason")
+    return data
+
+
+def _observation(evidence: dict, *, reason: str | None = None) -> dict:
+    return {"state": evidence["state"], "observed_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason or evidence.get("reason") or evidence["state"],
+            "host": _host(evidence.get("posting_url") or "")}
+
+
+def store_origin(job, posting: JobPosting) -> bool:
+    """Apply one observation and promote only compatible, positively verified records."""
+    if posting.origin_lead:
+        job.extra["origin_lead"] = posting.origin_lead
+        job.changed = True
+    evidence = posting.origin_resolution
+    if evidence is None and posting.origin_url and posting.origin_ats:
+        tenant, req, site = _identity(posting.origin_ats, posting.origin_url)
+        evidence = _resolution_data(OriginEvidence("resolved", posting.origin_confidence or 0.0, posting.origin_ats,
+                                                   posting_url=posting.origin_url, tenant=tenant,
+                                                   requisition_id=req, site=site))
+    if not evidence:
+        return False
+    job.extra["origin_observation"] = _observation(evidence)
+    job.changed = True
+    if not (_safe_origin_url(posting.origin_url) and not is_aggregator(posting.origin_url)
+            and evidence["state"] == "resolved" and evidence.get("posting_url") == posting.origin_url
+            and evidence.get("ats") == posting.origin_ats and posting.origin_ats):
+        return False
+    if job.origin_url and job.origin_ats not in (None, "careers_site", "phenom") and not is_aggregator(job.origin_url):
+        previous = job.extra.get("origin_resolution") or {}
+        old_tenant, old_req, old_site = _identity(job.origin_ats, previous.get("apply_url") or job.origin_url)
+        old_tenant, old_req = previous.get("tenant") or old_tenant, previous.get("requisition_id") or old_req
+        exact_url = clean_url(job.origin_url) == clean_url(posting.origin_url)
+        new_tenant, new_req = evidence.get("tenant"), evidence.get("requisition_id")
+        compatible = (posting.origin_ats == job.origin_ats
+                      and (not old_tenant or not new_tenant or old_tenant.lower() == new_tenant.lower())
+                      and (not old_req or not new_req or old_req.lower() == new_req.lower())
+                      and (exact_url or bool(old_tenant and new_tenant and old_req and new_req)))
+        if not compatible:
+            job.extra["origin_observation"]["reason"] = "different_or_unverified_requisition"
+            return False
+        evidence = {**evidence, "tenant": new_tenant or old_tenant, "requisition_id": new_req or old_req,
+                    "site": evidence.get("site") or previous.get("site") or old_site}
+    job.origin_url, job.origin_ats, job.origin_confidence = posting.origin_url, posting.origin_ats, posting.origin_confidence
+    job.extra["origin_resolution"] = evidence
+    return True
 
 
 _SMART_APPLY = re.compile(r"^/oneclick-ui/company/([\w.-]+)/publication/([\w-]+)(?:/|$)", re.I)
@@ -332,7 +398,6 @@ def _identity(ats: str, url: str) -> tuple[str | None, str | None, str | None]:
             tenant = params.get("for")
             req = params.get("gh_jid") or (params.get("token") if path.startswith("/embed/job_app") else None)
     elif ats == "successfactors":
-        tenant = params.get("company") or host
         match = _SAP_APPLY.search(path) or re.search(r"^/job/(?:[^/]+/)?(\d+)/?$", path, re.I)
         req = match[1] if match else params.get("jobreqid") or params.get("jobid")
     elif ats == "talentsoft":
@@ -357,7 +422,7 @@ def _identity(ats: str, url: str) -> tuple[str | None, str | None, str | None]:
     return tenant.lower() if tenant else None, req, site
 
 
-def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
+def _page_evidence(url: str, html: str, status: int = 200, posting: JobPosting | None = None) -> OriginEvidence:
     parsed = urlparse(url)
     host, path = _host(url), parsed.path
     tree = HTMLParser(html[:600_000])
@@ -367,7 +432,7 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
             target = urljoin(url, value)
         except ValueError:
             return ""
-        return target if value and is_http_url(target) else ""
+        return target if value and _safe_origin_url(target) else ""
 
     assets = [link(node.attributes.get("src") or node.attributes.get("href") or "")
               for node in tree.css('script[src], link[rel="stylesheet"][href], link[rel="preload"][href]')]
@@ -377,7 +442,9 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
     header = " ".join(node.text() for node in tree.css("title, h1")[:4])
     if status in (404, 410) or re.search(r"job (?:is )?no longer available|offre (?:n.est plus disponible|expirée)", header, re.I):
         return OriginEvidence(state="expired", **base)
-    if status in (401, 403, 429, 999) or tree.css_first('#challenge-form, #cf-challenge-running') or re.search(
+    if status == 429:
+        return OriginEvidence(state="deferred", reason="rate_limited", **base)
+    if status in (401, 403, 999) or tree.css_first('#challenge-form, #cf-challenge-running') or re.search(
             r"just a moment|verify (?:that )?you are human|attention required", header, re.I):
         return OriginEvidence(state="challenge", **base)
     if is_aggregator(url):
@@ -390,7 +457,9 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
     body = tree.css_first("main, [role=main], article")
     title = ld.get("title") or (body.css_first("h1").text() if body and body.css_first("h1") else "")
     job_path = re.search(r"/(?:job|jobs)/([^/]+)/", path, re.I)
-    front_id = job_path[1] if job_path and re.fullmatch(r"[\w-]*\d[\w-]*", job_path[1]) else None
+    id_segment = job_path[1] if job_path else path.rstrip("/").rsplit("/", 1)[-1]
+    front_match = re.match(r"^(\d+)(?:-|$)|^([A-Za-z]+-?\d+)$", id_segment)
+    front_id = (front_match[1] or front_match[2]) if front_match else None
     controls = []
     login = False
     for node in tree.css("a[href], form[action], iframe[src], [data-apply-url]"):
@@ -401,9 +470,16 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
         target_path = urlparse(target).path
         same_host = _host(target) == host
         login |= same_host and target_path.rstrip("/").lower() == "/account/login"
-        ancestor, in_posting, excluded = node.parent, False, False
+        ancestor, in_posting, excluded = node, False, False
+        bound = False
         while ancestor and ancestor.tag != "html":
-            in_posting |= ancestor.tag in ("main", "article") or ancestor.attributes.get("role") == "main"
+            heading = ancestor.css_first("h1") if ancestor.tag in ("main", "article", "section") or ancestor.attributes.get("role") == "main" else None
+            in_posting |= bool(heading and title and title_score(title, heading.text()) >= 85)
+            identifiers = {ancestor.attributes[key].lower() for key in ("data-job-id", "data-requisition-id", "data-posting-id")
+                           if ancestor.attributes.get(key)}
+            if identifiers and front_id:
+                bound |= front_id.lower() in identifiers
+                excluded |= front_id.lower() not in identifiers
             excluded |= ancestor.tag in ("header", "footer", "nav", "aside") or bool(re.search(
                 r"related|recommend|similar", (ancestor.attributes.get("class") or "") + " " + (ancestor.attributes.get("id") or ""), re.I))
             ancestor = ancestor.parent
@@ -412,7 +488,7 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
         action = bool(attrs.get("data-apply-url") or node.tag in ("form", "iframe") or
                       re.match(r"\s*(?:apply\b|postuler\b)", node.text() or "", re.I))
         if action:
-            controls.append((target, in_posting and bool(title)))
+            controls.append((target, in_posting, bound))
 
     if frontend == "phenom" and front_id:
         for script in tree.css("script:not([src])"):
@@ -431,29 +507,37 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
                     pending.extend(obj)
                 elif isinstance(obj, dict):
                     if isinstance(obj.get("applyUrl"), str) and any(str(obj.get(key, "")).lower() == front_id.lower()
-                            for key in ("jobId", "jobSeqNo", "jobRequisitionId", "requisitionId", "reqId")):
-                        controls.append((link(obj["applyUrl"]), True))
-                    pending.extend(obj.values())
+                            for key in ("jobId", "jobSeqNo", "jobRequisitionId", "jobReqId", "requisitionId", "reqId")):
+                        controls.append((link(obj["applyUrl"]), True, False))
+                    pending.extend(value for key, value in obj.items() if not re.search(r"related|recommend|similar", key, re.I))
 
     def resolved(ats: str, target: str | None = None) -> OriginEvidence:
         tenant, req, site = _identity(ats, target or url)
+        if ats == "successfactors" and not classify_ats(url) and posting and _employer_destination(posting, url):
+            tenant = _host(url)
         return OriginEvidence(state="resolved", confidence=0.98 if target or local else 0.9, ats=ats,
                               apply_url=clean_url(target) if target else None, tenant=tenant,
                               requisition_id=req, site=site, **base)
 
     vendor_targets = {}
-    for target, scoped in controls:
+    for target, scoped, bound in controls:
         if not target or is_aggregator(target):
             continue
         ats = classify_ats(target)
         if not ats or (local and ats != local):
             continue
         tenant, req, _ = _identity(ats, target)
+        if local and _continuity_rejection(url, target):
+            continue
         local_req = _identity(ats, url)[1] if local or ats == "successfactors" else front_id
         gh_id = dict(parse_qsl(parsed.query)).get("gh_jid")
         exact = bool(req and (req.lower() == (local_req or "").lower() or ats == "greenhouse" and req == gh_id))
-        posting_specific = looks_like_posting(url) and (req or ats == "smartrecruiters" and _SMART_APPLY.match(urlparse(target).path))
-        if tenant and (exact or (scoped and posting_specific and (not local_req or ats == "smartrecruiters" and not local))):
+        different_ids_explicitly_bound = (bound and req and ats == "smartrecruiters" and not local
+                                          and _SMART_APPLY.match(urlparse(target).path))
+        if (_host(target) != host and (not posting or not _employer_destination(posting, url)
+                                     or not _employer_destination(posting, target))):
+            continue
+        if (tenant or ats == "successfactors") and scoped and (exact or different_ids_explicitly_bound):
             vendor_targets[(ats, tenant, req)] = target
     if len(vendor_targets) == 1:
         (ats, _, _), target = next(iter(vendor_targets.items()))
@@ -463,7 +547,7 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
             any(re.search(r"(?:^|/)runclientscript(?:[./]|$)", urlparse(asset).path, re.I) for asset in assets)):
         return resolved("talentsoft")
     sap_req = _identity("successfactors", url)[1]
-    sap_apply = next((target for target, _ in controls if _host(target) == host and
+    sap_apply = next((target for target, _, _ in controls if _host(target) == host and
                       (match := _SAP_APPLY.search(urlparse(target).path)) and match[1] == sap_req), None)
     rmk = [asset for asset in assets if _host(asset) == "rmkcdn.successfactors.com"]
     if sap_req and rmk and (sap_apply or any(re.search(r"(?:^|/)j2w(?:[./_-]|$)", urlparse(asset).path, re.I) for asset in assets)):
@@ -479,7 +563,7 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
             return resolved("digitalrecruiters")
     team_req = _identity("teamtailor", url)[1]
     if team_req and any(_under(_host(asset), "teamtailor-cdn.com", "cdn.teamtailor.com") for asset in assets):
-        if target := next((target for target, _ in controls if _host(target) == host and
+        if target := next((target for target, _, _ in controls if _host(target) == host and
                            (match := _TEAM_APPLY.match(urlparse(target).path)) and match[1] == team_req), None):
             return resolved("teamtailor", target)
     if _identity("gestmax", url)[1] and any("gestmax-template" in urlparse(asset).path.lower() for asset in assets):
@@ -491,9 +575,9 @@ def _page_evidence(url: str, html: str, status: int = 200) -> OriginEvidence:
         board_path = path.rstrip("/").lower() in ("", "/jobs", "/careers", "/carrieres", "/offres")
         return OriginEvidence(state="intermediate_board" if local or board_path else "unresolved", **base)
     if not frontend and title and (ld or any(scoped and _host(target) == host and
-                                             urlparse(target).path != path for target, scoped in controls)):
+                                             urlparse(target).path != path for target, scoped, _ in controls)):
         return resolved("careers_site")
-    return OriginEvidence(**base)
+    return OriginEvidence(reason="no_verified_apply_target" if frontend else "no_posting_evidence", **base)
 
 
 @dataclass(frozen=True)
@@ -848,6 +932,59 @@ def tenant_matches_company(url: str, company: str | None) -> bool:
     return False
 
 
+def _employer_destination(posting: JobPosting, url: str) -> bool:
+    """Corroborate a destination using its actual vendor routing fields, never arbitrary query text."""
+    if not _safe_origin_url(url) or is_aggregator(url):
+        return False
+    ats, host = classify_ats(url), _host(url)
+    if ats:
+        tenant, _, _ = _identity(ats, url)
+        if ats == "successfactors" and not tenant:
+            tenant = dict(parse_qsl(urlparse(url).query)).get("company")
+        if tenant and (label_matches_company(tenant.split(".")[0], posting.company) or
+                       host_matches_website(tenant, posting.company_website)):
+            return True
+        if ats == "workday":
+            return any(WORKDAY_SEEDS.get(WORKDAY_ALIASES.get(slug, slug), (None,))[0] == host
+                       for slug in slug_candidates(posting.company, posting.company_website))
+        return False
+    if _under(host, "profils.org"):
+        return label_matches_company(host.split(".")[0], posting.company)
+    return bool(host_matches_website(host, posting.company_website) or host_matches_company(host, posting.company))
+
+
+def _continuity_rejection(source: str, target: str) -> str | None:
+    source_ats, target_ats = classify_ats(source), classify_ats(target)
+    if source_ats and source_ats == target_ats:
+        before_tenant, before_id, _ = _identity(source_ats, source)
+        after_tenant, after_id, _ = _identity(target_ats, target)
+        if source_ats == "successfactors":
+            before_tenant = before_tenant or dict(parse_qsl(urlparse(source).query)).get("company")
+            after_tenant = after_tenant or dict(parse_qsl(urlparse(target).query)).get("company")
+        if before_tenant and after_tenant and before_tenant.lower() != after_tenant.lower():
+            return "tenant_mismatch"
+        if before_id and after_id and before_id.lower() != after_id.lower():
+            return "requisition_mismatch"
+    return None
+
+
+def _redirect_rejection(source: str, target: str, posting: JobPosting | None) -> str | None:
+    if not _safe_origin_url(target):
+        return "unsafe_url"
+    if urlparse(source).scheme == "https" and urlparse(target).scheme != "https":
+        return "scheme_downgrade"
+    if reason := _continuity_rejection(source, target):
+        return reason
+    if urlparse(source).hostname == urlparse(target).hostname:
+        return None
+    if _under(_host(source), *_TRACKER_HOSTS, "equest.com", "grnh.se") and _under(
+            _host(target), *_TRACKER_HOSTS, "equest.com", "grnh.se"):
+        return None
+    if posting and _employer_destination(posting, target):
+        return None
+    return "intermediate_board" if is_aggregator(target) else "unverified_redirect_tenant"
+
+
 def looks_like_posting(url: str) -> bool:
     """A path/query that points at ONE posting (never an ATS board root or a homepage)."""
     try:
@@ -1155,7 +1292,7 @@ class DiskCache:
     @staticmethod
     def key(company: str | None, title: str, location: str | None, apply_url: str | None) -> str:
         loc = sorted(_loc_tokens(location))[:1]
-        raw = "v4|" + "|".join([" ".join(t for t in _company_tokens(company or "") if t not in _LEGAL), normalize_title(title), "".join(loc), apply_url or ""])
+        raw = "v5|" + "|".join([" ".join(t for t in _company_tokens(company or "") if t not in _LEGAL), normalize_title(title), "".join(loc), apply_url or ""])
         return hashlib.sha1(raw.encode()).hexdigest()[:20]
 
     def get(self, key: str) -> dict | None:
@@ -1308,12 +1445,29 @@ _CAREER_RE = re.compile(r"carri[eè]res?|careers?|recrut|rejoin|nous-rejoindre|j
 _CAREER_PATHS = ("/careers", "/carrieres", "/recrutement", "/nous-rejoindre", "/jobs", "/fr/carrieres", "/en/careers")
 
 
+_FETCH_ISSUE: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar("origin_fetch_issue", default=None)
+_REQUEST_POSTING: contextvars.ContextVar[JobPosting | None] = contextvars.ContextVar("origin_request_posting", default=None)
+REDIRECT_LIMIT = 8
+
+
+def _retry_after(value: str) -> float:
+    try:
+        return max(0.0, int(value))
+    except ValueError:
+        try:
+            return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+
 class Resolver:
-    def __init__(self, ctx: SourceContext):
+    def __init__(self, ctx: SourceContext, *, cache: bool = True):
         self.ctx = ctx
-        self.cache = DiskCache(ctx.settings.cache_dir / "origin")
+        self.cache = DiskCache(ctx.settings.cache_dir / "origin") if cache else None
         self.pacer = Pacer(0.5)
-        self.client = ctx.http(timeout=20, max_redirects=8, event_hooks={"request": [require_http_request]})
+        self.client = ctx.http(timeout=20, follow_redirects=False, event_hooks={"request": [require_http_request]})
+        self._host_locks: dict[str, asyncio.Lock] = {}
+        self._deferred_until: dict[str, float] = {}
         self._boards: dict[str, asyncio.Future] = {}
         self.sem = asyncio.Semaphore(CONCURRENCY)
         self.ddg_lock = asyncio.Lock()
@@ -1326,25 +1480,56 @@ class Resolver:
         await self.client.aclose()
 
     # ---- http ----
-    async def _get(self, url: str, *, gap: float | None = None, **kw) -> httpx.Response | None:
-        if not is_http_url(url):
-            return None
-        await self.pacer.wait(url, gap)
-        try:
-            return await self.client.get(url, **kw)
-        except (httpx.HTTPError, ValueError) as e:
-            log.debug("GET %s failed: %s", url, e)
-            return None
+    async def _request(self, method: str, url: str, *, gap: float | None = None,
+                       posting: JobPosting | None = None, **kw) -> httpx.Response | None:
+        _FETCH_ISSUE.set(None)
+        posting = posting or _REQUEST_POSTING.get()
+        history = []
+        visited = set()
+        for _ in range(REDIRECT_LIMIT + 1):
+            host = _host(url)
+            if not _safe_origin_url(url) or url in visited:
+                _FETCH_ISSUE.set(("unsafe_url" if not _safe_origin_url(url) else "redirect_loop", host))
+                return None
+            visited.add(url)
+            async with self._host_locks.setdefault(host, asyncio.Lock()):
+                if host in self._deferred_until:
+                    _FETCH_ISSUE.set(("host_cooldown", host))
+                    return None
+                await self.pacer.wait(url, gap)
+                try:
+                    response = await self.client.request(method, url, follow_redirects=False, **kw)
+                except (httpx.HTTPError, ValueError) as error:
+                    _FETCH_ISSUE.set(("timeout" if isinstance(error, httpx.TimeoutException) else "network_error", host))
+                    return None
+                if response.status_code == 429:
+                    self._deferred_until[host] = time.monotonic() + max(60.0, _retry_after(response.headers.get("retry-after", "")))
+            if not response.is_redirect or not response.headers.get("location") or method not in ("GET", "HEAD"):
+                response.history = history
+                return response
+            try:
+                target = urljoin(url, response.headers["location"])
+            except ValueError:
+                _FETCH_ISSUE.set(("unsafe_url", host))
+                return None
+            if reason := _redirect_rejection(url, target, posting):
+                _FETCH_ISSUE.set((reason, _host(target)))
+                return None
+            for previous in history:
+                if reason := _continuity_rejection(str(previous.url), target):
+                    _FETCH_ISSUE.set((reason, _host(target)))
+                    return None
+            history.append(response)
+            url = target
+            kw.pop("params", None)
+        _FETCH_ISSUE.set(("redirect_limit", _host(url)))
+        return None
 
-    async def _head(self, url: str, *, gap: float | None = None) -> httpx.Response | None:
-        if not is_http_url(url):
-            return None
-        await self.pacer.wait(url, gap)
-        try:
-            return await self.client.head(url)
-        except (httpx.HTTPError, ValueError) as e:
-            log.debug("HEAD %s failed: %s", url, e)
-            return None
+    async def _get(self, url: str, *, gap: float | None = None, **kw) -> httpx.Response | None:
+        return await self._request("GET", url, gap=gap, **kw)
+
+    async def _head(self, url: str, *, gap: float | None = None, **kw) -> httpx.Response | None:
+        return await self._request("HEAD", url, gap=gap, **kw)
 
     async def _json(self, url: str, **kw):
         r = await self._get(url, headers={"Accept": "application/json"}, **kw)
@@ -1424,16 +1609,17 @@ class Resolver:
         d = None
         delay = 4.0
         for attempt in range(3):
-            await self.pacer.wait(ref.host, 1.2)
             try:
-                r = await self.client.post(
-                    f"https://{ref.host}/wday/cxs/{ref.slug}/{ref.site}/jobs",
+                r = await self._request(
+                    "POST", f"https://{ref.host}/wday/cxs/{ref.slug}/{ref.site}/jobs", gap=1.2,
                     json={"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": q},
                 )
+                if r is None or r.status_code == 429:
+                    break
                 if r.status_code == 200:
                     d = r.json()
                     break
-                if r.status_code not in (429, 500, 502, 503):
+                if r.status_code not in (500, 502, 503):
                     break
                 ra = r.headers.get("retry-after", "")
                 delay = min(float(ra), 30) if ra.replace(".", "").isdigit() else 4 * 2**attempt
@@ -1908,7 +2094,7 @@ class Resolver:
             return None
 
     async def _validate_candidate(self, p: JobPosting, url: str) -> Match | None:
-        r = await self._get(url, gap=1.0)
+        r = await self._get(url, gap=1.0, posting=p)
         if r is None or r.status_code >= 400:
             note("http_blocked", _host(url))
             return None
@@ -1935,7 +2121,7 @@ class Resolver:
         if not (corroborated or company_in_text(p.company, body, loose=True)):
             note("employer_not_corroborated", _host(final))
             return None
-        evidence = _page_evidence(final, html)
+        evidence = _page_evidence(final, html, posting=p)
         if evidence.state != "resolved" and not (titles and evidence.state == "unresolved" and not evidence.frontend):
             return None
         ats = evidence.ats or "careers_site"
@@ -1963,19 +2149,20 @@ class Resolver:
         is the employer's own choice of destination: after following trackers it is taken as is ("linkedin_offsite"),
         whatever its host (ATS tenants rarely carry the company name). Aggregators, trackers that cannot be followed,
         LinkedIn itself and bare homepages are still refused."""
-        if (p.raw or {}).get("apply_source") == "linkedin_offsite" and is_http_url(p.apply_url):
+        if (p.raw or {}).get("apply_source") == "linkedin_offsite" and _safe_origin_url(p.apply_url):
             final = p.apply_url
             if is_aggregator(final):
-                final = embedded_target(final) or await self.follow(final)
+                embedded = embedded_target(final)
+                final = embedded if embedded and not _redirect_rejection(final, embedded, p) else await self.follow(final, posting=p)
                 if final and is_aggregator(final):
                     final = None
-            if final and is_http_url(final) and not is_aggregator(final):
+            if final and _safe_origin_url(final) and not is_aggregator(final):
                 parsed = urlparse(final)
                 if parsed.path.strip("/") or parsed.query:
                     return clean_url(final), "linkedin_offsite"
             note("redirect_aggregator", _host(p.apply_url))
         for u in (p.apply_url, p.url):
-            if is_http_url(u) and not is_aggregator(u):
+            if _safe_origin_url(u) and not is_aggregator(u):
                 if classify_ats(u):
                     return clean_url(u), "direct"
                 if host_corroborated(u, p.company, p.company_website):
@@ -1984,7 +2171,7 @@ class Resolver:
                     return match.cand.url, "direct"
                 note("employer_not_corroborated", _host(u))
         for u in (p.apply_url, p.url):
-            if is_http_url(u) and is_aggregator(u) and (t := embedded_target(u)):
+            if _safe_origin_url(u) and is_aggregator(u) and (t := embedded_target(u)) and not _redirect_rejection(u, t, p):
                 if classify_ats(t):
                     return clean_url(t), "direct_param"
                 if host_corroborated(t, p.company, p.company_website):
@@ -1992,9 +2179,9 @@ class Resolver:
                 if match := await self._validate_candidate(p, t):
                     return match.cand.url, "direct_param"
         for u in dict.fromkeys((p.apply_url, p.url if _under(_host(p.url), "equest.com", "grnh.se") else None)):
-            if not is_http_url(u) or p.apply_method in ("easy_apply", "platform") and not is_redirector(u):
+            if not _safe_origin_url(u) or p.apply_method in ("easy_apply", "platform") and not is_redirector(u):
                 continue
-            if final := await self.follow(u):
+            if final := await self.follow(u, posting=p):
                 if classify_ats(final):
                     return clean_url(final), "direct_redirect"
                 if host_corroborated(final, p.company, p.company_website):
@@ -2007,71 +2194,43 @@ class Resolver:
     _BLOCKED = (401, 403, 405, 429, 999)
     _APPLY_ANCHOR = re.compile(r"postuler|apply|voir l.?offre|consulter l.?(?:offre|annonce)|continuer|acc[eé]der|site de l.?entreprise", re.I)
 
-    async def follow(self, url: str) -> str | None:
-        """Follow a redirector / tracker to the page it leads to (HEAD, then GET, then meta-refresh / JS / "Postuler" link,
-        then a real browser) and return the FINAL url, or None when it still sits on an aggregator or a tracker."""
-        if not is_http_url(url):
+    def _interstitial_target(self, response: httpx.Response, posting: JobPosting | None) -> str | None:
+        if response.status_code != 200 or not is_aggregator(str(response.url)):
             return None
-        need_browser = False
-        for _hop in range(3):  # tracker -> interstitial -> tracker ... bounded
-            nxt, need_browser = await self._follow_once(url)
-            if nxt is None:
-                break
-            if not is_aggregator(nxt):
-                return nxt
-            if nxt == url:
-                break
-            url = nxt
-        return await self._follow_browser(url) if need_browser else None
+        final, body = str(response.url), response.text[:200_000]
+        match = (re.search(r"http-equiv=[\"']refresh[\"'][^>]*url=([^\"'>]+)", body, re.I)
+                 or re.search(r"location(?:\.href)?\s*=\s*[\"'](https?://[^\"']+)", body)
+                 or re.search(r"location\.replace\(\s*[\"'](https?://[^\"']+)", body))
+        targets = [match[1].strip()] if match else [node.attributes.get("href") or ""
+                    for node in HTMLParser(body).css("a[href]") if self._APPLY_ANCHOR.search(node.text() or "")]
+        for value in targets:
+            try:
+                target = urljoin(final, value)
+            except ValueError:
+                continue
+            if target != final and not _redirect_rejection(final, target, posting):
+                return target
+        return None
 
-    async def _follow_once(self, url: str) -> tuple[str | None, bool]:
-        """One HEAD/GET round: (final off-aggregator url | another aggregator/tracker url to try again | None,
-        whether a real browser could still do better: blocked, challenged or no answer)."""
-        blocked = False
-        r = await self._head(url, gap=1.5)
-        if r is not None:
-            final = str(r.url)
-            if is_http_url(final) and not is_aggregator(final) and (r.status_code < 400 or r.status_code in (*self._BLOCKED, 404, 410)):
-                return final, False
-        r = await self._get(url, gap=1.5)
-        if r is None:
-            note("redirect_failed", _host(url))
-            return None, True
-        final = str(r.url)
-        if is_http_url(final) and not is_aggregator(final) and (r.status_code < 400 or r.status_code in (*self._BLOCKED, 404, 410)):
-            return final, False
-        blocked = r.status_code in self._BLOCKED
-        body = r.text[:200_000]
-        m = (re.search(r"http-equiv=[\"']refresh[\"'][^>]*url=([^\"'>]+)", body, re.I)
-             or re.search(r"location(?:\.href)?\s*=\s*[\"'](https?://[^\"']+)", body)
-             or re.search(r"location\.replace\(\s*[\"'](https?://[^\"']+)", body))
-        if m and is_http_url(m.group(1).strip()):
-            return m.group(1).strip(), False
-        try:
-            for a in HTMLParser(body).css("a[href]"):
-                href = urljoin(final, a.attributes.get("href") or "")
-                if is_http_url(href) and not is_aggregator(href) and self._APPLY_ANCHOR.search(a.text() or "") and _host(href) != _host(final):
-                    return href, False
-        except Exception:  # noqa: BLE001
-            pass
-        if is_aggregator(final):
-            note("redirect_aggregator", _host(final))
-        if blocked:
-            note("http_blocked", _host(final))
-        return None, blocked or r.status_code >= 400 or "challenge" in body[:5000].lower()
-
-    async def _follow_browser(self, url: str) -> str | None:
-        if self.ctx.browser is None or not is_http_url(url):
-            return None
-        try:
-            async with self.ctx.browser.page(self.ctx.profile_id, "origin") as page:
-                await self.ctx.browser.goto(page, url)
-                for _ in range(16):
-                    if not is_aggregator(page.url) and is_http_url(page.url):
-                        return page.url
-                    await asyncio.sleep(0.5)
-        except Exception as e:  # noqa: BLE001
-            log.info("browser follow failed for %s: %s", url, e)
+    async def follow(self, url: str, *, posting: JobPosting | None = None) -> str | None:
+        """Resolve a tracker without browser navigation or unvalidated hops."""
+        for fetch in (self._head, self._get):
+            response = await fetch(url, gap=1.5, posting=posting)
+            if response is None:
+                if issue := _FETCH_ISSUE.get():
+                    reason, host = issue
+                    note("redirect_aggregator" if reason == "intermediate_board" else "redirect_failed", host)
+                    if reason not in ("timeout", "network_error"):
+                        return None
+                continue
+            final = str(response.url)
+            if not is_aggregator(final):
+                return final
+            if fetch == self._get and (target := self._interstitial_target(response, posting)):
+                return target if not is_aggregator(target) else None
+            if response.status_code == 429:
+                break
+        note("redirect_aggregator", _host(url))
         return None
 
     async def enrich_from_page(self, url: str) -> Candidate | None:
@@ -2099,13 +2258,22 @@ class Resolver:
 
     async def inspect_posting(self, p: JobPosting, url: str) -> Candidate:
         """Classify a landing page using GET only; do not visit application forms."""
-        response = await self._get(url, gap=1.0)
+        _FETCH_ISSUE.set(None)
+        response = await self._get(url, gap=1.0, posting=p)
+        if response is not None and (target := self._interstitial_target(response, p)):
+            first = response
+            response = await self._get(target, gap=1.0, posting=p)
+            if response is not None:
+                response.history = [*first.history, first, *response.history]
         if response is None:
-            return Candidate(url, "", "", evidence=OriginEvidence(posting_url=clean_url(url)))
+            reason, host = _FETCH_ISSUE.get() or ("network_error", _host(url))
+            state = {"host_cooldown": "deferred", "intermediate_board": "intermediate_board"}.get(reason, "unresolved")
+            location = clean_url(url) if _safe_origin_url(url) and host == _host(url) else (f"https://{host}/" if host else None)
+            return Candidate(url, "", "", evidence=OriginEvidence(state=state, posting_url=location, reason=reason))
         final = clean_url(str(response.url))
-        if not is_http_url(final):
-            return Candidate(url, "", "", evidence=OriginEvidence())
-        evidence = _page_evidence(final, response.text, response.status_code)
+        if not _safe_origin_url(final):
+            return Candidate(url, "", "", evidence=OriginEvidence(reason="unsafe_url"))
+        evidence = _page_evidence(final, response.text, response.status_code, posting=p)
         ld = jsonld_jobposting(response.text) or {}
         title = ld.get("title") or ""
         if response.status_code == 200 and (evidence.state == "unresolved" or evidence.ats == "careers_site") and not evidence.frontend:
@@ -2131,7 +2299,7 @@ class Resolver:
                     _host(final) != _host(url) and not (host_corroborated(final, p.company, p.company_website) or
                     tenant_matches_company(final, p.company) or title and
                     company_in_text(p.company, html_to_text(response.text)[:3000], loose=True))):
-                evidence = OriginEvidence(posting_url=final, frontend=evidence.frontend)
+                evidence = OriginEvidence(posting_url=final, frontend=evidence.frontend, reason="posting_mismatch")
         return Candidate(final, title, evidence.ats or "", location=_ld_location(ld),
                          posted_at=_parse_date(ld.get("datePosted")), description=html_to_text(ld.get("description")) or None,
                          evidence=evidence)
@@ -2172,7 +2340,7 @@ def _anchor_candidates(html: str, base: str) -> list[Candidate]:
 
 def _apply(p: JobPosting, url: str | None, ats: str | None, conf: float, extra: Candidate | None) -> JobPosting:
     upd: dict = {}
-    if is_http_url(url) and not is_aggregator(url) and conf >= MIN_CONFIDENCE:
+    if _safe_origin_url(url) and not is_aggregator(url) and conf >= MIN_CONFIDENCE:
         upd.update(origin_url=url, origin_ats=ats, origin_confidence=conf)
     if extra:
         published = extra.posted_at.replace(tzinfo=extra.posted_at.tzinfo or timezone.utc).astimezone(timezone.utc) if extra.posted_at else None
@@ -2181,11 +2349,11 @@ def _apply(p: JobPosting, url: str | None, ats: str | None, conf: float, extra: 
         if not p.description and extra.description:
             upd["description"] = extra.description
         if extra.evidence:
-            upd["origin_resolution"] = asdict(extra.evidence)
+            upd["origin_resolution"] = _resolution_data(extra.evidence)
     if "origin_url" in upd and "origin_resolution" not in upd and ats:
         tenant, req, site = _identity(ats, url)
-        upd["origin_resolution"] = asdict(OriginEvidence("resolved", conf, ats, posting_url=url, tenant=tenant,
-                                                        requisition_id=req, site=site))
+        upd["origin_resolution"] = _resolution_data(OriginEvidence("resolved", conf, ats, posting_url=url, tenant=tenant,
+                                                                  requisition_id=req, site=site))
     return p.model_copy(update=upd)
 
 
@@ -2194,14 +2362,15 @@ async def _resolve_one(r: Resolver, p: JobPosting, *, use_cache: bool = True) ->
 
 
 async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True) -> Resolution:
-    if p.origin_url and (not is_http_url(p.origin_url) or is_aggregator(p.origin_url)):
-        p = p.model_copy(update={"origin_url": None, "origin_ats": None, "origin_confidence": None})
+    p = p.model_copy(update={"origin_url": None, "origin_ats": None, "origin_confidence": None, "origin_resolution": None})
     key = DiskCache.key(p.company, p.title, p.location, json.dumps([p.url, p.apply_url, p.company_website, p.remote]))
-    if use_cache and (hit := r.cache.get(key)):
+    if use_cache and r.cache and (hit := r.cache.get(key)):
         evidence = OriginEvidence(**hit["origin_resolution"]) if hit.get("origin_resolution") else None
         extra = Candidate(hit.get("origin_url") or "", p.title, hit["origin_ats"] or "", posted_at=_parse_date(hit.get("posted_at")),
                           description=hit.get("description"), evidence=evidence) if hit.get("origin_url") or evidence else None
         out = _apply(p, hit.get("origin_url"), hit.get("origin_ats"), hit.get("origin_confidence") or 0.0, extra)
+        if hit.get("origin_lead"):
+            out = out.model_copy(update={"origin_lead": hit["origin_lead"]})
         res = Resolution(out, via=hit.get("via") or "", cached=True)
         if not out.origin_url:
             res.reason, res.detail = Trace().main_reason(p)
@@ -2211,12 +2380,14 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
 
     trace = Trace()
     token = _TRACE.set(trace)
+    request_token = _REQUEST_POSTING.set(p)
     url = ats = None
     conf, extra, via = 0.0, None, ""
+    lead = None
 
     def take(u: str, a: str, c: float, e: Candidate | None, v: str):
         nonlocal url, ats, conf, extra, via
-        if not is_http_url(u) or is_aggregator(u):
+        if not _safe_origin_url(u) or is_aggregator(u):
             return
         if e and p.remote != "full" and location_match(p.location, e.location) is False:
             note("location_mismatch", _host(u))
@@ -2234,10 +2405,13 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
         tlog("étape 1-2 (lien direct) : " + (f"{_host(d[0])} [{d[1]}]" if d else "rien"))
         if d:  # steps 1-2
             u, v = d
-            shortlink = next((link for link in (p.apply_url, p.url) if link and _under(_host(link), "grnh.se")), None)
-            page = await r.inspect_posting(p, shortlink or u)
+            tracker = next((link for link in (p.apply_url, p.url) if link and _under(_host(link), "grnh.se", "equest.com")), None)
+            page = await r.inspect_posting(p, tracker or u)
             if page.evidence.state != "resolved":
                 extra = page
+                if v == "linkedin_offsite":
+                    lead_url = clean_url(page.url) if _safe_origin_url(page.url) and not is_aggregator(page.url) else u
+                    lead = {"url": lead_url, "state": "unverified", "reason": page.evidence.reason or page.evidence.state}
             else:
                 take(page.url, page.ats, 0.9 if v == "linkedin_offsite" else page.evidence.confidence, page, v)
         elif _under(_host(p.apply_url or p.url), "equest.com", "grnh.se"):
@@ -2246,7 +2420,7 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
                 extra = page
             elif host_corroborated(page.url, p.company, p.company_website) or tenant_matches_company(page.url, p.company):
                 take(page.url, page.ats, page.evidence.confidence, page, "direct_redirect")
-        if url is None and extra is None:  # step 3
+        if url is None and (extra is None or lead):  # step 3
             m = await r.probe_company(p)
             tlog("étape 3 (sondes ATS, slugs " + ", ".join(slug_candidates(p.company, p.company_website)[:4]) + ") : "
                  + (f"{_host(m.cand.url)} {m.conf:.2f}" if m else "rien"))
@@ -2254,14 +2428,14 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
                 take(m.cand.url, m.cand.ats, m.conf, m.cand, m.via)
             elif m:
                 below(m)
-        if url is None and extra is None:  # step 4
+        if url is None and (extra is None or lead):  # step 4
             m = await r.discover_careers(p)
             tlog("étape 4 (page carrières) : " + (f"{_host(m.cand.url)} {m.conf:.2f}" if m else "rien"))
             if m and m.conf >= MIN_CONFIDENCE:
                 take(m.cand.url, m.cand.ats, m.conf, m.cand, m.via)
             elif m:
                 below(m)
-        if url is None and extra is None:  # step 5
+        if url is None and (extra is None or lead):  # step 5
             m = await r.web_search(p)
             tlog("étape 5 (recherche web) : " + (f"{_host(m.cand.url)} {m.conf:.2f}" if m else "rien"))
             if m and m.conf >= MIN_CONFIDENCE:
@@ -2278,23 +2452,31 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
             url, ats, conf, extra = None, None, 0.0, None
     except Exception as e:  # one posting must never kill the batch
         log.warning("origin resolution failed for %s: %s", p.url, e, exc_info=log.isEnabledFor(logging.DEBUG))
+        if lead and extra:
+            out = _apply(p, None, None, 0.0, extra).model_copy(update={"origin_lead": lead})
+            return Resolution(out, reason=extra.evidence.state)
         return Resolution(p, reason="redirect_failed", detail=type(e).__name__)
     finally:
         _TRACE.reset(token)
+        _REQUEST_POSTING.reset(request_token)
     log.info("origin %s -> %s [%s %s %.2f]", p.url, url, ats, via, conf)
     out = _apply(p, url, ats, conf, extra)
     if not out.origin_resolution:
         if not out.origin_url:
             intermediate = p.apply_url if is_aggregator(p.apply_url) and not is_redirector(p.apply_url) else None
             evidence = OriginEvidence(state="intermediate_board", posting_url=clean_url(intermediate)) if intermediate else OriginEvidence()
-            out = out.model_copy(update={"origin_resolution": asdict(evidence)})
-    r.cache.put(key, {
-        "origin_url": out.origin_url, "origin_ats": out.origin_ats, "origin_confidence": out.origin_confidence,
-        "posted_at": extra.posted_at.isoformat() if extra and extra.posted_at else None,
-        "description": (extra.description[:20000] if extra and extra.description and not p.description else None),
-        "via": via,
-        "origin_resolution": out.origin_resolution,
-    })
+            out = out.model_copy(update={"origin_resolution": _resolution_data(evidence)})
+    if lead:
+        out = out.model_copy(update={"origin_lead": lead})
+    if r.cache and (out.origin_resolution or {}).get("state") != "deferred":
+        r.cache.put(key, {
+            "origin_url": out.origin_url, "origin_ats": out.origin_ats, "origin_confidence": out.origin_confidence,
+            "posted_at": extra.posted_at.isoformat() if extra and extra.posted_at else None,
+            "description": (extra.description[:20000] if extra and extra.description and not p.description else None),
+            "via": via,
+            "origin_resolution": out.origin_resolution,
+            "origin_lead": out.origin_lead,
+        })
     res = Resolution(out, via=via if out.origin_url else "", best_url=trace.best_url, best_conf=trace.best_conf, trace=trace.render())
     if not out.origin_url:
         res.reason, res.detail = trace.main_reason(p)
@@ -2303,61 +2485,108 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
     return res
 
 
-async def reresolve_stored(profile_id: int | None, *, dry_run: bool = False) -> Counter[tuple[str, str]]:
+async def reresolve_stored(profile_id: int | None, *, dry_run: bool = False, explain: int = 0,
+                           explanations: dict | None = None) -> Counter[tuple[str, str]]:
     """Reclassify stored URLs only; no discovery, application traffic or cache writes."""
     from jobhunt import db
+    from jobhunt.config import Settings, configured_data_dir
+    from jobhunt.dedupe import MergedJob
 
     counts: Counter[tuple[str, str]] = Counter()
-    path = db.db_path().absolute()
+    path = (db.DB_PATH_OVERRIDE or Settings(data_dir=configured_data_dir()).db_path).absolute()
     if not path.is_file():
         return counts
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+    wal = path.with_name(path.name + "-wal")
+    shm = path.with_name(path.name + "-shm")
+    if wal.exists() and shm.exists():
+        read_mode = "?mode=ro"
+    elif wal.exists() and wal.stat().st_size:
+        raise ValueError("Uncheckpointed job database needs its existing SQLite shared-memory file")
+    else:
+        read_mode = "?mode=ro&immutable=1"
+    with closing(sqlite3.connect(path.as_uri() + read_mode, uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, profile_id, title, company, location, remote, origin_url, origin_ats, origin_confidence, apply_url, extra,"
-            " (SELECT url FROM sightings WHERE job_id=jobs.id ORDER BY id LIMIT 1) AS source_url"
+            "SELECT id, profile_id, title, company, location, remote, origin_url, origin_ats, origin_confidence, apply_url, extra"
             " FROM jobs WHERE (? IS NULL OR profile_id=?) ORDER BY id", (profile_id, profile_id)).fetchall()
+        sightings: dict[int, list[str]] = {}
+        for item in conn.execute("SELECT job_id, sightings.url, sightings.apply_url FROM sightings JOIN jobs ON jobs.id=sightings.job_id"
+                                 " WHERE (? IS NULL OR profile_id=?) ORDER BY sightings.id", (profile_id, profile_id)):
+            sightings.setdefault(item["job_id"], []).extend((item["url"], item["apply_url"]))
     if not rows:
         return counts
-    resolver = Resolver(SourceContext(profile_id=rows[0]["profile_id"]))
+    resolver = Resolver(SourceContext(profile_id=rows[0]["profile_id"], settings=Settings(data_dir=path.parent)), cache=False)
     updates = []
 
     async def classify(row):
         extra = db._json_object(row["extra"])
-        posting = JobPosting(source="stored", source_id=str(row["id"]), url=row["source_url"] or "",
-                             title=row["title"], company=row["company"], location=row["location"],
+        posting = JobPosting(source="stored", source_id=str(row["id"]), url="",
+                             title=row["title"], company=row["company"], location=row["location"], remote=row["remote"],
                              company_website=extra.get("company_website"))
-        urls = [url for url in (row["origin_url"], row["apply_url"], posting.url) if is_http_url(url)]
-        url = (next((url for url in urls if _under(_host(url), "grnh.se")), None)
-               if urls and dict(parse_qsl(urlparse(urls[0]).query)).get("gh_jid") else None)
-        url = url or next((url for url in urls if not is_aggregator(url) or
-                           _under(_host(url), *_TRACKER_HOSTS, "equest.com", "grnh.se")), None) or (urls[0] if urls else None)
-        if not url:
-            result = OriginEvidence()
-        elif is_aggregator(url) and not _under(_host(url), *_TRACKER_HOSTS, "equest.com", "grnh.se"):
-            result = OriginEvidence(state="intermediate_board", posting_url=clean_url(url))
+        job = MergedJob(title=posting.title, origin_url=row["origin_url"], origin_ats=row["origin_ats"],
+                        origin_confidence=row["origin_confidence"], extra=extra)
+        urls = list(dict.fromkeys(url for url in (row["origin_url"], row["apply_url"], extra.get("linkedin_apply_url"),
+                                                *sightings.get(row["id"], ())) if url))
+        attempts = []
+        results = []
+        for url in urls:
+            host = _host(url)
+            tracker = _under(host, *_TRACKER_HOSTS, "equest.com", "grnh.se")
+            offsite = extra.get("apply_source") == "linkedin_offsite" and url == extra.get("linkedin_apply_url")
+            if not _safe_origin_url(url):
+                result = OriginEvidence(reason="unsafe_url")
+            elif is_aggregator(url) and not tracker:
+                result = OriginEvidence(state="intermediate_board", posting_url=clean_url(url))
+            elif not (url == row["origin_url"] or tracker or offsite or _employer_destination(posting, url)):
+                result = OriginEvidence(posting_url=clean_url(url), reason="unverified_employer")
+            else:
+                async with resolver.sem:
+                    candidate = await resolver.inspect_posting(posting, url)
+                result = candidate.evidence
+                if result.state == "resolved" and posting.remote != "full" and location_match(posting.location, candidate.location) is False:
+                    result = OriginEvidence(posting_url=result.posting_url, reason="location_mismatch")
+            if offsite and _safe_origin_url(url) and result.state != "resolved":
+                extra["origin_lead"] = {"url": clean_url(url), "state": "unverified", "reason": result.reason or result.state}
+            reason = result.reason or result.state
+            if result.ats and result.ats != "careers_site":
+                proposed = _apply(posting, result.posting_url, result.ats, result.confidence, Candidate(
+                    result.posting_url, posting.title, result.ats, evidence=result))
+                if store_origin(job, proposed):
+                    break
+                reason = job.extra["origin_observation"]["reason"]
+                result = OriginEvidence(posting_url=result.posting_url, reason=reason)
+            elif result.ats == "careers_site":
+                reason = "no_vendor_evidence"
+            attempts.append({"host": host if re.fullmatch(r"[a-z0-9.-]+", host) else "", "reason": reason})
+            results.append(result)
         else:
-            async with resolver.sem:
-                result = (await resolver.inspect_posting(posting, url)).evidence
-            if (result.state == "resolved" and not (url == row["origin_url"] or classify_ats(url) or
-                    host_corroborated(result.posting_url, posting.company, posting.company_website) or
-                    tenant_matches_company(result.posting_url, posting.company) or
-                    extra.get("apply_source") == "linkedin_offsite")):
-                result = OriginEvidence(frontend=result.frontend, posting_url=result.posting_url)
-        previous = row["origin_ats"] or (extra.get("origin_resolution") or {}).get("state") or "unresolved"
-        counts[(previous, result.ats or result.state)] += 1
+            priority = {"expired": 5, "deferred": 4, "challenge": 3, "unresolved": 2, "intermediate_board": 1}
+            generic = next((item for item in results if item.ats == "careers_site"), None)
+            result = generic if generic and job.origin_ats in (None, "careers_site", "phenom") else max(
+                (item for item in results if not item.ats), key=lambda item: priority.get(item.state, 0),
+                default=OriginEvidence(reason="no_vendor_evidence" if generic else "no_candidate"))
+            store_origin(job, _apply(posting, result.posting_url if result.ats else None, result.ats, result.confidence,
+                                    Candidate(result.posting_url or "", posting.title, result.ats or "", evidence=result)))
+        job.extra["origin_observation"]["attempts"] = attempts
+        previous = row["origin_ats"] or "unresolved"
+        bucket = (previous, result.ats or result.state)
         if not dry_run:
-            extra["origin_resolution"] = asdict(result)
-            if not result.ats or row["origin_url"] != result.posting_url:
+            if row["origin_url"] != job.origin_url:
                 for key in ("origin_posted_at", "origin_date_checked", "origin_via", "origin_fingerprint"):
                     extra.pop(key, None)
-            updates.append((result.posting_url if result.ats else None, result.ats, result.confidence if result.ats else None,
+            updates.append((job.origin_url, job.origin_ats, job.origin_confidence,
                             json.dumps(extra, ensure_ascii=False), row["id"], row["origin_url"], row["origin_ats"],
                             row["origin_confidence"], row["apply_url"], row["extra"]))
+        return bucket, attempts
 
     try:
         for start in range(0, len(rows), 100):
-            await asyncio.gather(*(classify(row) for row in rows[start:start + 100]))
+            for bucket, attempts in await asyncio.gather(*(classify(row) for row in rows[start:start + 100])):
+                counts[bucket] += 1
+                if explain and explanations is not None:
+                    entries = explanations.setdefault(bucket, [])
+                    if len(entries) < explain:
+                        entries.append(attempts)
     finally:
         await resolver.aclose()
     if updates:

@@ -73,6 +73,7 @@ class JobPosting(BaseModel):
     origin_ats: str | None = None  # "greenhouse", "lever", "workday", "careers_site", ...
     origin_confidence: float | None = None  # 0..1
     origin_resolution: dict[str, Any] | None = None
+    origin_lead: dict[str, Any] | None = None
     origin_posted_at: datetime | None = None  # posting date shown on the origin ATS/careers page, when found
     experience_level: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict, exclude=True)  # source payload for debugging
