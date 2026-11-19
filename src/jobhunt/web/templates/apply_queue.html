@@ -162,7 +162,10 @@
 <section class="panel flush" id="sending">
   <div class="panel-head"><h3>En cours <span class="count">{{ groups.sending|length }}</span></h3></div>
   <ul class="plain-list">{% for it in groups.sending %}
-    <li><a href="/applications/{{ it.app.id }}"><span>{{ it.app.company or 'Entreprise non précisée' }} · {{ it.app.job_title or '' }}</span></a></li>{% endfor %}</ul>
+    <li><a href="/applications/{{ it.app.id }}"><span>{{ it.app.company or 'Entreprise non précisée' }} · {{ it.app.job_title or '' }}</span></a>
+    {% if it.last_run and it.last_run.mode == 'supervised' and it.last_run.status == 'running' %}
+    <form method="post" action="/apply/runs/{{ it.last_run.id }}/fill-step"><button class="btn small">Remplir cette étape</button></form>
+    {% endif %}</li>{% endfor %}</ul>
 </section>
 {% endif %}
 

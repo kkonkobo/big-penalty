@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.destination import clean_text, clean_url
-from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.errors import ApplyError, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
@@ -529,6 +529,8 @@ class _Run:
         self.out_dir, self.job_title, self.company, self.password = out_dir, job_title, company, password
         self.before_submit, self.on_submit_click, self.on_nav_click = before_submit, on_submit_click, on_nav_click
         self.before_field: Callable[[str], None] | None = None
+        self.current_step = False
+        self.live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None
         self.verifier, self.host_allowed = verifier, host_allowed
         self.max_steps, self.goto = max_steps, goto
         self.on_progress, self.captcha_wait_s = on_progress, captcha_wait_s
@@ -1262,11 +1264,21 @@ class _Run:
         return live is not None and live[1] and live[2] and _norm(live[0]) == _norm(f.label)
 
     # ------------------------------------------------------------ execution
-    async def _before_mutation(self, op: str) -> None:
+    async def _supervised_checkpoint(self, target=None) -> None:
+        if self.live_mutation_check:
+            try:
+                await self.live_mutation_check(target)
+            except StepChanged as exc:
+                raise _DecisionHold(self._end("needs_human", str(exc))) from exc
+            except Exception:
+                raise _DecisionHold(self._end("blocked", "Identité du poste non vérifiée : saisie annulée.")) from None
+        reasons = await self.before_submit()
+        if reasons:
+            raise _DecisionHold(self._end("blocked", " ; ".join(reasons)))
+
+    async def _before_mutation(self, op: str, target) -> None:
         if self.mode == "supervised":
-            reasons = await self.before_submit()
-            if reasons:
-                raise _DecisionHold(self._end("blocked", " ; ".join(reasons)))
+            await self._supervised_checkpoint(target)
             if self.before_field:
                 try:
                     self.before_field(op)
@@ -1279,7 +1291,7 @@ class _Run:
         T = ACTION_TIMEOUT_MS
         if self.mode == "supervised":
             if a.op == "upload_cv" and f.kind == "file" and self.uploads.cv_bytes is not None:
-                await self._before_mutation(a.op)
+                await self._before_mutation(a.op, loc)
                 await loc.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": self.uploads.cv_bytes}, timeout=T)
                 self.uploaded = True
                 return "CV.pdf"
@@ -1340,13 +1352,13 @@ class _Run:
                                               ".map(o => (o.label || o.textContent).trim())", o.value)
                 if not matching or any(" ".join(label.split()) != " ".join(o.label.split()) for label in matching):
                     raise _Skip("options du formulaire modifiées depuis la lecture")
-            await self._before_mutation(a.op)
+            await self._before_mutation(a.op, loc)
             await loc.select_option(value=o.value, timeout=T) if o.value else await loc.select_option(label=o.label, timeout=T)
             shown = str(await loc.evaluate("e => { const o = e.selectedOptions[0]; return o ? (o.label || o.textContent).trim() : ''; }") or "")
             if _norm(shown) != _norm(o.label):  # read back what the control really holds: log THAT, and never keep another choice
                 if it.used == "confirmed_form_choice":
                     raise _Dirty("la sélection confirmée n’a pas été retenue")
-                await self._before_mutation(a.op)
+                await self._before_mutation(a.op, loc)
                 with contextlib.suppress(Exception):
                     await loc.evaluate("e => { e.selectedIndex = -1; e.dispatchEvent(new Event('change', {bubbles: true})); }")
                 raise _Skip("valeur lue différente de la réponse validée")
@@ -1370,7 +1382,7 @@ class _Run:
                 ml = await loc.get_attribute("maxlength", timeout=T)
                 pat = await loc.get_attribute("pattern", timeout=T)
             text = pick_variant(fact, f, int(ml) if ml and ml.isdigit() else None, pat)
-        await self._before_mutation(a.op)
+        await self._before_mutation(a.op, loc)
         await self._type(loc, f, text)
         return text
 
@@ -1612,11 +1624,14 @@ class _Run:
             await ctx.route("**/*", guard)
         try:
             try:
-                await (self.goto or _default_goto)(self.page, self.url)
+                if not self.current_step:
+                    await (self.goto or _default_goto)(self.page, self.url)
                 if self._inspection_only:
                     offline = True
                     await ctx.set_offline(True)
                 res = await self._loop()
+            except _DecisionHold as hold:
+                res = hold.result
             except LLMError as e:
                 res = self._end("failed", f"Planificateur indisponible ({e.code}).")
             except Exception as e:  # message: exception type only, never page content
@@ -1791,7 +1806,11 @@ class _Run:
             await self._settle()
             if self.blocked_requests:  # a page script navigated by itself after the last step
                 return self._auto_submit_result(self.steps[-1] if self.steps else None)
+            if self.current_step:
+                await self._supervised_checkpoint()
             snap, resolve = await self._snapshot()
+            if self.current_step:
+                await self._supervised_checkpoint()
             if snap.has_captcha and self.captcha_wait_s > 0:  # visible window: give the human time to solve it, touching nothing
                 deadline = asyncio.get_running_loop().time() + self.captcha_wait_s
                 while snap.has_captcha and asyncio.get_running_loop().time() < deadline:
@@ -1876,9 +1895,13 @@ class _Run:
                 await self._shot(log)
                 return self._account_handoff()
 
+            if self.current_step:
+                await self._supervised_checkpoint()
             v = self._validate(plan, snap, resolve)
             if not self._inspection_only:
                 await self._verify(v)
+            if self.current_step:
+                await self._supervised_checkpoint()
             if v.items and not (_secure_url(self.page.url) and all(_secure_url(self._frame_url(resolve, it.field.ref), self.page.url)
                                                                    for it in v.items)):
                 log.note = f"{log.note}; page non sécurisée"
@@ -2207,7 +2230,8 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           on_progress: Callable[[RunResult], Awaitable[None]] | None = None, captcha_wait_s: float = 0.0,
                           account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None,
                           supervised_attempt: Attempt | None = None,
-                          before_field: Callable[[str], None] | None = None) -> RunResult:
+                          before_field: Callable[[str], None] | None = None, current_step: bool = False,
+                          live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None) -> RunResult:
     """Inspect `url` or fill a reserved, attended form. Never submit it.
 
     Legacy dispatch callbacks do not authorize generic live sends. Dry callers
@@ -2239,4 +2263,6 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                       host_allowed=host_allowed, max_steps=max_steps, goto=goto, on_progress=on_progress,
                       captcha_wait_s=captcha_wait_s, account_known=account_known, choices=choices)
     flow.before_field = before_field
+    flow.current_step = current_step
+    flow.live_mutation_check = live_mutation_check
     return await flow.run()

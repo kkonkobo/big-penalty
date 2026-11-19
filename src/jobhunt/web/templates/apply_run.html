@@ -46,6 +46,10 @@
   {% if run.message %}<div class="span"><dt>Message</dt><dd>{{ run.message }}</dd></div>{% endif %}
 </dl>
 
+{% if run.mode == 'supervised' and run.status == 'running' %}
+<form method="post" action="/apply/runs/{{ run.id }}/fill-step"><button class="btn">Remplir cette étape</button></form>
+{% endif %}
+
 {% for s in steps %}
 <section class="panel flush" id="step-{{ loop.index0 }}">
   <div class="panel-head">

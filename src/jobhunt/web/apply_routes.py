@@ -530,6 +530,28 @@ def apply_run_page(request: Request, run_id: str):
     return response
 
 
+@router.post("/apply/runs/{run_id}/fill-step", response_class=HTMLResponse)
+async def apply_fill_step(request: Request, run_id: str):
+    _require_local_evidence(request)
+    web = _web()
+    run = _run_or_404(_id_or_404(run_id))
+    back = f"/apply/runs/{run.id}"
+    if run.mode != "supervised" or run.status != "running":
+        return web._flash(back, error="Aucune fenêtre supervisée active pour cet essai.")
+    form = await request.form()
+    try:
+        if form.get("confirm") == "1":
+            result = await apply_service.fill_step(run.application_id, str(form.get("token") or ""), run_id=run.id)
+            return web._flash(back, **({"error": result.message} if result.status in ("blocked", "needs_human") else
+                                       {"notice": "Étape vérifiée. Poursuivez dans la fenêtre supervisée."}))
+        preview = await apply_service.preview_fill_step(run.application_id, run_id=run.id)
+    except ApplyError as exc:
+        return web._flash(back, error=str(exc))
+    response = web.render(request, "apply_fill_step.html", preview=preview)
+    response.headers.update(EVIDENCE_HEADERS)
+    return response
+
+
 @router.get("/apply/runs/{run_id}/shots/{index}")
 def apply_shot(request: Request, run_id: str, index: str):
     _require_local_evidence(request)

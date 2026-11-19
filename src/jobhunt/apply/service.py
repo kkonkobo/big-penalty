@@ -33,6 +33,7 @@ from jobhunt.apply.missing_answers import editable_custom
 from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR
 from jobhunt.apply.planner import LLMPlanner
 from jobhunt.apply.store import ApplyRun
+from jobhunt.apply.supervised import FillPreview, Session, UNAVAILABLE, local_bridge
 from jobhunt.apply.types import FilledField, Mode, Question, RunResult
 from jobhunt.browser import BrowserPool
 from jobhunt.config import get_settings
@@ -439,6 +440,24 @@ def _candidate_facts(app: Application, job):
     return build_facts(profile, master if master and master.is_confirmed else None, load_answers(app.profile_id), job)
 
 
+_SUPERVISED: dict[int, Session] = {}
+
+
+def _fill_session(app_id: int, run_id: int | None) -> Session:
+    session = _SUPERVISED.get(app_id)
+    if not session or (run_id is not None and session.attempt.run_id != run_id):
+        raise ApplyError(UNAVAILABLE)
+    return session
+
+
+async def preview_fill_step(app_id: int, *, run_id: int | None = None) -> FillPreview:
+    return await _fill_session(app_id, run_id).preview()
+
+
+async def fill_step(app_id: int, token: str, *, run_id: int | None = None) -> RunResult:
+    return await _fill_session(app_id, run_id).run(token)
+
+
 async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, pool, planner,
                  llm: _Llm, verifier=None, out: list[RunResult] | None = None,
                  receipts: list[Receipt] | None = None, confirmed_distinct: frozenset[int] = frozenset(),
@@ -497,10 +516,8 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             return [str(exc)]
         return []
 
-    if planner is None and not match:
+    if planner is None and not request:
         planner = LLMPlanner(llm.get())
-        if verifier is None and request:
-            verifier = _default_verifier(llm)
     site = f"apply-supervised-{host}" if request else "applydry-" + accounts.registrable_host(host)
     async with pool.page(app.profile_id, site, not request) as page:
         browser_guard = None
@@ -508,62 +525,104 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             browser_guard = RecipientGuard(frozenset({origin(started_origin), *(match.requisition.write_origins if match else ())}))
             await browser_guard.install(page)
 
-        async def guarded_goto(page, url):
-            if browser_guard:
-                await browser_guard.navigate(page, url, goto)
-            else:
-                await goto(page, url)
+        if not request:
+            res = await run_application(page, url=started_origin, facts=facts, planner=planner,
+                                        uploads=Uploads(cv_pdf=cv_pdf), mode=mode, verifier=verifier,
+                                        out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)),
+                                        job_title=job.title, company=job.company or "", host_allowed=host_allowed,
+                                        max_steps=get_settings().apply_max_steps, goto=goto,
+                                        choices=scoped_choices.load(app.profile_id, app.id, app.current_rev,
+                                                                   origin_digest(started_origin)) if trigger == "user" else None)
+            if out is not None:
+                out.append(res)
+            if challenge and res.status == "failed":
+                return res.model_copy(update={"status": "needs_human", "message": "Un défi anti-robot doit être résolu à la main."})
+            return res
+
+        session = None
+        steps = []
+        identity_match = match if match and canonical_identity(match.requisition.tenant, match.requisition.requisition_id) else None
         try:
-            gate = _write_gate(request, run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct) if request and match else None
-            filled = False
+            if page.is_closed():
+                raise ApplyError(UNAVAILABLE)
+            try:
+                await browser_guard.navigate(page, started_origin, goto)
+            except ChallengeRequired:
+                return RunResult(status="needs_human", message="Un défi anti-robot doit être résolu à la main.")
+            res = RunResult(status="needs_human", message=SUPERVISED_HANDOFF)
 
-            async def fill(selected_planner):
-                nonlocal filled
-                if filled:
-                    raise ApplyError("Une seule passe de saisie est autorisée.")
-                filled = True
-                options = {}
-                if gate:
-                    options["before_field"] = lambda op: gate._enter("cv_upload_parse" if op == "upload_cv" else "draft_write",
-                                                                     started_origin)
-                return await run_application(
-                    page, url=started_origin, facts=facts, planner=selected_planner,
-                    uploads=Uploads(cv_pdf=cv_pdf, cv_bytes=request.pdf if request else None), mode=mode,
-                    before_submit=recheck if request else None, supervised_attempt=request.attempt if request else None,
-                    out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)), job_title=job.title, company=job.company or "",
-                    host_allowed=host_allowed, verifier=verifier,
-                    max_steps=get_settings().apply_max_steps, goto=guarded_goto,
-                    choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(started_origin))
-                    if trigger == "user" else None, **options)
+            async def fill_pass(expected):
+                gate = _write_gate(request, run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct) if match else None
+                available, used = True, False
+                fill_result = None
 
-            res = await match.adapter.supervise(request, fill) if request and match else await fill(planner)
+                async def fill(selected_planner):
+                    nonlocal used, fill_result
+                    if not available or used:
+                        raise ApplyError("Une seule saisie est autorisée par demande.")
+                    used = True
+                    options = {}
+                    if gate:
+                        options["before_field"] = lambda op: gate._enter(
+                            "cv_upload_parse" if op == "upload_cv" else "draft_write", started_origin)
+                    fill_result = await run_application(
+                        page, url=started_origin, facts=facts, planner=selected_planner,
+                        uploads=Uploads(cv_pdf=cv_pdf, cv_bytes=request.pdf), mode=mode, before_submit=recheck,
+                        supervised_attempt=request.attempt, current_step=True,
+                        live_mutation_check=lambda target: session.before_mutation(target, expected),
+                        out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)) / f"pass-{len(steps)}",
+                        job_title=job.title, company=job.company or "", host_allowed=host_allowed,
+                        verifier=verifier if verifier is not None or planner is not None or match else _default_verifier(llm), max_steps=1,
+                        choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(started_origin)),
+                        **options)
+                    return fill_result
+
+                try:
+                    result = (await match.adapter.supervise(request, fill) if match else
+                              await fill(planner if planner is not None else LLMPlanner(llm.get())))
+                finally:
+                    available = False
+                if fill_result is not None:
+                    result = fill_result
+                for step in result.steps:
+                    steps.append(step.model_copy(update={"index": len(steps) + 1}))
+                result = result.model_copy(update={"steps": list(steps)})
+                apply_store.save_progress(run_.id, result)
+                return result
+
+            session = Session(attempt=request.attempt, page=page, match=identity_match, company=job.company or "",
+                              title=job.title, recheck=recheck, fill=fill_pass)
+            async with local_bridge(session):
+                _SUPERVISED[app.id] = session
+                if identity_match:
+                    res = await session.run(None, initial=True)
+                if not page.is_closed():
+                    with contextlib.suppress(Exception):
+                        await page.evaluate("""message => {
+                            const banner = document.createElement('aside');
+                            banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;pointer-events:none';
+                            const notice = document.createElement('div');
+                            notice.style.cssText = 'background:#152c4a;color:white;padding:12px;font:16px system-ui';
+                            notice.textContent = message;
+                            banner.attachShadow({mode:'closed'}).append(notice);
+                            document.documentElement.append(banner);
+                        }""", "Utilisez « Remplir cette étape » dans Envois pour lancer la saisie. " + SUPERVISED_HANDOFF)
+                if not page.is_closed():
+                    await page.wait_for_event("close", timeout=0)
+                async with session.lock:
+                    session.closed = True
+                    res = session.last or res
         except Exception:
             if not browser_guard or not browser_guard.refused:
                 raise
             res = _blocked_result([RECIPIENT_REFUSED])
+        finally:
+            if _SUPERVISED.get(app.id) is session:
+                _SUPERVISED.pop(app.id, None)
         if browser_guard and browser_guard.refused:
             res = _blocked_result([RECIPIENT_REFUSED])
-        elif request and res.status == "blocked" and not page.is_closed():
-            await page.close()
         if out is not None:
             out.append(res)
-        if request and not page.is_closed():
-            with contextlib.suppress(Exception):
-                await page.evaluate("""message => {
-                    const banner = document.createElement('aside');
-                    banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;pointer-events:none';
-                    const notice = document.createElement('div');
-                    notice.style.cssText = 'background:#152c4a;color:white;padding:12px;font:16px system-ui';
-                    notice.textContent = message;
-                    banner.attachShadow({mode:'closed'}).append(notice);
-                    document.documentElement.append(banner);
-                }""", SUPERVISED_HANDOFF)
-            if not page.is_closed():
-                await page.wait_for_event("close", timeout=0)
-            if browser_guard and browser_guard.refused:
-                res = _blocked_result([RECIPIENT_REFUSED])
-                if out is not None:
-                    out[-1] = res
     if challenge and res.status == "failed":
         res = res.model_copy(update={"status": "needs_human", "message": "Un défi anti-robot doit être résolu à la main."})
     return res

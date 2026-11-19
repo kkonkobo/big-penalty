@@ -3,3 +3,7 @@
 
 class ApplyError(Exception):
     pass
+
+
+class StepChanged(ApplyError):
+    """The operator must reconfirm the current page; no further mutations are allowed on this pass."""

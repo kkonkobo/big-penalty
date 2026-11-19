@@ -16,7 +16,7 @@ from typing import Callable
 from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
-from jobhunt.apply.destination import audit_url, clean_text, clean_url
+from jobhunt.apply.destination import audit_url, clean_text, clean_url, contains_verification_code
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, posting_fingerprint, resolved_identity, similar_role
 from jobhunt.apply.types import Mode, RunResult, RunStatus
@@ -50,9 +50,9 @@ def _safe_result(result: RunResult) -> RunResult:
 
     payload = result.model_dump(include=_RESULT_FIELDS)
     sensitive = {"account_login", "account_signup", "email_verification"}
-    credential_page = False
+    credential_page = contains_verification_code(result.message)
     for step in payload["steps"]:
-        if step["page_kind"] in sensitive:
+        if step["page_kind"] in sensitive or contains_verification_code(step["note"] or ""):
             credential_page = True
             step.update(note="credential_page", filled=[], clicked="", screenshot="")
     if credential_page or result.status == "needs_email":

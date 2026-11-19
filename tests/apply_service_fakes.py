@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
@@ -10,6 +11,20 @@ from jobhunt.apply import store as astore
 from jobhunt.apply.adapters import Receipt, Registry, Requisition
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.types import RunResult, StepLog
+
+
+async def wait_for_supervised(app_id, task):
+    async with asyncio.timeout(12):
+        while app_id not in service._SUPERVISED:
+            if task.done():
+                raise AssertionError(f"Supervised window did not open: {task.result().message}")
+            await asyncio.sleep(0.01)
+    return service._SUPERVISED[app_id].page
+
+
+async def confirm_step(app_id):
+    preview = await service.preview_fill_step(app_id)
+    return await service.fill_step(app_id, preview.token)
 
 
 class FakePool:

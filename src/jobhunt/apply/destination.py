@@ -13,7 +13,7 @@ _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 _CODE = re.compile(
     r"\b(?:otp|code(?:\s+de\s+(?:v[ée]rification|confirmation|s[ée]curit[ée]))?|pin|token|jeton|"
-    r"(?:verifizierungs|bestätigungs|sicherheits)[ -]?code)\s*(?:(?:is|est|ist|lautet)\s+|[:= -]\s*)"
+    r"(?:verifizierungs|bestätigungs|sicherheits)[ -]?code)(?:\s+(?:is|est|ist|lautet)\b)?\s*[:=–—-]?\s*"
     r"[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*", re.I)
 _JOB_PATH = re.compile(r"/(?:jobs?|job-postings?|requisitions?|positions?)/([0-9]{1,18})/?\Z", re.I)
 
@@ -61,6 +61,10 @@ def clean_text(text: str, *, audit: bool = False) -> str:
     return _CODE.sub("[code masqué]", _URL.sub(lambda match: "[lien masqué]" if re.search(
         r"verif|confirm|activate|reset|magic|token|otp", match.group(), re.I) else
         (audit_url if audit else clean_url)(match.group()), text))
+
+
+def contains_verification_code(text: str) -> bool:
+    return _CODE.search(text) is not None
 
 
 RECIPIENT_REFUSED = ("Destination ou transmission non autorisée : fenêtre fermée. "

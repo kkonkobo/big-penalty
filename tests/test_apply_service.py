@@ -20,7 +20,7 @@ from jobhunt.sources.base import ChallengeRequired
 
 from apply_cv_helpers import ERROR, make_app, make_job
 from apply_fakes import CONFIRMED, LoopbackFlowAdapter, ScriptedPlanner, act, cv_pdf, fast, page, server  # noqa: F401
-from apply_service_fakes import FakePool, register_fixture, stub_adapter, stub_engine
+from apply_service_fakes import FakePool, confirm_step, register_fixture, stub_adapter, stub_engine, wait_for_supervised
 from cv_fakes import save_confirmed
 
 
@@ -171,22 +171,34 @@ async def test_other_failures_leave_the_application_approved_and_never_raise(pro
     assert store.get_application(app.id).status == "approved"
 
 
-async def test_supervised_engine_receives_bound_pdf_and_policy_but_no_password(profile, master, tmp_path, monkeypatch):
-    _, app = new_app(profile, master, tmp_path, approve=True)
+async def test_supervised_engine_receives_bound_pdf_and_policy_but_no_password(profile, master, tmp_path, monkeypatch, page, server):
+    _, app = new_app(profile, master, tmp_path, approve=True, url=server.url("step1"))
     seen = []
     monkeypatch.setattr(accounts, "create_password", lambda host, email: seen.append((host, email)) or "Pw-Test-1234")
     calls = stub_engine(monkeypatch)
-    pool = FakePool()
+    pool = FakePool(page)
     refused = await service.run(app.id, mode="supervised", trigger="user", pool=pool, headless=True)
     assert refused.status == "blocked" and not calls and not pool.opened
-    await service.run(app.id, mode="supervised", trigger="user", pool=pool, headless=False)
+    await fill_stub_step(app, page, pool)
     kw = calls[0]
     assert kw.get("password") is None and not seen
-    assert pool.opened == [(profile.id, "apply-supervised-careers.exemple.test", False)] and kw["mode"] == "supervised"
-    assert kw["max_steps"] == get_settings().apply_max_steps and kw["uploads"].cv_pdf == cvs.safe_pdf(app)
+    assert pool.opened == [(profile.id, "apply-supervised-127.0.0.1", False)] and kw["mode"] == "supervised"
+    assert kw["max_steps"] == 1 and kw["current_step"] and kw["uploads"].cv_pdf == cvs.safe_pdf(app)
     assert kw["uploads"].cv_bytes == cvs.safe_pdf(app).read_bytes()
     assert kw["supervised_attempt"].rev == app.current_rev
     assert await kw["before_submit"]()
+
+
+async def fill_stub_step(app, page, pool=None, **kwargs):
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=pool or FakePool(page),
+                                           planner=object(), **kwargs))
+    try:
+        await wait_for_supervised(app.id, task)
+        await confirm_step(app.id)
+    finally:
+        await page.close()
+        result = await asyncio.wait_for(task, 10)
+    return result
 
 
 # ------------------------------------------------------------------ queue
@@ -529,16 +541,16 @@ async def test_origin_link_changed_during_the_run_blocks_the_click(profile, mast
     assert any("destination a changé" in reason for reason in seen[0])
 
 
-async def test_the_injected_verifier_and_hooks_reach_the_engine(profile, master, tmp_path, monkeypatch):
-    _, app = new_app(profile, master, tmp_path, approve=True)
+async def test_the_injected_verifier_and_hooks_reach_the_engine(profile, master, tmp_path, monkeypatch, page, server):
+    _, app = new_app(profile, master, tmp_path, approve=True, url=server.url("step1"))
     calls = stub_engine(monkeypatch)
     verifier = object()
-    await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), verifier=verifier)
+    await fill_stub_step(app, page, verifier=verifier)
     assert calls[0]["verifier"] is verifier and calls[0].get("on_submit_click") is None and callable(calls[0]["before_submit"])
     assert calls[0].get("on_nav_click") is None and callable(calls[0]["host_allowed"])
     calls = stub_engine(monkeypatch)
     await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
-    assert calls[0].get("on_submit_click") is None and calls[0].get("on_nav_click") is None and calls[0]["before_submit"] is None
+    assert calls[0].get("on_submit_click") is None and calls[0].get("on_nav_click") is None and calls[0].get("before_submit") is None
     assert callable(calls[0]["host_allowed"])  # dry runs are bound to the destination too
 
 
@@ -666,16 +678,17 @@ def test_host_allowed_ip_and_localhost_only_when_listed_exactly():
     assert not service.make_host_allowed(None, [])("careers.exemple.test")
 
 
-async def test_run_passes_host_allowed_built_from_the_origin_and_the_trusted_list(profile, master, tmp_path, monkeypatch):
-    _, app = new_app(profile, master, tmp_path, approve=True)
+async def test_run_passes_host_allowed_built_from_the_origin_and_the_trusted_list(profile, master, tmp_path, monkeypatch, page, server):
+    _, app = new_app(profile, master, tmp_path, approve=True, url=server.url("step1"))
+    _, dry_app = new_app(profile, master, tmp_path, 2, approve=True)
     facts.add_trusted_host(profile.id, "recrutement.autre.test")
     calls = stub_engine(monkeypatch)
-    for mode in ("dry_run", "supervised"):
-        await service.run(app.id, mode=mode, trigger="user", pool=FakePool())
+    await service.run(dry_app.id, mode="dry_run", trigger="user", pool=FakePool())
+    await fill_stub_step(app, page)
     dry, attended = [kw["host_allowed"] for kw in calls]
     assert dry("careers.exemple.test") and dry("jobs.lever.co") and dry("recrutement.autre.test")
-    assert attended("careers.exemple.test") and not attended("jobs.lever.co") and not attended("recrutement.autre.test")
-    assert not dry("pirate.example") and not attended("127.0.0.1")
+    assert attended("127.0.0.1") and not attended("jobs.lever.co") and not attended("recrutement.autre.test")
+    assert not dry("pirate.example") and not attended("careers.exemple.test")
 
 
 async def test_a_blocked_run_with_an_untrusted_host_is_recorded_and_shown_as_a_host_pause(profile, master, tmp_path, monkeypatch):
@@ -842,15 +855,14 @@ async def test_a_confirmed_submission_records_its_run_as_the_sending_attempt(pro
     assert [answer.label for answer in service.inferred_answers(app.id)] == ["Disponibilité"]
 
 
-async def test_run_binds_the_revision_and_the_destination_the_user_saw(profile, master, tmp_path, monkeypatch):
-    job, app = new_app(profile, master, tmp_path, approve=True)
+async def test_run_binds_the_revision_and_the_destination_the_user_saw(profile, master, tmp_path, monkeypatch, page, server):
+    job, app = new_app(profile, master, tmp_path, approve=True, url=server.url("step1"))
     calls = stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
     r = await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), expected_rev=app.current_rev + 1)
     assert r.status == "blocked" and "le CV a changé depuis l'affichage" in r.message and not calls
     r = await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), expected_origin=service.origin_digest("https://x.test/"))
     assert r.status == "blocked" and "le lien de l'offre a changé depuis l'affichage" in r.message and not calls
-    r = await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), expected_rev=app.current_rev,
-                          expected_origin=service.origin_digest(job.origin_url))
+    r = await fill_stub_step(app, page, expected_rev=app.current_rev, expected_origin=service.origin_digest(job.origin_url))
     assert r.status == "failed" and len(calls) == 1 and astore.outstanding_attempt(app.id).id == r.id
 
 
@@ -991,12 +1003,15 @@ class SlowPagePool(FakePool):
         return cm()
 
 
-async def test_cancel_during_page_cleanup_stores_the_result_the_engine_returned(profile, master, tmp_path, monkeypatch):
-    _, app = new_app(profile, master, tmp_path, approve=True)
+async def test_cancel_during_page_cleanup_stores_the_result_the_engine_returned(profile, master, tmp_path, monkeypatch, page, server):
+    _, app = new_app(profile, master, tmp_path, approve=True, url=server.url("step1"))
     final = RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True, steps=[inferred_step("Niveau")])
     stub_engine(monkeypatch, final)
-    pool = SlowPagePool()
-    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=pool))
+    pool = SlowPagePool(page)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=pool, planner=object()))
+    await wait_for_supervised(app.id, task)
+    await confirm_step(app.id)
+    await page.close()
     for _ in range(300):
         if getattr(pool, "cleaning", False):
             break

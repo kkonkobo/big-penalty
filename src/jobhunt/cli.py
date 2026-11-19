@@ -589,6 +589,7 @@ def apply_supervised(app_id: int) -> None:
     destination = audit_url(clean_url(job.origin_url, navigation=True)) if job else ""
     console.print(f"Candidature {app.id} · CV révision {app.current_rev} · {destination or 'destination inconnue'}", markup=False)
     console.print(SUPERVISED_HANDOFF, markup=False)
+    console.print(f"Pour la saisie, utilisez « Remplir cette étape » ou lancez big-penalty apply fill-step {app_id} dans un autre terminal.")
     if not typer.confirm("La saisie et le dépôt du CV peuvent transmettre des données avant le clic final. Continuer ?"):
         raise typer.Exit(1)
     confirmations = []
@@ -607,6 +608,30 @@ def apply_supervised(app_id: int) -> None:
     _print_run(result)
     if result.status == "blocked":
         raise typer.Exit(1)
+
+
+@apply_app.command("fill-step")
+def apply_fill_step(app_id: Annotated[int, typer.Argument(help="numéro de candidature", min=1)]) -> None:
+    """Remplit la page affichée dans la fenêtre supervisée, sans cliquer."""
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.supervised import call_local
+
+    try:
+        preview = asyncio.run(call_local(app_id, "preview"))
+        console.print(f"Offre réservée : {preview['company']} · {preview['title']} · {preview['reserved_url']}", markup=False)
+        console.print(f"Page ouverte : {preview['page_url']}", markup=False)
+        if preview["warning"]:
+            console.print("ATTENTION : le titre de la page ne ressemble ni au poste ni à l’entreprise réservés.", style="bold yellow")
+        if not typer.confirm("Confirmez-vous que la page ouverte concerne cette offre et autorisez-vous la saisie de cette étape ?"):
+            raise typer.Exit(1)
+        result = asyncio.run(call_local(app_id, "fill", preview["token"]))
+    except ApplyError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(1) from None
+    if result["status"] in ("blocked", "failed", "needs_human"):
+        console.print("Saisie interrompue. Consultez l’essai ; si la fenêtre est ouverte, vérifiez le poste avant de reconfirmer.")
+        raise typer.Exit(1)
+    console.print("Étape vérifiée. Poursuivez dans la fenêtre supervisée ; aucun bouton n’a été cliqué.")
 
 
 @apply_app.command("send")

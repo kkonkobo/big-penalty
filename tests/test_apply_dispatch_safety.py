@@ -4,15 +4,19 @@ from apply_cv_helpers import make_app, make_job
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 import pytest
 from apply_fakes import FakeVerifier, FixtureServer, ScriptedPlanner, act, cv_pdf, fast, page, sample_facts, server  # noqa: F401
-from apply_service_fakes import FakePool
+from apply_service_fakes import FakePool, confirm_step, wait_for_supervised
 from cv_fakes import save_confirmed
 
 from jobhunt import db
 from jobhunt.apply import engine, service, store
+from jobhunt.apply.adapters import Registry, Requisition
 from jobhunt.apply.destination import RecipientGuard, origin
+from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.supervised import call_local
 from jobhunt.apply.identity import resolved_identity
 from jobhunt.apply.engine import DRY_UNTESTED, UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.types import RunResult, StepLog, StepPlan
@@ -46,6 +50,139 @@ async def production_pool():
         await pool.close()
 
 
+def posting_form(action):
+    return (f'<title>Ingénieur systèmes embarqués</title><form action="{action}" method="post">'
+            '<label for="name">Prénom</label><input id="name" name="first_name">'
+            '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>')
+
+
+@pytest.mark.parametrize("change", ["redirect", "spa", "frame", "action"])
+async def test_production_adapter_checks_live_posting_identity(change, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    server.html["/jobs/100"] = posting_form("/jobs/200" if change == "action" else "/jobs/100")
+    server.html["/jobs/200"] = posting_form("/jobs/200")
+    if change == "redirect":
+        server.redirects["/jobs/100"] = "/jobs/200"
+    if change == "frame":
+        server.html["/jobs/100"] = '<iframe src="/jobs/200"></iframe>'
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+
+    class Adapter:
+        name = "posting-fixture"
+        capability = "supervised"
+        retry_rule = "never"
+        boundaries = {"draft_write": "auto", "cv_upload_parse": "auto"}
+
+        def matches(self, url, dom_markers):
+            return float(origin(url) == server.base)
+
+        def resolve(self, url, dom_markers):
+            path = urlsplit(url).path
+            if self.matches(url, dom_markers) and path in {"/jobs/100", "/jobs/200"}:
+                return Requisition("fixture", path.rsplit("/", 1)[1])
+
+        async def supervise(self, request, fill):
+            class Planner(ScriptedPlanner):
+                async def plan(self, *args, **kwargs):
+                    if change == "spa":
+                        page = service._SUPERVISED[app.id].page
+                        await page.evaluate("history.pushState({}, '', '/jobs/200')")
+                    return await super().plan(*args, **kwargs)
+
+            await fill(Planner(form))
+            return RunResult(status="ready", message="Must not mask the engine's refusal")
+
+    registry = Registry()
+    registry.register(Adapter(), host="127.0.0.1")
+    monkeypatch.setattr(service, "registry", registry)
+    result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=production_pool), 16)
+    assert "poste" in result.message and not server.posts and not production_pool._contexts
+    assert store.outstanding_attempt(app.id).id == result.id
+    assert not any(step.filled for step in result.result.steps)
+
+
+@pytest.mark.parametrize("change", ["url", "heading", "during_planner"])
+async def test_production_generic_fill_requires_fresh_confirmation(change, production_pool, server, profile, tmp_path, fast):
+    server.redirects["/jobs/100"] = "/jobs/200"
+    server.html["/jobs/200"] = posting_form("/jobs/200").replace("Ingénieur systèmes embarqués", "Technicien comptable")
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+
+    class Planner(ScriptedPlanner):
+        async def plan(self, *args, **kwargs):
+            if change == "during_planner" and not self.calls:
+                await opened.evaluate("history.pushState({}, '', '/jobs/300')")
+            return await super().plan(*args, **kwargs)
+
+    planner = Planner(form)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool, planner=planner))
+    opened = await wait_for_supervised(app.id, task)
+    try:
+        assert not planner.calls and not await opened.input_value("#name")
+        preview = await service.preview_fill_step(app.id)
+        assert preview.warning and preview.reserved_url.endswith("/jobs/100") and preview.page_url.endswith("/jobs/200")
+        if change == "during_planner":
+            result = await service.fill_step(app.id, preview.token)
+            assert "confirmez de nouveau" in result.message
+        else:
+            script = {"url": "history.pushState({}, '', '/jobs/300')", "heading": "document.title = 'Autre poste'"}[change]
+            await opened.evaluate(script)
+            with pytest.raises(ApplyError, match="confirmez de nouveau"):
+                await service.fill_step(app.id, preview.token)
+        assert not opened.is_closed() and not await opened.input_value("#name")
+        await confirm_step(app.id)
+        assert await opened.input_value("#name") and not server.posts
+    finally:
+        await opened.close()
+        await asyncio.wait_for(task, 10)
+
+
+@pytest.mark.parametrize("invalidate", ["settled", "approval", "pdf"])
+async def test_production_fill_step_reuses_reservation_and_refuses_stale_reentry(invalidate, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    import socket
+    from conftest import _REAL_CONNECT
+    from jobhunt.apply.supervised import _socket_path
+
+    server.html["/jobs/100"] = posting_form("/jobs/100") + '<a href="/jobs/100/step2">Suivant</a>'
+    server.html["/jobs/100/step2"] = posting_form("/jobs/100")
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    socket_path = str(_socket_path(app.id))
+    offline_connect = socket.socket.connect
+
+    def local_only(sock, address, *args, **kwargs):
+        return (_REAL_CONNECT if address == socket_path else offline_connect)(sock, address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", local_only)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                           planner=ScriptedPlanner(form)))
+    opened = await wait_for_supervised(app.id, task)
+    try:
+        first = await call_local(app.id, "preview")
+        await call_local(app.id, "fill", first["token"])
+        assert await opened.input_value("#name") and opened.url.endswith("/jobs/100")
+        await opened.get_by_text("Suivant").click()
+        await opened.wait_for_url("**/step2")
+        assert not await opened.input_value("#name")
+        second = await service.preview_fill_step(app.id)
+        await service.fill_step(app.id, second.token, run_id=second.run_id)
+        assert second.run_id == first["run_id"] and await opened.input_value("#name")
+        assert len(store.active_reservations(profile.id)) == 1 and not server.posts
+        last = await service.preview_fill_step(app.id)
+        if invalidate == "settled":
+            with db.connect() as conn:
+                conn.execute("UPDATE apply_reservations SET released_at=? WHERE run_id=?", (db.now().isoformat(), last.run_id))
+        elif invalidate == "approval":
+            with db.connect() as conn:
+                conn.execute("UPDATE applications SET approved_rev=NULL WHERE id=?", (app.id,))
+        else:
+            cvs.safe_pdf(app).write_bytes(b"%PDF-1.4 changed")
+        with pytest.raises(ApplyError):
+            await service.fill_step(app.id, last.token)
+        assert opened.is_closed() and not server.posts
+    finally:
+        if not opened.is_closed():
+            await opened.close()
+        await asyncio.wait_for(task, 10)
+
+
 async def test_production_supervised_non_http_is_inert_in_pages_frames_and_popups(production_pool, server, profile, tmp_path, fast):
     foreign = FixtureServer()
     try:
@@ -59,27 +196,58 @@ async def test_production_supervised_non_http_is_inert_in_pages_frames_and_popup
         server.html["/transport-frame"] = script
         _, app = approved_fixture(profile, tmp_path, server.url("transport"))
 
-        class Probe(ScriptedPlanner):
-            async def plan(self, *args, **kwargs):
-                context = next(iter(production_pool._contexts.values()))
-                opened = context.pages[0]
-                assert await opened.evaluate("window.inert", isolated_context=False) == [True] * 5
-                frame = next(frame for frame in opened.frames if frame.url.endswith("/transport-frame"))
-                assert await frame.evaluate("window.inert", isolated_context=False) == [True] * 5
-                async with opened.expect_popup() as pending:
-                    await opened.evaluate("() => { window.open('/transport-frame'); }")
-                popup = await pending.value
-                await popup.wait_for_load_state("domcontentloaded")
-                assert await popup.evaluate("window.inert", isolated_context=False) == [True] * 5
-                await popup.close()
-                await opened.close()
-                return await super().plan(*args, **kwargs)
-
-        probe = Probe([StepPlan(page_kind="other")])
-        result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
-                                                    planner=probe), timeout=20)
-        assert probe.calls and not foreign.requests and not foreign.posts
+        task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool))
+        opened = await wait_for_supervised(app.id, task)
+        try:
+            assert await opened.evaluate("window.inert", isolated_context=False) == [True] * 5
+            frame = next(frame for frame in opened.frames if frame.url.endswith("/transport-frame"))
+            assert await frame.evaluate("window.inert", isolated_context=False) == [True] * 5
+            async with opened.expect_popup() as pending:
+                await opened.evaluate("() => { window.open('/transport-frame'); }")
+            popup = await pending.value
+            await popup.wait_for_load_state("domcontentloaded")
+            assert await popup.evaluate("window.inert", isolated_context=False) == [True] * 5
+            await popup.close()
+        finally:
+            await opened.close()
+            result = await asyncio.wait_for(task, timeout=10)
+        assert not foreign.requests and not foreign.posts
         assert store.outstanding_attempt(app.id).id == result.id and not production_pool._contexts
+    finally:
+        foreign.close()
+
+
+@pytest.mark.parametrize("kind", ["blank", "srcdoc", "dynamic", "worker", "shared_worker"])
+async def test_production_transport_inert_in_fresh_realms(kind, production_pool, server, profile):
+    foreign = FixtureServer()
+    try:
+        target = foreign.url("collect").replace("http:", "ws:")
+        server.html["/realms"] = '<title>Fixture</title>'
+        server.html["/frame"] = '<title>Frame</title>'
+        async with production_pool.page(profile.id, "apply-supervised-realms", False) as opened:
+            guard = RecipientGuard(frozenset({origin(server.base)}))
+            await guard.install(opened)
+            await guard.navigate(opened, server.url("realms"), production_pool.goto)
+            checks = await opened.evaluate("""async ([kind, target]) => {
+                const inert = (Constructor, ...args) => {
+                    try { new Constructor(...args); return false; }
+                    catch (error) { return error.name === 'SecurityError'; }
+                };
+                if (kind.endsWith('worker')) {
+                    const script = `new WebSocket(${JSON.stringify(target)})`;
+                    const url = URL.createObjectURL(new Blob([script], {type: 'text/javascript'}));
+                    return [inert(kind === 'worker' ? Worker : SharedWorker, url)];
+                }
+                const frame = document.createElement('iframe');
+                if (kind === 'srcdoc') frame.srcdoc = '<title>Embedded</title>';
+                if (kind === 'dynamic') frame.src = '/frame';
+                const loaded = new Promise(resolve => frame.addEventListener('load', resolve, {once:true}));
+                document.body.appendChild(frame);
+                const before = inert(frame.contentWindow.WebSocket, target);
+                await loaded;
+                return [before, inert(frame.contentWindow.WebSocket, target)];
+            }""", [kind, target], isolated_context=False)
+            assert all(checks) and not foreign.requests and not foreign.posts
     finally:
         foreign.close()
 
@@ -148,8 +316,11 @@ async def test_production_rechecks_after_last_dom_read(mutation, production_pool
                   act(snapshot, "Indicatif", "select", "phone", "France (+33)"))
         return StepPlan(page_kind="form", actions=[action])
 
-    result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
-                                                planner=ScriptedPlanner(plan)), timeout=20)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                           planner=ScriptedPlanner(plan)))
+    await wait_for_supervised(app.id, task)
+    await confirm_step(app.id)
+    result = await asyncio.wait_for(task, timeout=12)
     assert revoked and not server.posts and not production_pool._contexts
     assert store.outstanding_attempt(app.id).id == result.id
 
@@ -171,8 +342,12 @@ async def test_supervised_recipient_refusal_closes_and_holds(egress, page, serve
                 }""", foreign.url("collect"))
                 return await super().plan(*args, **kwargs)
 
-        result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page),
-                                                    planner=ProbePlanner(form)), timeout=12)
+        task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page),
+                                               planner=ProbePlanner(form)))
+        if egress == "write":
+            await wait_for_supervised(app.id, task)
+            await confirm_step(app.id)
+        result = await asyncio.wait_for(task, timeout=12)
         assert page.is_closed() and store.outstanding_attempt(app.id).id == result.id
         assert "fenêtre fermée" in result.message and not foreign.requests and not foreign.posts
     finally:
@@ -196,8 +371,11 @@ async def test_supervised_rechecks_after_live_scan(changed, page, server, profil
                     conn.execute("UPDATE jobs SET status='rejected' WHERE id=?", (job.id,))
 
     monkeypatch.setattr(engine._Run, "_live_decisions", mutate_after_scan)
-    result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page),
-                                                planner=ScriptedPlanner(form)), timeout=12)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page),
+                                           planner=ScriptedPlanner(form)))
+    await wait_for_supervised(app.id, task)
+    await confirm_step(app.id)
+    result = await asyncio.wait_for(task, timeout=12)
     assert page.is_closed() and store.outstanding_attempt(app.id).id == result.id
     assert not any(step.filled for step in result.result.steps) and not server.posts
 
@@ -254,9 +432,12 @@ def test_origin_resolution_honors_canonical_ok():
     assert resolved_identity({"origin_resolution": {**metadata, "canonical_ok": True}}) == ("fixture", "req-7")
 
 
-@pytest.mark.parametrize("phrase", ["Your verification code is 654321", "Votre code de vérification est 654321",
-                                    "Ihr Bestätigungscode lautet 654321"])
-def test_credential_step_persists_only_diagnostics(server, profile, tmp_path, phrase):
+@pytest.mark.parametrize("prefix", ["Your verification code is", "Votre code de vérification est", "Ihr Bestätigungscode lautet"])
+@pytest.mark.parametrize("separator", [" ", ": ", "\u00a0:\u202f", " — "])
+def test_credential_step_persists_only_diagnostics(server, profile, tmp_path, prefix, separator):
+    phrase = prefix + separator + "654321"
+    from jobhunt.apply.destination import clean_text
+    assert "654321" not in clean_text(phrase)
     target = server.url("activate/fixture-secret") + "?token=fixture-token"
     _, app = approved_fixture(profile, tmp_path, target)
     run = store.start_run(app.id, app.current_rev, "dry_run", "user", lambda rid: tmp_path / "result")
@@ -267,7 +448,7 @@ def test_credential_step_persists_only_diagnostics(server, profile, tmp_path, ph
     assert result.final_url == result.steps[0].url == server.base
     assert result.steps[0].note == "credential_page" and not result.steps[0].clicked and not result.steps[0].screenshot
     assert "654321" not in result.model_dump_json() and "fixture-secret" not in result.model_dump_json()
-    assert "654321" not in store._safe_result(RunResult(status="failed", message=phrase)).message
+    assert "credential_page" in store._safe_result(RunResult(status="failed", message=phrase)).message
 
 
 async def test_secret_url_is_not_navigated_bound_or_persisted(server, profile, tmp_path, monkeypatch):
@@ -364,6 +545,8 @@ async def test_supervised_holds_before_headful_browser_and_only_operator_settles
                                            planner=ScriptedPlanner(form), verifier=FakeVerifier()))
     try:
         await page.locator("aside").wait_for(timeout=6000)
+        assert not await page.input_value("input[name=first_name]")
+        await confirm_step(app.id)
         assert await page.input_value("input[name=first_name]")
         assert await page.locator("input[type=file]").evaluate("el => el.files[0].name") == "CV.pdf"
         assert not server.posts_to("/apply")
