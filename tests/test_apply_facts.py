@@ -58,19 +58,19 @@ def test_name_split_multiple_tokens_and_answers_override(profile):
 
 
 def test_email_phone_fall_back_to_the_profile(profile):
-    profile = profile.model_copy(update={"email": "lea@example.test", "phone": "06 00 00 00 00"})
+    profile = profile.model_copy(update={"email": "lea@example.test", "phone": "06 12 34 56 78"})
     m = sample_master()
     m.identity.email = m.identity.phone = m.identity.linkedin = None
     s = sheet(profile, make_job(profile), master=m)
     assert val(s, "email") == "lea@example.test" and val(s, "account_email") == "lea@example.test"
-    assert val(s, "phone") == "06 00 00 00 00" and s.get("phone").variants == ["+33 6 12 34 56 78", "+33612345678", "0612345678"]
+    assert val(s, "phone") == "06 12 34 56 78" and s.get("phone").variants == ["+33 6 12 34 56 78", "+33612345678", "0612345678"]
     assert val(s, "linkedin") is None and s.get("linkedin").variants == []
 
 
 @pytest.mark.parametrize("raw", ["+33 6 12 34 56 78", "0033612345678", "06.12.34.56.78", "0612345678", "+33612345678"])
 def test_phone_variants_cover_the_french_formats(raw):
     got = set(F.phone_variants(raw)) | {raw}
-    assert {"+33 6 12 34 56 78", "+33612345678", "0612345678", "06 00 00 00 00"} <= got
+    assert {"+33 6 12 34 56 78", "+33612345678", "0612345678", "06 12 34 56 78"} <= got
 
 
 def test_phone_variants_empty_for_foreign_numbers():
