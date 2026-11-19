@@ -62,6 +62,7 @@ def confirmation_json(body: bytes) -> bool:
 class Audience:
     def __init__(self, reserved_url, verified_urls, recheck, *, pdf_bytes=None):
         self.reserved_url = reserved_url
+        self.recipient_url = reserved_url
         self.verified_urls = frozenset(verified_urls)
         self.document = reserved_url
         self.recheck = recheck
@@ -73,6 +74,7 @@ class Audience:
         self.method = ""
         self.next_document = ""
         self.document_nonce = ""
+        self.entry_nonce = ""
         self.final_response = False
         self.final_response_at = 0.0
         self.final_started = False
@@ -89,7 +91,12 @@ class Audience:
         if not recipient:
             return False
         host = urlsplit(recipient).hostname
-        return recipient == origin(self.reserved_url) or bool(self.domain and _domain(host) == self.domain)
+        return recipient == origin(self.recipient_url) or bool(self.domain and _domain(host) == self.domain)
+
+    def bind_recipient(self, target):
+        self.recipient_url = self.document = target
+        self.host = urlsplit(target).hostname
+        self.domain = _domain(self.host)
 
     def initial_redirect(self, source, destination):
         target = clean_url(destination, navigation=True)
@@ -201,11 +208,17 @@ class Audience:
     def receipt_url(self, url):
         return confirmation_url(url, self.document)
 
-    async def bind_document(self, page):
+    async def bind_document(self, page, *, entry=False):
         nonce = secrets.token_urlsafe(24)
+        live_url = await page.evaluate("""([nonce, entry]) => {
+            if (entry && document.__bp_apply_landing !== entry) return null;
+            document.__bp_autonomous_document = nonce;
+            return location.href;
+        }""", [nonce, self.entry_nonce if entry else ""], isolated_context=True)
+        if not live_url:
+            raise ApplyError(SUPERVISED_REQUIRED)
         self.document_nonce = nonce
-        self.live_url = await page.evaluate("value => { document.__bp_autonomous_document = value; return location.href; }",
-                                            nonce, isolated_context=True)
+        self.live_url = live_url
 
     async def after_click(self, page, *, observing=False):
         if observing and self.scriptable and not self.next_document:

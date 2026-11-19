@@ -83,6 +83,8 @@ class RecipientGuard:
         self.final_response = False
         self._initial_url = ""
         self._next_url = ""
+        self.probe = None
+        self.page = None
 
     async def navigate(self, page, url, goto) -> None:
         """Follow initial redirects explicitly, preserving the actual document URL."""
@@ -114,6 +116,7 @@ class RecipientGuard:
         return status in {301, 302, 303, 307, 308, 403, 429}
 
     async def install(self, page) -> None:
+        self.page = page
         await page.context.add_init_script(script="""(() => {
             const allowed = new Set(%s);
             const inert = function () { throw new DOMException('Transport disabled', 'SecurityError'); };
@@ -141,13 +144,21 @@ class RecipientGuard:
                 await route.abort()
                 return
             write = request.method not in {"GET", "HEAD"}
+            if self.probe and write:
+                if self.probe.same_site(request.url):
+                    await route.abort()
+                else:
+                    await refuse(route, "apply_target_unverified")
+                return
             if self.read_only and write:
                 await route.abort()
                 return
             permitted = self.allows(request.url)
-            if self.audience:
+            if self.probe:
+                permitted = self.probe.allows(request)
+            elif self.audience:
                 try:
-                    permitted = self.audience.request_allowed(request, page, initial=request.url == self._initial_url)
+                    permitted = self.audience.request_allowed(request, self.page, initial=request.url == self._initial_url)
                 except Exception:
                     permitted = False
             if not permitted:
@@ -157,7 +168,8 @@ class RecipientGuard:
                     category = ("same_site" if self.allows(request.url) or
                                 (self.audience and self.audience.write_recipient(request.url)) else
                                 "ats" if classify_ats(request.url) else "other")
-                    await refuse(route, f"recipient_refused_{category}_{'write' if write else 'navigation'}")
+                    await refuse(route, "apply_target_unverified" if self.probe else
+                                 f"recipient_refused_{category}_{'write' if write else 'navigation'}")
                 else:
                     await route.abort()
                 return
@@ -183,7 +195,10 @@ class RecipientGuard:
                         self.audience.final_receipt_url = target
                 if self.refusal_status(response.status):
                     target = urljoin(request.url, response.headers.get("location", ""))
-                    if (300 <= response.status < 400 and response.headers.get("location")
+                    if (self.probe and 300 <= response.status < 400 and response.headers.get("location")
+                            and request.is_navigation_request() and self.probe.redirect(target)):
+                        await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif (300 <= response.status < 400 and response.headers.get("location")
                             and request.method in {"GET", "HEAD"} and request.url == self._initial_url
                             and request.is_navigation_request() and request.frame == page.main_frame
                             and (self.audience.initial_redirect(request.url, target) if self.audience else self.allows(target))

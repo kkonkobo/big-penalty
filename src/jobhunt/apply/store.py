@@ -9,7 +9,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -62,6 +62,10 @@ _DIAGNOSTICS = {
     "aggregator_origin": "Le lien est celui d'un agrégateur, pas du site de l'entreprise.",
     "origin_not_usable": "Il n’y a pas de lien exploitable vers le site de l’entreprise.",
     "job_page_no_apply_control": "Aucun lien de candidature vérifiable sur la page de l’offre.",
+    "apply_target_unverified": "Destination de candidature non vérifiée.",
+    "apply_control_ambiguous": "Plusieurs contrôles de candidature possibles.",
+    "dry_apply_form_found": "Formulaire de candidature observé. Aucune donnée saisie ni envoyée.",
+    "dry_apply_form_needs_input": "Formulaire de candidature observé ; des réponses sont requises.",
     "cross_domain_apply_target": "Lien de candidature sur une autre origine non vérifiée.",
     "duplicate_unconfirmed": "Doublon possible : confirmez « ce n'est pas un doublon ».",
     "approval_binding_changed": "Approbation ou destination modifiée avant l'envoi",
@@ -197,6 +201,9 @@ def binding_record(attempt: Attempt) -> dict:
     payload = asdict(attempt)
     if not attempt.autonomous:
         payload.pop("autonomous")
+    if not attempt.landing_digest:
+        payload.pop("landing_host")
+        payload.pop("landing_digest")
     return {**payload, "url": audit_url(attempt.url), "url_digest": _url_key(attempt.url)}
 
 
@@ -641,11 +648,44 @@ def binding_active(attempt: Attempt) -> bool:
                     and _binding_current(conn, run, attempt))
 
 
+def bind_apply_landing(attempt: Attempt, target: str, *, confirmed_distinct=frozenset()) -> Attempt:
+    from urllib.parse import urlsplit
+    from jobhunt.apply.identity import ats_target
+
+    host = urlsplit(target).hostname
+    if not attempt.autonomous or attempt.landing_digest or not host or clean_url(target, navigation=True) != target:
+        raise ApplyError(NOT_ACTIVE)
+    _, canonical = ats_target(target)
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run = conn.execute("SELECT r.* FROM application_runs r JOIN apply_reservations v ON v.run_id=r.id"
+                           " WHERE r.id=? AND r.status='running' AND r.submit_clicked_at IS NULL"
+                           " AND v.released_at IS NULL AND v.binding_json=?", (attempt.run_id, _binding_json(attempt))).fetchone()
+        if not run or not _binding_current(conn, run, attempt) or _host_paused(conn, host):
+            raise ApplyError(NOT_ACTIVE)
+        duplicates = _potential_duplicates(conn, attempt.profile_id, attempt.application_id, canonical)
+        if any(exact or app_id not in confirmed_distinct for app_id, exact in duplicates.items()):
+            raise ApplyError(NOT_ACTIVE)
+        digest = _url_key(target)
+        if conn.execute("SELECT 1 FROM apply_reservations WHERE profile_id=? AND application_id<>?"
+                        " AND (released_at IS NULL OR receipt_outcome='confirmed' OR run_id IN"
+                        " (SELECT sent_run_id FROM applications WHERE profile_id=? AND status='submitted'))"
+                        " AND (url_key=? OR json_extract(binding_json, '$.landing_digest')=?)",
+                        (attempt.profile_id, attempt.application_id, attempt.profile_id, digest, digest)).fetchone():
+            raise ApplyError(NOT_ACTIVE)
+        updated = replace(attempt, landing_host=host, landing_digest=digest,
+                          tenant=canonical[0] if canonical else attempt.tenant,
+                          requisition_id=canonical[1] if canonical else attempt.requisition_id)
+        conn.execute("UPDATE apply_reservations SET binding_json=? WHERE run_id=?", (_binding_json(updated), attempt.run_id))
+        return updated
+
+
 def _host_paused(conn, host: str) -> bool:
     outcomes = conn.execute("""SELECT r.status, v.receipt_outcome FROM apply_reservations v
         JOIN application_runs r ON r.id=v.run_id
         WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
-        AND json_extract(v.binding_json, '$.host')=? ORDER BY v.id DESC LIMIT 2""", (host,)).fetchall()
+        AND ? IN (json_extract(v.binding_json, '$.host'), json_extract(v.binding_json, '$.landing_host'))
+        ORDER BY v.id DESC LIMIT 2""", (host,)).fetchall()
     return len(outcomes) == 2 and all(row["status"] == "failed" or row["receipt_outcome"] == "uncertain" for row in outcomes)
 
 
@@ -656,11 +696,17 @@ def host_paused(host: str) -> bool:
 
 def paused_hosts() -> set[str]:
     with connect() as conn:
-        rows = conn.execute("""WITH host_runs AS (
-            SELECT json_extract(v.binding_json, '$.host') AS host, v.receipt_outcome, r.status,
-            ROW_NUMBER() OVER (PARTITION BY json_extract(v.binding_json, '$.host') ORDER BY v.id DESC) AS pos
+        rows = conn.execute("""WITH eligible AS (
+            SELECT v.id, json_extract(v.binding_json, '$.host') AS host,
+            json_extract(v.binding_json, '$.landing_host') AS landing, v.receipt_outcome, r.status
             FROM apply_reservations v JOIN application_runs r ON r.id=v.run_id
             WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
+        ), hosts AS (
+            SELECT id, host, receipt_outcome, status FROM eligible
+            UNION ALL SELECT id, landing, receipt_outcome, status FROM eligible WHERE landing != host
+        ), host_runs AS (
+            SELECT host, receipt_outcome, status, ROW_NUMBER() OVER (PARTITION BY host ORDER BY id DESC) AS pos
+            FROM hosts
         ) SELECT host FROM host_runs WHERE pos<=2 GROUP BY host
         HAVING SUM(CASE WHEN status='failed' OR receipt_outcome='uncertain' THEN 1 ELSE 0 END)=2""").fetchall()
         return {row["host"] for row in rows}
@@ -688,7 +734,8 @@ def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=
     rows = conn.execute("""SELECT a.id, a.job_id, COALESCE(j.company,a.company) AS company,
         COALESCE(j.title,a.job_title) AS title, j.extra, j.origin_url, a.sent_origin_url,
         v.binding_json, v.url_key FROM applications a LEFT JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id
-        LEFT JOIN apply_reservations v ON v.application_id=a.id AND v.released_at IS NULL
+        LEFT JOIN apply_reservations v ON v.application_id=a.id AND
+            (v.released_at IS NULL OR v.receipt_outcome='confirmed' OR v.run_id=a.sent_run_id)
         WHERE a.profile_id=? AND a.id<>? AND (a.status='submitted' OR v.id IS NOT NULL OR EXISTS (
             SELECT 1 FROM application_runs r WHERE r.application_id=a.id AND r.operator_not_sent_at IS NULL
             AND (r.submit_clicked_at IS NOT NULL OR r.nav_clicked_at IS NOT NULL)))""",

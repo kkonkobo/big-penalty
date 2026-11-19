@@ -53,6 +53,8 @@ class Attempt:
     profile_id: int = 0
     receipt_kind: ReceiptType = "none"
     autonomous: bool = False
+    landing_host: str = ""
+    landing_digest: str = ""
 
 
 @dataclass(frozen=True)

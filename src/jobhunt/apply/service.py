@@ -23,6 +23,7 @@ from jobhunt import db
 from jobhunt.apply import accounts, policy
 from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Match, Receipt, WriteGate, clean_receipt, origin, registry
 from jobhunt.apply.autonomous import Audience
+from jobhunt.apply.apply_entry import discover
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url
@@ -495,7 +496,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         if not eligible:
             raise ApplyError(" ; ".join(reasons))
         if (not get_settings().apply_autonomous or registry.find(job.origin_url, job.origin_ats) != match
-                or not apply_store.binding_active(attempt)):
+                or not apply_store.binding_active(attempt)
+                or (attempt.landing_host and apply_store.host_paused(attempt.landing_host))):
             raise ApplyError(SUPERVISED_ONLY)
 
     async def recheck():
@@ -531,17 +533,31 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     diagnostics.control = "navigation"
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
         await guard.install(page)
-        async def open_apply(target, source, nonce):
-            if (page.url != source or source != audience.live_url or not nonce or nonce != audience.document_nonce
-                    or not audience.apply_navigation(target)):
-                return False
-            check()
-            await guard.navigate(page, target, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
-            audience.document = clean_url(page.url, navigation=True)
-            if guard.refused or not audience.initial_redirect(attempt.url, audience.document):
-                raise ApplyError("Destination de l'offre non vérifiée.")
-            await audience.bind_document(page)
-            return True
+        async def open_apply(tab, *, require_posting):
+            nonlocal attempt, password, account_known
+            try:
+                landing, target = await discover(tab, guard, audience, requisition=attempt.requisition_id,
+                                                 require_posting=require_posting)
+                if landing is not None:
+                    if clean_url(landing.url, navigation=True) != target or guard.refused:
+                        return None, "apply_target_unverified"
+                    attempt = apply_store.bind_apply_landing(attempt, target, confirmed_distinct=confirmed_distinct)
+                    browser[-1] = (attempt, guard)
+                    audience.bind_recipient(target)
+                    await audience.bind_document(landing, entry=True)
+                    if clean_url(audience.live_url, navigation=True) != target or guard.refused:
+                        return None, "apply_target_unverified"
+                    if email:
+                        password, account_known = accounts.guarded_account_callbacks(
+                            email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
+                            posting_url=target,
+                        )
+                    guard.page = landing
+                return landing, target
+            except ApplyError:
+                return None, "apply_target_unverified"
+            finally:
+                guard.probe = None
 
         try:
             await guard.navigate(page, attempt.url, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
@@ -557,8 +573,9 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 uploads=Uploads(cv_pdf=cvs.safe_pdf(app), cv_bytes=request.pdf), mode="submit", current_step=True,
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
-                password=password, account_known=account_known, diagnostics=diagnostics,
-                apply_navigation=open_apply,
+                password=(lambda url: password(url) if password else "") if email else None,
+                account_known=(lambda url: bool(account_known and account_known(url))) if email else None,
+                diagnostics=diagnostics, apply_entry=open_apply,
                 host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
@@ -683,24 +700,28 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                     if not guard.refused:
                         await audience.bind_document(tab)
 
-                async def inspect_navigation(target, source, nonce):
-                    if (page.url != source or source != audience.live_url or not nonce or nonce != audience.document_nonce
-                            or not audience.apply_navigation(target)):
-                        return False
-                    await page.context.set_offline(False)
+                async def inspect_navigation(tab, *, require_posting):
+                    identity = resolved_identity(job.extra)
                     try:
-                        await inspect_goto(page, target)
-                        return not guard.refused
+                        landing, target = await discover(tab, guard, audience, requisition=identity[1] if identity else None,
+                                                         require_posting=require_posting)
+                        if landing is not None:
+                            audience.bind_recipient(target)
+                            await audience.bind_document(landing, entry=True)
+                            guard.page = landing
+                        return landing, target
+                    except ApplyError:
+                        return None, "apply_target_unverified"
                     finally:
-                        if not page.is_closed():
-                            await page.context.set_offline(True)
+                        guard.probe = None
 
             res = await run_application(page, url=started_origin, facts=facts, planner=planner,
                                         uploads=Uploads(cv_pdf=cv_pdf), mode=mode, verifier=verifier,
                                         out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)),
-                                        job_title=job.title, company=job.company or "", host_allowed=host_allowed,
+                                        job_title=job.title, company=job.company or "",
+                                        host_allowed=(lambda name: name == audience.host) if inspect_navigation else host_allowed,
                                         max_steps=get_settings().apply_max_steps, goto=inspect_goto if inspect_navigation else goto,
-                                        apply_navigation=inspect_navigation,
+                                        apply_entry=inspect_navigation,
                                         choices=scoped_choices.load(app.profile_id, app.id, app.current_rev,
                                                                    origin_digest(started_origin)) if trigger == "user" else None)
             if inspect_navigation and guard.refused:

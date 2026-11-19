@@ -540,6 +540,8 @@ class _Run:
         self.generic_step = False
         self.autonomous = None
         self.apply_navigation = None
+        self.apply_entry = None
+        self.discovering_apply_entry = False
         self.apply_link_followed = False
         self.inspection_offline = False
         self.consent_codes = set()
@@ -1683,7 +1685,9 @@ class _Run:
             try:
                 # any document request once data was entered; before that, any NON-GET one (a dry run never needs one: its pre-data
                 # clicks are cookie banners and "Postuler" links)
-                if self.inspection_offline or (self._inspection_only and request.method not in {"GET", "HEAD"}):
+                if self.discovering_apply_entry:
+                    await route.fallback()
+                elif self.inspection_offline or (self._inspection_only and request.method not in {"GET", "HEAD"}):
                     await route.abort()
                 elif request.resource_type == "document" and (self.touched or self._is_form_get_submission(request)
                         or (request.method != "GET" and self._guarded_frame(request))):
@@ -2004,7 +2008,24 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
-            if self.apply_navigation and not self.touched and not self.apply_link_followed:
+            if self.apply_entry and not self.touched and not self.app_touched and not self.apply_link_followed:
+                required = kind == "job_page"
+                self.inspection_offline = False
+                self.discovering_apply_entry = True
+                try:
+                    landing, code = await self.apply_entry(self.page, require_posting=not required and self._has_form(snap))
+                finally:
+                    self.discovering_apply_entry = False
+                    self.inspection_offline = self._inspection_only
+                if landing is not None:
+                    self.page = landing
+                    self.apply_link_followed = True
+                    continue
+                if required or code != "job_page_no_apply_control":
+                    result = self._end("needs_human", "Accès au formulaire de candidature non vérifié.")
+                    result.diagnostic_code = code
+                    return result
+            if self.apply_navigation and not self.apply_entry and not self.touched and not self.apply_link_followed:
                 navigated, result = await self._open_posting_apply(required=kind == "job_page", has_form=self._has_form(snap))
                 if result:
                     return result
@@ -2276,10 +2297,16 @@ class _Run:
                 log.note = self._r("; ".join(([log.note] if log.note else []) + v.notes))[:900]
             await self._shot(log)
             if v.questions and (guarded or self._inspection_only or self.mode == "supervised"):
-                return self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
-                                 v.questions)
+                result = self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
+                                   v.questions)
+                if self._inspection_only and self.apply_link_followed and kind == "form" and self._has_form(snap):
+                    result.diagnostic_code = "dry_apply_form_needs_input"
+                return result
             if self._inspection_only:
-                return self._end("blocked", DRY_UNTESTED)
+                result = self._end("blocked", DRY_UNTESTED)
+                if self.apply_link_followed and kind == "form" and self._has_form(snap):
+                    result.diagnostic_code = "dry_apply_form_found"
+                return result
             if self.mode == "supervised":
                 return self._end("ready", "Vérifiez le formulaire. Vous seul pouvez cliquer sur Envoyer.")
 
@@ -2440,7 +2467,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           before_field: Callable[[str], None] | None = None, current_step: bool = False, generic_step: bool = False,
                           live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None,
                           autonomous=None, autonomous_attempt: Attempt | None = None,
-                          diagnostics: DispatchDiagnostics | None = None, apply_navigation=None) -> RunResult:
+                          diagnostics: DispatchDiagnostics | None = None, apply_navigation=None, apply_entry=None) -> RunResult:
     """Inspect or fill a form; only a bound, guarded unattended flow can submit.
 
     Legacy dispatch callbacks alone do not authorize live sends. Dry callers
@@ -2477,7 +2504,8 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                       host_allowed=host_allowed, max_steps=max_steps, goto=goto, on_progress=on_progress,
                       captcha_wait_s=captcha_wait_s, account_known=account_known, choices=choices)
     flow.before_field = before_field
-    flow.apply_navigation = apply_navigation
+    flow.apply_navigation = apply_navigation or apply_entry
+    flow.apply_entry = apply_entry
     flow.current_step = current_step
     flow.generic_step = generic_step
     flow.live_mutation_check = live_mutation_check
