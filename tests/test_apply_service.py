@@ -111,8 +111,8 @@ async def test_dry_run_on_a_draft_inspects_and_never_changes_status(profile, mas
     a = store.get_application(app.id)
     assert a.status == "draft" and a.submitted_at is None and db.get_job(job.id).status != "applied"
     # the engine's dry run stops after the first page of a multi-step form (it never clicks "next" without a real send)
-    assert not server.sent and not r.result.steps[0].filled
-    assert [s.page_kind for s in r.result.steps] == ["form"] and r.result.steps[0].screenshot
+    assert not server.sent and r.result.diagnostic_code == "dry_untested" and not r.result.steps
+    assert [request.split("?")[0] for request in server.requests if "/step" in request] == ["/step1"]
 
 
 async def test_submit_marks_application_and_job(profile, master, tmp_path, server, page, fast, monkeypatch):
@@ -167,7 +167,7 @@ async def test_other_failures_leave_the_application_approved_and_never_raise(pro
     assert r.status == "failed" and store.get_application(app.id).status == "approved"
     stub_engine(monkeypatch, raises=RuntimeError("secret page content"))
     r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
-    assert r.status == "failed" and "RuntimeError" in r.message and "secret" not in r.message
+    assert r.status == "failed" and r.result.diagnostic_code == "technical" and r.message == "Erreur technique."
     assert store.get_application(app.id).status == "approved"
 
 
@@ -347,7 +347,7 @@ async def test_the_submit_clicked_token_in_a_note_is_ignored(profile, master, tm
     _, app = new_app(profile, master, tmp_path, approve=True)  # the planner could forge a note: only RunResult.submit_clicked counts
     stub_engine(monkeypatch, RunResult(status="failed", steps=[StepLog(index=1, url="x", page_kind="form", note="submit_clicked")]))
     run = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
-    assert run.submit_clicked_at is None and run.result.steps[0].note == "submit_clicked"
+    assert run.submit_clicked_at is None and not run.result.submit_clicked and not run.result.steps
     assert store.get_application(app.id).status == "approved" and not astore.active_reservations(profile.id)
 
 
@@ -414,7 +414,7 @@ async def test_two_concurrent_sends_with_nine_reserved_only_the_first_gets_the_l
     calls = stub_adapter(monkeypatch)
     runs = await asyncio.gather(*(service.run(a.id, mode="submit", trigger="auto", pool=FakePool(), _lock_held=True) for a in (a1, a2)))
     assert len(calls) == 1 and sorted(run.status for run in runs) == ["blocked", "failed"]
-    assert "plafond de 10 envois" in runs[1].message.lower()
+    assert runs[1].result.diagnostic_code == "daily_cap"
     assert astore.count_auto_submitted(profile.id, datetime(2000, 1, 1, tzinfo=UTC)) == 10
 
 
@@ -832,7 +832,7 @@ def test_finish_and_settle_needs_the_newest_running_run(profile, master, tmp_pat
     assert astore.get_run(old.id).status == "running" and store.get_application(app.id).status == "approved"
 
 
-async def test_manual_sent_confirmation_keeps_the_deduced_answers_of_the_sending_attempt(profile, master, tmp_path, monkeypatch):
+async def test_manual_sent_confirmation_does_not_reuse_answers_from_a_failed_run(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     older = astore.start_run(app.id, 1, "dry_run", "user", lambda rid: tmp_path / f"a{rid}")
     step = lambda label: StepLog(index=1, url="https://x.test", page_kind="form", filled=[
@@ -843,7 +843,7 @@ async def test_manual_sent_confirmation_keeps_the_deduced_answers_of_the_sending
     sending = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     assert [f.label for f in service.inferred_answers(app.id)] == ["Du dry run"]  # before the confirmation: the ready dry run
     service.resolve_unconfirmed(app.id, sent=True, run_id=sending.id)
-    assert [f.label for f in service.inferred_answers(app.id)] == ["De l'envoi"]
+    assert not service.inferred_answers(app.id) and not sending.result.steps
     assert astore.sent_run(app.id).id == sending.id
 
 
@@ -958,33 +958,35 @@ async def _cancel_when_clicked(task, app_id):
         if last and last.result is not None:
             break
         await asyncio.sleep(0.01)
+    assert last.status == "running" and [f.label for st in last.result.steps for f in st.filled] == ["Disponibilité"]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
 
-async def test_cancel_between_the_click_and_the_receipt_keeps_the_deductions(profile, master, tmp_path, monkeypatch):
+async def test_cancel_between_the_click_and_the_receipt_scrubs_the_progress(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     stub_adapter(monkeypatch, RunResult(status="submitted"), hook=progress_hook(then_sleep=True))
     task = asyncio.create_task(service.run(app.id, mode="submit", trigger="user", pool=FakePool()))
     await _cancel_when_clicked(task, app.id)
     run = astore.last_run(app.id)
     assert run.status == "failed" and astore.outstanding_attempt(app.id).id == run.id and store.get_application(app.id).status == "failed"
-    assert [f.label for st in run.result.steps for f in st.filled] == ["Disponibilité"] and not run.result.submit_clicked
+    assert not run.result.steps and not run.result.submit_clicked
     service.resolve_unconfirmed(app.id, sent=True, run_id=astore.outstanding_attempt(app.id).id)
-    assert [f.label for f in service.inferred_answers(app.id)] == ["Disponibilité"]
+    assert not service.inferred_answers(app.id) and astore.sent_run(app.id).id == run.id
 
 
-async def test_an_engine_crash_after_the_click_keeps_the_progress(profile, master, tmp_path, monkeypatch):
+async def test_an_engine_crash_after_the_click_scrubs_the_progress(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
 
     async def hook(kw):
         await progress_hook()(kw)
+        assert astore.last_run(app.id).result.steps[0].filled[0].label == "Disponibilité"
         raise RuntimeError("boom")
 
     stub_adapter(monkeypatch, RunResult(status="submitted"), hook=hook)
     run = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert run.status == "failed" and [f.label for st in run.result.steps for f in st.filled] == ["Disponibilité"]
+    assert run.status == "failed" and not run.result.steps and astore.outstanding_attempt(app.id).id == run.id
 
 
 class SlowPagePool(FakePool):
@@ -1003,14 +1005,14 @@ class SlowPagePool(FakePool):
         return cm()
 
 
-async def test_cancel_during_page_cleanup_stores_the_result_the_engine_returned(profile, master, tmp_path, monkeypatch, page, server):
+async def test_cancel_during_page_cleanup_keeps_the_hold_without_engine_text(profile, master, tmp_path, monkeypatch, page, server):
     _, app = new_app(profile, master, tmp_path, approve=True, url=server.url("step1"))
     final = RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True, steps=[inferred_step("Niveau")])
     stub_engine(monkeypatch, final)
     pool = SlowPagePool(page)
     task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=pool, planner=object()))
     await wait_for_supervised(app.id, task)
-    await confirm_step(app.id)
+    assert (await confirm_step(app.id)).steps[0].filled[0].label == "Niveau"
     await page.close()
     for _ in range(300):
         if getattr(pool, "cleaning", False):
@@ -1021,7 +1023,7 @@ async def test_cancel_during_page_cleanup_stores_the_result_the_engine_returned(
         await task
     run = astore.last_run(app.id)
     assert run.status == "failed" and astore.outstanding_attempt(app.id).id == run.id
-    assert [f.label for st in run.result.steps for f in st.filled] == ["Niveau"]
+    assert not run.result.steps and "Niveau" not in run.message
     assert store.get_application(app.id).status == "failed"
 
 

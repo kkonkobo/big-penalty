@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.destination import clean_text, clean_url
-from jobhunt.apply.errors import ApplyError, StepChanged
+from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
@@ -530,6 +530,7 @@ class _Run:
         self.before_submit, self.on_submit_click, self.on_nav_click = before_submit, on_submit_click, on_nav_click
         self.before_field: Callable[[str], None] | None = None
         self.current_step = False
+        self.generic_step = False
         self.live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None
         self.verifier, self.host_allowed = verifier, host_allowed
         self.max_steps, self.goto = max_steps, goto
@@ -1270,6 +1271,8 @@ class _Run:
                 await self.live_mutation_check(target)
             except StepChanged as exc:
                 raise _DecisionHold(self._end("needs_human", str(exc))) from exc
+            except ManualField:
+                raise
             except Exception:
                 raise _DecisionHold(self._end("blocked", "Identité du poste non vérifiée : saisie annulée.")) from None
         reasons = await self.before_submit()
@@ -1902,11 +1905,11 @@ class _Run:
                 await self._verify(v)
             if self.current_step:
                 await self._supervised_checkpoint()
-            if v.items and not (_secure_url(self.page.url) and all(_secure_url(self._frame_url(resolve, it.field.ref), self.page.url)
+            if v.items and not self.generic_step and not (_secure_url(self.page.url) and all(_secure_url(self._frame_url(resolve, it.field.ref), self.page.url)
                                                                    for it in v.items)):
                 log.note = f"{log.note}; page non sécurisée"
                 return self._end("blocked", "Page non sécurisée (HTTPS requis) : aucune donnée n'a été saisie.")
-            if v.items:  # destination binding, before the first character is typed / file uploaded
+            if v.items and not self.generic_step:  # destination binding, before the first character is typed / file uploaded
                 bad = await self._dest_result(resolve, [it.field.ref for it in v.items], v.click[0] if v.click else None)
                 if bad is not None:
                     return bad
@@ -1938,7 +1941,12 @@ class _Run:
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
             for it in v.items if not self._inspection_only else ():
                 try:
-                    if self.mode == "supervised":
+                    if self.generic_step:
+                        target = await self._el(resolve, it.field.ref)
+                        if target is None:
+                            raise ManualField()
+                        await self._supervised_checkpoint(target)
+                    elif self.mode == "supervised":
                         bad = await self._dest_result(resolve, [it.field.ref], None)
                         if bad is not None:
                             return bad
@@ -1952,9 +1960,19 @@ class _Run:
                         target = await self._el(resolve, it.field.ref)
                         if target is None:
                             return self._end("blocked", "Champ introuvable : saisie annulée.")
-                    await self._live_decisions(snap, it.field, approved_choices, pending=pending_choices, applying=it)
+                    try:
+                        await self._live_decisions(snap, it.field, approved_choices, pending=pending_choices, applying=it)
+                    except _DecisionHold:
+                        if self.generic_step:
+                            await self._supervised_checkpoint(target)
+                        raise
                 except _DecisionHold as hold:
                     return hold.result
+                except ManualField:
+                    pending_choices.discard(it.field.ref)
+                    v.notes.append(f"{_label(it.field)} : à remplir à la main")
+                    v.questions.append(_question(it.field))
+                    continue
                 except Exception:
                     return self._end("blocked", "Impossible de vérifier les décisions du formulaire.")
                 pending_choices.discard(it.field.ref)
@@ -1965,6 +1983,10 @@ class _Run:
                     shown = await self._execute(it, target if self.mode == "supervised" else resolve(it.field.ref), snap, log)
                 except _DecisionHold as hold:
                     return hold.result
+                except ManualField:
+                    v.notes.append(f"{_label(it.field)} : à remplir à la main")
+                    v.questions.append(_question(it.field))
+                    continue
                 except _Skip as e:
                     if it.used == "confirmed_form_choice":
                         return self._end("blocked", "Le choix confirmé n’a pas pu être appliqué : action annulée.")
@@ -2230,7 +2252,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           on_progress: Callable[[RunResult], Awaitable[None]] | None = None, captcha_wait_s: float = 0.0,
                           account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None,
                           supervised_attempt: Attempt | None = None,
-                          before_field: Callable[[str], None] | None = None, current_step: bool = False,
+                          before_field: Callable[[str], None] | None = None, current_step: bool = False, generic_step: bool = False,
                           live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None) -> RunResult:
     """Inspect `url` or fill a reserved, attended form. Never submit it.
 
@@ -2264,5 +2286,6 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                       captcha_wait_s=captcha_wait_s, account_known=account_known, choices=choices)
     flow.before_field = before_field
     flow.current_step = current_step
+    flow.generic_step = generic_step
     flow.live_mutation_check = live_mutation_check
     return await flow.run()

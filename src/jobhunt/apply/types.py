@@ -151,6 +151,7 @@ class StepLog(BaseModel):
 class RunResult(BaseModel):
     status: RunStatus
     message: str = ""             # French, user-facing
+    diagnostic_code: str = ""
     steps: list[StepLog] = Field(default_factory=list)
     questions: list[Question] = Field(default_factory=list)   # status == needs_input
     final_url: str = ""

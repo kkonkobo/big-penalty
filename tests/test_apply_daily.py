@@ -421,8 +421,9 @@ async def test_progress_lines_are_numbered_and_the_counts_close_the_pass(env, pr
     body = [line for line in lines if line.startswith("[")]
     assert [line.split("]")[0] for line in body] == [f"[{n}/5" for n in range(1, 6)]
     by = {line.split("] ", 1)[1].split(" — ")[0]: line for line in body}
-    assert by["Société 1"].endswith(": envoyée") and "en pause (" in by["Société 2"] and "échec (msg)" in by["Société 4"]
-    assert "à vérifier (envoi non confirmé : msg)" in by["Société 5"]
+    assert by["Société 1"].endswith(": envoyée") and "en pause (" in by["Société 2"]
+    assert "échec (La tentative a échoué.)" in by["Société 4"]
+    assert "à vérifier (envoi non confirmé : La tentative a échoué.)" in by["Société 5"]
     assert (s.sent, s.paused, s.failed, s.to_check) == (2, 1, 1, 1)
     assert any(line.startswith("Passe terminée : 2 envoyée(s), 1 en pause, 1 à vérifier, 0 à corriger") for line in lines)
     assert "Détail : 2 envoyée(s) · 1 en pause (question 1) · 1 à vérifier · 0 à corriger · 0 bloquée(s) · 1 échec(s) technique(s)" in lines

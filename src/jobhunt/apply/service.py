@@ -568,7 +568,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                     fill_result = await run_application(
                         page, url=started_origin, facts=facts, planner=selected_planner,
                         uploads=Uploads(cv_pdf=cv_pdf, cv_bytes=request.pdf), mode=mode, before_submit=recheck,
-                        supervised_attempt=request.attempt, current_step=True,
+                        supervised_attempt=request.attempt, current_step=True, generic_step=identity_match is None,
                         live_mutation_check=lambda target: session.before_mutation(target, expected),
                         out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)) / f"pass-{len(steps)}",
                         job_title=job.title, company=job.company or "", host_allowed=host_allowed,

@@ -13,11 +13,11 @@ import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from jobhunt.apply.adapters import Attempt, Match
 from jobhunt.apply.destination import audit_url, clean_url, origin
-from jobhunt.apply.errors import ApplyError, StepChanged
+from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.identity import canonical_identity
 from jobhunt.apply.types import RunResult
 from jobhunt.config import get_settings
@@ -31,6 +31,27 @@ _VISIBLE_HEADING = """doc => Array.from(doc.querySelectorAll('h1')).filter(node 
     const style = doc.defaultView.getComputedStyle(node);
     return node.getClientRects().length && style.visibility === 'visible';
 }).map(node => node.innerText.trim())"""
+
+_POSTING_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}|(?<![a-z0-9])(?:jr|req|r)[_-]?\d+|\d{3,}", re.I)
+
+
+def _posting_ids(value: str) -> set[str]:
+    return {identifier.casefold() for identifier in _POSTING_ID.findall(unquote(value))}
+
+
+def _generic_action_allowed(document_url: str, raw_action: str | None, action_url: str | None) -> bool:
+    if raw_action is None or raw_action.strip() in {"", "#"}:
+        return True
+    if not action_url or origin(action_url) != origin(document_url):
+        return False
+    document = urlsplit(clean_url(document_url))
+    action = urlsplit(action_url)
+    if action.path == document.path:
+        return True
+    expected = _posting_ids(document.path)
+    for _, value in parse_qsl(document.query):
+        expected.update(_posting_ids(value))
+    return _posting_ids(action.path) == expected
 
 
 def require_posting(match: Match, attempt: Attempt, *urls: str) -> None:
@@ -80,6 +101,15 @@ class Session:
         self.closed = False
         self.pending: tuple[str, str] | None = None
         self.last: RunResult | None = None
+        self._navigation = 0
+        self._document_key = "__bp_" + secrets.token_hex(16)
+        if self.match is None:
+            self.page.on("framenavigated", self._on_navigation)
+
+    def _on_navigation(self, frame) -> None:
+        if frame == self.page.main_frame:
+            self._navigation += 1
+            self.pending = None
 
     async def _close(self) -> None:
         self.closed = True
@@ -115,29 +145,55 @@ class Session:
         except Exception:
             raise ApplyError(WRONG_POSTING) from None
 
-    async def fingerprint(self) -> tuple[str, str, str]:
-        url, title, headings = await self.page.evaluate(
-            f"() => [location.href, document.title, ({_VISIBLE_HEADING})(document)]")
+    async def fingerprint(self, *, issue: bool = False) -> tuple[str, str, str]:
+        navigation = self._navigation
+        try:
+            url, title, headings, nonce = await self.page.evaluate(f"""([key, nonce]) => {{
+                if (nonce !== null) document[key] = nonce;
+                return [location.href, document.title, ({_VISIBLE_HEADING})(document), document[key] ?? ''];
+            }}""", [self._document_key, secrets.token_urlsafe(32) if issue and not self.match else None], isolated_context=True)
+        except Exception:
+            raise StepChanged(CONFIRM_AGAIN) from None
+        return self._read_fingerprint(navigation, url, title, headings, nonce)
+
+    def _read_fingerprint(self, navigation: int, url: str, title: str, headings: list[str], nonce: str) -> tuple[str, str, str]:
         vetted = clean_url(url, navigation=True)
         if not vetted or origin(vetted) != origin(self.attempt.url):
             raise ApplyError(WRONG_POSTING)
-        if url != self.page.url:
+        if url != self.page.url or navigation != self._navigation or (not self.match and not nonce):
             raise StepChanged(CONFIRM_AGAIN)
-        return _digest(self.attempt.nonce, vetted, urlsplit(url).fragment, _digest(title, *headings)), url, " ".join([title, *headings])
+        return _digest(self.attempt.nonce, vetted, urlsplit(url).fragment, _digest(title, *headings),
+                       str(navigation), nonce), url, " ".join([title, *headings])
 
     async def before_mutation(self, target, expected: str | None) -> None:
         if self.match:
             await self.posting(target)
         else:
-            current, _, _ = await self.fingerprint()
+            navigation = self._navigation
+            live = None
+            if target is not None:
+                try:
+                    live = await target.evaluate(f"""(node, key) => {{
+                        const doc = node.ownerDocument, view = doc.defaultView;
+                        if (!view || view !== view.top || doc !== document || !node.isConnected) return null;
+                        const form = node.form;
+                        const action = form && Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action').get.call(form);
+                        return [[view.location.href, doc.title, ({_VISIBLE_HEADING})(doc), doc[key] ?? ''],
+                                form?.getAttribute('action') ?? null, action];
+                    }}""", self._document_key, isolated_context=True)
+                except Exception:
+                    pass
+            current, url, _ = self._read_fingerprint(navigation, *live[0]) if live else await self.fingerprint()
             if expected is None or not secrets.compare_digest(current, expected):
                 raise StepChanged(CONFIRM_AGAIN)
+            if target is not None and (not live or not _generic_action_allowed(url, *live[1:])):
+                raise ManualField()
 
     async def preview(self) -> FillPreview:
         async with self.lock:
             await self._check()
             try:
-                current, url, headings = await self.fingerprint()
+                current, url, headings = await self.fingerprint(issue=True)
                 if self.match:
                     await self.posting()
             except StepChanged:

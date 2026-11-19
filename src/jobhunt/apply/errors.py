@@ -7,3 +7,7 @@ class ApplyError(Exception):
 
 class StepChanged(ApplyError):
     """The operator must reconfirm the current page; no further mutations are allowed on this pass."""
+
+
+class ManualField(ApplyError):
+    """The displayed control is not eligible for generic autofill."""

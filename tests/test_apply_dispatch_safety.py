@@ -56,6 +56,111 @@ def posting_form(action):
             '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>')
 
 
+@pytest.mark.parametrize("target", ["iframe", "action", "changed_action", "missing_id", "other_id", "other_origin", "other_base"])
+async def test_production_generic_skips_unbound_targets(target, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    server.html["/jobs/200"] = '<label for="other">Autre prénom</label><input id="other" name="other">'
+    action = {"action": "/jobs/200", "missing_id": "/apply", "other_id": "/jobs/100/REQ-2",
+              "other_origin": "https://other.example.test/jobs/100", "other_base": "../100"}.get(target, "/jobs/100/apply")
+    other = f'<form action="{action}">{server.html["/jobs/200"]}</form>'
+    server.html["/jobs/100"] = posting_form("#") + ('<iframe src="/jobs/200"></iframe>' if target == "iframe" else other)
+    if target == "other_base":
+        server.html["/jobs/100"] += '<base href="https://other.example.test/jobs/100/">'
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+
+    def plan(snapshot):
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Autre prénom", "fill", "first_name"),
+                                                   act(snapshot, "^Prénom", "fill", "first_name")])
+
+    original = engine._Run._live_decisions
+
+    async def change_after_scan(self, *args, **kwargs):
+        await original(self, *args, **kwargs)
+        if target == "changed_action" and args[1].name == "other":
+            await self.page.evaluate("document.querySelector('#other').form.action = '/jobs/200'")
+
+    monkeypatch.setattr(engine._Run, "_live_decisions", change_after_scan)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                           planner=ScriptedPlanner(plan)))
+    opened = await wait_for_supervised(app.id, task)
+    try:
+        result = await confirm_step(app.id)
+        assert result.status == "needs_input" and "à remplir à la main" in result.steps[0].note
+        assert await opened.input_value("#name")
+        manual = opened.frame_locator("iframe").locator("#other") if target == "iframe" else opened.locator("#other")
+        assert not await manual.input_value() and not server.posts
+    finally:
+        await opened.close()
+        result = await asyncio.wait_for(task, 10)
+    assert store.outstanding_attempt(app.id).id == result.id
+
+
+@pytest.mark.parametrize("navigation", ["reload", "replace", "same_path_push_state", "during_scan"])
+async def test_production_generic_confirmation_dies_on_navigation(navigation, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    server.html["/jobs/100"] = posting_form("/jobs/100") + "<h1>Ingénieur systèmes embarqués</h1>"
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    original = engine._Run._live_decisions
+    changed = False
+
+    async def navigate_after_scan(self, *args, **kwargs):
+        nonlocal changed
+        await original(self, *args, **kwargs)
+        if navigation == "during_scan" and not changed:
+            changed = True
+            async with self.page.expect_event("framenavigated"):
+                await self.page.evaluate("history.pushState({changed: true}, '', location.href)")
+
+    monkeypatch.setattr(engine._Run, "_live_decisions", navigate_after_scan)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                           planner=ScriptedPlanner(form)))
+    opened = await wait_for_supervised(app.id, task)
+    try:
+        preview = await service.preview_fill_step(app.id)
+        if navigation == "during_scan":
+            result = await service.fill_step(app.id, preview.token)
+            assert "confirmez de nouveau" in result.message
+        else:
+            async with opened.expect_event("framenavigated", timeout=5000):
+                if navigation == "reload":
+                    await opened.reload(wait_until="domcontentloaded")
+                elif navigation == "replace":
+                    await opened.evaluate("() => location.replace(location.href)")
+                else:
+                    await opened.evaluate("history.pushState({changed: true}, '', location.pathname)")
+            with pytest.raises(ApplyError, match="confirmez de nouveau"):
+                await service.fill_step(app.id, preview.token)
+        assert not opened.is_closed() and not await opened.input_value("#name") and not server.posts
+        await confirm_step(app.id)
+        assert await opened.input_value("#name")
+    finally:
+        await opened.close()
+        await asyncio.wait_for(task, 10)
+
+
+@pytest.mark.parametrize("status", ["failed", "blocked"])
+async def test_production_failure_persists_no_page_text(status, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    server.html["/jobs/100"] = posting_form("/jobs/100") + "<p>Use the following code to sign in: 654321</p>"
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+
+    async def fail_from_page(page, **_):
+        text = await page.locator("p").inner_text()
+        return RunResult(status=status, message=text, final_url=page.url,
+                         steps=[StepLog(index=1, url=page.url, page_kind="other", note=text, clicked=text)])
+
+    monkeypatch.setattr(service, "run_application", fail_from_page)
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                           planner=ScriptedPlanner(form)))
+    opened = await wait_for_supervised(app.id, task)
+    try:
+        await confirm_step(app.id)
+    finally:
+        await opened.close()
+        result = await asyncio.wait_for(task, 10)
+    with db.connect() as conn:
+        raw_message, raw_json = conn.execute("SELECT message, result_json FROM application_runs WHERE id=?", (result.id,)).fetchone()
+    assert all(secret not in raw_message + raw_json for secret in ("following", "654321", "/jobs/100"))
+    assert result.result.diagnostic_code == "credential_page" and not result.result.steps
+
+
 @pytest.mark.parametrize("change", ["redirect", "spa", "frame", "action"])
 async def test_production_adapter_checks_live_posting_identity(change, production_pool, server, profile, tmp_path, fast, monkeypatch):
     server.html["/jobs/100"] = posting_form("/jobs/200" if change == "action" else "/jobs/100")
@@ -103,7 +208,7 @@ async def test_production_adapter_checks_live_posting_identity(change, productio
 @pytest.mark.parametrize("change", ["url", "heading", "during_planner"])
 async def test_production_generic_fill_requires_fresh_confirmation(change, production_pool, server, profile, tmp_path, fast):
     server.redirects["/jobs/100"] = "/jobs/200"
-    server.html["/jobs/200"] = posting_form("/jobs/200").replace("Ingénieur systèmes embarqués", "Technicien comptable")
+    server.html["/jobs/200"] = posting_form("").replace("Ingénieur systèmes embarqués", "Technicien comptable")
     _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
 
     class Planner(ScriptedPlanner):
@@ -432,7 +537,8 @@ def test_origin_resolution_honors_canonical_ok():
     assert resolved_identity({"origin_resolution": {**metadata, "canonical_ok": True}}) == ("fixture", "req-7")
 
 
-@pytest.mark.parametrize("prefix", ["Your verification code is", "Votre code de vérification est", "Ihr Bestätigungscode lautet"])
+@pytest.mark.parametrize("prefix", ["Your verification code is", "Votre code de vérification est", "Ihr Bestätigungscode lautet",
+                                    "Use the following code to sign in"])
 @pytest.mark.parametrize("separator", [" ", ": ", "\u00a0:\u202f", " — "])
 def test_credential_step_persists_only_diagnostics(server, profile, tmp_path, prefix, separator):
     phrase = prefix + separator + "654321"

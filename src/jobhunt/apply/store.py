@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -16,7 +17,7 @@ from typing import Callable
 from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
-from jobhunt.apply.destination import audit_url, clean_text, clean_url, contains_verification_code
+from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, posting_fingerprint, resolved_identity, similar_role
 from jobhunt.apply.types import Mode, RunResult, RunStatus
@@ -27,6 +28,75 @@ _suppress = contextlib.suppress
 
 UNCONFIRMED_NOTE = "Envoi non confirmé : vérifier sur le site de l'entreprise avant tout nouvel essai"
 
+_DIAGNOSTICS = {
+    "failed": "La tentative a échoué.",
+    "blocked": "L’action a été bloquée.",
+    "credential_page": "Vérification ou connexion manuelle requise (credential_page).",
+    "recipient_refused": RECIPIENT_REFUSED,
+    "posting_mismatch": "Identité du poste non vérifiée : saisie annulée.",
+    "dry_untested": "Simulation non testée : inspection hors ligne, sans saisie, fichier ni clic sur le site.",
+    "no_adapter": "Envoi bloqué : aucun adaptateur d'envoi et de reçu vérifié pour ce site. À envoyer en mode supervisé.",
+    "supervised_only": "À envoyer en mode supervisé",
+    "not_approved": "CV non approuvé",
+    "pdf_missing": "PDF absent",
+    "pdf_changed": "PDF modifié ou différent de celui approuvé",
+    "missing_link": "pas de lien vers le site de l'entreprise (http(s), hors agrégateur)",
+    "invalid_link": "Lien de candidature non autorisé.",
+    "already_sent": "candidature déjà envoyée",
+    "revision_changed": "le CV a changé depuis l'affichage",
+    "link_changed": "le lien de l'offre a changé depuis l'affichage",
+    "destination_changed": "La candidature ou la destination a changé.",
+    "send_lock": "un autre envoi est en cours",
+    "unconfirmed": UNCONFIRMED_NOTE,
+    "not_sent": "Non-envoi vérifié. Tout nouvel essai doit être lancé manuellement.",
+    "bad_origin": "Lien de l'offre inexploitable",
+    "receipt_recording": "Reçu vérifié, mais enregistrement impossible. Ne pas renvoyer cette candidature.",
+    "challenge": "Un défi anti-robot doit être résolu à la main.",
+    "untrusted_host": "Le formulaire est hébergé sur un site non reconnu.",
+    "technical": "Erreur technique.",
+    "interrupted": "interrompu",
+    "cv_errors": "Le CV contient des erreurs bloquantes.",
+    "duplicate": "Candidature déjà envoyée (ou tentée) pour la même offre.",
+    "potential_duplicate": "Doublon possible : confirmez « ce n'est pas un doublon ».",
+    "daily_cap": "Le plafond d’envois automatiques par jour est atteint.",
+}
+_EXACT_DIAGNOSTICS = {message: code for code, message in _DIAGNOSTICS.items()}
+_DIAGNOSTIC_PATTERNS = (
+    (r"Erreur technique \([A-Za-z_]+\)\.", "technical"),
+    (r"Interrompu\.", "interrupted"),
+    (r"Le poste affiché ne correspond pas à la candidature réservée : fenêtre fermée\.", "posting_mismatch"),
+    (r"Lien de l'offre inexploitable : .*", "bad_origin"),
+    (r"Doublon possible : .*", "potential_duplicate"),
+    (r"(?:candidature déjà envoyée pour la même offre \(n°\d+\)|Candidature déjà envoyée \(ou tentée\) pour la même offre)", "duplicate"),
+    (r"plafond de \d+ envois automatiques par jour atteint", "daily_cap"),
+    (r"\d+ erreur\(s\) bloquante\(s\)(?: dans le CV)?", "cv_errors"),
+    (r"\d+ erreur\(s\) à corriger avant d'approuver \(ou cocher « Ignorer et approuver »\)", "cv_errors"),
+)
+_HOST = re.compile(r"(?:[a-z0-9-]+\.)*[a-z0-9-]+|[a-f0-9:]+", re.I)
+
+
+def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
+    message = result.message
+    if (contains_verification_code(message) or any(
+        step.page_kind in {"account_login", "account_signup", "email_verification"} or contains_verification_code(step.note)
+        for step in result.steps
+    )):
+        code = "credential_page"
+    elif result.untrusted_host and _HOST.fullmatch(result.untrusted_host):
+        code = "untrusted_host"
+    else:
+        reasons = message.removeprefix("Envoi impossible : ").split(" ; ")
+        code = next((known for reason in reasons if (known := _EXACT_DIAGNOSTICS.get(reason))), "")
+        if not code:
+            code = next((known for pattern, known in _DIAGNOSTIC_PATTERNS if any(re.fullmatch(pattern, reason) for reason in reasons)), "")
+        code = code or result.status
+    message = _DIAGNOSTICS[code]
+    if held and code != "unconfirmed":
+        message = UNCONFIRMED_NOTE + ". " + message
+    return RunResult(status=result.status, diagnostic_code=code, message=message, final_url=origin(result.final_url),
+                     untrusted_host=result.untrusted_host if code == "untrusted_host" else "",
+                     submit_clicked=result.submit_clicked, finished_at=result.finished_at)
+
 
 _RESULT_FIELDS = {"status": True, "message": True, "final_url": True, "submit_clicked": True,
                   "untrusted_host": True, "finished_at": True,
@@ -34,7 +104,9 @@ _RESULT_FIELDS = {"status": True, "message": True, "final_url": True, "submit_cl
                   "questions": True}
 
 
-def _safe_result(result: RunResult) -> RunResult:
+def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
+    if result.status in ("failed", "blocked"):
+        return _failure_result(result, held=held)
     def scrub(value, key=""):
         if isinstance(value, dict):
             return {name: scrub(item, name) for name, item in value.items()}
@@ -155,8 +227,9 @@ def start_run(application_id: int, rev: int, mode: str, trigger: str, out_dir_fo
                            " WHERE application_id=? AND status='running'", (application_id,)).fetchall():
             if pid_alive(r["pid"]) if r["pid"] else ts - _dt(r["started_at"]) < STALE_RUN_AFTER:
                 raise ApplyError("Un envoi est déjà en cours pour cette candidature")
-            c.execute("UPDATE application_runs SET status='failed', message='interrompu', finished_at=? WHERE id=?",
-                      (_iso(ts), r["id"]))
+            interrupted = _failure_result(RunResult(status="failed", message="interrompu", finished_at=ts))
+            c.execute("UPDATE application_runs SET status='failed', message=?, result_json=?, finished_at=? WHERE id=?",
+                      (interrupted.message, interrupted.model_dump_json(), _iso(ts), r["id"]))
             if (r["submit_clicked_at"] is not None or r["nav_clicked_at"] is not None or c.execute(
                     "SELECT 1 FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (r["id"],)).fetchone()):
                 possibly_sent = True
@@ -192,8 +265,8 @@ def finish_run(run_id: int, result: RunResult) -> ApplyRun:
 
 
 def save_progress(run_id: int, result: RunResult) -> None:
-    """Persist a partial result (steps so far, `submit_clicked` as it is about to be) on a run that stays `running`, so a
-    cancellation / crash after a click still has the record of what was typed. Only the still-running NEWEST run of its
+    """Persist a partial result (steps so far, `submit_clicked` as it is about to be) on a run that stays `running`.
+    Finalizing a failure replaces this snapshot with a diagnostic. Only the still-running NEWEST run of its
     application: otherwise ApplyError (the engine then does not click)."""
     result = _safe_result(result)
     with connect() as c:
@@ -218,7 +291,7 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
 
     finished = result.finished_at or now()
     ts = _iso(finished)
-    result = _safe_result(result)
+    awaiting_verification = False
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
         run = c.execute("SELECT * FROM application_runs WHERE id=?", (run_id,)).fetchone()
@@ -249,8 +322,10 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
                 with _suppress(CVError):
                     cvstore.tx_force_failed(c, run["application_id"], UNCONFIRMED_NOTE)
                 status = "needs_input" if run["mode"] == "supervised" and result.status == "needs_input" else "failed"
-                result = result.model_copy(update={"status": status, "submit_clicked": False,
-                                                   "message": UNCONFIRMED_NOTE + ". " + result.message})
+                awaiting_verification = True
+                result = result.model_copy(update={"status": status, "submit_clicked": False})
+                if status == "needs_input":
+                    result = result.model_copy(update={"message": UNCONFIRMED_NOTE + ". " + result.message})
                 c.execute("UPDATE apply_reservations SET receipt_kind='none', receipt_outcome='uncertain', receipt_at=? WHERE id=?",
                           (ts, held["id"]))
             clicked = bool((held and not held["binding_json"]) or result.submit_clicked or result.status == "submitted"
@@ -262,6 +337,7 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
                 with _suppress(CVError):  # already submitted / withdrawn: nothing to flag
                     cvstore.tx_force_failed(c, run["application_id"], UNCONFIRMED_NOTE)
                 result = result.model_copy(update={"status": "failed", "submit_clicked": True, "message": UNCONFIRMED_NOTE})
+        result = _safe_result(result, held=awaiting_verification)
         c.execute("UPDATE application_runs SET status=?, message=?, result_json=?, finished_at=? WHERE id=?",
                   (result.status, result.message, result.model_copy(update={"finished_at": finished}).model_dump_json(), ts, run_id))
     return get_run(run_id)  # type: ignore[return-value]
@@ -398,8 +474,9 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
                                  (application_id,)).fetchall():
             if running["id"] != run_id or not _owner_confirmed_dead(running["pid"]):
                 raise ApplyError("Un envoi est encore en cours : vérifier de nouveau après sa fin")
-            c.execute("UPDATE application_runs SET status='failed', message='interrompu', finished_at=? WHERE id=?",
-                      (_iso(now()), run_id))
+            interrupted = _failure_result(RunResult(status="failed", message="interrompu", finished_at=now()))
+            c.execute("UPDATE application_runs SET status='failed', message=?, result_json=?, finished_at=? WHERE id=?",
+                      (interrupted.message, interrupted.model_dump_json(), _iso(interrupted.finished_at), run_id))
         held = c.execute("SELECT url_key, binding_json FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (out["id"],)).fetchone()
         if receipt:
             attempt = receipt.attempt

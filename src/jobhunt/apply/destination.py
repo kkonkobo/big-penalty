@@ -12,7 +12,7 @@ _TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid"}
 _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 _CODE = re.compile(
-    r"\b(?:otp|code(?:\s+de\s+(?:v[ée]rification|confirmation|s[ée]curit[ée]))?|pin|token|jeton|"
+    r"\b(?:otp|code(?:\s+(?:to\s+sign\s+in|de\s+(?:v[ée]rification|confirmation|s[ée]curit[ée])))?|pin|token|jeton|"
     r"(?:verifizierungs|bestätigungs|sicherheits)[ -]?code)(?:\s+(?:is|est|ist|lautet)\b)?\s*[:=–—-]?\s*"
     r"[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*", re.I)
 _JOB_PATH = re.compile(r"/(?:jobs?|job-postings?|requisitions?|positions?)/([0-9]{1,18})/?\Z", re.I)
