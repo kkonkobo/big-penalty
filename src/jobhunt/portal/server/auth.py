@@ -241,9 +241,11 @@ def login(portal: Portal, handle: str, code: str, client_addr: str, known_device
     if device_hash and row is not None:
         known = db.conn.execute("SELECT 1 FROM known_devices WHERE id_sha256=? AND profile_id=? AND epoch=?",
                                 (device_hash, row["id"], row["sessions_epoch"])).fetchone()
-    specs: list[BucketSpec] = [(f"a:{addr_key}", *ADDR_LIMIT), (f"ah:{addr_key}:{handle_key}", *ADDR_HANDLE_LIMIT)]
+    specs: list[BucketSpec] = [(f"a:{addr_key}", *ADDR_LIMIT)]
     lane = f"d:{handle_key}:{device_hash}" if known else f"h:{handle_key}"
-    specs.append((lane, *(DEVICE_LIMIT if known else HANDLE_ANON_LIMIT)))
+    if row is not None:
+        specs.extend([(f"ah:{addr_key}:{handle_key}", *ADDR_HANDLE_LIMIT),
+                      (lane, *(DEVICE_LIMIT if known else HANDLE_ANON_LIMIT))])
     if not throttle.reserve(db, specs, now):
         return LoginOutcome("throttled")
     salt = bytes(row["passcode_salt"]) if usable else _DUMMY_SALT

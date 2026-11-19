@@ -171,6 +171,29 @@ def test_address_budget_across_handles(h):
     assert h.login(profs[0]).kind == "throttled"
 
 
+def test_unknown_handles_do_not_lock_out_login_or_mac(h, monkeypatch):
+    device = h.pair()
+    profile = h.enable(device)
+    connection = h.portal.db.conn
+    initial = connection.execute("SELECT COUNT(*) FROM throttle WHERE bucket NOT GLOB 'api:*'").fetchone()[0]
+    monkeypatch.setattr(throttle, "MAX_ROWS", initial + 20)
+    for address in range(1, 16):
+        for attempt in range(10):
+            unknown = h.new_profile(handle=f"unknown-{address}-{attempt}")
+            assert h.login(unknown, addr=f"192.0.2.{address}", code="test-only").kind == "refused"
+    assert connection.execute("SELECT COUNT(*) FROM throttle WHERE bucket GLOB 'a:*'").fetchone()[0] == 15
+    assert connection.execute("SELECT COUNT(*) FROM throttle WHERE bucket GLOB 'h:*' OR bucket GLOB 'ah:*'").fetchone()[0] == 0
+    assert h.login(profile).kind == "ok"
+
+    capped = connection.execute("SELECT COUNT(*) FROM throttle WHERE bucket NOT GLOB 'api:*'").fetchone()[0]
+    monkeypatch.setattr(throttle, "MAX_ROWS", capped)
+    h.clock.advance(60)
+    assert h.client.get(f"{h.api}/status", headers=device.headers).status_code == 200
+    h.clock.advance(6 * 3600)
+    assert h.login(profile).kind == "ok"
+    assert h.client.get(f"{h.api}/status", headers=device.headers).status_code == 200
+
+
 def test_success_resets_pair_bucket_and_refunds(h):
     prof = h.enable()
     for _ in range(4):
@@ -369,6 +392,17 @@ def test_throttle_cap_rejects_new_rows_atomically(h, monkeypatch):
     assert not throttle.reserve(db, [("existing", 5, 60), ("new", 5, 60)], 1000)
     assert throttle.count(db, "existing", 60, 1000) == 1
     assert throttle.reserve(db, [("existing", 5, 60)], 1000)
+
+
+def test_expired_rows_make_room_and_api_buckets_keep_their_rate_limit(h, monkeypatch):
+    monkeypatch.setattr(throttle, "MAX_ROWS", 1)
+    database = h.portal.db
+    assert throttle.reserve(database, [("api:test-device", 1, 60)], 1000)
+    assert throttle.reserve(database, [("address", 5, 60)], 1000)
+    assert not throttle.reserve(database, [("api:test-device", 1, 60)], 1000)
+    assert not throttle.reserve(database, [("another-address", 5, 60)], 1019)
+    assert throttle.reserve(database, [("another-address", 5, 60)], 1020)
+    assert throttle.count(database, "address", 60, 1000) == 0
 
 
 def test_reserve_is_atomic_across_buckets(h):

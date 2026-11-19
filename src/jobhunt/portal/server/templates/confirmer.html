@@ -4,6 +4,10 @@
 {% block content %}
 <div class="page-head"><div><h1>{{ heading }}</h1>
 <p class="muted">Rien n'est fait tant que vous n'avez pas confirmé.</p></div></div>
+{% if omitted %}
+<p class="panel">{% if omitted == 1 %}1 candidature exclue : son CV n’est pas disponible sur le portail.{% else %}{{ omitted }} candidatures exclues : leurs CV ne sont pas disponibles sur le portail.{% endif %}</p>
+{% endif %}
+{% if entries %}
 <section class="panel">
   {% for e in entries %}
   <div class="item">
@@ -31,4 +35,7 @@
   <button class="btn primary block" type="submit">Confirmer</button>
   <a class="btn block" href="{{ base }}/{{ retour }}">Annuler</a>
 </form>
+{% else %}
+<a class="btn block" href="{{ base }}/{{ retour }}">Retour</a>
+{% endif %}
 {% endblock %}

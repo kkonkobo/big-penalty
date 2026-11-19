@@ -198,7 +198,7 @@ def test_database_setup(tmp_path):
 def test_transaction_rolls_back_and_connections_are_per_thread(tmp_path):
     db = dbmod.Database(tmp_path / "t.sqlite3")
     with pytest.raises(RuntimeError), db.transaction() as c:
-        c.execute("INSERT INTO throttle VALUES ('x', 1, 1)")
+        c.execute("INSERT INTO throttle VALUES ('x', 1, 1, 61)")
         raise RuntimeError
     assert db.conn.execute("SELECT COUNT(*) FROM throttle").fetchone()[0] == 0
     conns = []
@@ -206,6 +206,22 @@ def test_transaction_rolls_back_and_connections_are_per_thread(tmp_path):
     t.start()
     t.join()
     assert conns[0] is not db.conn
+    db.close()
+
+
+def test_throttle_expiry_migration_keeps_live_counters(tmp_path, monkeypatch):
+    path = tmp_path / "portal.sqlite3"
+    windows = {"a:addr": 900, "ah:addr:handle": 900, "d:handle:browser": 900, "h:handle": 3600,
+               "pair:a:addr": 3600, "pair:all": 86400, "api:device": 60}
+    with monkeypatch.context() as legacy:
+        legacy.setattr(dbmod, "MIGRATIONS", dbmod.MIGRATIONS[:6])
+        old_db = dbmod.Database(path)
+        old_db.conn.executemany("INSERT INTO throttle VALUES (?, 0, 5)", [(bucket,) for bucket in windows])
+        old_db.close()
+    db = dbmod.Database(path)
+    assert {row["bucket"]: (row["count"], row["expires_at"]) for row in db.conn.execute("SELECT * FROM throttle")} == {
+        bucket: (5, window) for bucket, window in windows.items()}
+    assert dbmod.purge_expired(db, 900)["throttle"] == 4
     db.close()
 
 

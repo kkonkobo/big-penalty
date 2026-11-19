@@ -32,7 +32,7 @@
   {% if free_count %}
   <div class="sticky-actions">
     <button class="btn" form="accord-confirm" type="submit">Approuver la sélection</button>
-    <button class="btn primary" form="accord-confirm" type="submit" name="tout" value="1">Tout approuver ({{ free_count }})</button>
+    {% if bulk_count %}<button class="btn primary" form="accord-confirm" type="submit" name="tout" value="1">Tout approuver ({{ bulk_count }})</button>{% endif %}
   </div>
   {% endif %}
 {% endif %}

@@ -19,7 +19,7 @@ def _window(now: float, window: int) -> int:
 
 
 def reserve(db: Database, specs: Iterable[BucketSpec], now: float) -> bool:
-    """Increment every bucket in ONE transaction, only when none is at its limit. False = nothing was changed."""
+    """Increment all buckets atomically or none; expired rows may be removed even on refusal."""
     specs = list(specs)
     with db.transaction() as c:
         starts = []
@@ -29,14 +29,17 @@ def reserve(db: Database, specs: Iterable[BucketSpec], now: float) -> bool:
             row = c.execute("SELECT count FROM throttle WHERE bucket=? AND window_start=?", (bucket, start)).fetchone()
             if row is not None and row[0] >= limit:
                 return False
-            if row is None:
+            if row is None and not bucket.startswith("api:"):
                 missing.add((bucket, start))
             starts.append(start)
-        if missing and c.execute("SELECT COUNT(*) FROM throttle").fetchone()[0] + len(missing) > MAX_ROWS:
-            return False
-        for (bucket, _limit, _window_s), start in zip(specs, starts, strict=True):
-            c.execute("INSERT INTO throttle(bucket, window_start, count) VALUES (?, ?, 1) "
-                      "ON CONFLICT(bucket, window_start) DO UPDATE SET count = count + 1", (bucket, start))
+        if missing:
+            c.execute("DELETE FROM throttle WHERE expires_at <= ?", (int(now),))
+            count = c.execute("SELECT COUNT(*) FROM throttle WHERE bucket NOT GLOB 'api:*'").fetchone()[0]
+            if count + len(missing) > MAX_ROWS:
+                return False
+        for (bucket, _limit, window), start in zip(specs, starts, strict=True):
+            c.execute("INSERT INTO throttle(bucket, window_start, count, expires_at) VALUES (?, ?, 1, ?) "
+                      "ON CONFLICT(bucket, window_start) DO UPDATE SET count = count + 1", (bucket, start, start + window))
     return True
 
 

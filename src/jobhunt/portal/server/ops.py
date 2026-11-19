@@ -324,6 +324,14 @@ def load_view(portal: Portal, profile_id: int, now: float) -> PortalView:
     return view
 
 
+_AVAILABLE_DOCUMENTS = (" FROM documents d JOIN manifest m ON m.profile_id=d.profile_id "
+                        "AND m.doc_id=d.doc_id AND m.sha256=d.sha256 AND m.size=d.size WHERE d.profile_id=?")
+
+
+def available_document_ids(portal: Portal, profile_id: int) -> set[str]:
+    return {row[0] for row in portal.db.conn.execute("SELECT d.doc_id" + _AVAILABLE_DOCUMENTS, (profile_id,))}
+
+
 def open_document(portal: Portal, profile_id: int | Session, doc_id: str) -> bytes | None:
     """The PDF, only when the current manifest lists it and the stored bytes are the listed ones."""
     with portal.db.transaction() as conn:
@@ -331,8 +339,7 @@ def open_document(portal: Portal, profile_id: int | Session, doc_id: str) -> byt
             if not session_is_live(conn, profile_id, portal.clock()):
                 return None
             profile_id = profile_id.profile_id
-        row = conn.execute("SELECT d.key_id, d.nonce, d.ciphertext FROM documents d JOIN manifest m ON m.profile_id=d.profile_id "
-                           "AND m.doc_id=d.doc_id AND m.sha256=d.sha256 AND m.size=d.size WHERE d.profile_id=? AND d.doc_id=?",
+        row = conn.execute("SELECT d.key_id, d.nonce, d.ciphertext" + _AVAILABLE_DOCUMENTS + " AND d.doc_id=?",
                            (profile_id, doc_id)).fetchone()
     return portal.cipher.open("document", profile_id, doc_id, _sealed(row)) if row else None
 

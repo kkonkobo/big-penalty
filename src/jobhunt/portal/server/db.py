@@ -13,7 +13,7 @@ Times are integer epoch seconds (UTC) everywhere. Tables (schema version in `PRA
 - `events(profile_id, seq, event_id UNIQUE, at, kind, key_id, nonce, ciphertext)`: the inbox (not yet acked by the Mac).
 - `sessions(id_sha256 PK, profile_id, epoch, created_at, last_seen_at)`, `known_devices(id_sha256 PK, profile_id, epoch,
   created_at, last_used_at)`: browser sessions and "known browser" cookies, stored as sha256.
-- `throttle(bucket, window_start, count)`: fixed-window counters; bucket names hold only keyed hashes.
+- `throttle(bucket, window_start, count, expires_at)`: fixed-window counters; bucket names hold only keyed hashes.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from pathlib import Path
 SESSION_IDLE = 7 * 86400
 SESSION_ABSOLUTE = 30 * 86400
 KNOWN_DEVICE_TTL = 365 * 86400
-THROTTLE_KEEP = 2 * 86400
 PURGE_EVERY = 3600
 
 _SCHEMA_V1 = """
@@ -95,6 +94,14 @@ UPDATE profiles SET revoked_through_seq=last_seq, snapshot_digest=NULL, snapshot
 DELETE FROM snapshots;
 DELETE FROM manifest;
 DELETE FROM documents;
+""", """
+ALTER TABLE throttle ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0;
+UPDATE throttle SET expires_at = window_start + CASE
+    WHEN bucket GLOB 'api:*' THEN 60
+    WHEN bucket GLOB 'a:*' OR bucket GLOB 'ah:*' OR bucket GLOB 'd:*' THEN 900
+    WHEN bucket GLOB 'h:*' OR bucket GLOB 'pair:a:*' THEN 3600
+    ELSE 86400 END;
+CREATE INDEX throttle_expiry ON throttle(expires_at);
 """]
 
 
@@ -189,7 +196,7 @@ def purge_expired(db: Database, now: float) -> dict[str, int]:
         s = c.execute("DELETE FROM sessions WHERE last_seen_at < ? OR created_at < ?",
                       (now - SESSION_IDLE, now - SESSION_ABSOLUTE)).rowcount
         k = c.execute("DELETE FROM known_devices WHERE last_used_at < ?", (now - KNOWN_DEVICE_TTL,)).rowcount
-        t = c.execute("DELETE FROM throttle WHERE window_start < ?", (now - THROTTLE_KEEP,)).rowcount
+        t = c.execute("DELETE FROM throttle WHERE expires_at <= ?", (now,)).rowcount
         c.execute("DELETE FROM used_login_nonces WHERE expires_at < ?", (now,))
     db.last_purge = float(now)
     return {"sessions": s, "known_devices": k, "throttle": t}

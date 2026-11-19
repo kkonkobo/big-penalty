@@ -303,7 +303,7 @@ def test_pages_render_from_a_rich_snapshot(h, user, prof):
     t = user.get("/app/accord").text
     for needle in ("En attente de mon accord", "Adéquation 81 %", "publiée il y a 3 jours", "Voir l'annonce", "Voir le CV",
                    f"/app/documents/{DOC_A}", "CV non disponible sur le portail", "Approuver celle-ci", "Approuver la sélection",
-                   "Tout approuver (2)", "Le Mac enregistre votre accord", f'name="g" value="{GRANT_SEND_1}"'):
+                   "Tout approuver (1)", "Le Mac enregistre votre accord", f'name="g" value="{GRANT_SEND_1}"'):
         assert needle in t, needle
     assert 'rel="noopener noreferrer"' in t and f'href="{JOB_URL}"' in t
 
@@ -514,7 +514,7 @@ def test_two_step_intent_flow(h, user, prof):
     assert [(e.kind, e.grant) for e in events(h, prof)] == [("intent", GRANT_SEND_1)]
     # the page now shows the waiting state instead of the buttons
     t = user.get("/app/accord").text
-    assert "Demande envoyée, en attente du Mac" in t and "Tout approuver (1)" in t
+    assert "Demande envoyée, en attente du Mac" in t and "Tout approuver" not in t
     # a second request for the same grant is refused
     r = post(user, "/intentions", {"g": GRANT_SEND_1, "retour": "accord"})
     assert "Cette candidature a changé : rechargez la page." in follow(user, r).text and len(events(h, prof)) == 1
@@ -546,13 +546,30 @@ def test_select_and_send_all(h, user, prof):
     r = post(user, "/confirmer", {"g": [GRANT_SEND_1, GRANT_SEND_2], "retour": "accord"})
     assert "Approuver ces 2 candidatures ?" in r.text
     r = post(user, "/confirmer", {"tout": "1", "retour": "accord"})
-    assert "Approuver ces 2 candidatures ?" in r.text and GRANT_SEND_2 in r.text
+    assert "Approuver cette candidature ?" in r.text and f'name="g" value="{GRANT_SEND_1}"' in r.text
+    assert GRANT_SEND_2 not in r.text and "1 candidature exclue : son CV n’est pas disponible" in r.text
     r = post(user, "/confirmer", {"un": GRANT_SEND_2, "g": GRANT_SEND_1, "retour": "accord"})
     assert "Approuver cette candidature ?" in r.text and GRANT_SEND_1 not in r.text
     r = post(user, "/confirmer", {"retour": "accord"})
     assert "Sélectionnez au moins une candidature." in follow(user, r).text
     r = post(user, "/intentions", {"g": [GRANT_SEND_1, GRANT_SEND_2], "retour": "accord"})
     assert "2 demandes envoyées au Mac" in follow(user, r).text and len(events(h, prof)) == 2
+
+
+def test_bulk_approval_excludes_a_pdf_not_yet_uploaded(h, user, prof):
+    device = h.pair()
+    snap = rich_snapshot()
+    missing = doc_ref(make_pdf("not yet uploaded"))
+    snap = snap.model_copy(update={"awaiting": [snap.awaiting[0], snap.awaiting[1].model_copy(update={"doc_id": missing.doc_id})],
+                                   "documents": [*snap.documents, missing]})
+    assert h.push_snapshot(device, prof, snap, upload=False).status_code == 200
+    assert h.upload(device, prof, DOC_A, PDF_A).status_code == 200
+    assert user.get(f"/app/documents/{missing.doc_id}").status_code == 404
+    assert "Tout approuver (1)" in user.get("/app/accord").text
+    page = post(user, "/confirmer", {"tout": "1", "retour": "accord"}).text
+    assert f'name="g" value="{GRANT_SEND_1}"' in page and GRANT_SEND_2 not in page
+    assert "1 candidature exclue : son CV n’est pas disponible" in page
+    assert not events(h, prof)
 
 
 @pytest.mark.parametrize("grant", ["f0" * 16, "zz", GRANT_SEND_1.upper(), "a1" * 15, ""])

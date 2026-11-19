@@ -295,7 +295,7 @@ def _layout(ctx: Ctx) -> dict:
                        "envoyees": max(snap.counts.sent_total, len(snap.sent))}}
 
 
-def _render(ctx: Ctx, template: str, active: str, status: int = 200, **extra) -> Response:
+def _render(ctx: Ctx, template: str, active: str, status: int = 200, *, docs: set[str] | None = None, **extra) -> Response:
     view, portal = ctx.view, ctx.portal
     layout = _layout(ctx)
     raw_flash = _single(ctx.request, FLASH_COOKIE)
@@ -303,9 +303,11 @@ def _render(ctx: Ctx, template: str, active: str, status: int = 200, **extra) ->
     if layout["waiting"]:
         template, extra = "attente.html", {}
     snap = view.snapshot
+    if docs is None:
+        docs = {d.doc_id for d in snap.documents} if snap else set()
     html = ENV.get_template(template).render(
         base=ctx.base, version=portal.config.version, csrf=auth.csrf_token(portal, ctx.session.id), layout=layout, active=active,
-        flash={"ok": ok, "err": err}, snap=snap, view=view, docs={d.doc_id for d in snap.documents} if snap else set(), **extra)
+        flash={"ok": ok, "err": err}, snap=snap, view=view, docs=docs, **extra)
     response = HTMLResponse(html, status_code=status)
     if raw_flash is not None:
         response.headers.append("set-cookie", auth.clear_cookie_header(portal.config, FLASH_COOKIE))
@@ -489,16 +491,31 @@ async def post_questions(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------- intents
+def _bulk_awaiting(ctx: Ctx) -> tuple[list[str], int, set[str]]:
+    docs = ops.available_document_ids(ctx.portal, ctx.session.profile_id)
+    snap = ctx.view.snapshot
+    if snap is None:
+        return [], 0, docs
+    docs.intersection_update(doc.doc_id for doc in snap.documents)
+    free = [app for app in snap.awaiting if app.grant not in ctx.view.intent_events]
+    grants = [app.grant for app in free if app.doc_id in docs]
+    return grants, len(free) - len(grants), docs
+
+
 def _do_confirm(c: Ctx) -> Response:
     snap = c.view.snapshot
     back = _back(c.form)
     if snap is None:
         return c.redirect(back, err=[ops.MSG_CHANGED])
     index = grant_index(snap)
+    omitted, docs = 0, None
     if c.form.get("tout"):
-        grants = [a.grant for a in snap.awaiting]
+        grants, omitted, docs = _bulk_awaiting(c)
+        if not grants and omitted:
+            return _render(c, "confirmer.html", back, entries=[], heading="Aucun CV disponible à approuver",
+                           retour=back, omitted=omitted, docs=docs)
         if not grants:
-            return c.redirect(back, err=[MSG_NOTHING_AWAITING])
+            return c.redirect(back, err=[MSG_ALREADY if snap.awaiting else MSG_NOTHING_AWAITING])
     elif c.form.get("un"):
         grants = [c.form.get("un")]
     else:
@@ -519,7 +536,7 @@ def _do_confirm(c: Ctx) -> Response:
         heading = {"sent": "Marquer comme envoyée ?", "not_sent": "Marquer comme non envoyée ?"}[entries[0].kind]
     else:
         heading = f"Confirmer ces {len(entries)} demandes ?"
-    return _render(c, "confirmer.html", back, entries=entries, heading=heading, retour=back)
+    return _render(c, "confirmer.html", back, entries=entries, heading=heading, retour=back, omitted=omitted, docs=docs)
 
 
 @router.post("/confirmer", include_in_schema=False)
@@ -668,7 +685,8 @@ def accord(request: Request) -> Response:
         return ctx
     snap, live = ctx.view.snapshot, ctx.view.intent_events
     free = sum(1 for a in snap.awaiting if a.grant not in live) if snap else 0
-    return _render(ctx, "accord.html", "accord", free_count=free)
+    bulk_grants, _, docs = _bulk_awaiting(ctx)
+    return _render(ctx, "accord.html", "accord", free_count=free, bulk_count=len(bulk_grants), docs=docs)
 
 
 def _epoch(item) -> float:
