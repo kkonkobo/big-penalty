@@ -13,6 +13,7 @@ from jobhunt.apply.destination import clean_url, origin
 from jobhunt.apply.identity import canonical_identity
 from jobhunt.apply.types import Action, Question, StepPlan
 from jobhunt.apply.widgets import date_segment, date_segment_option, denied_widget
+from jobhunt.origin import _identity as _origin_identity
 
 if TYPE_CHECKING:
     from jobhunt.apply.adapters import Attempt, Receipt, Requisition
@@ -280,6 +281,15 @@ class WorkdayAdapter:
 
     def matches(self, url: str, dom_markers: frozenset[str]) -> float:
         return 1.0 if _posting(url) else 0.0
+
+    def dedupe_identity(self, url: str) -> tuple[str, str] | None:
+        posting = _posting(url)
+        if not posting:
+            return None
+        tenant, requisition, _ = _origin_identity(self.name, url)
+        if requisition and requisition.casefold() == posting[1].casefold():
+            return canonical_identity(tenant, requisition)
+        return None
 
     def resolve(self, url: str, dom_markers: frozenset[str]) -> Requisition | None:
         from jobhunt.apply.adapters import Requisition

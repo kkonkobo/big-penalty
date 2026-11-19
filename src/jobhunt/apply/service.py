@@ -430,7 +430,12 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     requisition = match.requisition if match else None
     resolved = resolved_identity(job.extra)
     adapter_identity = canonical_identity(requisition.tenant, requisition.requisition_id) if requisition else None
-    if resolved and adapter_identity and resolved != adapter_identity:
+    dedupe_identity = getattr(match.adapter, "dedupe_identity", None) if adapter_identity else None
+    if dedupe_identity:
+        adapter_identity = dedupe_identity(url) or adapter_identity
+    metadata = job.extra.get("origin_resolution") if isinstance(job.extra, dict) else None
+    if resolved and adapter_identity and (resolved != adapter_identity or (
+            browser_adapter and metadata.get("canonical_ok") is True and metadata.get("submit_ats") != match.adapter.name)):
         raise ApplyError("Identité du poste incohérente : envoi annulé.")
     identity = resolved or adapter_identity
     canonical = ["req", *identity] if identity else ["job", job.id]
