@@ -2114,8 +2114,12 @@ class _Run:
                     try:
                         await self._record_choice(snap, it, shown, approved_choices)
                     except _DecisionHold as hold:
+                        if self.mode == "dry_run" and self.blocked_requests:
+                            break
                         return hold.result
                     except Exception:
+                        if self.mode == "dry_run" and self.blocked_requests:
+                            break
                         return self._end("blocked", "Impossible de vérifier la sélection appliquée.")
                     if it.act.op in ("upload_cv", "upload_letter"):
                         self.uploaded_files.append((self._host(), _norm(_label(it.field)), fold(Path(shown).stem)))
