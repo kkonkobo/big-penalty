@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from jobhunt import db
 from jobhunt.config import get_settings
-from jobhunt.dedupe import MergedJob, canonical_url, consolidate, merge_postings
+from jobhunt.dedupe import MergedJob, canonical_url, merge_postings
 from jobhunt.fetch import is_http_url
 from jobhunt.llm import LLMClient, get_llm
 from jobhunt.models import JobPosting, SearchQuery
@@ -315,8 +315,7 @@ async def run_search(
         result.stage = "origin"
         await _emit(progress, result, event="stage")
         jobs = await _resolve_origins(jobs, ctx, result)
-        jobs, removed = consolidate(jobs)
-        db.save_jobs(profile_id, jobs, removed=removed)
+        db.save_jobs(profile_id, jobs, consolidate_origins=True)
         result.unique_jobs = len(jobs)
         result.new_jobs = max(0, len(jobs) - n_before)
 
@@ -326,11 +325,9 @@ async def run_search(
         await _score_jobs(profile, jobs, llm, result, progress)
         result.llm_stats = getattr(llm, "stats", {})
         result.errors.extend(e for e in llm.errors if e not in result.errors)
+        db.save_scores(profile_id, jobs)
         if await _linkedin_second_pass(jobs, ctx, result):
-            jobs, removed = consolidate(jobs)
-            db.save_jobs(profile_id, jobs, removed=removed)
-        else:
-            db.save_jobs(profile_id, jobs)
+            db.save_jobs(profile_id, jobs, consolidate_origins=True)
 
         result.stage = "done"
         db.update_run(result.run_id, stats=result.stats_dict(), status="done", finished=True)
@@ -369,7 +366,7 @@ async def rescore(profile_id: int, *, llm: LLMClient | None = None, progress: Pr
         await _score_jobs(profile, jobs, llm, result, progress)
         result.llm_stats = getattr(llm, "stats", {})
         result.errors.extend(e for e in llm.errors if e not in result.errors)
-        db.save_jobs(profile_id, jobs)
+        db.save_scores(profile_id, jobs)
     finally:
         if hasattr(llm, "aclose"):
             await llm.aclose()

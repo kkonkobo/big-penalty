@@ -21,12 +21,10 @@ import hashlib
 import json
 import logging
 import re
-import sqlite3
 import time
 import unicodedata
 from collections import Counter
 from copy import deepcopy
-from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -312,11 +310,21 @@ class OriginEvidence:
 
 def _resolution_data(evidence: OriginEvidence) -> dict:
     data = asdict(evidence)
-    data["canonical_ok"] = bool(evidence.state == "resolved" and evidence.ats not in (None, "careers_site", "phenom")
-                                and evidence.tenant and evidence.requisition_id)
+    data["canonical_ok"] = _canonical_ok(data)
     if evidence.reason is None:
         data.pop("reason")
     return data
+
+
+def _canonical_ok(evidence: dict) -> bool:
+    tenant, requisition = evidence.get("tenant"), evidence.get("requisition_id")
+    ats = evidence.get("ats")
+    if evidence.get("state") != "resolved" or ats in (None, "careers_site", "phenom") or not (tenant and requisition):
+        return False
+    if ats == "smartrecruiters":
+        target = evidence.get("apply_url") or evidence.get("posting_url") or ""
+        return _smart_publication(target) == (tenant.lower(), requisition.lower())
+    return True
 
 
 def _observation(evidence: dict, *, reason: str | None = None) -> dict:
@@ -355,9 +363,18 @@ def store_origin(job, posting: JobPosting) -> bool:
         old_req = previous.get("requisition_id") or old_req
         exact_url = clean_url(job.origin_url) == clean_url(posting.origin_url)
         new_tenant, new_req = evidence.get("tenant"), evidence.get("requisition_id")
+        smart = job.origin_ats == posting.origin_ats == "smartrecruiters"
+        previous_canonical = _canonical_ok(previous) if previous else bool(
+            smart and _smart_publication(job.origin_url))
+        if smart and previous_canonical and not _canonical_ok(evidence):
+            job.extra["origin_observation"]["reason"] = "unmapped_publication"
+            return False
+        hosted_alias, hosted_req, _ = _identity("smartrecruiters", job.origin_url) if smart else (None, None, None)
+        mapped_publication = (smart and exact_url and not previous_canonical and _canonical_ok(evidence)
+                              and hosted_alias == old_tenant == new_tenant and hosted_req == old_req)
         compatible = (posting.origin_ats == job.origin_ats
                       and (not old_tenant or not new_tenant or old_tenant.lower() == new_tenant.lower())
-                      and (not old_req or not new_req or old_req.lower() == new_req.lower())
+                      and (not old_req or not new_req or old_req.lower() == new_req.lower() or mapped_publication)
                       and (exact_url or bool(old_tenant and new_tenant and old_req and new_req)))
         if not compatible:
             job.extra["origin_observation"]["reason"] = "different_or_unverified_requisition"
@@ -372,8 +389,7 @@ def store_origin(job, posting: JobPosting) -> bool:
         if not strong:
             job.extra["origin_observation"]["reason"] = "weaker_evidence"
             return False
-    evidence = {**evidence, "canonical_ok": bool(evidence.get("tenant") and evidence.get("requisition_id")
-                                                  and posting.origin_ats not in ("careers_site", "phenom"))}
+    evidence = {**evidence, "canonical_ok": _canonical_ok(evidence)}
     job.origin_url, job.origin_ats, job.origin_confidence = posting.origin_url, posting.origin_ats, posting.origin_confidence
     job.extra["origin_resolution"] = evidence
     return True
@@ -383,6 +399,12 @@ _SMART_APPLY = re.compile(r"^/oneclick-ui/company/([\w.-]+)/publication/([\w-]+)
 _SAP_APPLY = re.compile(r"/talentcommunity/apply/(\d+)(?:/|$)", re.I)
 _TEAM_APPLY = re.compile(r"^/jobs/(\d+)(?:-[^/]+)?/applications(?:/new)?/?$", re.I)
 _TALENTSOFT_POST = re.compile(r"^/(?:[a-z]{2}/)?(?:offre-de-emploi|job|job-offer)/[^/]+?[_/](\d+)\.aspx$", re.I)
+
+
+def _smart_publication(url: str) -> tuple[str, str] | None:
+    if classify_ats(url) == "smartrecruiters" and (match := _SMART_APPLY.match(unquote(urlparse(url).path))):
+        return match[1].lower(), match[2].lower()
+    return None
 
 
 def _identity(ats: str, url: str) -> tuple[str | None, str | None, str | None]:
@@ -548,9 +570,13 @@ def _page_evidence(url: str, html: str, status: int = 200, posting: JobPosting |
         if not ats or (local and ats != local):
             continue
         tenant, req, _ = _identity(ats, target)
-        if local and _continuity_rejection(url, target):
+        hosted_tenant, hosted_req, _ = _identity(ats, url) if local else (None, None, None)
+        same_hosted_posting = (local == ats == "smartrecruiters" and scoped and hosted_req
+                               and not _smart_publication(url) and _smart_publication(target)
+                               and hosted_tenant == tenant)
+        if local and _continuity_rejection(url, target) and not same_hosted_posting:
             continue
-        local_req = _identity(ats, url)[1] if local or ats == "successfactors" else front_id
+        local_req = hosted_req if local else _identity(ats, url)[1] if ats == "successfactors" else front_id
         gh_id = dict(parse_qsl(parsed.query)).get("gh_jid")
         exact = bool(req and (req.lower() == (local_req or "").lower() or ats == "greenhouse" and req == gh_id))
         different_ids_explicitly_bound = (bound and req and ats == "smartrecruiters" and not local
@@ -558,7 +584,7 @@ def _page_evidence(url: str, html: str, status: int = 200, posting: JobPosting |
         if (_host(target) != host and (not posting or not _employer_destination(posting, url)
                                      or not _employer_destination(posting, target))):
             continue
-        if (tenant or ats == "successfactors") and scoped and (exact or different_ids_explicitly_bound):
+        if (tenant or ats == "successfactors") and scoped and (exact or same_hosted_posting or different_ids_explicitly_bound):
             vendor_targets[(ats, tenant, req)] = target
     if len(vendor_targets) == 1:
         (ats, _, _), target = next(iter(vendor_targets.items()))
@@ -1325,7 +1351,7 @@ class DiskCache:
     @staticmethod
     def key(company: str | None, title: str, location: str | None, apply_url: str | None) -> str:
         loc = sorted(_loc_tokens(location))[:1]
-        raw = "v6|" + "|".join([" ".join(t for t in _company_tokens(company or "") if t not in _LEGAL), normalize_title(title), "".join(loc), apply_url or ""])
+        raw = "v7|" + "|".join([" ".join(t for t in _company_tokens(company or "") if t not in _LEGAL), normalize_title(title), "".join(loc), apply_url or ""])
         return hashlib.sha1(raw.encode()).hexdigest()[:20]
 
     def get(self, key: str) -> dict | None:
@@ -1515,31 +1541,35 @@ class Resolver:
 
     # ---- http ----
     async def _request(self, method: str, url: str, *, gap: float | None = None,
-                       posting: JobPosting | None = None, **kw) -> httpx.Response | None:
+                       posting: JobPosting | None = None, deadline: float | None = None, **kw) -> httpx.Response | None:
         _FETCH_ISSUE.set(None)
         posting = posting or _REQUEST_POSTING.get()
         history = []
         visited = set()
+        loop = asyncio.get_running_loop()
+        deadline = deadline if deadline is not None else loop.time() + REQUEST_DEADLINE
         for _ in range(REDIRECT_LIMIT + 1):
             host = _host(url)
             if not _safe_origin_url(url) or url in visited:
                 _FETCH_ISSUE.set(("unsafe_url" if not _safe_origin_url(url) else "redirect_loop", host))
                 return None
             visited.add(url)
-            async with self._host_locks.setdefault(host, asyncio.Lock()):
-                if self._deferred_until.get(host, 0) > time.monotonic():
-                    _FETCH_ISSUE.set(("host_cooldown", host))
-                    return None
-                self._deferred_until.pop(host, None)
-                await self.pacer.wait(url, gap)
-                try:
-                    async with asyncio.timeout(REQUEST_DEADLINE):
+            try:
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                async with asyncio.timeout_at(deadline):
+                    async with self._host_locks.setdefault(host, asyncio.Lock()):
+                        if self._deferred_until.get(host, 0) > time.monotonic():
+                            _FETCH_ISSUE.set(("host_cooldown", host))
+                            return None
+                        self._deferred_until.pop(host, None)
+                        await self.pacer.wait(url, gap)
                         response = await self.client.request(method, url, follow_redirects=False, **kw)
-                except (httpx.HTTPError, ValueError, TimeoutError) as error:
-                    _FETCH_ISSUE.set(("timeout" if isinstance(error, (httpx.TimeoutException, TimeoutError)) else "network_error", host))
-                    return None
-                if response.status_code == 429:
-                    self._deferred_until[host] = time.monotonic() + max(60.0, _retry_after(response.headers.get("retry-after", "")))
+                        if response.status_code == 429:
+                            self._deferred_until[host] = time.monotonic() + max(60.0, _retry_after(response.headers.get("retry-after", "")))
+            except (httpx.HTTPError, ValueError, TimeoutError) as error:
+                _FETCH_ISSUE.set(("timeout" if isinstance(error, (httpx.TimeoutException, TimeoutError)) else "network_error", host))
+                return None
             if not response.is_redirect or not response.headers.get("location") or method not in ("GET", "HEAD"):
                 response.history = history
                 return response
@@ -2301,10 +2331,11 @@ class Resolver:
     async def _inspect_posting(self, p: JobPosting, url: str) -> Candidate:
         """Classify a landing page using GET only; do not visit application forms."""
         _FETCH_ISSUE.set(None)
-        response = await self._get(url, gap=1.0, posting=p)
+        deadline = asyncio.get_running_loop().time() + REQUEST_DEADLINE
+        response = await self._get(url, gap=1.0, posting=p, deadline=deadline)
         if response is not None and (target := self._interstitial_target(response, p)):
             first = response
-            response = await self._get(target, gap=1.0, posting=p)
+            response = await self._get(target, gap=1.0, posting=p, deadline=deadline)
             if response is not None:
                 response.history = [*first.history, first, *response.history]
         if response is None:
@@ -2547,16 +2578,9 @@ async def reresolve_stored(profile_id: int | None, *, dry_run: bool = False, exp
     path = (db.DB_PATH_OVERRIDE or Settings(data_dir=configured_data_dir()).db_path).absolute()
     if not path.is_file():
         return counts
-    wal = path.with_name(path.name + "-wal")
-    shm = path.with_name(path.name + "-shm")
-    if wal.exists() and shm.exists():
-        read_mode = "?mode=ro"
-    elif wal.exists() and wal.stat().st_size:
-        raise ValueError("Uncheckpointed job database needs its existing SQLite shared-memory file")
-    else:
-        read_mode = "?mode=ro&immutable=1"
-    with closing(sqlite3.connect(path.as_uri() + read_mode, uri=True)) as conn:
-        conn.row_factory = sqlite3.Row
+    with db.origin_connection(path) as conn:
+        if not dry_run:
+            db.require_current_schema(conn)
         rows = conn.execute(
             "SELECT * FROM jobs WHERE (? IS NULL OR profile_id=?) ORDER BY id", (profile_id, profile_id)).fetchall()
         sightings: dict[int, list[str]] = {}
@@ -2657,8 +2681,8 @@ async def reresolve_stored(profile_id: int | None, *, dry_run: bool = False, exp
                 classified.append((before, job, attempts))
     finally:
         await resolver.aclose()
-    transitions = ([(before.origin_ats, after.origin_ats, None) for before, after, _ in classified] if dry_run else
-                   db.save_origin_updates([(before, after) for before, after, _ in classified], max_downgrades=max_downgrades))
+    transitions = db.save_origin_updates([(before, after) for before, after, _ in classified],
+                                         path=path, dry_run=dry_run, max_downgrades=max_downgrades)
     for (old, new, reason), (_, _, attempts) in zip(transitions, classified):
         if reason == "row_missing":
             continue

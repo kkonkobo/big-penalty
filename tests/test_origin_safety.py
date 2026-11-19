@@ -1,5 +1,8 @@
 import asyncio
 import json
+import sqlite3
+from collections import Counter
+from copy import deepcopy
 from dataclasses import asdict
 from unittest.mock import AsyncMock
 
@@ -523,3 +526,164 @@ def test_reresolve_downgrade_guard_aborts_before_any_write(profile):
         db.save_origin_updates([(before, after)], max_downgrades=0)
     assert db.get_job(job.id).extra == before.extra
     assert db.get_job(job.id).origin_ats == "workday"
+
+
+def verify_newer_origin(job_id):
+    snapshot = db.get_job(job_id)
+    updated = deepcopy(snapshot)
+    updated.origin_confidence = 0.99
+    updated.extra["origin_resolution"].update(confidence=0.99, apply_url=snapshot.origin_url + "/apply")
+    db.save_origin_updates([(snapshot, updated)])
+    return updated
+
+
+async def test_rescore_does_not_overwrite_concurrent_verified_origin(profile, monkeypatch):
+    job = stored_job(profile, confidence=0.95)
+
+    async def score(profile, jobs, llm, result, progress):
+        assert jobs[0].origin_confidence == 0.95
+        verify_newer_origin(job.id)
+        jobs[0].score = 87
+        jobs[0].score_json = {"fit": 87}
+        jobs[0].extra["scoring_fingerprint"] = "fixture"
+        jobs[0].changed = True
+
+    monkeypatch.setattr(pipeline, "_score_jobs", score)
+    await pipeline.rescore(profile.id)
+    refreshed = db.get_job(job.id)
+    assert refreshed.origin_confidence == 0.99
+    assert refreshed.extra["origin_resolution"]["apply_url"] == WORKDAY + "/apply"
+    assert (refreshed.score, refreshed.score_json, refreshed.extra["scoring_fingerprint"]) == (87, {"fit": 87}, "fixture")
+
+
+async def test_normal_search_compares_origin_snapshot_before_persisting(profile, monkeypatch):
+    from pipeline_fakes import patch_registry
+    from test_pipeline import FakeLLM
+
+    job = stored_job(profile, confidence=0.95)
+    patch_registry(monkeypatch, ["boarda"])
+
+    async def resolve(postings, ctx):
+        verify_newer_origin(job.id)
+        evidence = origin._resolution_data(origin.OriginEvidence("resolved", 0.98, "workday", posting_url=WORKDAY,
+                                                                  tenant="orbitex", requisition_id="JR284"))
+        return [post.model_copy(update={"origin_url": WORKDAY, "origin_ats": "workday", "origin_confidence": 0.98,
+                                        "origin_resolution": evidence}) if post.company == job.company else post
+                for post in postings]
+
+    monkeypatch.setattr(origin, "resolve_origins", resolve)
+    run = await pipeline.run_search(profile.id, llm=FakeLLM())
+    assert run.stage == "done", run.errors
+    refreshed = db.get_job(job.id)
+    assert refreshed.origin_confidence == 0.99
+    assert refreshed.extra["origin_resolution"]["apply_url"] == WORKDAY + "/apply"
+    assert refreshed.extra["origin_observation"]["write_reason"] == "snapshot_conflict"
+
+
+async def test_smartrecruiters_hosted_mapping_uses_only_publication_key(profile, monkeypatch):
+    hosted = "https://jobs.smartrecruiters.com/Orbitex/743999-stage"
+    publication = "https://jobs.smartrecruiters.com/oneclick-ui/company/Orbitex/publication/pub-84"
+    post = posting()
+    empty = f"<main><h1>{post.title}</h1></main>"
+    unmapped = origin._resolution_data(origin._page_evidence(hosted, empty, posting=post))
+    standalone = origin._resolution_data(origin._page_evidence(publication, "", posting=post))
+    assert (unmapped["requisition_id"], unmapped["canonical_ok"]) == ("743999", False)
+    assert (standalone["requisition_id"], standalone["canonical_ok"]) == ("pub-84", True)
+
+    job = stored_job(profile, url=hosted, ats="smartrecruiters", confidence=0.98)
+    job.extra["origin_resolution"] = {**unmapped, "canonical_ok": True}
+    job.changed = True
+    db.save_jobs(profile.id, [job])
+    html = f'<main><h1>{post.title}</h1><a data-job-id="743999" href="{publication}">Apply</a></main>'
+    mock_resolver(monkeypatch, lambda request: httpx.Response(200, text=html))
+    await origin.reresolve_stored(profile.id)
+    observed = db.get_job(job.id).extra["origin_resolution"]
+    assert observed["apply_url"] == publication
+    assert all(observed[key] == standalone[key] for key in ("tenant", "requisition_id", "canonical_ok"))
+
+    mock_resolver(monkeypatch, lambda request: httpx.Response(200, text=empty))
+    await origin.reresolve_stored(profile.id)
+    assert db.get_job(job.id).extra["origin_resolution"] == observed
+
+
+async def test_stored_dry_run_and_write_replan_after_concurrent_origin_update(profile, monkeypatch):
+    job = stored_job(profile)
+    replacement = "https://jobs.lever.co/orbitex/fixture"
+
+    def handler(request):
+        current = db.get_job(job.id)
+        updated = deepcopy(current)
+        updated.origin_url, updated.origin_ats, updated.origin_confidence = replacement, "lever", 0.99
+        updated.extra["origin_resolution"] = origin._resolution_data(origin.OriginEvidence(
+            "resolved", 0.99, "lever", posting_url=replacement, tenant="orbitex", requisition_id="fixture"))
+        db.save_origin_updates([(current, updated)])
+        return httpx.Response(403)
+
+    mock_resolver(monkeypatch, handler)
+    for dry_run in (True, False):
+        before = db.get_job(job.id)
+        before.origin_url, before.origin_ats, before.origin_confidence = WORKDAY, "workday", 0.95
+        before.extra["origin_resolution"] = job.extra["origin_resolution"]
+        before.changed = True
+        db.save_jobs(profile.id, [before])
+        transitions, explained = Counter(), {}
+        observed = await origin.reresolve_stored(profile.id, dry_run=dry_run, explain=1, stored_counts=transitions,
+                                                stored_explanations=explained)
+        assert observed == {("workday", "challenge"): 1}
+        assert transitions == {("lever", "lever"): 1}
+        assert explained["lever", "lever"][0][0]["reason"] == "snapshot_conflict"
+        assert ("origin_observation" in db.get_job(job.id).extra) is not dry_run
+
+
+async def test_redirect_chain_deadline_includes_pacing_and_all_hops(monkeypatch):
+    seen = []
+
+    async def handler(request):
+        seen.append(request.url.path)
+        await asyncio.sleep(0.08)
+        return httpx.Response(302, headers={"Location": "/jobs/second"}) if len(seen) == 1 else httpx.Response(200)
+
+    monkeypatch.setattr(origin, "REQUEST_DEADLINE", 0.23)
+    resolver = resolver_with(handler)
+    async def pace(*args):
+        await asyncio.sleep(0.05)
+
+    resolver.pacer.wait = pace
+    try:
+        first = "https://jobs.orbitex.example/jobs/first"
+        assert await resolver._get(first) is None
+        assert origin._FETCH_ISSUE.get() == ("timeout", "jobs.orbitex.example")
+        assert seen == ["/jobs/first", "/jobs/second"]
+    finally:
+        await resolver.aclose()
+
+
+async def test_request_deadline_covers_host_lock_acquisition(monkeypatch):
+    monkeypatch.setattr(origin, "REQUEST_DEADLINE", 0.04)
+    resolver = resolver_with(lambda request: pytest.fail("request should time out while waiting for the lock"))
+    lock = resolver._host_locks[origin._host(WORKDAY)] = asyncio.Lock()
+    try:
+        async with lock:
+            assert await asyncio.wait_for(resolver._get(WORKDAY), 1) is None
+            assert origin._FETCH_ISSUE.get() == ("timeout", origin._host(WORKDAY))
+    finally:
+        await resolver.aclose()
+
+
+def test_reresolve_refuses_old_schema_without_migrating_or_changing_journal(profile, monkeypatch):
+    job = stored_job(profile)
+    path = db.DB_PATH_OVERRIDE
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE application_runs DROP COLUMN operator_not_sent_at")
+        conn.execute("PRAGMA user_version=9")
+        conn.execute("PRAGMA journal_mode=DELETE")
+    db._migrated.discard(str(path))
+    original = path.read_bytes()
+    mock_resolver(monkeypatch, lambda request: pytest.fail("old schema must be rejected before fetching"))
+    result = CliRunner().invoke(cli.app, ["reresolve", str(profile.id), "--max-downgrades", "0"])
+    assert result.exit_code == 1 and "schema v9; expected v10" in result.output
+    assert path.read_bytes() == original
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (9,)
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+        assert conn.execute("SELECT origin_ats FROM jobs WHERE id=?", (job.id,)).fetchone() == ("workday",)

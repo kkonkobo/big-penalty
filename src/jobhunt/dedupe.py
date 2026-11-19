@@ -155,6 +155,7 @@ class MergedJob:
     last_seen: datetime | None = None
     changed: bool = True  # needs saving
     sighted: bool = False  # transient: sighted by the current search (db bumps last_seen only then)
+    persisted_origin: tuple | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.dedupe_key:
