@@ -44,7 +44,7 @@ def fx(name):
     ("https://acme.altays.com/offre/1", "altays"),
     ("https://acme.gestmax.fr/1/x", "gestmax"),
     ("https://parrot-drones.talentview.io/jobs/kvzln6", "talentview"),
-    ("https://careers.acme.com/job/1?gh_jid=4567", "greenhouse"),
+    ("https://careers.acme.com/job/1?gh_jid=4567", None),
     ("https://careers.acme.com/job/1", None),
 ])
 def test_classify_ats(url, ats):
@@ -52,7 +52,7 @@ def test_classify_ats(url, ats):
 
 
 def test_classify_html_hint_and_fallback():
-    assert o.classify_ats("https://acme.com/jobs", '<script src="https://cdn.teamtailor.com/x.js">') == "teamtailor"
+    assert o.classify_ats("https://acme.com/jobs", '<script src="https://cdn.teamtailor.com/x.js">') is None
     assert o.ats_or_site("https://acme.com/carrieres/1") == "careers_site"
 
 

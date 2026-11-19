@@ -88,9 +88,13 @@ class Settings(BaseModel):
         return self.data_dir / "applications"
 
 
+def configured_data_dir() -> Path:
+    return Path(os.environ.get("JOBHUNT_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
+
+
 @lru_cache
 def get_settings() -> Settings:
-    data_dir = Path(os.environ.get("JOBHUNT_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
+    data_dir = configured_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.get
     s = Settings(

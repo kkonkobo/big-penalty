@@ -172,10 +172,10 @@ async def test_offsite_link_refused_when_aggregator_tracker_linkedin_or_homepage
         await r.aclose()
 
 
-async def test_offsite_tracker_is_followed_and_final_url_trusted():
+async def test_offsite_tracker_is_followed_to_corroborated_employer():
     def handler(request):
         if request.url.host == "click.appcast.io":
-            return httpx.Response(302, headers={"location": "https://jobs.randomats.example/offre/77?utm_source=x"})
+            return httpx.Response(302, headers={"location": "https://jobs.orbitex.example/offre/77?utm_source=x"})
         return httpx.Response(200)
 
     r = resolver(handler)
@@ -186,7 +186,11 @@ async def test_offsite_tracker_is_followed_and_final_url_trusted():
 
 
 async def test_resolve_gives_confidence_09_and_ats_or_site(tmp_path):
-    r = resolver()
+    def handler(request):
+        html = '<main><h1>Stage ingénieur systèmes</h1><a href="/postuler/77">Postuler</a></main>'
+        return httpx.Response(200, text=html if request.url.host == "jobs.randomats.example" else "")
+
+    r = resolver(handler)
     r.cache = origin.DiskCache(tmp_path)
     from unittest.mock import AsyncMock
     r.enrich_from_page = AsyncMock(return_value=None)
@@ -231,6 +235,11 @@ def test_reresolve_uses_linkedin_provider_and_reports(profile, monkeypatch):
 
     for step in ("enrich_from_page", "probe_company", "discover_careers", "web_search"):
         monkeypatch.setattr(origin.Resolver, step, none)
+    async def fetch(self, url, **kwargs):
+        html = '<main><h1>Stage ingénieur 4</h1><a href="/postuler/9">Postuler</a></main>' if url.endswith("/9") else ""
+        return httpx.Response(200, request=httpx.Request("GET", url), text=html)
+
+    monkeypatch.setattr(origin.Resolver, "_get", fetch)
     refetched = []
     monkeypatch.setattr(pipeline, "_refetch_apply_urls", lambda jobs, ctx, report, skip_sources=(): refetched.append(skip_sources) or asyncio.sleep(0))
 
@@ -302,6 +311,37 @@ def test_second_pass_disabled_by_setting(profile, monkeypatch):
     monkeypatch.setattr(pipeline, "enrich_linkedin_jobs", lambda *a, **k: called.append(1))
     assert asyncio.run(pipeline._linkedin_second_pass([stored(profile, 1)], SimpleNamespace(), pipeline.RunResult(run_id=0, profile_id=1))) is False
     assert called == []
+
+
+async def test_search_saves_linkedin_enrichment_when_followup_resolution_fails(profile, monkeypatch):
+    from pipeline_fakes import patch_registry
+    from test_pipeline import FakeLLM
+
+    job = stored(profile, 7)
+    db.save_jobs(profile.id, [job])
+    patch_registry(monkeypatch, ["boarda"])
+    monkeypatch.setattr(pipeline.get_settings(), "linkedin_detail_cmd", "fetch {id}")
+    monkeypatch.setattr(pipeline.get_settings(), "linkedin_detail_max_per_run", 2)
+    monkeypatch.setattr(pipeline.get_settings(), "apply_prepare_min_score", 0)
+    apply_url = "https://orbitex.talentview.io/jobs/abc?id=7"
+    real_fetch = ld.fetch_job_detail
+
+    async def fetch(job_id, **kwargs):
+        return await real_fetch(job_id, runner=runner_returning(payload()))
+
+    async def resolve(postings, ctx):
+        if any(p.apply_url == apply_url for p in postings):
+            raise RuntimeError("fixture follow-up failure")
+        return postings
+
+    monkeypatch.setattr(ld, "fetch_job_detail", fetch)
+    monkeypatch.setattr(origin, "resolve_origins", resolve)
+    run = await pipeline.run_search(profile.id, llm=FakeLLM())
+    assert run.stage == "done", run.errors
+    assert run.linkedin_links == 1
+    assert any("fixture follow-up failure" in error for error in run.errors)
+    refreshed = db.get_job(job.id)
+    assert (refreshed.apply_url, refreshed.sightings[0].apply_url, refreshed.origin_url) == (apply_url, apply_url, None)
 
 
 async def test_enrich_cap_and_skip_rules(profile):

@@ -7,6 +7,7 @@ import asyncio
 import json
 import re
 import sqlite3
+from collections import Counter
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -172,6 +173,35 @@ def rescore(profile_id: int) -> None:
     console.print(f"Offres : {res.unique_jobs} · réévaluées : {res.scored} · écartées d'avance : {res.prefiltered}")
     for e in res.errors:
         console.print(f"[yellow]! {e}[/yellow]")
+
+
+@app.command("reresolve")
+def reresolve(
+    profile_id: Annotated[Optional[int], typer.Argument(help="profil (par défaut : tous)")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="compte les transitions sans écrire")] = False,
+    explain: Annotated[int, typer.Option("--explain", min=0, help="affiche les motifs de rejet des N premières offres par transition")] = 0,
+    max_downgrades: Annotated[int, typer.Option("--max-downgrades", min=0, help="annule l’écriture au-delà de ce nombre de régressions")] = 0,
+) -> None:
+    """Reclasse les ATS des offres enregistrées sans relancer la recherche."""
+    from jobhunt.origin import reresolve_stored
+
+    explanations = {}
+    stored_counts, stored_explanations = Counter(), {}
+    try:
+        counts = asyncio.run(reresolve_stored(profile_id, dry_run=dry_run, explain=explain, explanations=explanations,
+                                              stored_counts=stored_counts, stored_explanations=stored_explanations,
+                                              max_downgrades=max_downgrades))
+    except ValueError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    for label, transitions, details in (("OBSERVED", counts, explanations), ("STORED origin_ats", stored_counts, stored_explanations)):
+        typer.echo(label)
+        for before, after in sorted(transitions, key=lambda pair: (pair[0] or "", pair[1] or "")):
+            typer.echo(f"{before or 'null'} → {after or 'null'}: {transitions[before, after]}")
+            for attempts in details.get((before, after), ()):
+                if attempts:
+                    typer.echo("  " + "; ".join(f"{attempt['host'] or '—'}: {attempt['reason']}" for attempt in attempts))
+    typer.echo(f"downgrades of a known vendor: {sum(count for (old, new), count in stored_counts.items() if db.origin_downgrade(old, new))}")
 
 
 @app.command("origins")
