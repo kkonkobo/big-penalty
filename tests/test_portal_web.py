@@ -4,6 +4,7 @@ background sync button. Fictional data only; nothing here talks to a real portal
 from __future__ import annotations
 
 import functools
+import re
 import threading
 import time
 from pathlib import Path
@@ -16,7 +17,7 @@ from jobhunt.portal import manage, protocol, sync, web_routes
 from jobhunt.portal.manage import ManageError
 from jobhunt.web import app as webapp
 
-from portal_fakes import NOW, journal, master, paired, portal, server  # noqa: F401
+from portal_fakes import NOW, journal, master, new_app, paired, portal, server  # noqa: F401
 
 TEMPLATE = Path(webapp.__file__).parent / "templates" / "portal_admin.html"
 
@@ -41,6 +42,11 @@ def url(pid, sub=""):
 def follow(client, resp):
     assert resp.status_code == 303, resp.text[:300]
     return client.get(resp.headers["location"])
+
+
+def review_batch(client, pid):
+    page = client.get(url(pid)).text
+    return re.search(r'name="review_batch" value="([^"]+)"', page).group(1)
 
 
 @pytest.fixture
@@ -98,7 +104,7 @@ def test_page_enabled_review_with_items(client, portal):
     assert "Passer en mode direct" in r.text and 'id="review"' in r.text
     assert "Ville" in r.text and "Lyon" in r.text and "Code postal" in r.text and "69000" in r.text
     assert f"/portal/review/{a}/apply" in r.text and f"/portal/review/{b}/reject" in r.text
-    assert "Tout appliquer" in r.text and "Tout refuser" in r.text and "Appliquer" in r.text and "Refuser" in r.text
+    assert "Appliquer les actions affichées" in r.text and "Tout refuser" in r.text and "Refuser" in r.text
     assert '<span class="count">2</span>' in r.text
 
 
@@ -268,7 +274,8 @@ def test_review_all(client, portal, monkeypatch):
 
     monkeypatch.setattr(manage, "review_apply", partial(manage.review_apply, client=portal.client))
     review_items(portal)
-    assert "2 action(s) traitée(s)" in follow(client, client.post(url(portal.profile_id, "/review/apply-all"))).text
+    data = {"review_batch": review_batch(client, portal.profile_id)}
+    assert "2 action(s) traitée(s)" in follow(client, client.post(url(portal.profile_id, "/review/apply-all"), data=data)).text
     portal.fake.edit_answer(portal.key, "country", "France")
     sync.sync_all(journal=portal.journal, client=portal.client, now=NOW, execute=False)
     assert "1 action(s) refusée(s)" in follow(client, client.post(url(portal.profile_id, "/review/reject-all"))).text
@@ -281,15 +288,55 @@ def test_review_calls_manage_with_the_event_id(client, profile, monkeypatch):
     eid = "ab" * 16
     client.post(url(profile.id, f"/review/{eid}/apply"))
     client.post(url(profile.id, f"/review/{eid}/reject"))
-    client.post(url(profile.id, "/review/apply-all"))
-    assert applied == [(profile.id, [eid]), (profile.id, None)] and rejected == [(profile.id, [eid])]
+    assert "Sélection de validation invalide" in follow(client, client.post(url(profile.id, "/review/apply-all"))).text
+    assert applied == [(profile.id, [eid])] and rejected == [(profile.id, [eid])]
     assert client.post(url(profile.id, f"/review/{eid}/bogus")).status_code == 404
     assert client.post(url(profile.id, "/review/bad id!/apply")).status_code == 404
 
 
-def test_review_apply_refused_by_a_pause_is_an_error(client, profile, monkeypatch):
-    monkeypatch.setattr(manage, "review_apply", lambda pid, ids=None: SimpleNamespace(states={}, skipped_reason="pause locale"))
-    assert "pause locale" in follow(client, client.post(url(profile.id, "/review/apply-all"))).text
+def test_review_apply_refused_by_a_pause_is_an_error(client, portal):
+    review_items(portal)
+    data = {"review_batch": review_batch(client, portal.profile_id)}
+    manage.pause(journal=portal.journal)
+    assert "pause locale" in follow(client, client.post(url(portal.profile_id, "/review/apply-all"), data=data)).text
+
+
+@pytest.mark.parametrize("new_kind", ["answer", "intent"])
+def test_bulk_approval_excludes_newly_synced_requests(client, portal, profile, master, tmp_path, monkeypatch, new_kind):
+    monkeypatch.setattr(manage, "review_apply", functools.partial(manage.review_apply, client=portal.client))
+    new_app(profile, master, tmp_path)
+    displayed = review_items(portal)
+    batch = review_batch(client, profile.id)
+    remote = portal.fake.profiles[portal.key]
+    grant = remote.snapshot.awaiting[0].grant
+    if new_kind == "intent":
+        unseen = portal.fake.add_event(portal.key, "intent", grant=grant)
+    else:
+        unseen = portal.fake.edit_answer(portal.key, "country", "France")
+    assert sync.sync_all(journal=portal.journal, client=portal.client, now=NOW, execute=False)[0].ok
+
+    route = url(profile.id, "/review/apply-all")
+    assert "Sélection de validation invalide" in follow(client, client.post(route, data={"review_batch": f"{batch},{unseen}"})).text
+    assert all(portal.journal.get_event(eid).state == "awaiting_review" for eid in (*displayed, unseen))
+    portal.fake.requests.clear()
+    assert "2 action(s) traitée(s)" in follow(client, client.post(route, data={"review_batch": batch})).text
+    assert any(method == "GET" and path.endswith("/inbox") for method, path in portal.fake.requests)
+    assert all(portal.journal.get_event(eid).state == "applied" for eid in displayed)
+    event = portal.journal.get_event(unseen)
+    assert event.state == "awaiting_review" and not event.approved
+    if new_kind == "intent":
+        assert portal.journal.get_grant(grant).state == "offered"
+
+
+def test_bulk_approval_rejects_whole_stale_selection(client, portal, monkeypatch):
+    monkeypatch.setattr(manage, "review_apply", functools.partial(manage.review_apply, client=portal.client))
+    stale, remaining = review_items(portal)
+    batch = review_batch(client, portal.profile_id)
+    manage.review_reject(portal.profile_id, [stale], journal=portal.journal)
+    response = client.post(url(portal.profile_id, "/review/apply-all"), data={"review_batch": batch})
+    assert "sélection périmée" in follow(client, response).text
+    event = portal.journal.get_event(remaining)
+    assert event.state == "awaiting_review" and not event.approved
 
 
 # ---------------------------------------------------------------- sync now

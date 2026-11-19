@@ -9,8 +9,10 @@ must not transit through a browser form (`big-penalty portal pair` in the termin
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import re
+from secrets import token_bytes
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,6 +32,7 @@ STATE_CLASS = {"received": "src", "awaiting_review": "warn", "queued": "src", "r
                "conflict": "warn", "rejected": "bad", "refused": "bad", "failed": "bad", "cancelled": "warn", "interrupted": "warn",
                "lost": "warn"}
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_REVIEW_KEY = token_bytes(32)
 EXPECTED = (ManageError, PortalError, secrets.PortalSecretError)
 
 # Background "Synchroniser maintenant": in memory, ONE task at a time (like apply_routes.SENDING).
@@ -63,6 +66,10 @@ def _back(pid: int) -> str:
     return f"/profiles/{pid}/portal"
 
 
+def _review_signature(pid: int, payload: str) -> str:
+    return hmac.digest(_REVIEW_KEY, f"apply-all:{pid}:{payload}".encode(), "sha256").hex()
+
+
 def _context(pid: int) -> dict[str, Any]:
     """Everything the page shows (blocking: journal reads). Values to be shown only; no secret is in here."""
     st = manage.status()
@@ -93,6 +100,8 @@ async def _page(request: Request, pid: int, *, notice: str | None = None, error:
                "sync_at": None}
         error = error or str(e)
     ctx["creds"] = creds
+    ids = ",".join(item["id"] for item in ctx["review"])
+    ctx["review_batch"] = f"{_review_signature(pid, ids)}.{ids}" if ids else ""
     resp = web.render(request, "portal_admin.html", profile=profile, notice=notice, error=error, **ctx)
     if creds is not None:
         resp.headers["Cache-Control"] = "no-store"
@@ -196,9 +205,17 @@ async def portal_resync(pid: str):
 
 # ------------------------------------------------------------ review queue
 @router.post("/profiles/{pid}/portal/review/apply-all")
-async def portal_apply_all(pid: str):
+async def portal_apply_all(request: Request, pid: str):
     p = _pid_or_404(pid)
-    return await _review(p, None, True)
+    async with request.form() as form:
+        batches = form.getlist("review_batch")
+    if len(batches) == 1 and isinstance(batches[0], str):
+        signature, _, payload = batches[0].partition(".")
+        if re.fullmatch(r"[0-9a-f]{64}", signature) and hmac.compare_digest(signature, _review_signature(p, payload)):
+            ids = payload.split(",")
+            if all(_ID.fullmatch(event_id) for event_id in ids) and len(set(ids)) == len(ids):
+                return await _review(p, ids, True)
+    return _web()._flash(_back(p), error="Sélection de validation invalide. Rechargez la page et vérifiez les actions affichées.")
 
 
 @router.post("/profiles/{pid}/portal/review/reject-all")

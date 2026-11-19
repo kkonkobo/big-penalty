@@ -436,8 +436,8 @@ def review_apply(profile_id: int, event_ids: list[str] | None = None, *, journal
         profile, stop = j.controls(profile_id)
         if stop and stop != "profil suspendu":
             return apply_events.ApplyReport(skipped_reason=stop)
-        selected = [event.event_id for event in j.events(profile_id, ("awaiting_review",))
-                    if event_ids is None or event.event_id in event_ids]
+        selected = ([event.event_id for event in j.events(profile_id, ("awaiting_review",))]
+                    if event_ids is None else event_ids)
         now = db.now()
         try:
             with _client(j, client) as remote:

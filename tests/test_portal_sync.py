@@ -421,6 +421,17 @@ def test_results_are_capped_and_hold_no_value(portal):
     assert len(res) == 100 and all("Ville-secrete" not in r.message and "Ville-secrete" not in r.label for r in res)
 
 
+def test_historical_journal_result_label_stays_local(portal):
+    go(portal)
+    event_id = portal.fake.edit_answer(portal.key, "city", "Lyon")
+    go(portal)
+    portal.journal.update_event(event_id, NOW, label="Retired synthetic inference label")
+    go(portal)
+    result = next(result for result in srv(portal).results if result.event_id == event_id)
+    assert result.label == "" and result.key == "a:city" and result.status == "applied"
+    assert portal.journal.get_event(event_id).label == "Retired synthetic inference label"
+
+
 # ------------------------------------------------------------------ with sends
 @pytest.fixture
 def engine(monkeypatch):

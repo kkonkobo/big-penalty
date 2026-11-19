@@ -154,7 +154,7 @@ def _results_for_stream(journal: Journal, profile_id: int, stream_id: str) -> li
             value = source.payload.get(field)
             if isinstance(value, str) and value:
                 result = result.model_copy(update={"key": f"{prefix}:{value}"[:120]})
-        wire_results.append(result)
+        wire_results.append(result.model_copy(update={"label": ""}))
     return wire_results
 
 

@@ -313,7 +313,9 @@ def test_review_list_apply_reject_and_journal_tail(portal):
     c = portal.fake.edit_answer(portal.key, "country", "France")
     sync.sync_all(journal=portal.journal, client=portal.client, now=NOW, execute=False)
     items = manage.review_list(portal.profile_id, journal=portal.journal)
-    assert [(i.label, i.before_text, i.after_text) for i in items] == [("Ville", "", "Lyon"), ("Code postal", "", "69000"), ("Pays", "", "France")]
+    assert [(i.label, i.before_text, i.after_text) for i in items] == [
+        ("Ville", "", "Lyon"), ("Code postal", "", "69000"), ("Pays de résidence", "", "France"),
+    ]
     assert manage.status(journal=portal.journal).profiles[0].awaiting_review == 3
     rep = manage.review_apply(portal.profile_id, [a], journal=portal.journal, client=portal.client)
     assert rep.applied_answers and stored_answer(portal.profile_id, "city") == "Lyon"

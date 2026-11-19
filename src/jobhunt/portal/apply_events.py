@@ -453,15 +453,23 @@ def apply_reviewed(journal: Journal, profile_id: int, event_ids: list[str] | Non
     """The operator's decision on `awaiting_review` events (all of them when `event_ids` is None)."""
     now = now or db.now()
     report = ApplyReport()
-    _, stop = journal.controls(profile_id)
+    profile, stop = journal.controls(profile_id)
     if stop:
         report.skipped_reason = stop
         return report
-    if approve and validated is None:
+    if approve and (validated is None or profile != validated):
         report.skipped_reason = "contrôles non validés"
         return report
     ctx = _Ctx(journal, profile_id, now, report)
-    chosen = [e for e in journal.events(profile_id, ("awaiting_review",)) if event_ids is None or e.event_id in event_ids]
+    ids = set(event_ids) if event_ids is not None else None
+    chosen = [e for e in journal.events(profile_id, ("awaiting_review",)) if ids is None or e.event_id in ids]
+    if approve and ((ids is not None and len(chosen) != len(ids)) or any(
+        ev.stream_id != profile.stream_id or not profile.revoked_through_seq < ev.seq <= profile.cursor_seq for ev in chosen
+    )):
+        report.skipped_reason = "sélection périmée : vérifiez les actions affichées"
+        return report
     for ev in sorted(chosen, key=lambda item: item.kind != "cancel"):
         _process(ctx, ev, approve, validated=validated)
+        if report.skipped_reason:
+            break
     return report

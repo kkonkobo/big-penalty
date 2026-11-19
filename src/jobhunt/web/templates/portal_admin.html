@@ -108,7 +108,10 @@
   <div class="panel-head plain"><h2>À valider <span class="count">{{ review|length }}</span></h2></div>
   {% if review %}
   <div class="row">
-    <form method="post" action="/profiles/{{ profile.id }}/portal/review/apply-all"><button class="btn primary small" type="submit">Tout appliquer</button></form>
+    <form method="post" action="/profiles/{{ profile.id }}/portal/review/apply-all">
+      <input type="hidden" name="review_batch" value="{{ review_batch }}">
+      <button class="btn primary small" type="submit">Appliquer les actions affichées</button>
+    </form>
     <form method="post" action="/profiles/{{ profile.id }}/portal/review/reject-all"><button class="btn quiet-bad small" type="submit">Tout refuser</button></form>
   </div>
   <table class="tbl">
