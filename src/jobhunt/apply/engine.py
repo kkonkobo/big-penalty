@@ -1534,12 +1534,23 @@ class _Run:
         return request.url.split("#")[0].split("?")[0] == fi.get("action")
 
     async def run(self) -> RunResult:
-        if self.mode == "submit":
+        if self.mode not in ("dry_run", "supervised"):
             res = self._end("blocked", UNSUPPORTED_DISPATCH)
             res.finished_at = datetime.now()
             return res
         if self.mode == "supervised" and (self.before_submit is None or self.uploads.cv_bytes is None):
             return self._end("blocked", UNSUPPORTED_DISPATCH)
+        return await self._run_page()
+
+    @property
+    def _inspection_only(self) -> bool:
+        return self.mode == "dry_run"
+
+    def _account_handoff(self) -> RunResult:
+        return self._end("blocked", DRY_UNTESTED)
+
+    async def _run_page(self) -> RunResult:
+        """Page lifecycle for callers that have already authorized their interaction policy."""
         ctx = self.page.context
         offline = False
 
@@ -1556,9 +1567,10 @@ class _Run:
             try:
                 # any document request once data was entered; before that, any NON-GET one (a dry run never needs one: its pre-data
                 # clicks are cookie banners and "Postuler" links)
-                if offline or request.method not in {"GET", "HEAD"}:
+                if offline or (self._inspection_only and request.method not in {"GET", "HEAD"}):
                     await route.abort()
-                elif request.resource_type == "document" and (self.touched or self._is_form_get_submission(request)):
+                elif request.resource_type == "document" and (self.touched or self._is_form_get_submission(request)
+                        or (request.method != "GET" and self._guarded_frame(request))):
                     # Aborted in every case. It ENDS the run only when it can be our doing: after data entry, or right after
                     # a click of ours (a saved draft being posted). A widget that posts while the page loads (e.g. an
                     # "apply with LinkedIn" iframe) is just not loaded.
@@ -1568,7 +1580,10 @@ class _Run:
                         self.widget_blocked += 1
                     await route.abort()
                 else:
-                    await route.continue_()
+                    if self._inspection_only:
+                        await route.continue_()
+                    else:
+                        await route.fallback()
             except Exception:
                 pass
 
@@ -1578,7 +1593,7 @@ class _Run:
         try:
             try:
                 await (self.goto or _default_goto)(self.page, self.url)
-                if self.mode == "dry_run":
+                if self._inspection_only:
                     offline = True
                     await ctx.set_offline(True)
                 res = await self._loop()
@@ -1835,7 +1850,7 @@ class _Run:
                 return self._unconfirmed()
             if self.mode != "submit" and kind in ACCOUNT_KINDS:
                 await self._shot(log)
-                return self._end("blocked", DRY_UNTESTED)
+                return self._account_handoff()
 
             v = self._validate(plan, snap, resolve)
             await self._verify(v)
@@ -1854,12 +1869,13 @@ class _Run:
             # page URL, so a form that keeps asking for the file cannot loop.
             page_key = urldefrag(self.page.url).url
             uploads_first = [it for it in v.items if it.act.op in ("upload_cv", "upload_letter")]
-            split = (self.mode == "submit" and SPLIT_UPLOADS and bool(uploads_first) and len(uploads_first) < len(v.items)
+            split = (not self._inspection_only and self.mode != "supervised" and SPLIT_UPLOADS
+                     and bool(uploads_first) and len(uploads_first) < len(v.items)
                      and page_key not in self.upload_split)
             if split:
                 self.upload_split.add(page_key)
                 v.items = uploads_first
-            if self.mode == "dry_run":
+            if self._inspection_only:
                 handled.update(it.field.ref for it in v.items)
             if self.mode == "submit" and v.items:  # policy gate BEFORE the first field interaction of the step (a tick / choice can
                 bad = await self._gate(n)           # trigger page behaviour): nothing is entered when it says no
@@ -1867,7 +1883,7 @@ class _Run:
                     return bad
             dirty = False
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
-            for it in v.items if self.mode in ("submit", "supervised") else ():
+            for it in v.items if not self._inspection_only else ():
                 try:
                     if self.mode == "supervised":
                         reasons = await self.before_submit()
@@ -2020,10 +2036,10 @@ class _Run:
             if v.notes:
                 log.note = self._r("; ".join(([log.note] if log.note else []) + v.notes))[:900]
             await self._shot(log)
-            if v.questions and (guarded or self.mode != "submit"):
+            if v.questions and (guarded or self._inspection_only or self.mode == "supervised"):
                 return self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
                                  v.questions)
-            if self.mode == "dry_run":
+            if self._inspection_only:
                 return self._end("blocked", DRY_UNTESTED)
             if self.mode == "supervised":
                 return self._end("ready", "Vérifiez le formulaire. Vous seul pouvez cliquer sur Envoyer.")

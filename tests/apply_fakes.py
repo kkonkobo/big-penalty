@@ -5,16 +5,21 @@ Everything is offline: pages come from tests/fixtures/apply/*.html served on 127
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 import pytest
 
 from jobhunt.apply import engine
-from jobhunt.apply.types import Action, Fact, FactSheet, PageSnapshot, StepLog, StepPlan
+from jobhunt.apply.adapters import Attempt, Dispatch, Receipt, Registry, Requisition, WriteGate
+from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.types import Action, Fact, FactSheet, PageSnapshot, RunResult, StepLog, StepPlan
 
 FIXTURES = Path(__file__).parent / "fixtures" / "apply"
 TEST_PASSWORD = "Hunter2-Test-Pw"
@@ -123,6 +128,8 @@ class FakeVerifier:
 
 # ------------------------------------------------------------------ loopback server
 class FixtureServer:
+    """Serve static fixture HTML and synthetic receipts without any HTTP redirects."""
+
     def __init__(self):
         self.posts: list[dict] = []
         self.requests: list[str] = []
@@ -134,11 +141,13 @@ class FixtureServer:
             def log_message(self, *a):
                 pass
 
-            def _html(self, name: str, status: int = 200):
+            def _html(self, name: str, status: int = 200, *, receipt: str = ""):
                 body = (FIXTURES / name).read_bytes()
                 self.send_response(status)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                if receipt:
+                    self.send_header("X-Fixture-Receipt", receipt)
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -168,7 +177,9 @@ class FixtureServer:
                     self.end_headers()
                     self.wfile.write(b"<p>Candidature recue (fixture).</p>")
                     return
-                self._html(outer.post_pages.get(self.path.split("?")[0], "confirmation.html"))
+                name = outer.post_pages.get(self.path.split("?")[0], "confirmation.html")
+                receipt = self.headers.get("X-Fixture-Nonce", "") if self.path == "/apply" and name == "confirmation.html" else ""
+                self._html(name, receipt=receipt)
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.base = f"http://127.0.0.1:{self.httpd.server_port}"
@@ -183,6 +194,134 @@ class FixtureServer:
     def close(self) -> None:
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+class FixtureFlow(engine._Run):
+    """Test-only consumer of the actual planner/fill/navigation implementation."""
+
+    @property
+    def _inspection_only(self):
+        return False
+
+    def _account_handoff(self):
+        return self._end("ready", "Le site demande un compte, créé uniquement pour un vrai envoi : rien n'a été envoyé (simulation).")
+
+    async def _execute(self, item, target, snapshot, log):
+        boundary = "cv_upload_parse" if item.act.op.startswith("upload_") else "draft_write"
+        return await self.write_gate.perform(boundary, self.url, lambda: super(FixtureFlow, self)._execute(item, target, snapshot, log))
+
+    async def _click(self, target, *, recheck=None):
+        boundary = "final_submit" if self.final_clicked else "draft_write"
+        async def operation():
+            await super(FixtureFlow, self)._click(target, recheck=recheck)
+        await self.write_gate.perform(boundary, self.url, operation)
+
+
+class LoopbackFlowAdapter:
+    """Rehearse or dispatch the shared browser flow on one fixture server, never a real ATS."""
+
+    name = "loopback-browser-fixture"
+    capability = "unattended"
+    retry_rule = "never"
+    boundaries = {"draft_write": "auto", "cv_upload_parse": "auto", "final_submit": "auto"}
+    tenant = "browser-fixture"
+
+    def __init__(self, server, page, *, capture_receipt=False, **options):
+        self.server, self.page, self.options = server, page, options
+        self.fixture = urlsplit(server.base)
+        self.capture_receipt = capture_receipt
+
+    def matches(self, url, dom_markers):
+        parsed = urlsplit(url)
+        return float(parsed.scheme == "http" and parsed.netloc == self.fixture.netloc and parsed.hostname == "127.0.0.1")
+
+    def resolve(self, url, dom_markers):
+        return Requisition(self.tenant, urlsplit(url).path) if self.matches(url, dom_markers) else None
+
+    async def dispatch(self, request, gate):
+        return await self._drive(request, gate, "submit")
+
+    async def rehearse(self, request, gate):
+        return await self._drive(request, gate, "dry_run")
+
+    async def verify_receipt(self, attempt, *, evidence=None):
+        if isinstance(evidence, tuple) and attempt.nonce in evidence[1]:
+            return Receipt(attempt, "confirmed", "first_party_confirmation", "fixture-apply")
+        return Receipt(attempt, "uncertain")
+
+    async def _drive(self, request, gate, mode):
+        url = request.attempt.url
+        if not self.matches(url, frozenset()) or hashlib.sha256(request.pdf).hexdigest() != request.attempt.pdf_sha256:
+            raise ApplyError("Fixture destination or PDF mismatch")
+        page, options = self.page, self.options.copy()
+        aliases = {self.fixture.netloc}
+        if not self.capture_receipt:
+            aliases.update({f"localhost:{self.fixture.port}", f"thirdparty.test:{self.fixture.port}"})
+        else:
+            options["uploads"] = replace(options["uploads"], cv_bytes=request.pdf)
+        receipt_nonces = []
+
+        def observe(response):
+            if response.url == self.server.url("apply") and response.request.method == "POST":
+                receipt_nonces.append(response.headers.get("x-fixture-receipt"))
+
+        async def local_only(route, browser_request):
+            target = urlsplit(browser_request.url)
+            if target.scheme != "http" or target.netloc not in aliases:
+                await route.abort()
+            elif target.hostname == "thirdparty.test":
+                if browser_request.method not in {"GET", "HEAD"}:
+                    await route.abort()
+                    return
+                response = await route.fetch(url=self.server.base + target.path, max_redirects=0)
+                await route.fulfill(response=response)
+            elif self.capture_receipt:
+                headers = {key: value for key, value in browser_request.headers.items() if key != "x-fixture-nonce"}
+                if gate.final_called and not gate.stopped and browser_request.method == "POST" and target.path == "/apply":
+                    headers["x-fixture-nonce"] = request.attempt.nonce
+                await route.continue_(headers=headers)
+            else:
+                await route.continue_()
+
+        allowed = options.pop("allowed_hosts", None)
+        if allowed is not None and "host_allowed" not in options:
+            options["host_allowed"] = lambda host: host.lower() in {name.lower() for name in allowed}
+        for name in ("before_submit", "on_submit_click", "on_nav_click", "verifier", "host_allowed", "goto", "password"):
+            options.setdefault(name, None)
+        if mode == "submit" and options["before_submit"] is None:
+            return RunResult(status="blocked", message="Envoi bloqué : garde-fou d'envoi absent.")
+        flow = FixtureFlow(page, url=url, mode=mode, **options)
+        flow.write_gate = gate
+        await page.context.route("**/*", local_only)
+        if self.capture_receipt:
+            page.on("response", observe)
+        try:
+            result = await flow._run_page()
+            return (result, receipt_nonces) if self.capture_receipt else result
+        finally:
+            if self.capture_receipt:
+                page.remove_listener("response", observe)
+            await page.context.unroute("**/*", local_only)
+
+
+async def exercise_fixture_flow(page, server, *, url, mode, uploads, **options):
+    adapter = LoopbackFlowAdapter(server, page, uploads=uploads, **options)
+    registry = Registry()
+    registry.register(adapter, host="127.0.0.1", unattended_tenants={adapter.tenant: "first_party_confirmation"})
+    match = registry.find(url, None)
+    assert match and match.capability == "unattended"
+    pdf = uploads.cv_pdf.read_bytes()
+    attempt = Attempt(1, 1, 1, hashlib.sha256(pdf).hexdigest(), url, "127.0.0.1", "fixture", adapter.name,
+                      adapter.tenant, match.requisition.requisition_id)
+
+    def recheck():
+        if registry.find(url, None) != match:
+            raise ApplyError("Fixture adapter is no longer registered")
+
+    gate = WriteGate(capability="unattended" if mode == "submit" else "supervised", policies=adapter.boundaries,
+                     origins=frozenset({server.base}), recheck=recheck)
+    run = adapter.dispatch if mode == "submit" else adapter.rehearse
+    return await run(Dispatch(attempt, pdf), gate)
 
 
 # "thirdparty.test" is another SITE (a widget / an untrusted destination) that resolves to the loopback fixture server

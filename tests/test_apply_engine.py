@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from apply_fakes import (CONFIRMED, FIXTURES, FACT_PASSWORD, TEST_PASSWORD, FakeVerifier, ScriptedPlanner, act, cv_pdf, fast,  # noqa: F401
+from apply_fakes import (CONFIRMED, FIXTURES, FACT_PASSWORD, TEST_PASSWORD, FakeVerifier, ScriptedPlanner, act, cv_pdf, fast, exercise_fixture_flow,  # noqa: F401
                          form_actions, form_plan, job_plan, page, password_for, release, sample_facts, server)  # noqa: F401
 from jobhunt.apply import engine
 from jobhunt.apply.adapters import Attempt
@@ -26,8 +26,20 @@ async def go(page, server, planner, tmp_path, cv_pdf, *, mode="dry_run", start="
     if mode == "submit":
         kw.setdefault("before_submit", no_reasons)
     url = kw.pop("url", None) or server.url(start)
+    if mode in ("submit", "dry_run"):
+        return await exercise_fixture_flow(page, server, url=url, facts=facts or sample_facts(), planner=planner, uploads=uploads,
+                                           mode="dry_run" if mode == "inspection" else mode, out_dir=tmp_path / "shots",
+                                 job_title="Technicien", company="Exemple SA", **kw)
     return await run_application(page, url=url, facts=facts or sample_facts(), planner=planner, uploads=uploads,
-                                 mode=mode, out_dir=tmp_path / "shots", job_title="Technicien", company="Exemple SA", **kw)
+                                 mode="dry_run" if mode == "inspection" else mode, out_dir=tmp_path / "shots",
+                                 job_title="Technicien", company="Exemple SA", **kw)
+
+
+def mocked_navigation(url):
+    """The host-policy tests fulfill this URL in Playwright; the context blocks unmatched traffic."""
+    async def goto(page, approved_url):
+        await page.goto(url, wait_until="domcontentloaded")
+    return goto
 
 
 async def no_reasons():
@@ -597,18 +609,18 @@ def _fake_host(page, scheme):
 
 async def test_non_https_page_refuses_any_data(page, server, fast, cv_pdf, tmp_path):
     await _fake_host(page, "http")
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="http://jobs.example.test/form")
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("http://jobs.example.test/form"))
     assert res.status == "blocked" and "non sécurisée" in res.message.lower() and await page.input_value("#fn") == ""
     assert res.steps[0].filled == []
 
 
 async def test_https_page_is_fine_and_the_host_is_logged(page, server, fast, cv_pdf, tmp_path):
     await _fake_host(page, "https")
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="https://jobs.example.test/form",
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/form"),
                    allowed_hosts={"other.example.test"})
     assert res.status == "blocked" and res.untrusted_host == "jobs.example.test" and await page.input_value("#fn") == ""
     assert "jobs.example.test" in res.steps[0].note and "hors hôte de l'offre" in res.steps[0].note
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="https://jobs.example.test/form",
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/form"),
                    allowed_hosts={"jobs.example.test"})
     assert res.status == "ready" and await page.input_value("#fn") == "Camille" and "hors hôte" not in res.steps[0].note
 
@@ -994,7 +1006,7 @@ FORM_BODY = (FIXTURES / "form.html").read_text(encoding="utf-8")
 
 async def test_top_level_page_on_an_unrecognized_host_gets_no_data(page, server, fast, cv_pdf, tmp_path):
     await _fake_host(page, "https")
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="https://jobs.example.test/form",
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/form"),
                    host_allowed=lambda h: h == "ok.example.test", mode="submit")
     assert res.status == "blocked" and res.untrusted_host == "jobs.example.test" and not res.submit_clicked
     assert res.message == "Le formulaire est hébergé sur un site non reconnu : jobs.example.test"
@@ -1011,11 +1023,11 @@ async def test_a_form_in_a_frame_on_another_host_gets_no_data(page, server, fast
             reqs.append(request.url)
         await route.fulfill(content_type="text/html; charset=utf-8", body=FORM_BODY)
     await page.route("https://*.example.test/**", handler)
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="https://jobs.example.test/embed",
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/embed"),
                    host_allowed=lambda h: h == "jobs.example.test")
     assert res.status == "blocked" and res.untrusted_host == "ats.example.test" and "ats.example.test" in res.message
     assert await page.frame_locator("iframe").locator("#fn").input_value() == ""
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="https://jobs.example.test/embed",
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/embed"),
                    host_allowed=lambda h: h.endswith(".example.test"))
     assert res.status == "ready" and await page.frame_locator("iframe").locator("#fn").input_value() == "Camille"
 
@@ -1031,10 +1043,10 @@ async def test_a_form_that_posts_to_another_host_gets_no_data(page, server, fast
             reqs.append(request.url)
         await route.fulfill(content_type="text/html; charset=utf-8", body=body)
     await page.route("https://*.example.test/**", handler)
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="https://jobs.example.test/form",
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/form"),
                    host_allowed=lambda h: h == "jobs.example.test", mode="submit")
     assert res.status == "blocked" and res.untrusted_host == "collect.example.test" and await page.input_value("#fn") == "" and not reqs
-    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, url="https://jobs.example.test/form",
+    res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/form"),
                    host_allowed=lambda h: h.endswith(".example.test"))
     assert res.status == "ready" and await page.input_value("#fn") == "Camille"
 
@@ -1061,7 +1073,7 @@ async def test_the_action_changed_after_data_entry_is_caught_right_before_the_cl
 
     async def hook():
         hooks.append(1)
-    res = await go(page, server, Planner(), tmp_path, cv_pdf, url="https://jobs.example.test/form", mode="submit", on_submit_click=hook,
+    res = await go(page, server, Planner(), tmp_path, cv_pdf, goto=mocked_navigation("https://jobs.example.test/form"), mode="submit", on_submit_click=hook,
                    host_allowed=lambda h: h == "jobs.example.test")
     assert res.status == "blocked" and res.untrusted_host == "collect.example.test" and not reqs and hooks == [] and not res.submit_clicked, (
         res.status, res.message, res.steps[0].note, res.steps[0].filled)
@@ -2380,15 +2392,15 @@ async def test_a_language_picker_elsewhere_does_not_block_the_apply_click(page, 
     assert res.steps[0].clicked == "Postuler"
 
 
-async def test_a_third_party_widget_frame_may_post_while_loading(page, server, fast, cv_pdf, tmp_path):
+async def test_inspection_blocks_third_party_widget_posts_while_loading(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "recruitee", f'<h1>Offre</h1><iframe src="{third_party(server)}/widget_post" style="width:300px;height:100px"></iframe>')
     class Slow(ScriptedPlanner):   # gives the widget frame time to load and POST while the run is in progress
         async def plan(self, *a, **k):
             await asyncio.sleep(1.5)
             return await super().plan(*a, **k)
     planner = Slow([StepPlan(page_kind="closed")])
-    res = await go(page, server, planner, tmp_path, cv_pdf, start="recruitee", max_steps=3)
-    assert res.status == "blocked" and server.posts_to("/widget_hit") and len(planner.calls) == 1, (server.requests, res.message)
+    res = await go(page, server, planner, tmp_path, cv_pdf, start="recruitee", max_steps=3, mode="inspection")
+    assert res.status == "blocked" and not server.posts_to("/widget_hit") and len(planner.calls) == 1, (server.requests, res.message)
 
 
 # ================================================================== eighth review round
