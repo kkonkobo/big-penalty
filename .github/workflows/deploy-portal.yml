@@ -1,0 +1,245 @@
+name: Deploy portal
+
+# Builds the job-seeker portal server (portal/, src/jobhunt/portal/server) into an image, pushes it to GHCR and asks
+# Dokploy to run that exact digest at https://big-penalty.yibe.studio/app. Pull requests only test, build and
+# smoke-test the image: they never receive a secret, never push and never deploy. See portal/README.md.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/jobhunt/portal/**"
+      - "src/jobhunt/__init__.py"
+      - "src/jobhunt/web/static/style.css"
+      - "portal/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/deploy-portal.yml"
+      - ".github/scripts/**"
+  pull_request:
+    paths:
+      - "src/jobhunt/portal/**"
+      - "src/jobhunt/__init__.py"
+      - "src/jobhunt/web/static/style.css"
+      - "portal/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/deploy-portal.yml"
+      - ".github/scripts/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Two deployments never overlap, and a running one is never cancelled half-way (image update and deploy are two
+# separate API writes).
+concurrency:
+  group: production-portal-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/big-penalty-portal
+  SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  DEPLOY: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+      - name: Test deploy helper
+        run: bash .github/scripts/dokploy-deploy.test.sh
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+      - run: uv sync --frozen
+      - name: Portal tests
+        run: uv run pytest -q tests/test_portal_*.py
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: portal/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          build-args: GIT_SHA=${{ env.SHA }}
+          tags: ${{ env.IMAGE }}:${{ env.SHA }}
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          base=http://127.0.0.1:8080
+          # Throwaway key for this run only; the image itself contains no secret.
+          key=$(openssl rand -hex 32)
+          echo "::add-mask::$key"
+          docker volume create portal-smoke-data >/dev/null
+          docker run -d --name portal \
+            --read-only --tmpfs /tmp --user 10001:10001 -v portal-smoke-data:/data \
+            --health-interval 2s --health-start-period 1s --health-retries 5 \
+            -p 127.0.0.1:8080:8080 \
+            -e PORTAL_DATA_KEY="$key" \
+            -e PORTAL_PUBLIC_ORIGIN=http://127.0.0.1:8080 -e PORTAL_ALLOW_INSECURE_LOCAL=1 \
+            -e PORTAL_BASE_PATH=/app -e PORTAL_DB_PATH=/data/portal.sqlite3 \
+            "$IMAGE:$SHA" >/dev/null
+
+          wait_ready() {
+            for attempt in $(seq 1 30); do
+              curl -fsS "$base/app/healthz" >/dev/null 2>&1 && return 0
+              sleep 1
+            done
+            echo "The portal did not answer /app/healthz within 30 seconds" >&2
+            return 1
+          }
+          wait_healthy() {
+            # the image's own HEALTHCHECK (Host header taken from PORTAL_PUBLIC_ORIGIN) must report healthy
+            for attempt in $(seq 1 30); do
+              [[ "$(docker inspect --format '{{.State.Health.Status}}' portal)" == healthy ]] && return 0
+              sleep 1
+            done
+            echo "The container's HEALTHCHECK never became healthy" >&2
+            return 1
+          }
+          wait_ready
+          wait_healthy
+
+          curl -fsS "$base/app/healthz" | grep -q '"ok"'
+          curl -fsS "$base/app/version.json" | grep -q "$SHA"
+
+          curl -sS -D headers.txt -o /dev/null -w '%{http_code}\n' "$base/app/" | grep -qx 200
+          for header in content-security-policy x-frame-options strict-transport-security referrer-policy x-content-type-options; do
+            grep -qi "^$header:" headers.txt || { echo "missing header $header on /app/" >&2; exit 1; }
+          done
+          grep -qi '^x-frame-options: DENY' headers.txt
+          grep -qi '^referrer-policy: no-referrer' headers.txt
+          grep -qi '^x-content-type-options: nosniff' headers.txt
+
+          code=$(curl -sS -D redirect.txt -o /dev/null -w '%{http_code}' "$base/app")
+          [[ "$code" =~ ^30[1278]$ ]] || { echo "/app answered $code, expected a redirect" >&2; exit 1; }
+          grep -i '^location:' redirect.txt | tr -d '\r' | grep -qE '/app/$'
+          [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/")" == 404 ]]
+          [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/app/api/v2/status")" == 401 ]]
+          [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/app/api/v1/status")" == 404 ]]
+
+          [[ "$(docker exec portal id -u)" == 10001 ]]
+          docker exec portal python -m jobhunt.portal.server.admin list
+          # Only the server's files are in the image.
+          docker exec portal sh -c '
+            set -e
+            test ! -e /srv/app/jobhunt/apply
+            test ! -e /srv/app/jobhunt/cv
+            test ! -e /srv/app/jobhunt/cli.py
+            test -f /srv/app/jobhunt/web/static/style.css
+            test -z "$(find /srv/app \( -iname tests -o -iname "test_*" -o -iname ".env*" \) | head -1)"
+            touch /data/.write-probe
+            rm /data/.write-probe
+            if touch /srv/app/.write-probe 2>/dev/null; then echo "code directory is writable" >&2; exit 1; fi
+          '
+
+          # Restart on the same volume: the persistence path is writable and the server comes back.
+          docker restart portal >/dev/null
+          wait_ready
+          wait_healthy
+          curl -fsS "$base/app/version.json" | grep -q "$SHA"
+      - name: Container logs
+        if: failure()
+        run: docker logs portal 2>&1 | tail -n 80 || true
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f portal >/dev/null 2>&1 || true
+          docker volume rm portal-smoke-data >/dev/null 2>&1 || true
+      - name: Save the tested image
+        if: env.DEPLOY == 'true'
+        run: docker save "$IMAGE:$SHA" | gzip > tested-portal.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: env.DEPLOY == 'true'
+        with:
+          name: tested-portal
+          path: tested-portal.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    # Only trusted code on main reaches the secrets. Pull requests and other branches stop at the image job.
+    needs: image
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: portal
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-portal
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested image
+        run: |
+          docker load -i tested-portal.tar.gz
+          docker push "$IMAGE:$SHA" | tee push.txt
+          digest=$(awk '$2 == "digest:" && $3 ~ /^sha256:/ { print $3 }' push.txt)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "IMAGE_REF=$IMAGE@$digest" >> "$GITHUB_ENV"
+      - name: Request deployment
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_PORTAL_API_KEY }}
+          # The panel hostname is behind Cloudflare's proxy, which challenges GitHub runners.
+          DOKPLOY_ORIGIN_IP: ${{ vars.DOKPLOY_ORIGIN_IP }}
+          APPLICATION_ID: ${{ vars.DOKPLOY_PORTAL_APP_ID }}
+        run: |
+          test -n "$APPLICATION_ID"
+          bash .github/scripts/dokploy-deploy.sh "$APPLICATION_ID" "$IMAGE_REF"
+      - name: Wait for the new version to be live
+        env:
+          PORTAL_URL: ${{ vars.PORTAL_URL }}
+          ORIGIN_IP: ${{ vars.DOKPLOY_ORIGIN_IP }}
+        run: |
+          test -n "$PORTAL_URL"
+          [[ "$PORTAL_URL" == https://* ]]
+          # If the DNS record is ever proxied by Cloudflare, runners get challenged. Go straight to the server
+          # instead; TLS is still verified against the site's hostname.
+          resolve=()
+          if [[ -n "$ORIGIN_IP" ]]; then
+            host=${PORTAL_URL#https://}
+            resolve=(--resolve "${host%%/*}:443:$ORIGIN_IP")
+          fi
+          for attempt in $(seq 1 36); do
+            status=$(curl --silent --connect-timeout 5 --max-time 10 ${resolve[@]+"${resolve[@]}"} \
+              --output version.json --write-out '%{http_code}' "${PORTAL_URL%/}/app/version.json" || true)
+            if [[ "$status" == 200 ]] && grep -q "$SHA" version.json; then
+              echo "Live: $PORTAL_URL/app serves $SHA"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "The portal did not serve $SHA within 3 minutes. Last HTTP status: ${status:-none}" >&2
+          exit 1

@@ -20,20 +20,23 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: production-site-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
   cancel-in-progress: false
 
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/big-penalty-site
+  SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  DEPLOY: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
 jobs:
-  release:
+  image:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/big-penalty-site
-      SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      DEPLOY: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
@@ -42,47 +45,84 @@ jobs:
       - name: Test deploy helper
         run: bash .github/scripts/dokploy-deploy.test.sh
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        if: env.DEPLOY == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: site
           file: site/Dockerfile
           platforms: linux/amd64
-          push: ${{ env.DEPLOY == 'true' }}
+          push: false
           load: true
           build-args: GIT_SHA=${{ env.SHA }}
           tags: ${{ env.IMAGE }}:${{ env.SHA }}
       - name: Smoke-test the image
         run: |
-          docker run -d --rm --name site -p 8080:8080 "$IMAGE:$SHA"
+          docker run -d --rm --name site -p 127.0.0.1:8080:8080 "$IMAGE:$SHA"
           for attempt in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && break; sleep 1; done
           curl -fsS http://127.0.0.1:8080/ | grep -q "Big Penalty"
           curl -fsS http://127.0.0.1:8080/version.json | grep -q "$SHA"
           # every asset address carries this build's version, and still resolves
           curl -fsS http://127.0.0.1:8080/ | grep -q "/assets/screenshot.jpg?v=$SHA"
           curl -fsS -o /dev/null "http://127.0.0.1:8080/assets/screenshot.jpg?v=$SHA"
+          # the portal shares this origin: strict CSP on documents and errors, and no inline script (portal/DESIGN.md 12)
+          curl -fsS -D - -o /dev/null http://127.0.0.1:8080/ | grep -qi "^content-security-policy: default-src 'none'; script-src 'self';"
+          curl -sS -D - -o /dev/null http://127.0.0.1:8080/no-such-page | grep -qi "^content-security-policy: default-src 'none'; script-src 'self';"
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<script src="/assets/site.js?v='"$SHA"'" defer></script>'
+          curl -fsS -o /dev/null "http://127.0.0.1:8080/assets/site.js?v=$SHA"
+          if curl -fsS http://127.0.0.1:8080/ | grep '<script' | grep -v ' src="/assets/'; then echo 'inline script in index.html' >&2; exit 1; fi
           for path in windows windows-portable mac mac-intel; do
             curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' "http://127.0.0.1:8080/download/$path" | grep -q '^302 https://github.com/kkonkobo/big-penalty/releases/latest/download/Big-Penalty-'
           done
           curl -sS -o /dev/null -w '%{redirect_url}\n' http://127.0.0.1:8080/download/windows | grep -q 'setup\.exe$'
           curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' http://127.0.0.1:8080/latest | grep -q '^302 https://github.com/kkonkobo/big-penalty/releases/latest$'
           docker stop site
-      - name: Request deployment
+      - name: Save the tested image
         if: env.DEPLOY == 'true'
+        run: docker save "$IMAGE:$SHA" | gzip > tested-site.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: env.DEPLOY == 'true'
+        with:
+          name: tested-site
+          path: tested-site.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: image
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-site
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested image
+        run: |
+          docker load -i tested-site.tar.gz
+          docker push "$IMAGE:$SHA" | tee push.txt
+          digest=$(awk '$2 == "digest:" && $3 ~ /^sha256:/ { print $3 }' push.txt)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "IMAGE_REF=$IMAGE@$digest" >> "$GITHUB_ENV"
+      - name: Request deployment
         env:
           DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
           DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
           # The panel hostname is behind Cloudflare's proxy, which challenges GitHub runners.
           DOKPLOY_ORIGIN_IP: ${{ vars.DOKPLOY_ORIGIN_IP }}
           APPLICATION_ID: ${{ vars.DOKPLOY_APP_ID }}
-        run: bash .github/scripts/dokploy-deploy.sh "$APPLICATION_ID" "$IMAGE:$SHA"
+        run: bash .github/scripts/dokploy-deploy.sh "$APPLICATION_ID" "$IMAGE_REF"
       - name: Wait for the new version to be live
-        if: env.DEPLOY == 'true'
         env:
           SITE_URL: ${{ vars.SITE_URL }}
           ORIGIN_IP: ${{ vars.DOKPLOY_ORIGIN_IP }}
@@ -105,5 +145,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "The site did not serve $SHA within 3 minutes. Last HTTP status: ${status:-none}; body starts: $(head -c 120 version.json 2>/dev/null | tr -d '\n')" >&2
+          echo "The site did not serve $SHA within 3 minutes. Last HTTP status: ${status:-none}" >&2
           exit 1
