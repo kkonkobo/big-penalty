@@ -77,7 +77,13 @@ DIAL_OPTION_RE = re.compile(r"^\s*\(?\+\d{1,4}")
 TEXT_KINDS = {"text", "email", "tel", "url", "number", "date", "password", "textarea", "combobox"}
 PROFILE_KINDS = {"text", "email", "tel", "url", "number", "date", "textarea"}  # a pre-filled value there = a form with a profile
 GUARDED = {"next", "submit", "signup", "login"}
-FILLABLE = {"text", "email", "tel", "textarea", "select", "radio", "checkbox"}  # "the form is still there" = a file or >= 3 of these
+FILLABLE = {"text", "email", "tel", "textarea", "select", "radio", "checkbox"}
+# Unattended sends never guess these: they need a stored answer (« À compléter une fois »), else they become a question.
+_UNATTENDED_NO_GUESS = re.compile(
+    r"dipl[oô]m|degree|qualification|niveau d.?[ée]tudes|education level|abschluss|"
+    r"date de d[ée]but|d[ée]but souhait|disponibilit|start date|starting date|available (from|to start)|availability|"
+    r"verf[üu]gbar|eintrittsdatum|"
+    r"salaire|r[ée]mun[ée]ration|pr[ée]tentions?|salary|compensation|pay expectation|gehalt", re.I)  # "the form is still there" = a file or >= 3 of these
 CV_RE = re.compile(r"(?<![a-z])(cv(?![a-z])|curriculum|resume|lebenslauf)")           # run on accent-stripped lowercase text
 LETTER_RE = re.compile(r"lettre|cover|motivation|anschreiben")
 # Consents that code accepts by itself (recruitment-data / privacy / site terms), run on accent-stripped lowercase text; any other
@@ -1134,6 +1140,9 @@ class _Run:
         if self.autonomous and item.hard and (a.inferred or fact is None or not fact.value
                 or (not fact.exact and not derived_from(want or "", fact.value))):
             return drop("fait dur absent des faits confirmés")
+        if (self.autonomous and (a.inferred or fact is None or not fact.value)
+                and _UNATTENDED_NO_GUESS.search(" ".join(filter(None, (f.label, f.group, f.name, f.placeholder))))):
+            return drop("diplôme, date de début ou salaire : jamais deviné sans vous (réponse enregistrée requise)")
 
         def need_verdict(answer: str, backed: bool) -> _Item | None:
             if item.hard and (a.inferred or fact is None):
@@ -1770,7 +1779,12 @@ class _Run:
                 trace = self.diagnostics
                 if not self.autonomous.final_response:
                     trace.receipt_reason = "no_final_response"
-                elif self.autonomous.final_json:
+                elif self.autonomous.final_json and not (has_form and (
+                        any(f.error for f in snap.fields) or await self._banner_error()
+                        or {(_norm(_label(f)), f.kind) for f in snap.fields if f.kind in FILLABLE}
+                        - (self.last_sent.fields if self.last_sent else set()))):
+                    # A positive JSON body alone is not enough: many sites return an id for a draft. Refuse it while
+                    # the page still shows a form with an error or new fields to fill (the next step of the form).
                     trace.receipt_reason = "confirmation_json"
                 elif not has_form and (self.autonomous.final_receipt_url or self.autonomous.receipt_url(self.page.url)):
                     trace.receipt_reason = "confirmation_url"

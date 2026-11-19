@@ -121,7 +121,7 @@ def get_settings() -> Settings:
         apply_daily=env("JOBHUNT_APPLY_DAILY", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_auto_min_score=float(env("JOBHUNT_APPLY_AUTO_MIN_SCORE") or 60),
         apply_daily_cap=int(env("JOBHUNT_APPLY_DAILY_CAP") or 40),
-        apply_autonomous=env("JOBHUNT_APPLY_AUTONOMOUS", "1") != "0",
+        apply_autonomous=env("JOBHUNT_APPLY_AUTONOMOUS", "1").strip().lower() not in ("0", "false", "no", "off"),
         apply_max_age_days=int(env("JOBHUNT_APPLY_MAX_AGE_DAYS") or 14),
         apply_prepare_min_score=float(env("JOBHUNT_APPLY_PREPARE_MIN_SCORE") or 60),
         apply_prepare_daily_cap=int(env("JOBHUNT_APPLY_PREPARE_DAILY_CAP") or 15),

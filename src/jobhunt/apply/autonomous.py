@@ -49,7 +49,8 @@ def confirmation_json(body: bytes) -> bool:
     status = value.get("status")
     status = status.casefold() if isinstance(status, str) else ""
     if (value.get("error") or value.get("errors") or value.get("success") is False
-            or status in {"draft", "pending", "failed", "error", "rejected", "incomplete", "validation_error"}):
+            or status in {"draft", "pending", "failed", "error", "rejected", "incomplete", "validation_error",
+                      "in_progress", "inprogress", "started", "open", "saved", "created", "new", "partial"}):
         return False
     identifier = value.get("applicationId", value.get("application_id"))
     return (value.get("success") is True or status in {"submitted", "received"}

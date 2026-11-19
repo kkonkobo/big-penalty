@@ -63,14 +63,17 @@ def posting_form(action):
             '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>')
 
 
-@pytest.mark.parametrize("scenario", ["json", "no_receipt", "foreign", "wrong_posting", "late_foreign", "url", "text"])
+@pytest.mark.parametrize("scenario", ["json", "no_receipt", "foreign", "wrong_posting", "late_foreign", "url", "text",
+                                      "json_draft_step"])
 async def test_production_autonomous_scripted_submit(scenario, production_pool, server, profile, tmp_path, fast, monkeypatch):
     monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
     with closing(FixtureServer()) as receiver:
         endpoint = (receiver.url("submit") if scenario == "foreign" else
                     "/jobs/200/apply" if scenario == "wrong_posting" else "/api/applications")
         server.post_json[endpoint] = ({"applicationId": "fixture-123", "success": True}
-                                      if scenario in {"json", "late_foreign"} else {"status": "pending", "success": True})
+                                      if scenario in {"json", "late_foreign"} else
+                                      {"applicationId": "draft-1"} if scenario == "json_draft_step" else
+                                      {"status": "pending", "success": True})
         server.html["/jobs/100"] = posting_form("/jobs/100").replace(' method="post"', '') + """<script>
         document.forms[0].addEventListener('submit', async event => {
             event.preventDefault();
@@ -79,9 +82,13 @@ async def test_production_autonomous_scripted_submit(scenario, production_pool, 
             if (%s) navigator.sendBeacon(%s, 'synthetic');
             if (%s) location.href = '/application-received';
             if (%s) document.body.innerHTML = '<h1>Merci, votre candidature a bien été reçue.</h1>';
+            if (%s) document.body.innerHTML = '<h1>Étape 2 sur 3 : questionnaire</h1><form>'
+                + '<label for="q1">Pourquoi nous ?</label><input id="q1" name="q1" required>'
+                + '<label for="q2">Disponibilité</label><input id="q2" name="q2" required>'
+                + '<label for="q3">Mobilité</label><input id="q3" name="q3" required><button>Suivant</button></form>';
         });
         </script>""" % (json.dumps(endpoint), json.dumps(scenario == "late_foreign"), json.dumps(receiver.url("beacon")),
-                         json.dumps(scenario == "url"), json.dumps(scenario == "text"))
+                         json.dumps(scenario == "url"), json.dumps(scenario == "text"), json.dumps(scenario == "json_draft_step"))
         server.html["/application-received"] = "<h1>Merci</h1>"
         job, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
         result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
