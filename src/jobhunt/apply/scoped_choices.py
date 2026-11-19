@@ -9,7 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from jobhunt.apply.facts import answers_lock, answers_path
+from jobhunt.apply.facts import answers_lock, answers_path, replace_file
 from jobhunt.apply.prompt_rules import decision_key, requires_site_consent, technical_key
 from jobhunt.apply.types import FormField, Question
 
@@ -84,7 +84,7 @@ def save_once(profile_id: int, app_id: int, rev: int, origin: str, binding: str,
                 json.dump(data, handle)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(name, path)
+            replace_file(name, path)
         finally:
             Path(name).unlink(missing_ok=True)
         return True

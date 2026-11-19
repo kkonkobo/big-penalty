@@ -14,6 +14,7 @@ import os
 import re
 import tempfile
 import threading
+import sys
 import time
 import unicodedata
 from datetime import date, datetime
@@ -123,6 +124,19 @@ def _locked(fn):
 STALE_TMP_S = 3600
 
 
+def replace_file(src: str | os.PathLike, dst: str | os.PathLike, *, attempts: int = 40, delay_s: float = 0.025) -> None:
+    """`os.replace`, retried briefly on Windows: it refuses to replace a file another handle has open (a concurrent
+    replace, a reader, an antivirus scan) with PermissionError. Other OSes replace atomically on the first try."""
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or attempt == attempts - 1:
+                raise
+            time.sleep(delay_s)
+
+
 def _write_answers(profile_id: int, data: dict) -> None:
     """Atomic YAML write: a UNIQUE temp file in the same folder (two writers never share a name), fsync, `os.replace`.
     Temp files left by a crash are harmless and removed on the next write once they are older than an hour. Comments of the
@@ -140,7 +154,7 @@ def _write_answers(profile_id: int, data: dict) -> None:
             f.write(yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100, default_flow_style=False))
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, p)
+        replace_file(tmp, p)
     except BaseException:
         if tmp:
             with contextlib.suppress(OSError):

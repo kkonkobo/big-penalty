@@ -16,7 +16,7 @@ from jobhunt.apply import engine, service, store
 from jobhunt.apply.adapters import Registry, Requisition
 from jobhunt.apply.destination import RecipientGuard, origin
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.supervised import call_local
+from jobhunt.apply.supervised import HAS_LOCAL_BRIDGE, call_local
 from jobhunt.apply.identity import resolved_identity
 from jobhunt.apply.engine import DRY_UNTESTED, UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.types import RunResult, StepLog, StepPlan
@@ -279,6 +279,7 @@ async def test_production_generic_fill_requires_fresh_confirmation(change, produ
         await asyncio.wait_for(task, 10)
 
 
+@pytest.mark.skipif(not HAS_LOCAL_BRIDGE, reason="exercises the Unix-socket fill-step CLI bridge (absent on Windows)")
 @pytest.mark.parametrize("invalidate", ["settled", "approval", "pdf"])
 async def test_production_fill_step_reuses_reservation_and_refuses_stale_reentry(invalidate, production_pool, server, profile, tmp_path, fast, monkeypatch):
     import socket
