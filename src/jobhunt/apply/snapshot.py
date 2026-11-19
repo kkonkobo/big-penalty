@@ -30,12 +30,15 @@ MAX_TEXT = 4000
 Resolver = Callable[[str], Locator]  # the returned object also has `.frame_url(ref)` (URL of the frame holding the element)
 
 _JS = r"""
-([start, readOnly]) => {
+([start, readOnly, choice]) => {
   // refs -> the very elements tagged below (a page script may clone an element WITH its attributes: the attribute alone
   // cannot tell the original from its clone, this registry can)
   const reg = {};
   if (!readOnly) Object.defineProperty(window, '__bpEls', {value: reg, configurable: true, writable: true});
-  const tagRef = (el, ref) => { if (!readOnly) { el.setAttribute('data-bp-ref', ref); reg[ref] ??= el; } };
+  const tagRef = (el, ref) => {
+    if (choice && choice.node === el) reg.target = ref;
+    if (!readOnly) { el.setAttribute('data-bp-ref', ref); reg[ref] ??= el; }
+  };
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const els = [];
   const walk = (root) => {
@@ -480,9 +483,46 @@ _JS = r"""
     if (el.tagName === 'INPUT' && ['text', 'search', ''].includes((el.getAttribute('type') || '').toLowerCase()) && vis(el)
         && CODE_TXT.test(labelOf2(el)) && !el.value) { captcha = true; break; }
   }
+  if (choice) {
+    const field = out.find(entry => entry.ref === reg.target);
+    const node = choice.node;
+    if (!field || captcha || !node.isConnected || window !== window.top || location.href !== choice.url
+        || document.__bp_autonomous_document !== choice.nonce || node.closest('[inert]')) return false;
+    for (const [key, value] of Object.entries(choice.expected)) {
+      if (JSON.stringify(field[key]) !== JSON.stringify(value)) return false;
+    }
+    const matches = field.choice_options.filter(option => option[0] === choice.value);
+    if (matches.length !== 1 || matches[0][2] || matches[0][1] !== choice.label) return false;
+    if (field.kind === 'select') {
+      node.value = choice.value;
+      node.dispatchEvent(new Event('input', {bubbles: true, composed: true}));
+      node.dispatchEvent(new Event('change', {bubbles: true}));
+      return true;
+    }
+    if (field.kind !== 'radio' || !node.name) return false;
+    const option = els.find(member => member.type === 'radio' && member.name === node.name
+      && member.form === node.form && member.getRootNode() === node.getRootNode() && member.value === choice.value);
+    if (!option || option.closest('[inert]') || !field.options.some(entry => entry.value === choice.value)) return false;
+    option.click();
+    return true;
+  }
   return {fields: out, text: document.body ? clean(document.body.innerText) : '', captcha, next: n};
 }
 """
+
+
+async def apply_demographic_choice(target: ElementHandle, field: FormField, index: int, *, url: str, nonce: str) -> bool:
+    """Check the exact live choice shape and mutate in the same browser task."""
+    option = field.options[index]
+    expected = field.model_dump(include={"kind", "name", "label", "group", "required", "options", "value"})
+    expected.update(form=field.form.partition(":")[2], wording=field.wording, multiple=field.multiple,
+                    autocomplete=field.autocomplete, destination=field.destination,
+                    choice_destination=field.choice_destination, choice_options=field.choice_options, selected=field.selected)
+    if field.kind == "radio":
+        expected.pop("multiple")
+    return await target.evaluate(f"(node, choice) => ({_JS})([0, true, {{...choice, node}}])",
+                                 dict(expected=expected, url=url, nonce=nonce, value=option.value, label=option.label),
+                                 isolated_context=True)
 
 
 async def _frame_shown(frame: Frame, page: Page) -> bool:

@@ -36,6 +36,17 @@ _VISIBLE_HEADING = """doc => Array.from(doc.querySelectorAll('h1')).filter(node 
     return node.getClientRects().length && style.visibility === 'visible';
 }).map(node => node.innerText.trim())"""
 
+_FORM_TARGETS_JS = """node => {
+    const form = node.form;
+    if (!form) return [null, null, []];
+    const action = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action').get.call(form);
+    const submitters = [...form.getRootNode().querySelectorAll('button[formaction],input[formaction]')].filter(control =>
+        control.form === form && (control.type === 'submit' || control.type === 'image')
+        && control.getAttribute('formaction') !== ''
+    ).map(control => control.formAction);
+    return [form.getAttribute('action'), action, submitters];
+}"""
+
 _POSTING_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}|(?<![a-z0-9])(?:jr|req|r)[_-]?\d+|\d{3,}", re.I)
 
 
@@ -69,7 +80,7 @@ def _generic_action_allowed(document_url: str, raw_action: str | None, action_ur
     """`action_url` and `submitter_urls` are resolved by the browser, so `<base href>` is taken into account
     (`action="#"` under `<base href="/jobs/200">` submits to job 200). An absent or empty action submits to the
     document URL itself. Submit controls carrying `formaction` override the form's action and are checked too."""
-    targets = [] if raw_action is None or not raw_action.strip() else [action_url]
+    targets = [] if raw_action is None or raw_action == '' else [action_url]
     targets.extend(submitter_urls or ())
     return all(_target_allowed(document_url, target) for target in targets)
 
@@ -196,13 +207,8 @@ class Session:
                     live = await target.evaluate(f"""(node, key) => {{
                         const doc = node.ownerDocument, view = doc.defaultView;
                         if (!view || view !== view.top || doc !== document || !node.isConnected) return null;
-                        const form = node.form;
-                        const action = form && Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action').get.call(form);
-                        const submitters = form ? Array.from(form.elements).filter(e =>
-                            (e.type === 'submit' || e.type === 'image') && (e.getAttribute('formaction') ?? '').trim() !== ''
-                        ).map(e => e.formAction) : [];
                         return [[view.location.href, doc.title, ({_VISIBLE_HEADING})(doc), doc[key] ?? ''],
-                                form?.getAttribute('action') ?? null, action, submitters];
+                                ...({_FORM_TARGETS_JS})(node)];
                     }}""", self._document_key, isolated_context=True)
                 except Exception:
                     pass

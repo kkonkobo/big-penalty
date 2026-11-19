@@ -63,6 +63,8 @@ class FixtureAdapter:
     async def dispatch(self, request, gate):
         if self.scenario == "blocker":
             gate.stop("captcha")
+        if self.scenario == "otp":
+            gate.stop("otp")
         if self.scenario == "redirect":
             return await gate.perform("final_submit", "https://unapproved.example.test/", attach_pdf=True)
         if self.scenario == "wrong-endpoint":
@@ -103,7 +105,7 @@ def adapter_factory(request):
 
 
 @pytest.mark.parametrize("scenario", ["verified", "text-only", "wrong-attempt", "interrupt", "stale", "unregistered", "default",
-                                      "wrong-tenant", "paused-write", "redirect", "blocker", "policy-change", "duplicate",
+                                      "wrong-tenant", "paused-write", "redirect", "blocker", "otp", "policy-change", "duplicate",
                                       "wrong-receipt-kind", "wrong-requisition", "reconcile", "reconcile-not-sent",
                                       "wrong-endpoint", "negative-kind", "negative-nonce", "negative-req"])
 async def test_adapter_contract(adapter_factory, scenario, server, profile, tmp_path, monkeypatch):
@@ -135,8 +137,11 @@ async def test_adapter_contract(adapter_factory, scenario, server, profile, tmp_
         assert result.status == "blocked"
         assert not adapter.sent and not server.sent and not store.active_reservations(profile.id)
         return
-    if scenario in ("paused-write", "redirect", "blocker", "policy-change", "wrong-endpoint"):
+    if scenario in ("paused-write", "redirect", "blocker", "otp", "policy-change", "wrong-endpoint"):
         assert not adapter.sent and not server.sent and store.outstanding_attempt(app.id).id == result.id
+        if scenario in {"blocker", "otp"}:
+            assert result.status == ("needs_email" if scenario == "otp" else "needs_human")
+            assert result.result.dispatch_diagnostics.receipt_reason == ("verification_required" if scenario == "otp" else "human_required")
         return
     assert len(adapter.sent) == len(server.posts) == 1
     assert server.posts[0]["body"] == adapter.sent[0].pdf

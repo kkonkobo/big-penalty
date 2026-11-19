@@ -94,14 +94,20 @@ def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
     if held and code != "unconfirmed":
         message = UNCONFIRMED_NOTE + ". " + message
     return RunResult(status=result.status, diagnostic_code=code, message=message, final_url=origin(result.final_url),
+                     dispatch_diagnostics=result.dispatch_diagnostics,
+                     consent_codes=_safe_consents(result),
                      untrusted_host=result.untrusted_host if code == "untrusted_host" else "",
                      submit_clicked=result.submit_clicked, finished_at=result.finished_at)
 
 
-_RESULT_FIELDS = {"status": True, "message": True, "final_url": True, "submit_clicked": True,
+_RESULT_FIELDS = {"status": True, "message": True, "final_url": True, "submit_clicked": True, "dispatch_diagnostics": True,
                   "untrusted_host": True, "finished_at": True,
                   "steps": {"__all__": {"index", "url", "page_kind", "filled", "clicked", "screenshot", "note"}},
                   "questions": True}
+
+
+def _safe_consents(result: RunResult) -> list[str]:
+    return sorted(set(result.consent_codes) & {"application_privacy", "application_terms"})
 
 
 def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
@@ -121,6 +127,7 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
         return value
 
     payload = result.model_dump(include=_RESULT_FIELDS)
+    payload["consent_codes"] = _safe_consents(result)
     sensitive = {"account_login", "account_signup", "email_verification"}
     credential_page = contains_verification_code(result.message)
     for step in payload["steps"]:
@@ -137,7 +144,10 @@ def _url_key(url: str) -> str:
 
 
 def binding_record(attempt: Attempt) -> dict:
-    return {**asdict(attempt), "url": audit_url(attempt.url), "url_digest": _url_key(attempt.url)}
+    payload = asdict(attempt)
+    if not attempt.autonomous:
+        payload.pop("autonomous")
+    return {**payload, "url": audit_url(attempt.url), "url_digest": _url_key(attempt.url)}
 
 
 def _binding_json(attempt: Attempt) -> str:
@@ -280,7 +290,8 @@ def save_progress(run_id: int, result: RunResult) -> None:
 
 
 def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | None = None,
-                      receipt: Receipt | None = None) -> ApplyRun:
+                      receipt: Receipt | None = None, browser_attempt: Attempt | None = None,
+                      browser_confirmed: bool = False, browser_clear: bool = False) -> ApplyRun:
     """Preserve any possible send atomically; no generic engine result is an attempt-bound receipt.
 
     Only a typed receipt authenticated by a registered adapter and matching a live, durable
@@ -301,7 +312,28 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
         if run["mode"] in ("submit", "supervised"):
             held = c.execute("SELECT * FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (run_id,)).fetchone()
             verified = False
-            if (receipt and held and run["mode"] == "submit" and receipt.attempt.adapter and clean_receipt(receipt, receipt.attempt)
+            if (browser_attempt and browser_attempt.autonomous and held and run["mode"] == "submit"
+                    and held["binding_json"] == _binding_json(browser_attempt) and browser_attempt.run_id == run_id):
+                if (browser_confirmed and result.status == "submitted" and run["submit_clicked_at"]
+                        and _binding_current(c, run, browser_attempt)):
+                    cvstore.tx_mark_submitted(c, run["application_id"], run["rev"], sent_origin_url=audit_url(browser_attempt.url))
+                    c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (run_id, run["application_id"]))
+                    c.execute("UPDATE jobs SET status='applied' WHERE id=(SELECT job_id FROM applications WHERE id=?)", (run["application_id"],))
+                    c.execute("UPDATE apply_reservations SET receipt_kind='first_party_confirmation', receipt_outcome='confirmed', receipt_at=? WHERE id=?",
+                              (ts, held["id"]))
+                    verified = True
+                elif browser_clear and not run["submit_clicked_at"] and not run["nav_clicked_at"] and not result.submit_clicked:
+                    c.execute("UPDATE apply_reservations SET released_at=? WHERE id=?", (ts, held["id"]))
+                else:
+                    awaiting_verification = True
+                    with _suppress(CVError):
+                        cvstore.tx_force_failed(c, run["application_id"], UNCONFIRMED_NOTE)
+                    if run["submit_clicked_at"] or result.status not in ("needs_input", "needs_email", "needs_human"):
+                        result = result.model_copy(update={"status": "failed"})
+                    c.execute("UPDATE apply_reservations SET receipt_kind='none', receipt_outcome='uncertain', receipt_at=? WHERE id=?",
+                              (ts, held["id"]))
+                    verified = True
+            elif (receipt and held and run["mode"] == "submit" and receipt.attempt.adapter and clean_receipt(receipt, receipt.attempt)
                     and receipt.attempt.run_id == run_id and receipt.attempt.application_id == run["application_id"]
                     and receipt.attempt.rev == run["rev"] and held["binding_json"] == _binding_json(receipt.attempt)
                     and _binding_current(c, run, receipt.attempt)):
@@ -316,12 +348,14 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
                     c.execute("UPDATE apply_reservations SET released_at=? WHERE id=?", (ts, held["id"]))
                     c.execute("UPDATE application_runs SET operator_not_sent_at=? WHERE id=?", (ts, run_id))
                     cvstore.tx_set_status(c, run["application_id"], "draft")
-                    result = RunResult(status="blocked", message="Non-envoi vérifié. Tout nouvel essai doit être lancé manuellement.")
+                    result = RunResult(status="blocked", message="Non-envoi vérifié. Tout nouvel essai doit être lancé manuellement.",
+                                       dispatch_diagnostics=result.dispatch_diagnostics)
                 verified = True
             elif held and held["binding_json"]:
                 with _suppress(CVError):
                     cvstore.tx_force_failed(c, run["application_id"], UNCONFIRMED_NOTE)
-                status = "needs_input" if run["mode"] == "supervised" and result.status == "needs_input" else "failed"
+                status = result.status if (run["mode"] == "supervised" and result.status == "needs_input"
+                                           or run["mode"] == "submit" and result.status in ("needs_email", "needs_human")) else "failed"
                 awaiting_verification = True
                 result = result.model_copy(update={"status": status, "submit_clicked": False})
                 if status == "needs_input":
@@ -556,6 +590,42 @@ def binding_active(attempt: Attempt) -> bool:
                     and _binding_current(conn, run, attempt))
 
 
+def _host_paused(conn, host: str) -> bool:
+    outcomes = conn.execute("""SELECT r.status, v.receipt_outcome FROM apply_reservations v
+        JOIN application_runs r ON r.id=v.run_id
+        WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
+        AND json_extract(v.binding_json, '$.host')=? ORDER BY v.id DESC LIMIT 2""", (host,)).fetchall()
+    return len(outcomes) == 2 and all(row["status"] == "failed" or row["receipt_outcome"] == "uncertain" for row in outcomes)
+
+
+def host_paused(host: str) -> bool:
+    with connect() as conn:
+        return _host_paused(conn, host)
+
+
+def paused_hosts() -> set[str]:
+    with connect() as conn:
+        rows = conn.execute("""WITH host_runs AS (
+            SELECT json_extract(v.binding_json, '$.host') AS host, v.receipt_outcome, r.status,
+            ROW_NUMBER() OVER (PARTITION BY json_extract(v.binding_json, '$.host') ORDER BY v.id DESC) AS pos
+            FROM apply_reservations v JOIN application_runs r ON r.id=v.run_id
+            WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
+        ) SELECT host FROM host_runs WHERE pos<=2 GROUP BY host
+        HAVING SUM(CASE WHEN status='failed' OR receipt_outcome='uncertain' THEN 1 ELSE 0 END)=2""").fetchall()
+        return {row["host"] for row in rows}
+
+
+def mark_autonomous_submit(attempt: Attempt) -> None:
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run = conn.execute("SELECT r.* FROM application_runs r JOIN apply_reservations v ON v.run_id=r.id"
+                           " WHERE r.id=? AND r.status='running' AND r.submit_clicked_at IS NULL"
+                           " AND v.released_at IS NULL AND v.binding_json=?", (attempt.run_id, _binding_json(attempt))).fetchone()
+        if not attempt.autonomous or not run or not _binding_current(conn, run, attempt):
+            raise ApplyError(NOT_ACTIVE)
+        conn.execute("UPDATE application_runs SET submit_clicked_at=? WHERE id=?", (_iso(now()), attempt.run_id))
+
+
 def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=None) -> dict[int, bool]:
     current = conn.execute("SELECT j.id, j.company, j.title, j.extra, j.origin_url FROM applications a JOIN jobs j"
                            " ON j.id=a.job_id AND j.profile_id=a.profile_id WHERE a.id=? AND a.profile_id=?",
@@ -636,11 +706,13 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
         if binding and (binding.run_id != run_id or binding.application_id != application_id or binding.rev != run["rev"]
                         or binding.profile_id != profile_id or not binding.dedupe_key
                         or run["trigger"] != trigger or run["mode"] not in ("submit", "supervised")
-                        or (run["mode"] == "submit" and not binding.adapter)
+                        or (run["mode"] == "submit" and not (binding.adapter or binding.autonomous))
                         or not _binding_current(c, run, binding)):
             raise ApplyError("Approbation ou destination modifiée avant l'envoi")
         confirmed_distinct = frozenset()
         if binding:
+            if binding.autonomous and _host_paused(c, binding.host):
+                raise ApplyError("À envoyer en mode supervisé")
             duplicates = _potential_duplicates(c, profile_id, application_id,
                                                canonical_identity(binding.tenant, binding.requisition_id))
             if any(duplicates.values()):
@@ -660,11 +732,14 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
                 c.execute("UPDATE apply_reservations SET pending=0 WHERE id=?", (own["id"],))
                 c.execute("UPDATE application_runs SET submit_clicked_at=COALESCE(submit_clicked_at, ?) WHERE id=?", (_iso(ts), run_id))
             return
-        rows = c.execute("SELECT application_id, trigger, role_key, url_key, created_at FROM apply_reservations"
+        rows = c.execute("SELECT application_id, trigger, role_key, url_key, created_at, binding_json FROM apply_reservations"
                          " WHERE profile_id=? AND released_at IS NULL", (profile_id,)).fetchall()
-        if trigger == "auto":
+        if trigger == "auto" or (binding and binding.autonomous):
             day = start_of_today_paris(ts)
-            if sum(1 for r in rows if r["trigger"] == "auto" and _dt(r["created_at"]) >= day) >= daily_cap:
+            count = c.execute("""SELECT count(*) FROM apply_reservations WHERE profile_id=? AND created_at>=?
+                AND ((trigger='auto' AND released_at IS NULL) OR json_extract(binding_json, '$.autonomous')=1)""",
+                              (profile_id, _iso(day))).fetchone()[0]
+            if count >= daily_cap:
                 raise ApplyError(f"Plafond de {daily_cap} envois automatiques par jour atteint")
         for r in rows:
             if r["application_id"] == application_id:

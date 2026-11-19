@@ -27,6 +27,9 @@ from patchright.async_api import ElementHandle, Locator, Page
 from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt
+from jobhunt.apply.autonomous import (
+    SUPERVISED_REQUIRED, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
+)
 from jobhunt.apply.destination import clean_text, clean_url
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
@@ -34,10 +37,11 @@ from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
 from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code, technical_key
 from jobhunt.apply.scoped_choices import field_choices
-from jobhunt.apply.snapshot import Resolver, live_button, take_snapshot
+from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
 from jobhunt.apply.store import binding_active
-from jobhunt.apply.types import (Action, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
+from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan)
+from jobhunt.apply.unattended import ClickUncertain as _Dispatched, click_once, handoff_result, trial_click
 from jobhunt.browser import human_pause
 from jobhunt.llm import LLMError
 
@@ -73,7 +77,13 @@ DIAL_OPTION_RE = re.compile(r"^\s*\(?\+\d{1,4}")
 TEXT_KINDS = {"text", "email", "tel", "url", "number", "date", "password", "textarea", "combobox"}
 PROFILE_KINDS = {"text", "email", "tel", "url", "number", "date", "textarea"}  # a pre-filled value there = a form with a profile
 GUARDED = {"next", "submit", "signup", "login"}
-FILLABLE = {"text", "email", "tel", "textarea", "select", "radio", "checkbox"}  # "the form is still there" = a file or >= 3 of these
+FILLABLE = {"text", "email", "tel", "textarea", "select", "radio", "checkbox"}
+# Unattended sends never guess these: they need a stored answer (« À compléter une fois »), else they become a question.
+_UNATTENDED_NO_GUESS = re.compile(
+    r"dipl[oô]m|degree|qualification|niveau d.?[ée]tudes|education level|abschluss|"
+    r"date de d[ée]but|d[ée]but souhait|disponibilit|start date|starting date|available (from|to start)|availability|"
+    r"verf[üu]gbar|eintrittsdatum|"
+    r"salaire|r[ée]mun[ée]ration|pr[ée]tentions?|salary|compensation|pay expectation|gehalt", re.I)  # "the form is still there" = a file or >= 3 of these
 CV_RE = re.compile(r"(?<![a-z])(cv(?![a-z])|curriculum|resume|lebenslauf)")           # run on accent-stripped lowercase text
 LETTER_RE = re.compile(r"lettre|cover|motivation|anschreiben")
 # Consents that code accepts by itself (recruitment-data / privacy / site terms), run on accent-stripped lowercase text; any other
@@ -394,10 +404,6 @@ class _Validated:
     upload_refs: set[str] = dc_field(default_factory=set)
 
 
-class _Dispatched(Exception):
-    """The single activation of a click raised: it may have fired. Never retried."""
-
-
 class _Dirty(Exception):
     """An action left the control in a state that may not be the validated one and cannot be undone (a radio): the step stops."""
 
@@ -528,9 +534,12 @@ class _Run:
         self.page, self.url, self.facts, self.planner, self.uploads, self.mode = page, url, facts, planner, uploads, mode
         self.out_dir, self.job_title, self.company, self.password = out_dir, job_title, company, password
         self.before_submit, self.on_submit_click, self.on_nav_click = before_submit, on_submit_click, on_nav_click
+        self.diagnostics = DispatchDiagnostics()
         self.before_field: Callable[[str], None] | None = None
         self.current_step = False
         self.generic_step = False
+        self.autonomous = None
+        self.consent_codes = set()
         self.live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None
         self.verifier, self.host_allowed = verifier, host_allowed
         self.max_steps, self.goto = max_steps, goto
@@ -606,6 +615,8 @@ class _Run:
         for field in pub.fields:
             if technical_key(field.label, field.kind, group=field.group, autocomplete=field.autocomplete) == "credentials":
                 field.value = SECRET_LOG if field.value else ""
+            if race_ethnicity_field(field, fold):
+                field.value = ""
             field.destination = field.choice_destination = None
             field.choice_options = []
         return pub, masked
@@ -637,7 +648,11 @@ class _Run:
             if question.reason is None:
                 question = _question(FormField(ref=question.ref, kind=question.kind, label=question.label))
             bound.append(question)
-        return RunResult(status=status, message=self._r(message), questions=bound)
+        trace = self.diagnostics.model_copy()
+        if status in ("needs_email", "needs_human") and trace.receipt_reason == "before_submit":
+            trace = handoff_result("email" if status == "needs_email" else "human", diagnostics=trace).dispatch_diagnostics
+        return RunResult(status=status, message=self._r(message), questions=bound, consent_codes=sorted(self.consent_codes),
+                         dispatch_diagnostics=trace)
 
     async def _shot(self, log: StepLog) -> None:
         if log.screenshot or os.getenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS") != "1":
@@ -731,14 +746,19 @@ class _Run:
 
     def _planner_facts(self) -> FactSheet:
         """The facts the planner sees: ours plus the derived `account_exists` of the CURRENT page host (when we can tell)."""
+        facts = [fact for fact in self.facts.facts if fact.key != "race_ethnicity"]
         if self.account_known is None:
-            return self.facts
+            return FactSheet(facts=facts)
         try:
             known = bool(self.account_known(self._host()))
         except Exception:
-            return self.facts
+            return FactSheet(facts=facts)
         extra = Fact(key="account_exists", label="Un compte existe déjà sur ce site pour le candidat", value="oui" if known else "non")
-        return FactSheet(facts=[*self.facts.facts, extra])
+        return FactSheet(facts=[*facts, extra])
+
+    def _autonomous_decision(self, field: FormField):
+        fact = self.facts.get("race_ethnicity")
+        return autonomous_decision(field, fold, race_ethnicity=fact.value if fact else None)
 
     def _identity_needles(self) -> dict[str, list[str]]:
         """What identifies the candidate's own data in a field value: his names, e-mail addresses and phone digits. A page
@@ -823,6 +843,24 @@ class _Run:
         seen: set[str] = set()
         clicks: list[tuple[FormField, str]] = []
         for field in snap.fields:
+            if self.autonomous:
+                selected = self._autonomous_decision(field)
+                if selected:
+                    code, index = selected
+                    seen.add(field.ref)
+                    if field.kind != "checkbox" or _is_empty(field):
+                        op = "check" if field.kind == "checkbox" else "select"
+                        v.items.append(_Item(Action(ref=field.ref, op=op), field, option_index=index, used=code))
+                    continue
+                if blocked_consent(fold(f"{field.label} {field.group}")) and field.kind == "checkbox":
+                    seen.add(field.ref)
+                    if not _is_empty(field):
+                        v.items.append(_Item(Action(ref=field.ref, op="uncheck"), field, used="optional_opt_out"))
+                    continue
+                if field.kind in CHOICE_KINDS and eeo_field(fold(f"{field.label} {field.group}")):
+                    seen.add(field.ref)
+                    self._drop(v, field, "réponse volontaire à choisir sur le site", ask=True)
+                    continue
             entry = self.choice_fields.get(field.ref)
             if not entry or entry[0] != _question(field) or field_choices(self.page.url, field) != entry[1:]:
                 continue
@@ -925,6 +963,9 @@ class _Run:
             return (field.kind != "password" and _question(field).category == "credentials"
                     and (field.required or active))
         if _site_consent(field):
+            if self.autonomous and (self._autonomous_decision(field) or (
+                    not field.required and not active and blocked_consent(fold(f"{field.label} {field.group}")))):
+                return False
             return field.required or active
         if not active:
             return field.required and (decision_key(field.label) or decision_key(field.group)) not in (
@@ -962,6 +1003,10 @@ class _Run:
             if not self._in_scope(field, current):
                 continue
             original = originals.get(field.live_ref)
+            if (self.autonomous and applying is None and target.kind in {"button", "link"}
+                    and field.required and field.kind not in {"button", "link"}
+                    and (original is None or (_is_empty(field) and not self._file_satisfied(field, fresh)))):
+                questions.append(_question(original or field))
             if field.kind in CHOICE_KINDS:
                 expected = approved.get(field.live_ref)
                 if expected is not None and expected == _choice_state(field):
@@ -1000,10 +1045,14 @@ class _Run:
     def _check(self, a: Action, f: FormField, v: _Validated, snap: PageSnapshot, resolve: Resolver | None) -> _Item | None:
         drop = lambda why, ask=True: self._drop(v, f, why, ask)  # noqa: E731
         op, k = a.op, f.kind
+        if a.fact == "race_ethnicity":
+            return drop("origine ethnique : sélection contrôlée uniquement")
         if _question(f).category == "credentials" and k != "password":
             return drop("mot de passe et champ incompatibles" if a.fact == "account_password"
                         else "identifiant technique à saisir sur le site")
         if op in ("upload_cv", "upload_letter"):
+            if self.autonomous and (op != "upload_cv" or k != "file"):
+                return drop("document à déposer à la main")
             if k == "file" and self._file_satisfied(f, snap):
                 return drop("fichier déjà déposé dans cette candidature", ask=False)
             if k not in ("file", "button", "link") or (k != "file" and not FILE_OPENER_RE.search(fold(f.label))):
@@ -1034,6 +1083,8 @@ class _Run:
             return drop("case ou liste sans libellé lisible : jamais cochée ni choisie")
         if a.fact == "consent_required" or (k in CHOICE_KINDS and _site_consent(f)):
             return drop("consentement à donner sur le site")
+        if self.autonomous and k in CHOICE_KINDS and blocked_consent(fold(f"{f.label} {f.group}")):
+            return drop("option de diffusion exclue")
         if choice and exact_key not in {"work_authorization", "needs_visa_sponsorship"} and not (
                 choice == "ambiguous_country" and (dial or exact_key == "country")):
             return drop("décision à confirmer sur le site")
@@ -1086,6 +1137,12 @@ class _Run:
         want = fact.value if fact is not None and (fact.exact or fact.key in address_facts | {"work_authorization"}) else (
             a.value or (fact.value if fact is not None else None))
         item.value = want
+        if self.autonomous and item.hard and (a.inferred or fact is None or not fact.value
+                or (not fact.exact and not derived_from(want or "", fact.value))):
+            return drop("fait dur absent des faits confirmés")
+        if (self.autonomous and (a.inferred or fact is None or not fact.value)
+                and _UNATTENDED_NO_GUESS.search(" ".join(filter(None, (f.label, f.group, f.name, f.placeholder))))):
+            return drop("diplôme, date de début ou salaire : jamais deviné sans vous (réponse enregistrée requise)")
 
         def need_verdict(answer: str, backed: bool) -> _Item | None:
             if item.hard and (a.inferred or fact is None):
@@ -1280,7 +1337,14 @@ class _Run:
             raise _DecisionHold(self._end("blocked", " ; ".join(reasons)))
 
     async def _before_mutation(self, op: str, target) -> None:
-        if self.mode == "supervised":
+        if self.autonomous:
+            try:
+                await self.autonomous.target(target)
+            except ManualField:
+                raise
+            except ApplyError:
+                raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
+        elif self.mode == "supervised":
             await self._supervised_checkpoint(target)
             if self.before_field:
                 try:
@@ -1292,6 +1356,30 @@ class _Run:
         """Carry out one validated action. Returns the (redacted) value for the log; raises _Skip when it cannot be done."""
         a, f = it.act, it.field
         T = ACTION_TIMEOUT_MS
+        if self.autonomous:
+            if a.op == "upload_cv" and f.kind == "file":
+                await self._before_mutation(a.op, loc)
+                await loc.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": self.uploads.cv_bytes}, timeout=T)
+                self.uploaded = True
+                return "CV.pdf"
+            if it.used in {"application_privacy", "application_terms", "optional_opt_out"}:
+                await self._before_mutation(a.op, loc)
+                await (loc.check if a.op == "check" else loc.uncheck)(timeout=T)
+                if a.op == "check":
+                    self.consent_codes.add(it.used)
+                return "true" if a.op == "check" else "false"
+            if it.used in {"eeo_opt_out", "eeo_race_ethnicity"}:
+                await self._before_mutation(a.op, loc)
+                try:
+                    applied = await apply_demographic_choice(loc, f, it.option_index, url=snap.url,
+                                                            nonce=self.autonomous.document_nonce)
+                except Exception:
+                    applied = False
+                if not applied:
+                    raise _DecisionHold(self._end("blocked", "Une question ou sa sélection a changé : action annulée."))
+                return f.options[it.option_index].label
+            if f.kind not in {"select", "text", "email", "tel", "url", "number", "date", "textarea", "password"}:
+                raise ManualField()
         if self.mode == "supervised":
             if a.op == "upload_cv" and f.kind == "file" and self.uploads.cv_bytes is not None:
                 await self._before_mutation(a.op, loc)
@@ -1375,6 +1463,7 @@ class _Run:
             if pw is None:
                 raise _Skip("mot de passe indisponible")
             self.secrets.add(pw)       # from now on masked everywhere, and no screenshot any more
+            await self._before_mutation(a.op, loc)
             await self._type(loc, f, pw)
             return SECRET_LOG
         text = it.value or ""
@@ -1424,7 +1513,7 @@ class _Run:
         T = ACTION_TIMEOUT_MS
         if f.kind != "textarea":
             text = text.replace("\r", " ").replace("\n", " ")  # never a stray Enter in a single-line field
-        if self.mode == "supervised" or f.kind in ("date", "number") or len(text) > 120:
+        if self.autonomous or self.mode == "supervised" or f.kind in ("date", "number") or len(text) > 120:
             await loc.fill(text, timeout=T)
         else:
             await loc.click(timeout=T)
@@ -1479,11 +1568,7 @@ class _Run:
     @staticmethod
     async def _trial(el: ElementHandle, timeout: int) -> bool:
         """Is the element clickable? (Playwright's trial: every actionability check, NO event dispatched.)"""
-        try:
-            await el.click(trial=True, timeout=timeout)
-            return True
-        except Exception:
-            return False
+        return await trial_click(el, timeout)
 
     async def _click(self, target: ElementHandle | Locator, *, recheck=None) -> None:
         """Activate the exact element EXACTLY ONCE. Actionability is learnt with non-dispatching trials (retried after scrolling
@@ -1491,23 +1576,11 @@ class _Run:
         A dispatch that raises is never retried: it may have fired -> `_Dispatched`."""
         if isinstance(self, _Run):  # (unit tests call this unbound)
             self.click_window = time.monotonic() + CLICK_ATTRIBUTION_S
-        el = target.first if isinstance(target, Locator) else target
-        ok = await _Run._trial(el, ACTION_TIMEOUT_MS)
-        if not ok:
-            with contextlib.suppress(Exception):
-                await el.scroll_into_view_if_needed(timeout=2000)
-            with contextlib.suppress(Exception):
-                await el.evaluate("e => e.scrollIntoView({block: 'center', inline: 'center'})")
-            ok = await _Run._trial(el, ACTION_TIMEOUT_MS // 2)
-        if recheck is not None:
-            await recheck()
-        try:
-            if ok:
-                await el.click(timeout=ACTION_TIMEOUT_MS)
-            else:  # still covered (a sticky widget / overlay): activate the SAME element directly, once
-                await el.evaluate("e => e.click()")
-        except Exception as e:
-            raise _Dispatched(type(e).__name__) from e
+        async def gate():
+            if recheck is not None:
+                await recheck()
+
+        await click_once(target, recheck=gate, timeout_ms=ACTION_TIMEOUT_MS, trial=_Run._trial)
 
     async def _after_click(self) -> None:
         await asyncio.sleep(CLICK_WAIT_S)
@@ -1569,7 +1642,7 @@ class _Run:
         return request.url.split("#")[0].split("?")[0] == fi.get("action")
 
     async def run(self) -> RunResult:
-        if self.mode not in ("dry_run", "supervised"):
+        if self.mode not in ("dry_run", "supervised") and not self.autonomous:
             res = self._end("blocked", UNSUPPORTED_DISPATCH)
             res.finished_at = datetime.now()
             return res
@@ -1695,17 +1768,47 @@ class _Run:
         errors_seen = False
         while True:
             has_form = self._has_form(snap)
+            if self.autonomous and self.nav_pending:
+                has_form = has_form or any(field.form and field.kind in FILLABLE for field in snap.fields)
             if self.last_sent is not None and not self.last_sent.final and not has_form:
                 self.final_clicked = True  # the form of a navigation click is gone: it may have been sent
             if snap.has_captcha:
                 await self._shot(log)
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
+            if self.autonomous and self.final_awaiting:
+                trace = self.diagnostics
+                if not self.autonomous.final_response:
+                    trace.receipt_reason = "no_final_response"
+                elif self.autonomous.final_json and not (has_form and (
+                        any(f.error for f in snap.fields) or await self._banner_error()
+                        or {(_norm(_label(f)), f.kind) for f in snap.fields if f.kind in FILLABLE}
+                        - (self.last_sent.fields if self.last_sent else set()))):
+                    # A positive JSON body alone is not enough: many sites return an id for a draft. Refuse it while
+                    # the page still shows a form with an error or new fields to fill (the next step of the form).
+                    trace.receipt_reason = "confirmation_json"
+                elif not has_form and (self.autonomous.final_receipt_url or self.autonomous.receipt_url(self.page.url)):
+                    trace.receipt_reason = "confirmation_url"
+                elif self._confirmed(snap, self.last_sent):
+                    trace.receipt_reason = "confirmation_text"
+                else:
+                    trace.receipt_reason = "form_still_present" if has_form else "no_confirmation"
+                if (trace.receipt_reason in ("confirmation_url", "confirmation_text", "confirmation_json")
+                        and self.autonomous.receipt_settled()):
+                    trace.receipt_kind = "first_party_confirmation"
+                    return self._end("submitted", "Candidature envoyée.")
+                if loop.time() >= deadline:
+                    return self._unconfirmed()
+                await asyncio.sleep(OBSERVE_POLL_S)
+                snap, resolve = await self._snapshot()
+                continue
             # a field error / error banner is NEVER proof that nothing was sent, and takes precedence over "continuation": it only
             # changes the message of the final (unconfirmed) result
             errors_seen = errors_seen or (has_form and any(f.error for f in snap.fields if f.kind not in ("button", "link"))) \
                 or await self._banner_error()
             if has_form and self.nav_pending and not errors_seen and self._distinct_step(snap):
                 self.nav_pending = False
+                if self.autonomous:
+                    await self.autonomous.after_click(self.page)
                 return snap, resolve
             # a page without a form, or one where the form of the final click is GONE (an optional upsell / "connect" form of the
             # confirmation page does not make it "still a form"): the planner only CLASSIFIES it
@@ -1803,12 +1906,15 @@ class _Run:
 
     async def _loop(self) -> RunResult:
         idle = 0
-        while self.consumed < self.max_steps:
+        while self.consumed < self.max_steps or (self.autonomous and self.final_awaiting):
             n = len(self.steps) + 1
             self.consumed += 1
             await self._settle()
             if self.blocked_requests:  # a page script navigated by itself after the last step
                 return self._auto_submit_result(self.steps[-1] if self.steps else None)
+            if not self.final_awaiting:
+                self.diagnostics.step = n
+                self.diagnostics.control = "scan"
             if self.current_step:
                 await self._supervised_checkpoint()
             snap, resolve = await self._snapshot()
@@ -1826,7 +1932,7 @@ class _Run:
                           + ("" if self.host_allowed is None or not self._bad_host(self.page.url) else " (hors hôte de l'offre)"))
             self.steps.append(log)
             sent, self.pending = self.pending, None
-            if sent is not None and not sent.final and not self._has_form(snap):
+            if sent is not None and not sent.final and not self.autonomous and not self._has_form(snap):
                 self.final_clicked = True  # a click made with application data: the form is gone, it may have been sent
             if snap.has_captcha:
                 log.page_kind = "captcha"
@@ -1858,7 +1964,7 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
-            if (self.pre_steps < PRE_STEP_CAP and not self.touched and not self.app_touched
+            if (not self.autonomous and self.pre_steps < PRE_STEP_CAP and not self.touched and not self.app_touched
                     and (kind == "job_page" or kind in ACCOUNT_KINDS
                          or (plan.actions and all(a.op == "click" and a.click_role == "cookies" for a in plan.actions)))):
                 self.pre_steps += 1   # a pure pre-data step (cookie banner, open_form, account page): the budget is for the application
@@ -1940,12 +2046,15 @@ class _Run:
             dirty = False
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
             for it in v.items if not self._inspection_only else ():
+                self.diagnostics.control = ("upload" if it.act.op.startswith("upload_") else
+                                            "choice" if it.field.kind in CHOICE_KINDS else "text")
                 try:
-                    if self.generic_step:
+                    if self.generic_step or self.autonomous:
                         target = await self._el(resolve, it.field.ref)
                         if target is None:
                             raise ManualField()
-                        await self._supervised_checkpoint(target)
+                        if self.generic_step:
+                            await self._supervised_checkpoint(target)
                     elif self.mode == "supervised":
                         bad = await self._dest_result(resolve, [it.field.ref], None)
                         if bad is not None:
@@ -1980,7 +2089,7 @@ class _Run:
                 if plan.page_kind not in ACCOUNT_KINDS and not (it.fact and (it.fact.secret or it.fact.key.startswith("account_"))):
                     self.app_touched = True
                 try:
-                    shown = await self._execute(it, target if self.mode == "supervised" else resolve(it.field.ref), snap, log)
+                    shown = await self._execute(it, target if self.autonomous or self.mode == "supervised" else resolve(it.field.ref), snap, log)
                 except _DecisionHold as hold:
                     return hold.result
                 except ManualField:
@@ -2019,14 +2128,19 @@ class _Run:
                     try:
                         await self._record_choice(snap, it, shown, approved_choices)
                     except _DecisionHold as hold:
+                        if self.mode == "dry_run" and self.blocked_requests:
+                            break
                         return hold.result
                     except Exception:
+                        if self.mode == "dry_run" and self.blocked_requests:
+                            break
                         return self._end("blocked", "Impossible de vérifier la sélection appliquée.")
                     if it.act.op in ("upload_cv", "upload_letter"):
                         self.uploaded_files.append((self._host(), _norm(_label(it.field)), fold(Path(shown).stem)))
                     handled.add(it.field.ref)
                     log.filled.append(FilledField(label=self._r(_label(it.field)), op=it.act.op, fact=it.used or it.act.fact,
-                                                  value="Choix confirmé" if it.used == "confirmed_form_choice" else self._r(shown),
+                                                  value="Choix confirmé" if it.used in {"confirmed_form_choice", "eeo_race_ethnicity"}
+                                                  else self._r(shown),
                                                   inferred=it.inferred, basis=self._r(it.basis)))
                 if self.mode == "dry_run" and self.blocked_requests:  # (also when the aborted navigation made the action fail)
                     break
@@ -2176,7 +2290,7 @@ class _Run:
             before = (self.final_clicked, self.submit_clicks, self.nav_pending, self.pending, self.last_sent, self.nav_ref, self.final_awaiting)
             if final:
                 try:
-                    if self.on_submit_click is not None:
+                    if self.on_submit_click is not None and not self.autonomous:
                         await self.on_submit_click()
                 except Exception:
                     return self._end("blocked", "Envoi bloqué : enregistrement de l'envoi impossible.")
@@ -2189,7 +2303,7 @@ class _Run:
                         await self.on_nav_click()
                 except Exception:
                     return self._end("blocked", "Envoi bloqué : enregistrement du clic impossible.")
-                if self.app_touched:
+                if self.app_touched or (self.autonomous and role in {"next", "login", "signup"}):
                     self.nav_pending = True  # recorded: from here on the application MAY have been sent, until a snapshot shows the form again
             if self.mode == "submit" and (final or self.app_touched) and not attach:
                 keys = {(_norm(_label(f)), f.kind) for f in snap.fields if f.ref in handled}
@@ -2221,13 +2335,30 @@ class _Run:
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
                 with contextlib.suppress(Exception):
                     self.login_unknown_try = not self.account_known(self._host())
+            self.diagnostics.control = ("final_submit" if final else "login_otp" if role == "login" else
+                                        "account_creation" if role == "signup" else "navigation")
             try:
-                if recheck_click:
+                if self.autonomous:
+                    async def dispatch_check():
+                        await recheck()
+                        try:
+                            await self.autonomous.target(target, button=True, final=final)
+                            if final and self.on_submit_click is not None:
+                                await self.on_submit_click()
+                                self.diagnostics.receipt_reason = "submit_unverified"
+                            self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"})
+                        except (ManualField, ApplyError):
+                            raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
+                    await self._click(target, recheck=dispatch_check)
+                elif recheck_click:
                     await self._click(target, recheck=recheck)  # type: ignore[arg-type]
                 else:
                     await self._click(target)  # type: ignore[arg-type]
             except _DecisionHold as hold:
                 log.clicked = ""
+                if self.autonomous:
+                    (self.final_clicked, self.submit_clicks, self.nav_pending, self.pending, self.last_sent, self.nav_ref,
+                     self.final_awaiting) = before
                 return hold.result
             except _Dispatched as e:  # the click may have fired: after data / final it is "possibly sent", never retried
                 if self.mode == "submit" and (final or post_data):
@@ -2235,6 +2366,10 @@ class _Run:
                 return self._end("failed", f"Clic impossible sur « {_label(field)} » ({e}).")
             log.clicked = self._r(field.label)
             await self._after_click()
+            if self.autonomous:
+                await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending)
+        if self.autonomous:
+            return self._end("needs_human", "Trop d'étapes : limite atteinte.")
         return self._unconfirmed() if self.final_clicked or self.nav_pending else self._end("failed", "Trop d'étapes : limite atteinte.")
 
 
@@ -2253,15 +2388,22 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None,
                           supervised_attempt: Attempt | None = None,
                           before_field: Callable[[str], None] | None = None, current_step: bool = False, generic_step: bool = False,
-                          live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None) -> RunResult:
-    """Inspect `url` or fill a reserved, attended form. Never submit it.
+                          live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None,
+                          autonomous=None, autonomous_attempt: Attempt | None = None,
+                          diagnostics: DispatchDiagnostics | None = None) -> RunResult:
+    """Inspect or fill a form; only a bound, guarded unattended flow can submit.
 
-    Legacy dispatch callbacks do not authorize generic live sends. Dry callers
+    Legacy dispatch callbacks alone do not authorize live sends. Dry callers
     should supply a fresh headless context, as the apply service does.
     """
     url = clean_url(url, navigation=True)
     if not url:
         return RunResult(status="blocked", message="Lien de candidature non autorisé.")
+    if autonomous and (mode != "submit" or not autonomous_attempt or not autonomous_attempt.autonomous
+            or autonomous_attempt.url != url or not uploads.cv_bytes
+            or hashlib.sha256(uploads.cv_bytes).hexdigest() != autonomous_attempt.pdf_sha256
+            or before_submit is None or not binding_active(autonomous_attempt)):
+        return RunResult(status="blocked", message=UNSUPPORTED_DISPATCH)
     if mode == "supervised":
         if (not supervised_attempt or supervised_attempt.url != url or not uploads.cv_bytes
                 or hashlib.sha256(uploads.cv_bytes).hexdigest() != supervised_attempt.pdf_sha256 or before_submit is None
@@ -2288,4 +2430,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     flow.current_step = current_step
     flow.generic_step = generic_step
     flow.live_mutation_check = live_mutation_check
+    flow.autonomous = autonomous
+    if diagnostics is not None:
+        flow.diagnostics = diagnostics
     return await flow.run()

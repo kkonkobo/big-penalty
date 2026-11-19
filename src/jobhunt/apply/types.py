@@ -148,10 +148,22 @@ class StepLog(BaseModel):
     note: str = ""
 
 
+class DispatchDiagnostics(BaseModel, validate_assignment=True):
+    step: int = Field(default=0, ge=0, le=10000)
+    control: Literal["reservation", "navigation", "scan", "text", "choice", "upload", "account_creation", "login_otp",
+                     "cv_upload_parse", "draft_write", "final_submit", "other"] = "reservation"
+    receipt_kind: Literal["none", "first_party_confirmation", "candidate_home_listing", "correlated_email"] = "none"
+    receipt_reason: Literal["before_submit", "submit_unverified", "no_final_response", "form_still_present",
+                            "no_confirmation", "confirmation_text", "confirmation_url", "confirmation_json", "attested", "receipt_rejected",
+                            "recipient_refused", "verification_required", "human_required"] = "before_submit"
+
+
 class RunResult(BaseModel):
     status: RunStatus
     message: str = ""             # French, user-facing
     diagnostic_code: str = ""
+    dispatch_diagnostics: DispatchDiagnostics = Field(default_factory=DispatchDiagnostics)
+    consent_codes: list[str] = Field(default_factory=list)
     steps: list[StepLog] = Field(default_factory=list)
     questions: list[Question] = Field(default_factory=list)   # status == needs_input
     final_url: str = ""

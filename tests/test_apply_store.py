@@ -87,7 +87,7 @@ def test_v5_database_migrates_to_v6_additively(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ settings
 def test_apply_settings_defaults():
     s = Settings(data_dir=get_settings().data_dir)
-    assert (s.apply_auto, s.apply_auto_min_score, s.apply_daily_cap) == (False, 60, 10)
+    assert (s.apply_auto, s.apply_autonomous, s.apply_auto_min_score, s.apply_daily_cap) == (False, True, 60, 40)
     assert (s.apply_prepare_min_score, s.apply_prepare_daily_cap, s.apply_max_steps) == (60, 15, 12)
 
 
