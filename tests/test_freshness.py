@@ -65,7 +65,7 @@ def test_weight_curve_and_rank():
 
 def test_origin_posted_at_carried_into_extra():
     j = job()
-    j.apply_origin(JobPosting(source="s", source_id="1", url="u", title="T", origin_url="https://x.com/job/1",
+    j.apply_origin(JobPosting(source="s", source_id="1", url="u", title="T", origin_url="https://jobs.lever.co/example/fixture-1",
                               origin_ats="lever", origin_confidence=0.9, origin_posted_at=d(5)))
     assert j.extra["origin_posted_at"] == d(5).isoformat()
 
