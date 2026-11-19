@@ -1,0 +1,47 @@
+# Application portal
+
+The portal is an optional web interface for viewing application status, editing answers, and requesting supported actions. The paired local application owns the underlying records and processes requests. The server does not send applications itself.
+
+- Approving a CV authorizes that exact revision for the Mac's ordinary daily or batch apply pass, just like a local approval. Sync only records the approval; it never opens a browser, fills a form, resumes an attempt, or sends. The Mac applies the normal eligibility checks, automatic-send settings (including `JOBHUNT_APPLY_AUTONOMOUS` for generic sites), daily cap (`JOBHUNT_APPLY_DAILY_CAP`), per-host breaker and receipt rules. Approval is not a guarantee of sending.
+- The portal reports **Envoyée**, **À vérifier**, **Il manque une réponse**, **Code par e-mail**, and **Action humaine requise** from the Mac's state. Answer supported questions on the portal; codes, browser interaction and supervised fill steps stay on the Mac. For **À vérifier**, check the employer site or email, attest to the result and choose **Envoyée** or **Pas envoyée** for the displayed attempt. If in doubt, leave it held. A confirmed non-send is never retried automatically.
+- Run `uv run big-penalty portal --help` for local commands and setup options.
+- Use a synthetic profile and the offline test suite to validate changes. Never use real credentials, application documents, or event payloads as fixtures.
+- Pairing and access codes are private. Keep credentials, operator logs, production configuration, and recovery procedures outside source control.
+
+See [Portal design](DESIGN.md) for the synchronization and permission model. Its historical send and auto-resume flows are superseded by the approval-only behavior above.
+
+## Upgrade
+
+1. Close user intake (for example, block browser access at the proxy), stop Mac sync and local approval, and take the portal offline. Confirm in-flight work has stopped or record it for reconciliation. Back up the Mac journal and server database as a matched set, including pending SQLite WAL data; protect the backups as sensitive. Do not interchange old and new databases or run v1 against upgraded data.
+2. Upgrade the portal server and all paired Macs while offline. Protocol v3 adds snapshot status values for approvals waiting on the Mac, email codes and human handoff; v1 and v2 API routes are not served. Migration fences old pending events, invalidates local grants and clears previous server snapshots and document copies. Keep intake closed while restoring authenticated Mac connectivity and checking device/profile state and the first v3 sync, which rebuilds the snapshot. Keep send execution stopped during verification. Inspect actual local answers and submission outcomes before asking anyone to repeat an interrupted action.
+3. Reopen intake only on matching v3 software after reconciliation, preferably in `review` mode. Have users resubmit still-needed edits or actions. Old supervised-only grants do not authorize sending, and CVs already approved under that restriction need fresh consent; the Mac will not send them automatically. Switch to `direct` only if automatic processing of edits and approvals is intended. Neither mode fills or sends during sync; the separate Mac apply pass can send an eligible approved application.
+
+For rollback, close intake and stop both sides again. Restore matching pre-upgrade binaries and the matched pre-upgrade journal/database backups, not one side alone. Keep user intake, approvals and send execution off while reconciling actual local outcomes since the backup and retiring any restored pending events or grants. Reconcile the local applications database, including approvals and attempts recorded since the backup, before enabling older execution code. Verify both sides before reopening intake; restored pending requests must not replay.
+
+### Offline rehearsal results
+
+The throttling hardening updates the server schema from `6` to `7`, but leaves the Mac journal and v3 protocol unchanged. It backfills counter expiry without resetting live limits. Use a server backup for rollback; older server binaries refuse schema `7`.
+
+1. Archive the v1 (`3a640bc`) and v2 (`ef6d424`) sources. Run their `Database` and `Journal` constructors against separate synthetic pairs. Seed a fictional device/profile, queued intent and offered grant, plus placeholder server snapshot, results, manifest, document and event rows. Use SQLite's backup API to make a matching pair before upgrading.
+2. Reopen the v1 files under v2, then v3; also reopen the separate v2 pair directly under v3. The server/journal versions went from `4/7` to `5/8` to `6/9`. Both upgrades fenced the previous server event sequence, cleared the snapshot/results, manifest and documents, cancelled the queued intent and voided its grant.
+3. With the same fictional bearer, the matching `/app/api/vN/status` returned `200` and the other two versions returned `404` at each stage. Archived v1 and v2 constructors refused the upgraded databases. Restoring each matched backup under its original software restored authenticated status and the old queued intent and offered grant, so retire restored requests before reopening intake. No real data or VPS was used.
+
+### Deployment workflow inputs
+
+| Workflow | GitHub secrets | GitHub variables |
+| --- | --- | --- |
+| `deploy-portal.yml` | `DOKPLOY_URL`, `DOKPLOY_PORTAL_API_KEY`, built-in `GITHUB_TOKEN` | `DOKPLOY_PORTAL_APP_ID`, `PORTAL_URL` (origin only, no `/app`), optional `DOKPLOY_ORIGIN_IP` |
+| `deploy-site.yml` | `DOKPLOY_URL`, `DOKPLOY_API_KEY`, built-in `GITHUB_TOKEN` | `DOKPLOY_APP_ID`, `SITE_URL`, optional `DOKPLOY_ORIGIN_IP` |
+
+The portal's Dokploy app and GitHub settings already exist. The portal deploy job uses the `portal` GitHub environment. The server's encryption key and other runtime settings belong in Dokploy, not in the workflow or image. PRs only test and build with read-only permissions. The trusted `main` deploy job publishes the image that passed the smoke test and deploys its digest. Deployments are serialized per application.
+
+## Recovery and containment
+
+- **Hold and disable:** Server hold invalidates browser sessions and blocks user access and intake. Local disable stops new local processing, then attempts to disable server access; verify server confirmation, or keep user intake blocked and have the operator hold the profile there. A fresh Mac check observes these gates, but is not a lock: a hold or disable after that check can be missed before a write or between claims. Stop Mac activity and reconcile work that may already have started. Hold and profile disable do not fence every authenticated snapshot or PDF upload already in flight. If uploads must stop, quiesce sync and block or drain the device API as well; verify before proceeding.
+- **Unresolved v1 enable or rotation:** The migrated journal has no durable verifier for the old operation. Do not generate a verifier and replay it as that operation. Keep intake closed; run `big-penalty portal disable PROFILE --purge` for the matching local profile when the device credential survives. This replaces the staged operation and treats a missing server row as already gone. If the Mac cannot purge an orphan, have the server operator identify it with `python -m jobhunt.portal.server.admin list` and run `python -m jobhunt.portal.server.admin purge-profile PROFILE_KEY_PREFIX --yes`. Clear any remaining local pending operation via the local purge after restoring device access, or recover/re-pair as appropriate. Re-enable in `--review` on a fresh stream and verify access and sync before reopening intake.
+- **Staged v2 rotation:** A retry only resumes the same operation while it is pending. Re-enter the identical chosen code, or retry without entering a code to settle the staged verifier. A confirmation that the original code is unrecoverable means the operation settled even though no code was displayed. If no rotation remains pending, `portal passcode` starts a new rotation, not a retry. Verify with the known code or deliberately rotate again if it is unknown.
+- **Lost journal:** If the device credential survives, use `portal recover`, then enable the matching local profile in `--review` on a new stream using the recovered profile key. If the credential is gone, have the operator revoke the orphaned device and pair again. Never reconstruct approval from a snapshot, old grant, or copied cursor.
+
+## Data retention
+
+The server keeps unacknowledged event payloads. A successful snapshot acknowledgement deletes server events through the acknowledged cursor; a stream reset discards prior stream events, and profile purge deletes the profile's event, snapshot, result and document data while retaining control tombstones. Hold, disable and credential rotation are not erasure. Result history is bounded on the server; acknowledgement does not remove the local journal, including stored event payloads, labels and review text. Plan separate retention and protected backup disposal for that journal and for local application data. The portal still holds the current snapshot, including supported PDFs and eligible answers and other free text. Suppressing historical result labels is not a guarantee that sensitive content cannot appear in those fields or documents; review them before exposing a profile.

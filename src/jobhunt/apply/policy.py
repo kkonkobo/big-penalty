@@ -185,6 +185,8 @@ def _submit_problems(app: Application, job: MergedJob | None, *, trigger: Litera
             out.append("nouvel envoi manuel requis après vérification")
         if apply_store.has_site_handoff(app.id):
             out.append("intervention manuelle requise sur le site")
+        if app.approved_by == "portal":
+            out.append("ancien accord limité au mode supervisé : nouvel accord requis")
         if not s.apply_auto:
             out.append("envoi automatique désactivé")
         ok, reasons = service.is_eligible(app)

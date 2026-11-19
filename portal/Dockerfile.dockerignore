@@ -1,0 +1,13 @@
+# Whitelist: nothing enters the build context except what portal/Dockerfile copies.
+# (No data/, .env, tests/, git history, other jobhunt modules.)
+*
+!portal/requirements.txt
+!src/jobhunt/__init__.py
+!src/jobhunt/portal/__init__.py
+!src/jobhunt/portal/protocol.py
+!src/jobhunt/portal/server
+!src/jobhunt/web/static/style.css
+# Local caches and any dotfile that might sit inside the whitelisted directories.
+**/__pycache__
+**/*.pyc
+**/.env*

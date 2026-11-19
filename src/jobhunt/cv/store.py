@@ -52,7 +52,7 @@ class Application(BaseModel):
     approved_sha256: str | None = None
     approved_at: datetime | None = None
     approval_override: bool = False  # approved by hand despite blocking errors: never auto-eligible
-    approved_by: str | None = None  # "user" | "auto" (who approved the current approval)
+    approved_by: str | None = None  # "user" | "auto" | "portal"
     submitted_at: datetime | None = None
     sent_origin_url: str | None = None  # canonical URL the application was sent to (kept when the job row disappears)
     tailored: TailoredCV  # UNTRIMMED content of the current revision
@@ -242,16 +242,21 @@ def set_status(app_id: int, new: str, *, base_rev: int | None = None) -> Applica
 
 
 def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_errors: bool = False,
-                     approved_by: str = "user") -> Application:
+                     approved_by: str = "user", confirm_auto: bool = False, confirm_portal: bool = False) -> Application:
     """Approve EXACTLY `rev`: it must be the current revision, its PDF must exist and hash to the stored sha256."""
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        a = c.execute("SELECT status, current_rev FROM applications WHERE id=?", (app_id,)).fetchone()
+        a = c.execute("SELECT * FROM applications WHERE id=?", (app_id,)).fetchone()
         if a is None:
             raise CVError("Candidature introuvable")
         if rev != a["current_rev"]:
             raise StaleRevision("Le CV a changé entre-temps : rouvrir la page et recommencer")
-        if "approved" not in TRANSITIONS[a["status"]]:
+        if "approved" not in TRANSITIONS[a["status"]] and not (
+            a["status"] == "approved" and (
+                (confirm_auto and approved_by == "user" and a["approved_by"] == "auto")
+                or (confirm_portal and approved_by == "user" and a["approved_by"] in ("portal", "user"))
+            )
+        ):
             raise TransitionError("Seul un brouillon peut être approuvé")
         r = c.execute("SELECT pdf_path, pdf_sha256, flags_json FROM application_revisions WHERE application_id=? AND rev=?",
                       (app_id, rev)).fetchone()
@@ -260,6 +265,10 @@ def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_e
         errors = [f for f in json.loads(r["flags_json"] or "[]") if f.get("level") == "error"]
         if errors and not ignore_errors:
             raise ApprovalError(f"{len(errors)} erreur(s) à corriger avant d'approuver (ou cocher « Ignorer et approuver »)")
+        if confirm_portal and a["status"] == "approved" and a["approved_by"] == "user":
+            if a["approved_rev"] != rev or a["approved_sha256"] != file_sha256 or a["approval_override"]:
+                raise ApprovalError("L’approbation locale ne correspond plus au CV présenté.")
+            return _from_row(c.execute(_SELECT + " WHERE a.id=?", (app_id,)).fetchone())
         note = None
         if errors:
             note = f"Approuvé à la main malgré {len(errors)} erreur(s) de vérification (jamais éligible à l'envoi automatique)."

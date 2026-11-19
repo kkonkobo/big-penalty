@@ -1,0 +1,56 @@
+/* Big Penalty, portail : compléments pour le téléphone. Vient APRÈS style.css (le même que l'application locale). */
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+html{font-size:16px}
+body{font-size:1rem;line-height:1.5}
+
+/* En-tête et navigation */
+.top{position:static;justify-content:space-between;align-items:center;gap:1rem;padding:.7rem 1rem}
+.top .who{color:var(--mut);font-size:.95rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.pnav{position:sticky;top:0;z-index:10;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:var(--surface);border-bottom:1px solid var(--line)}
+.pnav a{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.1rem;min-height:3.25rem;padding:.35rem .15rem;color:var(--mut);text-decoration:none;font-size:.82rem;font-weight:500;line-height:1.2;text-align:center;border-bottom:3px solid transparent}
+.pnav a[aria-current=page]{color:var(--fg);font-weight:650;border-bottom-color:var(--acc)}
+.pnav .count{font-size:.72rem}
+.pnav .count.hot{background:var(--acc);color:#fff}
+main{max-width:46rem;padding:1rem 1rem 3rem}
+@media (min-width:721px){main{padding:1.5rem 1.5rem 4rem}}
+
+/* Messages */
+.notice.warn{background:var(--warn-soft);color:var(--warn)}
+.notice,.error-box{font-size:.97rem;overflow-wrap:anywhere}
+.syncline{margin:0 0 1rem;font-size:.88rem}
+
+/* Contrôles tactiles */
+.btn,.btn.small{min-height:2.75rem;padding:.55rem 1rem;font-size:1rem}
+.btn.block{display:flex;width:100%;white-space:normal;text-align:center}
+.btn.link{padding:.55rem .6rem}
+input,select,textarea{min-height:2.75rem;font-size:1rem;width:100%;max-width:100%}
+input[type=checkbox]{width:1.5rem;height:1.5rem;min-height:0;flex:none}
+label.check{min-height:2.75rem;font-size:1rem}
+.form label{font-size:.95rem}
+.form{max-width:none}
+.stack > .panel + .panel,.stack > section + section{margin-top:0}
+.panel{padding:1rem}
+.panel h2{overflow-wrap:anywhere}
+.item{padding:.85rem 0;border-top:1px solid var(--line)}
+.item:first-of-type{border-top:0;padding-top:.2rem}
+.item h3{margin:0 0 .15rem;font-size:1rem;overflow-wrap:anywhere}
+.item p{overflow-wrap:anywhere}
+.item .row{margin-top:.6rem}
+.item .row form{flex:1 1 12rem;margin:0}
+.item .row .btn{width:100%;white-space:normal;text-align:center}
+.links{gap:.5rem}
+.links a{display:inline-flex;align-items:center;gap:.35rem;min-height:2.75rem}
+.sub{display:block;font-weight:400;color:var(--mut);font-size:.88rem}
+.state{display:block;margin:.1rem 0 .2rem}
+.lead-line{margin:.2rem 0 0;color:var(--fg-2)}
+.pick{display:flex;align-items:flex-start;gap:.7rem}
+.pick input{margin-top:.25rem}
+.sticky-actions{position:sticky;bottom:0;background:var(--bg);padding:.7rem 0;display:flex;flex-wrap:wrap;gap:.6rem;border-top:1px solid var(--line)}
+.sticky-actions .btn{flex:1 1 12rem}
+.inline-form{margin:0}
+dl.defs{margin:0}
+dl.defs dt{font-weight:600;margin-top:.7rem;overflow-wrap:anywhere}
+dl.defs dd{margin:.1rem 0 0;overflow-wrap:anywhere}
+.login{max-width:26rem;margin:2rem auto}
+.neutral{max-width:26rem;margin:3rem auto;text-align:center}
+.quiet{margin-top:1.5rem}
