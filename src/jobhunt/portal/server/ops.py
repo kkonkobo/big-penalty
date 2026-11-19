@@ -526,19 +526,22 @@ def delete_custom(portal: Portal, profile_id: int | Session, custom_id: str, tok
     return _mutate(portal, profile_id, now, plan)
 
 
-def request_intents(portal: Portal, profile_id: int | Session, grant_ids: list[str], now: float) -> SubmitOutcome:
+def request_intents(portal: Portal, profile_id: int | Session, grant_ids: list[str], now: float, *, verified: bool = False) -> SubmitOutcome:
     """He pressed a button for each grant id (as shown on the confirmation page). Refused when the grant is not in the
     CURRENT snapshot, already has a live pending intent, or (unconfirmed item) its sibling grant has one."""
     def plan(ctx: _Ctx, out: SubmitOutcome) -> None:
         snap = ctx.snapshot
-        known = {a.grant for a in snap.awaiting} | {p.grant for p in snap.email_pauses}
+        known = {a.grant for a in snap.awaiting}
         siblings: dict[str, str] = {}
         for u in snap.unconfirmed:
-            known |= {u.grant_sent, u.grant_not_sent}
+            if verified:
+                known |= {u.grant_sent, u.grant_not_sent}
             siblings[u.grant_sent], siblings[u.grant_not_sent] = u.grant_not_sent, u.grant_sent
         live = effective_intents(ctx.events, ctx.results)
         for grant in grant_ids:
-            if grant not in known or grant in live or siblings.get(grant) in live:
+            if grant in siblings and not verified:
+                out.problems.append(Problem("refused", grant, "", "Confirmez d’abord avoir vérifié le résultat de cet essai."))
+            elif grant not in known or grant in live or siblings.get(grant) in live:
                 out.problems.append(Problem("refused", grant, "", MSG_CHANGED))
             else:
                 event = ctx.add(IntentEvent, grant=grant)

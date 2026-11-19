@@ -332,8 +332,6 @@ def grant_index(snap: protocol.Snapshot) -> dict[str, Entry]:
     out: dict[str, Entry] = {}
     for a in snap.awaiting:
         out[a.grant] = Entry(a.grant, "send", a.company, a.title, a.host, a.job_url, a.doc_id)
-    for e in snap.email_pauses:
-        out[e.grant] = Entry(e.grant, "resume", e.company, e.title, e.host)
     for u in snap.unconfirmed:
         out[u.grant_sent] = Entry(u.grant_sent, "sent", u.company, u.title, u.host, sibling=u.grant_not_sent)
         out[u.grant_not_sent] = Entry(u.grant_not_sent, "not_sent", u.company, u.title, u.host, sibling=u.grant_sent)
@@ -517,7 +515,7 @@ def _do_confirm(c: Ctx) -> Response:
     if kinds == {"send"}:
         heading = "Approuver cette candidature ?" if len(entries) == 1 else f"Approuver ces {len(entries)} candidatures ?"
     elif len(entries) == 1:
-        heading = {"resume": "Reprendre cette candidature ?", "sent": "Marquer comme envoyée ?", "not_sent": "Remettre dans la file ?"}[entries[0].kind]
+        heading = {"sent": "Marquer comme envoyée ?", "not_sent": "Marquer comme non envoyée ?"}[entries[0].kind]
     else:
         heading = f"Confirmer ces {len(entries)} demandes ?"
     return _render(c, "confirmer.html", back, entries=entries, heading=heading, retour=back)
@@ -533,7 +531,7 @@ def _do_intents(c: Ctx) -> Response:
     grants = list(dict.fromkeys(g for g in c.form.getall("g") if _HEX32.match(g)))[:MAX_GRANTS]
     if not grants:
         return c.redirect(back, err=[ops.MSG_CHANGED])
-    out = ops.request_intents(c.portal, c.session, grants, c.now)
+    out = ops.request_intents(c.portal, c.session, grants, c.now, verified=c.form.get("verified") == "1")
     ok = []
     if out.stored:
         ok = [_count(out.stored, "Demande envoyée au Mac : elle sera traitée à sa prochaine synchronisation.",

@@ -272,8 +272,8 @@ class Seeker:
         tok = token if token is not None else next(c.token for c in self.view().custom if c.custom_id == custom_id)
         return ops.delete_custom(self.live.portal, self.pid, custom_id, tok, self.live.clock())
 
-    def request(self, *grants: str) -> ops.SubmitOutcome:
-        return ops.request_intents(self.live.portal, self.pid, list(grants), self.live.clock())
+    def request(self, *grants: str, verified: bool = True) -> ops.SubmitOutcome:
+        return ops.request_intents(self.live.portal, self.pid, list(grants), self.live.clock(), verified=verified)
 
     def cancel(self, event_id: str) -> ops.SubmitOutcome:
         return ops.cancel_intent(self.live.portal, self.pid, event_id, self.live.clock())

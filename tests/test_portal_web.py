@@ -73,12 +73,13 @@ def test_page_not_paired_explains_pairing_from_the_terminal(client, profile):
     assert r.status_code == 200 and "<h1>Portail</h1>" in r.text
     assert "big-penalty portal pair" in r.text and "non appairé" in r.text
     assert "/portal/enable" not in r.text and "pairing" not in r.text.lower().replace("appairage", "")
-    assert "fenêtres de navigateur" in r.text and "toutes les 15 minutes" in r.text  # JOBHUNT_PORTAL_SEND_EVERY_MIN default
+    assert "n’ouvre aucun navigateur" in r.text and "ne remplit aucun formulaire" in r.text
 
 
-def test_page_send_batch_interval_comes_from_the_environment(client, profile, monkeypatch):
+def test_legacy_send_batch_setting_does_not_change_the_approval_only_ui(client, profile, monkeypatch):
     monkeypatch.setenv("JOBHUNT_PORTAL_SEND_EVERY_MIN", "30")
-    assert "toutes les 30 minutes" in client.get(url(profile.id)).text
+    text = client.get(url(profile.id)).text
+    assert "toutes les 30 minutes" not in text and "n’ouvre aucun navigateur" in text
 
 
 def test_page_paired_but_not_enabled_offers_activation(client, profile, paired):
@@ -370,7 +371,7 @@ def test_sync_button_starts_one_background_task_only(client, portal, monkeypatch
         time.sleep(0.02)
     assert started == [([portal.profile_id], True)]  # a single task ran, for this profile, with execution
     done = client.get(url(portal.profile_id)).text
-    assert "Synchronisation en cours" not in done and "2 reçu(s)" in done and "1 envoi(s) exécuté(s)" in done
+    assert "Synchronisation en cours" not in done and "2 reçu(s)" in done and "1 demande(s) d’approbation traitée(s)" in done
     again = client.post(url(portal.profile_id, "/sync"))
     assert again.status_code == 303 and "déjà en cours" not in follow(client, again).text
 

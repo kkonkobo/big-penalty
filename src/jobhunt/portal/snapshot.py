@@ -23,7 +23,6 @@ from jobhunt.portal.settings import get_portal_settings, is_masked_question
 
 _PATH_RE = re.compile(r"^[a-z0-9_]{1,40}(\.[a-z0-9_]{1,40}){0,3}$")
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
-EMAIL_PAUSE_NOTE = "En pause : un e-mail de confirmation est à valider."
 
 
 def _t(text, n: int) -> str:
@@ -192,14 +191,15 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
 
     # --- awaiting / email pauses / unconfirmed / info
     awaiting_src: list[tuple[service.QueueItem, str, str]] = []  # (item, grant, sha)
-    email_pauses, unconfirmed, info = [], [], []
+    unconfirmed, info = [], []
     pdfs: dict[int, tuple[Path, str, int, bool] | None] = {}
     for it in items:
         a = it.app
         if it.bucket != "sent" and it.outstanding is None and interrupted_after_click(it.last_run):
             info.append(protocol.InfoItem(kind="interrupted", company=_t(a.company, 300), title=_t(a.job_title, 300),
                                           host=_t(it.origin_host, 255)))
-        elif it.supervised and a.approved_by == "user" and a.status == "approved":
+        elif a.status == "approved" and (it.bucket == "to_validate" and a.approved_by == "portal"
+                                          or it.supervised and a.approved_by in ("user", "portal")):
             info.append(protocol.InfoItem(kind="supervised", company=_t(a.company, 300), title=_t(a.job_title, 300),
                                           host=_t(it.origin_host, 255)))
         elif it.bucket == "to_validate" and (it.selectable or it.supervised):
@@ -208,22 +208,13 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
             pdfs[a.id] = pdf = _pdf_info(a)
             if pdf is None:
                 continue
-            mode = "submit" if it.selectable else "supervised"
             awaiting_src.append((it, grant("send", app_id=a.id, rev=a.current_rev, pdf_sha256=pdf[1], origin_sha=it.origin_sha,
-                                          mode=mode), pdf[1]))
+                                          mode="supervised"), pdf[1]))
         elif it.bucket == "paused":
             last = it.last_run
-            if it.pause_reason == "email" and last is not None and last.mode == "submit":
-                if not it.selectable:
-                    info.append(protocol.InfoItem(kind="supervised", company=_t(a.company, 300), title=_t(a.job_title, 300),
-                                                  host=_t(it.origin_host, 255)))
-                    continue
-                pdfs[a.id] = pdf = _pdf_info(a)
-                if pdf is None:
-                    continue
-                gid = grant("resume", app_id=a.id, rev=a.current_rev, pdf_sha256=pdf[1], origin_sha=it.origin_sha, run_id=last.id, mode=last.mode)
-                email_pauses.append(protocol.EmailPause(grant=gid, company=_t(a.company, 300), title=_t(a.job_title, 300),
-                                                        host=_t(it.origin_host, 255), note=EMAIL_PAUSE_NOTE))
+            if it.pause_reason == "email":
+                info.append(protocol.InfoItem(kind="supervised", company=_t(a.company, 300), title=_t(a.job_title, 300),
+                                              host=_t(it.origin_host, 255)))
             elif it.pause_reason == "human":
                 info.append(protocol.InfoItem(kind="captcha", company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255)))
             elif it.pause_reason == "host":
@@ -304,7 +295,7 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
         display_name=_t(name[0] if name else "", 80), synced_at=now, auto_send_on=bool(service.get_settings().apply_auto),
         review_mode=profile.review_mode, paused=journal.paused, answer_schema=schema,
         answers=_answers(journal, profile_id, fields, ps.write_only), custom=_custom(journal, profile_id), questions=questions,
-        email_pauses=email_pauses[:200], unconfirmed=unconfirmed[:200], info=info[:300], awaiting=awaiting, sent=sent, documents=refs,
+        unconfirmed=unconfirmed[:200], info=info[:300], awaiting=awaiting, sent=sent, documents=refs,
         counts=counts)
     try:
         protocol.Snapshot.model_validate(snap.model_dump())

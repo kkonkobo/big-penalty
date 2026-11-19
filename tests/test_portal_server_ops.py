@@ -198,7 +198,7 @@ def test_inbox_full_stores_nothing(h, prof, monkeypatch):
 def test_seq_is_contiguous_across_operations(h, prof):
     edit(h, prof, "identity.city", "A")
     ops.answer_questions(h.portal, prof.row_id, [(QID, "Oui")], h.clock())
-    ops.request_intents(h.portal, prof.row_id, [GRANT_SEND_1, GRANT_EMAIL], h.clock())
+    ops.request_intents(h.portal, prof.row_id, [GRANT_SEND_1, GRANT_SEND_2], h.clock())
     assert [e.seq for e in events(h, prof)] == [1, 2, 3, 4]
     assert h.portal.db.conn.execute("SELECT last_seq FROM profiles WHERE id=?", (prof.row_id,)).fetchone()[0] == 4
 
@@ -268,18 +268,18 @@ def test_request_intents_and_refusals(h, prof):
     assert out.stored == 2 and len(out.refused) == 1 and out.messages() == [ops.MSG_CHANGED]
     assert {e.grant for e in events(h, prof) if e.kind == "intent"} == {GRANT_SEND_1, GRANT_SEND_2}
     assert ops.request_intents(h.portal, prof.row_id, [GRANT_SEND_1], h.clock()).refused  # already pending
-    assert ops.request_intents(h.portal, prof.row_id, [GRANT_EMAIL], h.clock()).stored == 1
-    assert set(view(h, prof).intent_events) == {GRANT_SEND_1, GRANT_SEND_2, GRANT_EMAIL}
+    assert ops.request_intents(h.portal, prof.row_id, [GRANT_EMAIL], h.clock()).stored == 0
+    assert set(view(h, prof).intent_events) == {GRANT_SEND_1, GRANT_SEND_2}
 
 
 def test_unconfirmed_sibling_grant_is_refused(h, prof):
-    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock()).stored == 1
-    assert ops.request_intents(h.portal, prof.row_id, [GRANT_NOT_SENT], h.clock()).refused
-    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock()).refused
-    both = ops.request_intents(h.portal, prof.row_id, [GRANT_NOT_SENT], h.clock())
+    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock(), verified=True).stored == 1
+    assert ops.request_intents(h.portal, prof.row_id, [GRANT_NOT_SENT], h.clock(), verified=True).refused
+    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock(), verified=True).refused
+    both = ops.request_intents(h.portal, prof.row_id, [GRANT_NOT_SENT], h.clock(), verified=True)
     assert both.stored == 0
     p2 = h.enable()
-    out = ops.request_intents(h.portal, p2.row_id, [GRANT_SENT, GRANT_NOT_SENT], h.clock())
+    out = ops.request_intents(h.portal, p2.row_id, [GRANT_SENT, GRANT_NOT_SENT], h.clock(), verified=True)
     assert out.stored == 1 and len(out.refused) == 1  # a single batch cannot send both outcomes
 
 
@@ -312,17 +312,17 @@ def test_cancel_refused_after_ack_without_a_live_result(h, prof):
 
 @pytest.mark.parametrize("status", ["received", "awaiting_review", "queued", "running", "cancelled"])
 def test_keyed_intent_result_controls_repeat_and_cancel_after_ack(h, prof, status):
-    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock()).stored == 1
+    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock(), verified=True).stored == 1
     intent, = events(h, prof)
     result = protocol.EventResult(event_id=intent.event_id, kind="intent", key=f"g:{GRANT_SENT}", status=status, at=intent.at)
     assert h.push_snapshot(h.pair(), prof, acked_seq=1, results=[result]).status_code == 200
     assert events(h, prof) == []
     if status == "cancelled":
         assert ops.cancel_intent(h.portal, prof.row_id, intent.event_id, h.clock()).refused
-        assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock()).stored == 1
+        assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT], h.clock(), verified=True).stored == 1
         return
     assert view(h, prof).intent_events == {GRANT_SENT: intent.event_id}
-    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT, GRANT_NOT_SENT], h.clock()).stored == 0
+    assert ops.request_intents(h.portal, prof.row_id, [GRANT_SENT, GRANT_NOT_SENT], h.clock(), verified=True).stored == 0
     out = ops.cancel_intent(h.portal, prof.row_id, intent.event_id, h.clock())
     if status == "running":
         assert out.refused and events(h, prof) == []
@@ -332,7 +332,7 @@ def test_keyed_intent_result_controls_repeat_and_cancel_after_ack(h, prof, statu
         assert cancel.seq == 2 and cancel.kind == "cancel" and cancel.target == intent.event_id
         assert view(h, prof).cancelling_intents == {intent.event_id}
         assert ops.cancel_intent(h.portal, prof.row_id, intent.event_id, h.clock()).refused
-        assert ops.request_intents(h.portal, prof.row_id, [GRANT_NOT_SENT], h.clock()).refused
+        assert ops.request_intents(h.portal, prof.row_id, [GRANT_NOT_SENT], h.clock(), verified=True).refused
 
 
 def test_only_cancels_can_use_fifty_reserved_slots(h, prof, monkeypatch):
@@ -387,7 +387,7 @@ def test_open_document(h, prof):
 
 
 def test_event_labels(h, prof):
-    ops.request_intents(h.portal, prof.row_id, [GRANT_SEND_1, GRANT_SENT, GRANT_EMAIL], h.clock())
+    ops.request_intents(h.portal, prof.row_id, [GRANT_SEND_1, GRANT_SENT, GRANT_EMAIL], h.clock(), verified=True)
     ops.answer_questions(h.portal, prof.row_id, [(QID, "Oui")], h.clock())
     labels = [p.label for p in view(h, prof).pending]
-    assert labels == ["Société Exemple — Technicien mécatronique", "Maison Dupont — Stagiaire", "Atelier Martin — Assistant", "Permis de conduire ?"]
+    assert labels == ["Société Exemple — Technicien mécatronique", "Maison Dupont — Stagiaire", "Permis de conduire ?"]

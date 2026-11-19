@@ -283,8 +283,7 @@ def test_pages_render_from_a_rich_snapshot(h, user, prof):
     t = r.text
     for needle in ("Questions en attente", "Permis de conduire ?", "Votre mobilité", "Choisir…", "Vos réponses sont gardées pour tous les prochains formulaires.",
                    "Enregistrer mes réponses", "E-mails à confirmer", "Atelier Martin", "ats.example", "Lien reçu",
-                   "Ouvrez votre boîte mail, cliquez sur le lien de confirmation envoyé par ce site, puis revenez ici.",
-                   "C'est fait, reprendre la candidature", "Envois à vérifier", "Maison Dupont", "9 janvier 2027",
+                   "Reprenez ensuite sur le Mac uniquement.", "Envois à vérifier", "Maison Dupont", "9 janvier 2027",
                    "Vérifiez sur le site de l'entreprise (ou dans vos e-mails) si la candidature est bien partie.",
                    "Elle a bien été envoyée", "Elle n'a pas été envoyée", "À régler sur le Mac", "CAPTCHA à résoudre",
                    "Site à approuver", "Essai à blanc en pause", "Envoi en cours", "Mes dernières actions",
@@ -528,15 +527,18 @@ def test_unconfirmed_sibling_and_email_resume(h, user, prof):
     r = post(user, "/confirmer", {"g": GRANT_SENT})
     assert "Elle sera marquée comme envoyée et ne sera pas renvoyée." in r.text and "Marquer comme envoyée ?" in r.text
     r2 = post(user, "/confirmer", {"g": GRANT_NOT_SENT})
-    assert "La candidature retournera dans la file et pourra être envoyée à nouveau." in r2.text
-    assert post(user, "/intentions", {"g": GRANT_SENT}).status_code == 303
+    assert "Toute nouvelle tentative doit être lancée manuellement." in r2.text and 'name="verified"' in r2.text
+    for grant in (GRANT_SENT, GRANT_NOT_SENT):
+        assert "avoir vérifié le résultat" in follow(user, post(user, "/intentions", {"g": grant})).text
+        assert not events(h, prof)
+    assert post(user, "/intentions", {"g": GRANT_SENT, "verified": "1"}).status_code == 303
     assert "Demande envoyée, en attente du Mac" in user.get("/app/a-faire").text
-    r = post(user, "/intentions", {"g": GRANT_NOT_SENT})
+    r = post(user, "/intentions", {"g": GRANT_NOT_SENT, "verified": "1"})
     assert "Cette candidature a changé" in follow(user, r).text and len(events(h, prof)) == 1
     assert follow(user, post(user, "/confirmer", {"g": GRANT_NOT_SENT})).status_code == 200  # sibling refused: back to the list
     r = post(user, "/confirmer", {"g": GRANT_EMAIL})
-    assert "Reprendre cette candidature ?" in r.text
-    assert post(user, "/intentions", {"g": GRANT_EMAIL}).status_code == 303 and len(events(h, prof)) == 2
+    assert r.status_code == 303
+    assert post(user, "/intentions", {"g": GRANT_EMAIL}).status_code == 303 and len(events(h, prof)) == 1
 
 
 def test_select_and_send_all(h, user, prof):

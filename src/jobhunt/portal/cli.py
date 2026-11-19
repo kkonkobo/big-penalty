@@ -268,7 +268,7 @@ def report_line(r: sync.ProfileSyncReport) -> str:
     parts.append("état envoyé au serveur" if r.pushed else "rien envoyé au serveur")
     if r.uploaded:
         parts.append(f"{r.uploaded} document(s) transmis")
-    parts.append(f"{r.executed} envoi(s) exécuté(s)")
+    parts.append(f"{r.executed} demande(s) d’approbation traitée(s)")
     if r.message:
         parts.append(r.message)
     return f"{who} : " + " · ".join(parts)
@@ -277,10 +277,9 @@ def report_line(r: sync.ProfileSyncReport) -> str:
 @portal_app.command("sync")
 def portal_sync(
     profile_ids: Annotated[Optional[list[int]], typer.Argument(help="Profils à synchroniser (défaut : tous les profils activés)")] = None,
-    no_execute: Annotated[bool, typer.Option("--no-execute", help="Ne lancer aucun envoi approuvé depuis le portail")] = False,
+    no_execute: Annotated[bool, typer.Option("--no-execute", help="Laisser les demandes d’approbation en attente")] = False,
 ) -> None:
-    """Une passe : récupère les demandes, les applique, envoie l'état au serveur, puis lance les envois approuvés
-    (par lots, fenêtres de navigateur sur ce Mac). Code de sortie 1 si un profil est en erreur."""
+    """Récupère les demandes, traite les accords pour le mode supervisé, puis publie l’état. Aucun envoi de candidature."""
     reports = _call(sync.sync_all, list(profile_ids) if profile_ids else None, not no_execute)
     if not reports:
         _p("Aucun profil activé à synchroniser.")

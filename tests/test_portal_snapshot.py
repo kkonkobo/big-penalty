@@ -107,8 +107,8 @@ def test_queue_buckets(jp, profile, master, tmp_path):
     snap, docs = build(jp, profile)
     assert [a.company for a in snap.awaiting] == ["Société 1"] and snap.awaiting[0].host == "careers.exemple.test"
     assert snap.awaiting[0].job_url == "https://careers.exemple.test/jobs/1" and snap.awaiting[0].doc_id in docs
-    assert [e.company for e in snap.email_pauses] == ["Société 2"] and snap.email_pauses[0].note == snapshot.EMAIL_PAUSE_NOTE
-    assert sorted(i.kind for i in snap.info) == ["captcha", "dry_run"]
+    assert not snap.email_pauses
+    assert sorted(i.kind for i in snap.info) == ["captcha", "dry_run", "supervised"]
     u = snap.unconfirmed[0]
     assert u.company == "Société 5" and u.grant_sent != u.grant_not_sent
     g1, g2 = jp.get_grant(u.grant_sent), jp.get_grant(u.grant_not_sent)
@@ -116,8 +116,6 @@ def test_queue_buckets(jp, profile, master, tmp_path):
     ga = jp.get_grant(snap.awaiting[0].grant)
     assert (ga.action, ga.app_id, ga.rev) == ("send", draft.id, draft.current_rev)
     assert ga.pdf_sha256 == cvstore.sha256_file(draft.cv_path) and ga.origin_sha
-    gm = jp.get_grant(snap.email_pauses[0].grant)
-    assert gm.action == "resume" and gm.mode == "submit" and gm.run_id == apply_store.last_run(mail.id).id
     assert snap.counts.failed == 1
 
 

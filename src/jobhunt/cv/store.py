@@ -52,7 +52,7 @@ class Application(BaseModel):
     approved_sha256: str | None = None
     approved_at: datetime | None = None
     approval_override: bool = False  # approved by hand despite blocking errors: never auto-eligible
-    approved_by: str | None = None  # "user" | "auto" (who approved the current approval)
+    approved_by: str | None = None  # "user" | "auto" | "portal"
     submitted_at: datetime | None = None
     sent_origin_url: str | None = None  # canonical URL the application was sent to (kept when the job row disappears)
     tailored: TailoredCV  # UNTRIMMED content of the current revision
@@ -252,7 +252,10 @@ def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_e
         if rev != a["current_rev"]:
             raise StaleRevision("Le CV a changé entre-temps : rouvrir la page et recommencer")
         if "approved" not in TRANSITIONS[a["status"]] and not (
-            confirm_auto and approved_by == "user" and a["status"] == "approved" and a["approved_by"] == "auto"
+            a["status"] == "approved" and (
+                (confirm_auto and approved_by == "user" and a["approved_by"] == "auto")
+                or (approved_by == "portal" and a["approved_by"] in ("auto", "user"))
+            )
         ):
             raise TransitionError("Seul un brouillon peut être approuvé")
         r = c.execute("SELECT pdf_path, pdf_sha256, flags_json FROM application_revisions WHERE application_id=? AND rev=?",

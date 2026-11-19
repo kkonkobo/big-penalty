@@ -310,12 +310,6 @@ def _question(ctx: _Ctx, ev: EventRow) -> None:
     label = match.label[:500]
     if match.options and answer not in match.options:
         return ctx.finish(ev, "rejected", "Cette réponse ne fait pas partie des choix proposés.", label=label)
-    if not ctx.profile().review_mode:
-        candidates = [(item.app.id, item.last_run.id) for item in service.resumable(pid)
-                      if item.last_run is not None and item.last_run.mode == "submit"
-                      and any(question_id(q.label) == qid for q in item.questions)]
-        if candidates and not ev.write_ver:
-            ctx.j.record_resume_candidates(pid, ev.event_id, candidates)
     new_ver = _write_plan(ctx, ev, current, answer, label=label, after_text=answer)
     if not new_ver:
         return

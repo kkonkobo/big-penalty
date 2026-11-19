@@ -491,7 +491,7 @@ def test_supervised_approval_and_exact_attempt_settlement(w, profile, master, tm
     event = w.seeker.request(approval.grant).event_ids[0]
     assert w.mac.sync_one(profile.id).ok
     app = cvstore.get_application(draft.id)
-    assert app.approved_rev == draft.current_rev and app.approved_by == "user"
+    assert app.approved_rev == draft.current_rev and app.approved_by == "portal"
     assert not run_spy and not engine and not apply_store.list_runs(app.id)
     assert w.mac.journal.sends_today(profile.id, w.mac.now) == 0
     assert w.seeker.statuses()[event] == "done" and "mode supervisé" in w.seeker.messages()[event]
@@ -534,8 +534,8 @@ def test_supervised_grant_cannot_be_promoted_to_unattended(w, profile, master, t
     event = w.seeker.request(grant).event_ids[0]
     monkeypatch.setattr(service, "registry", registry)
     assert w.mac.sync_one(profile.id).ok
-    assert w.seeker.statuses()[event] == "refused"
-    assert cvstore.get_application(app.id).status == "draft" and not engine and not apply_store.list_runs(app.id)
+    assert w.seeker.statuses()[event] == "done"
+    assert cvstore.get_application(app.id).approved_by == "portal" and not engine and not apply_store.list_runs(app.id)
 
 
 def test_08_send_approval_end_to_end(w, profile, master, tmp_path, engine, run_spy):
@@ -558,25 +558,19 @@ def test_08_send_approval_end_to_end(w, profile, master, tmp_path, engine, run_s
     assert cvstore.get_application(app.id).status == "draft"  # nothing is approved until the Mac executes
 
     rep = mac.sync_one(pid)
-    assert rep.ok and rep.executed == 1 and len(engine) == 1
-    (call,) = run_spy
-    assert call["app_id"] == app.id and call["mode"] == "submit" and call["trigger"] == "user" and call["_lock_held"] is True
-    assert call["headless"] is None and "attended" not in call
-    assert call["expected_rev"] == app.current_rev and call["expected_origin"] == service.origin_digest(job.origin_url)
-    assert call["status_at_call"] == "approved" and call["approved_rev"] == app.current_rev  # approved for exactly that revision
-    assert seeker.statuses()[ev] == "done" and seeker.messages()[ev] == "Envoyée."
-    assert cvstore.get_application(app.id).status == "submitted"
+    assert rep.ok and rep.executed == 1 and not engine and not run_spy
+    approved = cvstore.get_application(app.id)
+    assert approved.approved_by == "portal" and approved.approved_rev == app.current_rev
+    assert seeker.statuses()[ev] == "done" and "mode supervisé" in seeker.messages()[ev]
     snap = srv_snap(w)
-    assert snap.awaiting == [] and [s.company for s in snap.sent] == ["Société 1"] and live.pending(w.key) == []
-    assert mac.journal.get_grant(aw.grant).state == "used" and mac.journal.sends_today(pid, mac.now) == 1
-    assert seeker.request(aw.grant).stored == 0  # no longer in the snapshot
+    assert not snap.awaiting and not snap.sent and live.pending(w.key) == []
+    assert mac.journal.get_grant(aw.grant).state == "used" and mac.journal.sends_today(pid, mac.now) == 0
+    assert seeker.request(aw.grant).stored == 0
 
-    # the same grant forged straight into the server's inbox: the Mac refuses it, nothing runs again
     forged = live.forge_event(w.key, IntentEvent, grant=aw.grant)
-    rep = mac.sync_one(pid)
-    assert seeker.statuses()[forged.event_id] == "refused" and len(engine) == 1 and len(apply_store.list_runs(app.id)) == 1
-    mac.sync_one(pid)
-    assert len(engine) == 1
+    assert mac.sync_one(pid).ok
+    assert seeker.statuses()[forged.event_id] == "refused" and not apply_store.list_runs(app.id)
+    assert not engine and not run_spy
 
 
 @pytest.mark.parametrize("change", ["rev", "pdf", "origin"])
@@ -611,7 +605,7 @@ def test_09_binding_drift_after_the_approval_is_refused_and_re_offered(w, profil
     # the new grant works
     out2 = seeker.request(aw2.grant)
     mac.sync_one(pid)
-    assert seeker.statuses()[out2.event_ids[0]] == "done" and len(engine) == 1
+    assert seeker.statuses()[out2.event_ids[0]] == "done" and not engine
 
 
 # ================================================================ 10. locks, spacing, budget
@@ -633,10 +627,10 @@ def test_10_send_lock_held_by_another_process_leaves_the_intent_queued(w, profil
     assert mac.journal.get_grant(g).state == "offered" and mac.journal.sends_today(pid, mac.now) == 0
     assert seeker.statuses()[ev] == "queued" and w.live.pending(w.key) == []  # custody taken, status visible
     rep = mac.sync_one(pid)
-    assert rep.executed == 1 and len(engine) == 1 and seeker.statuses()[ev] == "done"
+    assert rep.executed == 1 and not engine and seeker.statuses()[ev] == "done"
 
 
-def test_10_queued_intent_requested_twice_still_sends_once(w, profile, master, tmp_path, engine):
+def test_10_queued_intent_requested_twice_approves_once(w, profile, master, tmp_path, engine):
     mac, pid, seeker = w.mac, w.profile_id, w.seeker
     (app,), (g,) = two_apps(w, profile, master, tmp_path, 1)
     first = seeker.request(g).event_ids[0]
@@ -646,7 +640,7 @@ def test_10_queued_intent_requested_twice_still_sends_once(w, profile, master, t
     assert again.stored == 0
     mac.sync_one(pid)
     st = seeker.statuses()
-    assert st[first] == "done" and len(engine) == 1 and len(apply_store.list_runs(app.id)) == 1
+    assert st[first] == "done" and not engine and not apply_store.list_runs(app.id)
 
 
 def test_10_daily_run_holding_its_lock_blocks_the_batch(w, profile, master, tmp_path, engine):
@@ -662,36 +656,6 @@ def test_10_daily_run_holding_its_lock_blocks_the_batch(w, profile, master, tmp_
     assert mac.journal.get_event(ev).state == "queued" and mac.journal.get_grant(g).state == "offered"
     rep = mac.sync_one(pid)
     assert rep.executed == 1 and seeker.statuses()[ev] == "done"
-
-
-def test_10_send_every_min_spaces_the_batches(w, profile, master, tmp_path, engine):
-    mac, pid, seeker = w.mac, w.profile_id, w.seeker
-    _, (g1, g2) = two_apps(w, profile, master, tmp_path, 2)
-    e1 = seeker.request(g1).event_ids[0]
-    mac.sync_one(pid)
-    assert seeker.statuses()[e1] == "done" and len(engine) == 1
-    e2 = seeker.request(g2).event_ids[0]
-    rep = mac.sync_one(pid, step=timedelta(minutes=5))
-    assert rep.executed == 0 and len(engine) == 1 and mac.journal.get_event(e2).state == "queued"
-    rep = mac.sync_one(pid, step=timedelta(minutes=10))  # 15 minutes after the first batch
-    assert rep.executed == 1 and len(engine) == 2 and seeker.statuses()[e2] == "done"
-
-
-def test_10_daily_budget_defers_to_the_next_paris_day(w, profile, master, tmp_path, engine, monkeypatch):
-    monkeypatch.setenv("JOBHUNT_PORTAL_MAX_SENDS_PER_DAY", "1")
-    mac, pid, seeker = w.mac, w.profile_id, w.seeker
-    _, (g1, g2) = two_apps(w, profile, master, tmp_path, 2)
-    e1, e2 = seeker.request(g1).event_ids[0], seeker.request(g2).event_ids[0]
-    mac.sync_one(pid)
-    assert len(engine) == 1 and mac.journal.sends_today(pid, mac.now) == 1
-    states = {e: mac.journal.get_event(e).state for e in (e1, e2)}
-    assert sorted(states.values()) == ["done", "queued"]
-    queued = next(e for e, s in states.items() if s == "queued")
-    assert "limite quotidienne" in seeker.messages()[queued]
-    mac.sync_one(pid)  # same day: still deferred
-    assert len(engine) == 1 and mac.journal.get_event(queued).state == "queued"
-    mac.sync_one(pid, step=timedelta(days=1))
-    assert len(engine) == 2 and seeker.statuses()[queued] == "done"
 
 
 # ================================================================ 11. unconfirmed sends
@@ -742,23 +706,7 @@ def test_11_unconfirmed_not_sent_goes_back_to_the_queue(w, profile, master, tmp_
 
 
 # ================================================================ 12. e-mail pause and auto-resume
-def test_12_email_pause_resume(w, profile, master, tmp_path, engine, run_spy):
-    mac, pid, seeker = w.mac, w.profile_id, w.seeker
-    job, app = new_app(profile, master, tmp_path, 1, approve=True)
-    paused = make_run(app, tmp_path, status="needs_email", message="Lien de confirmation envoyé par e-mail")
-    mac.sync_one(pid, execute=False)
-    (ep,) = srv_snap(w).email_pauses
-    assert ep.company == "Société 1" and "e-mail" in ep.note
-    out = seeker.request(ep.grant)
-    rep = mac.sync_one(pid)
-    assert rep.executed == 1 and len(engine) == 1 and seeker.statuses()[out.event_ids[0]] == "done"
-    (call,) = run_spy
-    assert call["mode"] == "submit" and call["trigger"] == "user" and call["_lock_held"] is True and call["expected_rev"] == app.current_rev
-    assert cvstore.get_application(app.id).status == "submitted" and srv_snap(w).email_pauses == []
-    assert mac.journal.get_grant(ep.grant).state == "used" and mac.journal.get_grant(ep.grant).run_id == paused.id
-
-
-def test_12_answering_the_last_question_resumes_the_paused_submit_run(w, profile, master, tmp_path, engine):
+def test_12_answering_the_last_question_does_not_resume_a_paused_submit_run(w, profile, master, tmp_path, engine):
     mac, pid, seeker = w.mac, w.profile_id, w.seeker
     _, app = new_app(profile, master, tmp_path, 1, approve=True)
     make_run(app, tmp_path, status="needs_input", questions=[Question(label="Ville ?")])
@@ -766,9 +714,9 @@ def test_12_answering_the_last_question_resumes_the_paused_submit_run(w, profile
     (q,) = srv_snap(w).questions
     out = seeker.answer_question(q.qid, "Lyon")
     rep = mac.sync_one(pid)
-    assert rep.executed == 1 and len(engine) == 1 and cvstore.get_application(app.id).status == "submitted"
-    assert seeker.statuses()[out.event_ids[0]] == "applied" and mac.journal.sends_today(pid, mac.now) == 1
-    assert srv_snap(w).questions == [] and [s.company for s in srv_snap(w).sent] == ["Société 1"]
+    assert rep.executed == 0 and not engine and cvstore.get_application(app.id).status == "approved"
+    assert seeker.statuses()[out.event_ids[0]] == "applied" and mac.journal.sends_today(pid, mac.now) == 0
+    assert not srv_snap(w).questions and not srv_snap(w).sent
 
 
 def test_12_no_auto_resume_in_review_mode(w, profile, master, tmp_path, engine):
@@ -805,7 +753,7 @@ def test_13_cancel_before_the_pass_nothing_runs(w, profile, master, tmp_path, en
     again = seeker.request(g)
     assert again.stored == 1
     mac.sync_one(pid)
-    assert seeker.statuses()[again.event_ids[0]] == "done" and len(engine) == 1
+    assert seeker.statuses()[again.event_ids[0]] == "done" and not engine
 
 
 def test_13_cancel_after_execution_is_too_late(w, profile, master, tmp_path, engine):
@@ -820,7 +768,7 @@ def test_13_cancel_after_execution_is_too_late(w, profile, master, tmp_path, eng
     forged = w.live.forge_event(w.key, CancelEvent, target=ev)
     mac.sync_one(pid)
     assert seeker.statuses()[forged.event_id] == "refused" and "Trop tard" in seeker.messages()[forged.event_id]
-    assert seeker.statuses()[ev] == "done" and len(engine) == 1
+    assert seeker.statuses()[ev] == "done" and not engine
 
 
 def test_13_cancel_of_a_queued_intent(w, profile, master, tmp_path, engine):
@@ -978,43 +926,31 @@ def test_15_kill_after_save_answers_before_the_journal_records_it(w, monkeypatch
     assert seeker.statuses()[ev] == "applied" and live.pending(w.key) == []
 
 
-@pytest.mark.parametrize("when", ["before_the_engine", "after_the_engine"])
-def test_15_kill_after_the_claim_the_intent_is_interrupted_never_re_executed(w, profile, master, tmp_path, engine, monkeypatch, when):
-    live, mac, pid, seeker = w.live, w.mac, w.profile_id, w.seeker
-    (app,), (g,) = two_apps(w, profile, master, tmp_path, 1)
-    ev = seeker.request(g).event_ids[0]
-    real = service.run
+@pytest.mark.parametrize("after_approval", [False, True])
+def test_15_kill_after_claim_never_reprocesses_approval(w, profile, master, tmp_path, engine, monkeypatch, after_approval):
+    mac, pid, seeker = w.mac, w.profile_id, w.seeker
+    (app,), (grant,) = two_apps(w, profile, master, tmp_path, 1)
+    event = seeker.request(grant).event_ids[0]
+    approve = cvs.approve
 
-    async def dying(app_id, **kw):
-        if when == "before_the_engine":
-            raise Kill
-        await real(app_id, **kw)
-        raise Kill  # the engine finished (the run is settled), the process dies before the executor records it
+    def dying(*args, **kwargs):
+        if after_approval:
+            approve(*args, **kwargs)
+        raise Kill
 
-    monkeypatch.setattr(service, "run", dying)
+    monkeypatch.setattr(cvs, "approve", dying)
     with pytest.raises(Kill):
         mac.sync_one(pid)
-    j = mac.journal
-    assert j.get_event(ev).state == "running" and j.get_grant(g).state == "used" and j.sends_today(pid, mac.now) == 1
-    assert live.pending(w.key) == [] and live.profile_row(w.key)["acked_seq"] == 1  # the server is not stuck on it
-    with service.send_lock():  # the lock was released by the dying process
+    journal = mac.journal
+    assert journal.get_event(event).state == "running" and journal.get_grant(grant).state == "used"
+    assert journal.sends_today(pid, mac.now) == 0 and w.live.pending(w.key) == []
+    with service.send_lock():
         pass
-    monkeypatch.setattr(service, "run", real)
-    n_engine = len(engine)
     for _ in range(3):
-        rep = mac.sync_one(pid)
-        assert rep.ok and rep.executed == 0
-    assert j.get_event(ev).state == "interrupted" and seeker.statuses()[ev] == "interrupted"
-    assert "vérifiez" in seeker.messages()[ev] and len(engine) == n_engine  # never executed a second time
-    assert live.pending(w.key) == [] and srv_results(w)[ev] == "interrupted"
-    status = cvstore.get_application(app.id).status
-    if when == "before_the_engine":
-        assert n_engine == 0 and apply_store.list_runs(app.id) == [] and status != "submitted"
-        (aw,) = awaiting(w)  # comes back as waiting, with a new grant (the old one is used)
-        assert aw.grant != g
-    else:
-        assert n_engine == 1 and status == "submitted" and awaiting(w) == [] and [s.company for s in srv_snap(w).sent] == ["Société 1"]
-
+        report = mac.sync_one(pid)
+        assert report.ok and report.executed == 0
+    assert seeker.statuses()[event] == "interrupted" and not engine and not apply_store.list_runs(app.id)
+    assert cvstore.get_application(app.id).status == ("approved" if after_approval else "draft")
 
 def test_15_kill_after_applying_before_the_snapshot_push(w, monkeypatch):
     live, mac, pid, seeker = w.live, w.mac, w.profile_id, w.seeker
@@ -1144,7 +1080,7 @@ def test_17_resync_drops_pending_events_as_lost_and_old_grants_are_refused(w, pr
     assert stored(pid, "city") == "Nice" and seeker.statuses()[new.event_ids[0]] == "applied"
     out = seeker.request(aw.grant)
     mac.sync_one(pid)
-    assert seeker.statuses()[out.event_ids[0]] == "done" and len(engine) == 1
+    assert seeker.statuses()[out.event_ids[0]] == "done" and not engine
 
 
 def test_17_server_restored_from_an_older_copy_fails_closed_until_resync(w, tmp_path):
@@ -1281,7 +1217,7 @@ def test_18_admin_hold_kills_sessions_blocks_login_the_mac_starts_nothing_releas
     admin.release(live.portal.db, w.key[:10])
     assert not seeker.alive() and seeker.login().kind == "ok"  # the sessions did not come back by themselves
     rep = mac.sync_one(pid)
-    assert not mac.journal.get_profile(pid).held and rep.executed == 1 and len(engine) == 1 and seeker.statuses()[ev] == "done"
+    assert not mac.journal.get_profile(pid).held and rep.executed == 1 and not engine and seeker.statuses()[ev] == "done"
 
 
 def test_18_no_write_of_the_mac_clears_an_admin_hold(w):
@@ -1361,7 +1297,7 @@ def test_19_review_approved_intent_executes_on_the_next_pass(profile, master, li
     manage.review_apply(pid)
     assert mac.journal.get_event(e_int).state == "queued"
     mac.sync_one(pid)
-    assert len(engine) == 1 and seeker.statuses()[e_int] == "done"
+    assert not engine and seeker.statuses()[e_int] == "done"
 
 
 # ================================================================ 20. local pause
@@ -1420,11 +1356,11 @@ def test_21_two_profiles_one_pass_data_never_crosses(w, profile, master, tmp_pat
     assert sa.statuses()[ia.event_ids[0]] == "done" and sb.statuses()[ib.event_ids[0]] == "done"
     assert sb.statuses()[forged.event_id] == "refused"
     assert not (set(sa.statuses()) & set(sb.statuses()))
-    assert cvstore.get_application(app_a.id).status == "submitted" and cvstore.get_application(app_b.id).status == "submitted"
-    assert [s.company for s in srv_snap(w).sent] == ["Société 1"] and [s.company for s in live.snapshot(key_b).sent] == ["Société 2"]
+    assert cvstore.get_application(app_a.id).approved_by == cvstore.get_application(app_b.id).approved_by == "portal"
+    assert not srv_snap(w).sent and not live.snapshot(key_b).sent
     assert srv_snap(w).answers["city"].value == "Lyon" and live.snapshot(key_b).answers["city"].value == "Nice"
     assert sa.view().fields["city"].value == "Lyon" and sb.view().fields["city"].value == "Nice"
-    assert len(engine) == 2
+    assert not engine
 
 
 def test_21_documents_of_one_profile_are_not_readable_by_the_other(w, profile, master, tmp_path):
@@ -1589,38 +1525,6 @@ def test_24_first_sync_with_many_documents_stays_under_the_server_rate_limit(w, 
 
 
 # ================================================================ extra: the volume loop (send -> question -> answer -> resume -> sent)
-def test_25_send_pauses_on_a_question_the_seeker_answers_and_the_run_resumes(w, profile, master, tmp_path, monkeypatch):
-    live, mac, pid, seeker = w.live, w.mac, w.profile_id, w.seeker
-    pause = RunResult(status="needs_input", message="Une question", questions=[Question(label="Pays de résidence ?")])
-    calls = []
-
-    drive = service._drive
-
-    async def scripted(*args, **kw):
-        calls.append(kw)
-        return pause if len(calls) == 1 else await drive(*args, **kw)
-
-    monkeypatch.setattr(service, "_drive", scripted)
-    (app,), (g,) = two_apps(w, profile, master, tmp_path, 1)
-    e1 = seeker.request(g).event_ids[0]
-    rep = mac.sync_one(pid)
-    assert rep.executed == 1 and len(calls) == 1
-    assert seeker.statuses()[e1] == "failed" and "question" in seeker.messages()[e1]
-    snap = srv_snap(w)
-    assert snap.awaiting == [] and [q.label for q in snap.questions] == ["Pays de résidence ?"]
-    qid = snap.questions[0].qid
-    assert qid == facts.custom_id("Pays de résidence ?")  # the same id on both sides
-    out = seeker.answer_question(qid, "France")
-    assert seeker.answer_question(qid, "Autre").stored == 0  # already answered, pending
-    rep = mac.sync_one(pid)
-    assert rep.executed == 1 and len(calls) == 2  # resumed automatically, once
-    assert seeker.statuses()[out.event_ids[0]] == "applied" and cvstore.get_application(app.id).status == "submitted"
-    snap = srv_snap(w)
-    assert snap.questions == [] and [s.company for s in snap.sent] == ["Société 1"]
-    mac.sync_one(pid)
-    assert len(calls) == 2 and mac.journal.sends_today(pid, mac.now) == 2  # the first attempt and the resume are both counted
-
-
 # ================================================================ extra: clearing, custom answers, legacy dates
 def test_26_clearing_a_standing_answer_and_custom_answers_edit_delete_conflict(w):
     mac, pid, seeker = w.mac, w.profile_id, w.seeker
@@ -1720,7 +1624,7 @@ def test_27_a_grant_expires_after_seven_days_on_the_mac_clock(w, profile, master
     assert aw.grant != g and mac.journal.get_grant(g).expires_at < mac.now
     out = seeker.request(aw.grant)
     mac.sync_one(pid)
-    assert seeker.statuses()[out.event_ids[0]] == "done" and len(engine) == 1
+    assert seeker.statuses()[out.event_ids[0]] == "done" and not engine
 
 
 # ================================================================ extra: the seeker acts while a pass is running
@@ -1774,24 +1678,6 @@ def test_29_a_second_edit_during_a_pause_chains_to_the_first(w):
     mac.sync_one(pid)
     st = seeker.statuses()
     assert st[first] == "applied" and st[second.event_ids[0]] == "applied" and stored(pid, "city") == "Nice"
-
-
-def test_29_question_answer_resumes_on_a_later_pass_if_the_batch_is_deferred(w, profile, master, tmp_path, engine):
-    mac, pid, seeker = w.mac, w.profile_id, w.seeker
-    (app1,), (g1,) = two_apps(w, profile, master, tmp_path, 1)
-    _, app2 = new_app(profile, master, tmp_path, 2, approve=True)
-    make_run(app2, tmp_path, status="needs_input", questions=[Question(label="Ville ?")])
-    mac.sync_one(pid, execute=False)
-    seeker.request(g1)
-    mac.sync_one(pid)  # a batch runs now (app 1)
-    assert len(engine) == 1
-    (q,) = srv_snap(w).questions
-    out = seeker.answer_question(q.qid, "Lyon")
-    rep = mac.sync_one(pid, step=timedelta(minutes=5))  # inside the 15 minutes between batches
-    assert seeker.statuses()[out.event_ids[0]] == "applied" and rep.executed == 0 and len(engine) == 1
-    for _ in range(3):
-        mac.sync_one(pid)
-    assert len(engine) == 2 and cvstore.get_application(app2.id).status == "submitted"
 
 
 @pytest.mark.parametrize("action", ["rotate", "revoke", "mode", "resync", "disable"])

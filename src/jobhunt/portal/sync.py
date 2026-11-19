@@ -202,12 +202,12 @@ async def _async_pass(journal: Journal, client: PortalClient, ids: list[int], no
             batch = await executor.run_batch(journal, [r.profile_id for r in reports if r.ok], now)
         except Exception as e:  # noqa: BLE001
             for r in reports:
-                r.message = f"Envoi non lancé ({type(e).__name__})."
+                r.message = f"Accords non traités ({type(e).__name__})."
             return reports
         for r in reports:
             r.executed = sum(1 for o in batch.outcomes if o.profile_id == r.profile_id)
             if batch.locked:
-                r.message = "Un autre envoi est en cours : les envois restent en attente."
+                r.message = "Un autre envoi est en cours : les accords restent en attente."
             if r.executed:
                 _guard(journal, r.profile_id, now, r, lambda r=r: _push(journal, client, r.profile_id, now, r))
     return reports

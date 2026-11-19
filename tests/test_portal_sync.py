@@ -445,13 +445,13 @@ async def test_send_intent_end_to_end(portal, profile, master, tmp_path, engine)
     g = srv(portal).snapshot.awaiting[0].grant
     e = portal.fake.add_event(portal.key, "intent", grant=g)
     (rep,) = await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(minutes=5))
-    assert rep.ok and rep.executed == 1 and len(engine) == 1
-    assert [(r.event_id, r.status, r.message) for r in srv(portal).results] == [(e, "done", "Envoyée.")]
+    assert rep.ok and rep.executed == 1 and not engine
+    assert [(r.event_id, r.status, r.message) for r in srv(portal).results] == [(e, "done", executor.SUPERVISED)]
     snap = srv(portal).snapshot  # pushed again after the batch
-    assert snap.awaiting == [] and [s.company for s in snap.sent] == ["Société 1"]
-    assert cvstore.get_application(app.id).status == "submitted"
+    assert not snap.awaiting and not snap.sent
+    assert cvstore.get_application(app.id).approved_by == "portal"
     await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(hours=1))
-    assert len(engine) == 1  # an event is never executed twice
+    assert not engine and not apply_store.list_runs(app.id)
 
 
 async def test_no_execute_leaves_the_intent_queued(portal, profile, master, tmp_path, engine):
@@ -485,7 +485,7 @@ async def test_one_batch_for_all_profiles(portal, journal, profile, master, tmp_
     monkeypatch.setattr(executor, "run_batch", spy)
     reps = await sync.async_sync_all(journal=journal, client=portal.client, now=NOW + timedelta(minutes=5))
     assert len(batches) == 1 and sorted(batches[0]) == sorted([profile.id, other.id]) and [r.executed for r in reps] == [1, 1]
-    assert len(engine) == 2
+    assert not engine
 
 
 async def test_busy_send_lock_leaves_it_queued_and_says_so(portal, profile, master, tmp_path, engine):
@@ -498,7 +498,7 @@ async def test_busy_send_lock_leaves_it_queued_and_says_so(portal, profile, mast
     assert portal.journal.get_event(e).state == "queued" and apply_store.list_runs(1) == []
 
 
-async def test_answering_a_question_resumes_the_paused_run(portal, profile, master, tmp_path, engine):
+async def test_answering_a_question_does_not_resume_the_paused_run(portal, profile, master, tmp_path, engine):
     _, app = new_app(profile, master, tmp_path, 1, approve=True)
     make_run(app, tmp_path, status="needs_input", questions=[Question(label="Ville ?")])
     await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW)
@@ -506,5 +506,5 @@ async def test_answering_a_question_resumes_the_paused_run(portal, profile, mast
     assert q.label == "Ville ?" and q.qid == facts.custom_id("Ville ?")
     portal.fake.add_event(portal.key, "question_answer", qid=q.qid, answer="Lyon")
     (rep,) = await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(minutes=5))
-    assert rep.executed == 1 and len(engine) == 1 and cvstore.get_application(app.id).status == "submitted"
+    assert rep.executed == 0 and not engine and cvstore.get_application(app.id).status == "approved"
     assert srv(portal).snapshot.questions == [] and [r.status for r in srv(portal).results] == ["applied"]

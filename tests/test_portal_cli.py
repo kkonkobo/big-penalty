@@ -294,7 +294,7 @@ def test_sync_prints_one_line_per_profile(monkeypatch):
     assert res.exit_code == 0 and calls == [([1, 2], False)]
     lines = res.output.strip().splitlines()
     assert len(lines) == 2 and lines[0].startswith("profil 1 :") and lines[1].startswith("profil 2 :")
-    assert "3 reçu(s)" in lines[0] and "2 appliqué" in lines[0] and "1 à valider" in lines[0] and "2 envoi(s) exécuté(s)" in lines[0]
+    assert "3 reçu(s)" in lines[0] and "2 appliqué" in lines[0] and "1 à valider" in lines[0] and "2 demande(s) d’approbation traitée(s)" in lines[0]
     assert "1 document(s)" in lines[0] and "état envoyé au serveur" in lines[1]
     monkeypatch.setattr(sync, "sync_all", lambda ids, execute: calls.append((ids, execute)) or [])
     assert run("sync").exit_code == 0 and calls[-1] == (None, True)

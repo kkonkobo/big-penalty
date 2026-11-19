@@ -43,9 +43,9 @@
     <p class="lead-line">{{ e.title }}</p>
     {% if e.host %}<p class="muted small">Site : {{ e.host }}</p>{% endif %}
     {% if e.note %}<p class="small">{{ e.note }}</p>{% endif %}
-    <p>Ouvrez votre boîte mail, cliquez sur le lien de confirmation envoyé par ce site, puis revenez ici.</p>
+    <p>Ouvrez votre boîte mail et vérifiez la demande sur le site. Reprenez ensuite sur le Mac uniquement.</p>
     {% if e.grant in view.intent_events %}{{ intent_status(view.intent_events[e.grant], view) }}
-    {% else %}<div class="row">{{ intent_form(e.grant, "C'est fait, reprendre la candidature", 'a-faire', True) }}</div>{% endif %}
+    {% endif %}
   </div>
   {% endfor %}
 </section>

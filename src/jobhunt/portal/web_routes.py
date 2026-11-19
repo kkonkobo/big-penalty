@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from starlette.concurrency import run_in_threadpool
 
-from jobhunt.portal import manage, protocol, secrets, settings, sync
+from jobhunt.portal import manage, protocol, secrets, sync
 from jobhunt.portal.client import PortalError
 from jobhunt.portal.cli import EVENT_KIND_LABELS, STATE_LABELS, change_text, report_line
 from jobhunt.portal.manage import ManageError
@@ -84,7 +84,7 @@ def _context(pid: int) -> dict[str, Any]:
                         for ev in manage.journal_tail(pid, 50)]
     mine = [r for r in SYNCING["reports"] if r.profile_id in (pid, None)] if SYNCING["profile_id"] == pid else []
     return {"st": st, "ps": ps, "handle_shown": protocol.grouped(ps.handle, 5) if ps and ps.handle else "", "review": review, "journal_rows": journal_rows,
-            "send_every": settings.get_portal_settings().send_every_min, "syncing": bool(SYNCING["running"]),
+            "syncing": bool(SYNCING["running"]),
             "sync_lines": [report_line(r) for r in mine], "sync_error": SYNCING["error"] if SYNCING["profile_id"] == pid else None,
             "sync_at": SYNCING["finished_at"] if SYNCING["profile_id"] == pid else None, "creds": None}
 
@@ -96,7 +96,7 @@ async def _page(request: Request, pid: int, *, notice: str | None = None, error:
         ctx = await run_in_threadpool(_context, pid)
     except EXPECTED as e:
         ctx = {"st": manage.PortalStatus(paired=False), "ps": None, "review": [], "journal_rows": [], "creds": None,
-               "handle_shown": "", "send_every": settings.get_portal_settings().send_every_min, "syncing": False, "sync_lines": [], "sync_error": None,
+               "handle_shown": "", "syncing": False, "sync_lines": [], "sync_error": None,
                "sync_at": None}
         error = error or str(e)
     ctx["creds"] = creds
@@ -266,4 +266,4 @@ async def portal_sync(pid: str):
         return web._flash(_back(p), error="Une synchronisation est déjà en cours : attendez sa fin.")
     SYNCING.update(running=True, profile_id=p, reports=[], error=None, finished_at=None)
     SYNCING["task"] = asyncio.create_task(_run_sync(p))
-    return web._flash(_back(p), notice="Synchronisation lancée. Les envois approuvés depuis le portail ouvrent des fenêtres de navigateur.")
+    return web._flash(_back(p), notice="Synchronisation lancée. Aucun formulaire ne sera rempli ni envoyé.")
