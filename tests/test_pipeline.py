@@ -316,6 +316,7 @@ async def test_search_resighting_bumps_last_seen_but_rescore_does_not(monkeypatc
 async def test_run_search_headless_is_explicit_and_leaves_settings_alone(monkeypatch, profile):
     from jobhunt.config import get_settings
 
+    monkeypatch.delenv("JOBHUNT_FORCE_HEADLESS", raising=False)
     patch_registry(monkeypatch, ["boarda"])
     seen = []
 
