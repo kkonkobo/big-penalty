@@ -6,6 +6,7 @@ Everything is offline: pages come from tests/fixtures/apply/*.html served on 127
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
 from dataclasses import replace
@@ -135,6 +136,7 @@ class FixtureServer:
         self.requests: list[str] = []
         self.sent: list[dict] = []          # EVERY request that carries candidate data: a GET with a query string, any POST
         self.post_pages: dict[str, str] = {}  # POST path -> fixture served in answer (default: confirmation.html)
+        self.post_json: dict[str, dict] = {}
         self.redirects: dict[str, str] = {}
         self.html: dict[str, str] = {}
         outer = self
@@ -191,6 +193,14 @@ class FixtureServer:
                     self.send_response(307)
                     self.send_header("Location", outer.redirects[self.path])
                     self.end_headers()
+                    return
+                if self.path in outer.post_json:
+                    body = json.dumps(outer.post_json[self.path]).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                     return
                 if self.path == "/adapter-contract/fixture-tenant/req-1" and body.startswith(b"%PDF-") and self.headers.get("X-Application-Attempt"):
                     self.send_response(200)

@@ -1759,6 +1759,8 @@ class _Run:
         errors_seen = False
         while True:
             has_form = self._has_form(snap)
+            if self.autonomous and self.nav_pending:
+                has_form = has_form or any(field.form and field.kind in FILLABLE for field in snap.fields)
             if self.last_sent is not None and not self.last_sent.final and not has_form:
                 self.final_clicked = True  # the form of a navigation click is gone: it may have been sent
             if snap.has_captcha:
@@ -1768,24 +1770,31 @@ class _Run:
                 trace = self.diagnostics
                 if not self.autonomous.final_response:
                     trace.receipt_reason = "no_final_response"
-                elif has_form:
-                    trace.receipt_reason = "form_still_present"
-                elif self.autonomous.final_receipt_url:
+                elif self.autonomous.final_json:
+                    trace.receipt_reason = "confirmation_json"
+                elif not has_form and (self.autonomous.final_receipt_url or self.autonomous.receipt_url(self.page.url)):
                     trace.receipt_reason = "confirmation_url"
                 elif self._confirmed(snap, self.last_sent):
                     trace.receipt_reason = "confirmation_text"
                 else:
-                    trace.receipt_reason = "no_confirmation"
-                if trace.receipt_reason in ("confirmation_url", "confirmation_text"):
+                    trace.receipt_reason = "form_still_present" if has_form else "no_confirmation"
+                if (trace.receipt_reason in ("confirmation_url", "confirmation_text", "confirmation_json")
+                        and self.autonomous.receipt_settled()):
                     trace.receipt_kind = "first_party_confirmation"
                     return self._end("submitted", "Candidature envoyée.")
-                return self._unconfirmed()
+                if loop.time() >= deadline:
+                    return self._unconfirmed()
+                await asyncio.sleep(OBSERVE_POLL_S)
+                snap, resolve = await self._snapshot()
+                continue
             # a field error / error banner is NEVER proof that nothing was sent, and takes precedence over "continuation": it only
             # changes the message of the final (unconfirmed) result
             errors_seen = errors_seen or (has_form and any(f.error for f in snap.fields if f.kind not in ("button", "link"))) \
                 or await self._banner_error()
             if has_form and self.nav_pending and not errors_seen and self._distinct_step(snap):
                 self.nav_pending = False
+                if self.autonomous:
+                    await self.autonomous.after_click(self.page)
                 return snap, resolve
             # a page without a form, or one where the form of the final click is GONE (an optional upsell / "connect" form of the
             # confirmation page does not make it "still a form"): the planner only CLASSIFIES it
@@ -1883,7 +1892,7 @@ class _Run:
 
     async def _loop(self) -> RunResult:
         idle = 0
-        while self.consumed < self.max_steps:
+        while self.consumed < self.max_steps or (self.autonomous and self.final_awaiting):
             n = len(self.steps) + 1
             self.consumed += 1
             await self._settle()
@@ -1909,7 +1918,7 @@ class _Run:
                           + ("" if self.host_allowed is None or not self._bad_host(self.page.url) else " (hors hôte de l'offre)"))
             self.steps.append(log)
             sent, self.pending = self.pending, None
-            if sent is not None and not sent.final and not self._has_form(snap):
+            if sent is not None and not sent.final and not self.autonomous and not self._has_form(snap):
                 self.final_clicked = True  # a click made with application data: the form is gone, it may have been sent
             if snap.has_captcha:
                 log.page_kind = "captcha"
@@ -1941,7 +1950,7 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
-            if (self.pre_steps < PRE_STEP_CAP and not self.touched and not self.app_touched
+            if (not self.autonomous and self.pre_steps < PRE_STEP_CAP and not self.touched and not self.app_touched
                     and (kind == "job_page" or kind in ACCOUNT_KINDS
                          or (plan.actions and all(a.op == "click" and a.click_role == "cookies" for a in plan.actions)))):
                 self.pre_steps += 1   # a pure pre-data step (cookie banner, open_form, account page): the budget is for the application
@@ -2276,7 +2285,7 @@ class _Run:
                         await self.on_nav_click()
                 except Exception:
                     return self._end("blocked", "Envoi bloqué : enregistrement du clic impossible.")
-                if self.app_touched:
+                if self.app_touched or (self.autonomous and role in {"next", "login", "signup"}):
                     self.nav_pending = True  # recorded: from here on the application MAY have been sent, until a snapshot shows the form again
             if self.mode == "submit" and (final or self.app_touched) and not attach:
                 keys = {(_norm(_label(f)), f.kind) for f in snap.fields if f.ref in handled}
@@ -2319,6 +2328,7 @@ class _Run:
                             if final and self.on_submit_click is not None:
                                 await self.on_submit_click()
                                 self.diagnostics.receipt_reason = "submit_unverified"
+                            self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"})
                         except (ManualField, ApplyError):
                             raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
                     await self._click(target, recheck=dispatch_check)
@@ -2339,7 +2349,9 @@ class _Run:
             log.clicked = self._r(field.label)
             await self._after_click()
             if self.autonomous:
-                await self.autonomous.after_click(self.page)
+                await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending)
+        if self.autonomous:
+            return self._end("needs_human", "Trop d'étapes : limite atteinte.")
         return self._unconfirmed() if self.final_clicked or self.nav_pending else self._end("failed", "Trop d'étapes : limite atteinte.")
 
 

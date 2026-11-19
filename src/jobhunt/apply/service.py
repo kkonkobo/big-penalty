@@ -538,7 +538,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
                 password=password, account_known=account_known, diagnostics=diagnostics,
-                host_allowed=lambda host: host == _host(audience.document), max_steps=get_settings().apply_max_steps,
+                host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
             result = handoff_result("human", diagnostics=diagnostics).model_copy(

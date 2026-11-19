@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
+import time
 from urllib.parse import parse_qsl, urlsplit
 
 import tldextract
 
 from jobhunt.apply.destination import clean_url, origin
 from jobhunt.apply.errors import ApplyError, ManualField
-from jobhunt.apply.supervised import _FORM_TARGETS_JS, _generic_action_allowed, _posting_ids, _target_allowed
+from jobhunt.apply.supervised import _FORM_TARGETS_JS, _generic_action_allowed, _posting_ids, _target_allowed, _url_posting_ids
 from jobhunt.origin import ats_of_host
 
 
@@ -34,6 +36,27 @@ def confirmation_url(url: str, posting_url: str) -> bool:
     }
 
 
+def confirmation_json(body: bytes) -> bool:
+    """Recognize a positive structured result, never a bare HTTP success or generic resource ID."""
+    if len(body) > 65536:
+        return False
+    try:
+        value = json.loads(body)
+    except (ValueError, UnicodeError, RecursionError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    status = value.get("status")
+    status = status.casefold() if isinstance(status, str) else ""
+    if (value.get("error") or value.get("errors") or value.get("success") is False
+            or status in {"draft", "pending", "failed", "error", "rejected", "incomplete", "validation_error"}):
+        return False
+    identifier = value.get("applicationId", value.get("application_id"))
+    return (value.get("success") is True or status in {"submitted", "received"}
+            or (type(identifier) is int and identifier > 0)
+            or (isinstance(identifier, str) and bool(identifier.strip())))
+
+
 class Audience:
     def __init__(self, reserved_url, verified_urls, recheck, *, pdf_bytes=None):
         self.reserved_url = reserved_url
@@ -49,8 +72,13 @@ class Audience:
         self.next_document = ""
         self.document_nonce = ""
         self.final_response = False
+        self.final_response_at = 0.0
         self.final_started = False
         self.final_receipt_url = ""
+        self.final_json = False
+        self.click_write = None
+        self.scriptable = False
+        self.live_url = ""
         self.pdf_bytes = pdf_bytes
         self.final_actions = set()
 
@@ -86,16 +114,27 @@ class Audience:
             return request.frame == page.main_frame and bool(origin(request.url))
         if not self.write_recipient(request.url):
             return False
+        writing = request.method not in {"GET", "HEAD"}
         if request.is_navigation_request() and request.frame == page.main_frame:
+            if (not writing and self.final_response and self.clicking and not self.next_document
+                    and request.frame.url == self.live_url and self.receipt_url(request.url)):
+                self.next_document = request.url
+                return True
             if (not self.clicking or self.next_document or request.method != self.method or request.url != self.endpoint
-                    or clean_url(request.frame.url, navigation=True) != self.document
+                    or request.frame.url != self.live_url
                     or not _target_allowed(request.frame.url, request.url)):
+                return False
+            if writing and not self._admit_click_write(request):
                 return False
             self.next_document = clean_url(request.url, navigation=True)
             return True
-        if request.method not in {"GET", "HEAD"} or self.active and urlsplit(request.url).query:
-            if request.frame != page.main_frame or clean_url(request.frame.url, navigation=True) != self.document:
+        if writing or self.active and urlsplit(request.url).query:
+            if request.frame != page.main_frame or request.frame.url != self.live_url:
                 return False
+            if not _url_posting_ids(request.url) <= _url_posting_ids(self.document):
+                return False
+            if writing and self.clicking and self.scriptable and not request.is_navigation_request():
+                return self._admit_click_write(request)
             target = urlsplit(request.url)
             ids = _posting_ids(target.path + "?" + urlsplit(clean_url(request.url)).query)
             expected = _posting_ids(urlsplit(self.document).path + "?" + urlsplit(self.document).query)
@@ -109,6 +148,24 @@ class Audience:
                 return (self.active and not self.clicking and not self.final_started
                         and self._is_cv_upload(request))
         return request.method in {"GET", "HEAD"} or self.active
+
+    def _admit_click_write(self, request):
+        if self.click_write is not None:
+            return False
+        self.click_write = request
+        return True
+
+    async def inspect_receipt(self, request, response):
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if (mime == "application/json" or mime.endswith("+json")) and not self._is_cv_upload(request):
+            self.final_json = confirmation_json(await response.body())
+
+    def record_response(self):
+        self.final_response = True
+        self.final_response_at = time.monotonic()
+
+    def receipt_settled(self):
+        return self.final_response and time.monotonic() - self.final_response_at >= 0.2
 
     def _is_cv_upload(self, request):
         target = urlsplit(clean_url(request.url))
@@ -136,9 +193,12 @@ class Audience:
     async def bind_document(self, page):
         nonce = secrets.token_urlsafe(24)
         self.document_nonce = nonce
-        await page.evaluate("value => { document.__bp_autonomous_document = value; }", nonce, isolated_context=True)
+        self.live_url = await page.evaluate("value => { document.__bp_autonomous_document = value; return location.href; }",
+                                            nonce, isolated_context=True)
 
-    async def after_click(self, page):
+    async def after_click(self, page, *, observing=False):
+        if observing and self.scriptable and not self.next_document:
+            return
         self.clicking = False
         if self.next_document and not self.final_response:
             new_url = clean_url(page.url, navigation=True)
@@ -157,36 +217,41 @@ class Audience:
                 if (button && node.matches('a[href]') && (!node.target || node.target === '_self'))
                     return [win.location.href, [node.getAttribute('href'), node.href, []],
                             node.href, doc.__bp_autonomous_document, 'GET'];
-                if (button && (!node.form || !['submit', 'image'].includes(node.type))) return null;
                 const form = node.form;
-                if (button && ((node.getAttribute('formmethod') || form.getAttribute('method') || 'get').toLowerCase() !== 'post'
-                    || !['', '_self'].includes((node.getAttribute('formtarget') || form.getAttribute('target') || '').toLowerCase()))) return null;
+                if (button && !['', '_self'].includes((node.getAttribute('formtarget') || form?.getAttribute('target') || '').toLowerCase())) return null;
                 const targets = ({_FORM_TARGETS_JS})(node);
                 const override = button ? node.getAttribute('formaction') : null;
+                if (override !== null && override !== '') targets[2].push(node.formAction ?? new URL(override, doc.baseURI).href);
                 const action = override !== null ? (override === '' ? doc.URL : node.formAction) : (targets[1] ?? doc.URL);
-                return [win.location.href, targets, action, doc.__bp_autonomous_document, 'POST'];
+                const nativePost = form
+                    && (node.getAttribute('formmethod') || form.getAttribute('method') || 'get').toLowerCase() === 'post';
+                return [win.location.href, targets, action, doc.__bp_autonomous_document, nativePost ? 'POST' : ''];
             }}""", button, isolated_context=True)
         except Exception:
             raise ManualField() from None
         if not value or not _generic_action_allowed(value[0], *value[1]):
             raise ManualField()
         live = clean_url(value[0], navigation=True)
-        if not live or live != self.document or value[3] != self.document_nonce or not self.write_recipient(live):
+        if not live or live != self.document or value[0] != self.live_url or value[3] != self.document_nonce or not self.write_recipient(live):
             raise ApplyError(SUPERVISED_REQUIRED)
         if not button:
             for action in (value[2], *value[1][2]):
                 self.final_actions.add((origin(action), urlsplit(action).path))
         if button:
-            if final and value[4] != "POST":
+            if final and value[4] == "GET":
                 raise ApplyError(SUPERVISED_REQUIRED)
             endpoint = urlsplit(value[2] or live)._replace(fragment="").geturl()
             if not clean_url(endpoint, navigation=True) or not _target_allowed(value[0], endpoint):
                 raise ApplyError(SUPERVISED_REQUIRED)
             self.endpoint = endpoint
             self.method = value[4]
-            self.clicking = True
         self.recheck()
         self.active = True
+
+    def arm_click(self, *, scripted: bool):
+        self.click_write = None
+        self.scriptable = scripted and self.method != "GET"
+        self.clicking = True
 
 
 _OPT_OUT = re.compile(r"marketing|newsletter|job alerts?|alertes? (?:emploi|offres?)|talent pool|vivier|partners?|partenaires?|(?:third[ -]part|tiers)|publicit|prospection|transfert", re.I)

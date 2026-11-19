@@ -154,7 +154,7 @@ class DispatchDiagnostics(BaseModel, validate_assignment=True):
                      "cv_upload_parse", "draft_write", "final_submit", "other"] = "reservation"
     receipt_kind: Literal["none", "first_party_confirmation", "candidate_home_listing", "correlated_email"] = "none"
     receipt_reason: Literal["before_submit", "submit_unverified", "no_final_response", "form_still_present",
-                            "no_confirmation", "confirmation_text", "confirmation_url", "attested", "receipt_rejected",
+                            "no_confirmation", "confirmation_text", "confirmation_url", "confirmation_json", "attested", "receipt_rejected",
                             "recipient_refused", "verification_required", "human_required"] = "before_submit"
 
 

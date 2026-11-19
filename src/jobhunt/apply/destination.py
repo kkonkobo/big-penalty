@@ -140,7 +140,10 @@ class RecipientGuard:
             write = request.method not in {"GET", "HEAD"}
             permitted = self.allows(request.url)
             if self.audience:
-                permitted = self.audience.request_allowed(request, page, initial=request.url == self._initial_url)
+                try:
+                    permitted = self.audience.request_allowed(request, page, initial=request.url == self._initial_url)
+                except Exception:
+                    permitted = False
             if not permitted:
                 if request.method not in {"GET", "HEAD"} or request.is_navigation_request():
                     await refuse(route)
@@ -155,9 +158,9 @@ class RecipientGuard:
                 if self.audience and (write or (self.audience.active and urlsplit(request.url).query)):
                     self.audience.recheck()
                     self.transmitted = True
-                final_request = self.final_started and write and request.is_navigation_request() and request.frame == page.main_frame
+                final_request = self.final_started and write and self.audience.click_write is request
                 response = await route.fetch(max_redirects=0, max_retries=0)
-                if final_request and response.status in {301, 302, 303} and response.headers.get("location"):
+                if final_request and request.is_navigation_request() and response.status in {301, 302, 303} and response.headers.get("location"):
                     target = self.audience.confirmation_redirect(urljoin(request.url, response.headers["location"]))
                     if not target:
                         await refuse(route)
@@ -181,10 +184,14 @@ class RecipientGuard:
                 elif self.refused:
                     await route.abort()
                 else:
-                    if final_request and 200 <= response.status < 300:
-                        self.final_response = True
-                        self.audience.final_response = True
+                    positive_response = final_request and 200 <= response.status < 300
+                    if positive_response:
+                        if request.resource_type in {"xhr", "fetch"}:
+                            await self.audience.inspect_receipt(request, response)
                     await route.fulfill(response=response)
+                    if positive_response:
+                        self.final_response = True
+                        self.audience.record_response()
             except Exception:
                 if not self.refused:
                     with contextlib.suppress(Exception):

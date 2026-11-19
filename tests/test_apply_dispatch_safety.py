@@ -58,6 +58,112 @@ def posting_form(action):
             '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>')
 
 
+@pytest.mark.parametrize("scenario", ["json", "no_receipt", "foreign", "wrong_posting", "late_foreign", "url", "text"])
+async def test_production_autonomous_scripted_submit(scenario, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    with closing(FixtureServer()) as receiver:
+        endpoint = (receiver.url("submit") if scenario == "foreign" else
+                    "/jobs/200/apply" if scenario == "wrong_posting" else "/api/applications")
+        server.post_json[endpoint] = ({"applicationId": "fixture-123", "success": True}
+                                      if scenario in {"json", "late_foreign"} else {"status": "pending", "success": True})
+        server.html["/jobs/100"] = posting_form("/jobs/100").replace(' method="post"', '') + """<script>
+        document.forms[0].addEventListener('submit', async event => {
+            event.preventDefault();
+            await new Promise(done => setTimeout(done, 200));
+            await fetch(%s, {method: 'POST', body: new FormData(event.target)});
+            if (%s) navigator.sendBeacon(%s, 'synthetic');
+            if (%s) location.href = '/application-received';
+            if (%s) document.body.innerHTML = '<h1>Merci, votre candidature a bien été reçue.</h1>';
+        });
+        </script>""" % (json.dumps(endpoint), json.dumps(scenario == "late_foreign"), json.dumps(receiver.url("beacon")),
+                         json.dumps(scenario == "url"), json.dumps(scenario == "text"))
+        server.html["/application-received"] = "<h1>Merci</h1>"
+        job, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+        result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+        assert result.submit_clicked_at and not receiver.sent
+        if scenario in {"json", "url", "text"}:
+            assert result.status == "submitted", result.result.dispatch_diagnostics
+            assert result.result.dispatch_diagnostics.receipt_reason == f"confirmation_{scenario}"
+            assert db.get_job(job.id).status == "applied"
+        else:
+            assert result.status == "failed" and store.outstanding_attempt(app.id).id == result.id
+            await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+        assert [post["path"] for post in server.posts] == ([] if scenario in {"foreign", "wrong_posting"} else [endpoint])
+
+
+@pytest.mark.parametrize("scenario", ["three_steps", "cap", "changed_identity"])
+async def test_production_autonomous_scripted_next(scenario, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    monkeypatch.setattr(service.get_settings(), "apply_max_steps", 40)
+    last = 13 if scenario == "cap" else 3
+    server.post_json["/api/advance"] = {"status": "draft"}
+    server.post_json["/api/applications"] = {"application_id": "fixture-456"}
+    server.html["/jobs/100"] = """<title>Ingénieur systèmes embarqués</title><main></main><script>
+        let step = 1;
+        const last = %s;
+        const draw = () => {
+            document.querySelector('main').innerHTML = `<form>
+                <label for="name">Prénom étape ${step}</label><input id="name" name="first_name" required>
+                <button type="button">${step === last ? 'Envoyer' : 'Suivant'}</button></form>`;
+            document.querySelector('button').onclick = async () => {
+                await fetch(step === last ? '/api/applications' : '/api/advance',
+                            {method: 'POST', body: new FormData(document.forms[0])});
+                if (step !== last) { step += 1; draw(); }
+                if (%s && step === 2) history.pushState({}, '', '/jobs/200');
+            };
+        };
+        draw();
+    </script>""" % (last, json.dumps(scenario == "changed_identity"))
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+
+    def plan(snapshot):
+        label = next(field.label for field in snapshot.fields if field.kind == "text")
+        final = label.endswith(f" {last}")
+        return StepPlan(page_kind="form", actions=[act(snapshot, label, "fill", "first_name"),
+                        act(snapshot, "Envoyer" if final else "Suivant", "click", role="submit" if final else "next")])
+
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(plan))
+    assert result.status == ("submitted" if scenario == "three_steps" else "needs_human"), (
+        result.result.dispatch_diagnostics, len(result.result.steps), [post["path"] for post in server.posts])
+    paths = {"three_steps": ["/api/advance"] * 2 + ["/api/applications"],
+             "cap": ["/api/advance"] * 12, "changed_identity": ["/api/advance"]}
+    assert [post["path"] for post in server.posts] == paths[scenario]
+    if scenario != "three_steps":
+        assert result.submit_clicked_at is None
+
+
+@pytest.mark.parametrize("otp", [False, True])
+async def test_production_autonomous_scripted_login(otp, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    monkeypatch.setattr(service.accounts, "create_password", lambda host, email: "fixture-password")
+    monkeypatch.setattr(service.accounts, "account_known", lambda host, email: True)
+    server.post_json["/api/login"] = {"success": True}
+    after_login = ('<h1>Vérifiez votre boîte e-mail</h1>' if otp else posting_form('/jobs/100').replace(
+        '<button>', '<button type="button" onclick="this.form.requestSubmit()">'))
+    server.html["/jobs/100"] = """<title>Connexion</title><form>
+        <label for="email">E-mail</label><input type="email" id="email" name="email" required>
+        <label for="pw">Mot de passe</label><input type="password" id="pw" name="password" required>
+        <button>Se connecter</button></form><script>
+        document.forms[0].onsubmit = async event => {
+            event.preventDefault();
+            await fetch('/api/login', {method: 'POST', body: new FormData(event.target)});
+            document.body.innerHTML = %s;
+        };</script>""" % json.dumps(after_login)
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+
+    def plan(snapshot):
+        if "Vérifiez" in snapshot.text:
+            return StepPlan(page_kind="email_verification")
+        if any(field.kind == "password" for field in snapshot.fields):
+            return StepPlan(page_kind="account_login", actions=[act(snapshot, "E-mail", "fill", "account_email"),
+                act(snapshot, "Mot de passe", "fill", "account_password"),
+                act(snapshot, "Se connecter", "click", role="login")])
+        return form(snapshot)
+
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(plan))
+    assert result.status == ("needs_email" if otp else "submitted"), result.result.dispatch_diagnostics
+    assert [post["path"] for post in server.posts] == (["/api/login"] if otp else ["/api/login", "/jobs/100"])
+    assert bool(result.submit_clicked_at) != otp
 async def test_production_autonomous_submits_with_receipt_and_scoped_decisions(production_pool, server, profile, tmp_path, fast, monkeypatch):
     monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
     page_html = posting_form("/jobs/100").replace("<button>", """
