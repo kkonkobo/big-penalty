@@ -387,7 +387,7 @@ def _check_boundary(run_: ApplyRun, started_job, mode: Mode, trigger: str, *, re
 
 
 def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match | None = None, *,
-             confirmed_distinct: frozenset[int] = frozenset()) -> Dispatch:
+             confirmed_distinct: frozenset[int] = frozenset(), duplicate_confirmations: tuple[str, ...] = ()) -> Dispatch:
     app, job, host, url = _check_boundary(run_, started_job, mode, trigger, confirmed_distinct=confirmed_distinct)
     pdf_path = cvs.safe_pdf(app)
     if pdf_path is None:
@@ -411,8 +411,8 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     facts = tuple(CandidateFact(fact.key, fact.label, fact.value, tuple(fact.variants))
                   for fact in _candidate_facts(app, job).facts if fact.value and not fact.secret) if match else ()
     apply_store.reserve_send(run_.id, profile_id=app.profile_id, application_id=app.id, trigger=trigger,
-                             role_key=policy.normalize_role(job.company, job.title), url_key=policy._canon(url),
-                             daily_cap=get_settings().apply_daily_cap, binding=attempt, confirmed_distinct=confirmed_distinct)
+                             role_key=policy.normalize_role(job.company, job.title), url_key=apply_store._url_key(url),
+                             daily_cap=get_settings().apply_daily_cap, binding=attempt, duplicate_confirmations=duplicate_confirmations)
     return Dispatch(attempt, pdf, facts)
 
 
@@ -427,7 +427,7 @@ def _write_gate(request: Dispatch, run_: ApplyRun, job, mode: Mode, trigger: str
     if any(not value or origin(value) != value for value in destinations):
         raise ApplyError("Destination d'adaptateur non vérifiée.")
     return WriteGate(capability=match.capability, policies=match.adapter.boundaries, origins=destinations,
-                     recheck=recheck, dispatch=request)
+                     recheck=recheck, dispatch=request, endpoints=match.requisition.endpoints)
 
 
 def _candidate_facts(app: Application, job):
@@ -441,14 +441,16 @@ def _candidate_facts(app: Application, job):
 
 async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, pool, planner,
                  llm: _Llm, verifier=None, out: list[RunResult] | None = None,
-                 receipts: list[Receipt] | None = None, confirmed_distinct: frozenset[int] = frozenset()) -> RunResult:
+                 receipts: list[Receipt] | None = None, confirmed_distinct: frozenset[int] = frozenset(),
+                 duplicate_confirmations: tuple[str, ...] = ()) -> RunResult:
     """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
     follows cannot lose it."""
     match = registry.find(job.origin_url, job.origin_ats) if mode != "dry_run" else None
     if mode == "submit":
         if match is None or match.capability != "unattended":
             return RunResult(status="blocked", message=UNSUPPORTED_DISPATCH + " " + SUPERVISED_ONLY + ".")
-        request = _reserve(run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct)
+        request = _reserve(run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct,
+                           duplicate_confirmations=duplicate_confirmations)
         gate = _write_gate(request, run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct)
         evidence = await match.adapter.dispatch(request, gate)
         receipt = await match.adapter.verify_receipt(request.attempt, evidence=evidence)
@@ -458,7 +460,8 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
         progress = apply_store.get_run(run_.id)
         return RunResult(status="failed", message="Aucun reçu authentifié pour cet essai.",
                          steps=progress.result.steps if progress and progress.result else [])
-    request = _reserve(run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct) if mode == "supervised" else None
+    request = _reserve(run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct,
+                       duplicate_confirmations=duplicate_confirmations) if mode == "supervised" else None
     facts = _candidate_facts(app, job)
     cv_pdf = cvs.safe_pdf(app)
     assert cv_pdf is not None and job.origin_url
@@ -484,6 +487,8 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             if browser_guard and browser_guard.refused:
                 return [RECIPIENT_REFUSED]
             live, _, _, _ = _check_boundary(run_, job, mode, trigger, reserved=True, confirmed_distinct=confirmed_distinct)
+            if not apply_store.binding_active(request.attempt):
+                return ["Réservation ou approbation périmée : saisie annulée."]
             pdf = cvs.safe_pdf(live)
             if (pdf is None or live.pdf_sha256 != request.attempt.pdf_sha256
                     or hashlib.sha256(pdf.read_bytes()).hexdigest() != request.attempt.pdf_sha256):
@@ -502,6 +507,12 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
         if request and not page.is_closed():
             browser_guard = RecipientGuard(frozenset({origin(started_origin), *(match.requisition.write_origins if match else ())}))
             await browser_guard.install(page)
+
+        async def guarded_goto(page, url):
+            if browser_guard:
+                await browser_guard.navigate(page, url, goto)
+            else:
+                await goto(page, url)
         try:
             gate = _write_gate(request, run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct) if request and match else None
             filled = False
@@ -521,7 +532,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                     before_submit=recheck if request else None, supervised_attempt=request.attempt if request else None,
                     out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)), job_title=job.title, company=job.company or "",
                     host_allowed=host_allowed, verifier=verifier,
-                    max_steps=get_settings().apply_max_steps, goto=goto,
+                    max_steps=get_settings().apply_max_steps, goto=guarded_goto,
                     choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(started_origin))
                     if trigger == "user" else None, **options)
 
@@ -564,7 +575,7 @@ UNRESOLVED = "Un envoi précédent n'est pas confirmé : vérifier sur le site d
 async def run(app_id: int, *, mode: Mode, trigger: Literal["auto", "user"], headless: bool | None = None,
               pool=None, planner=None, llm=None, verifier=None, _lock_held: bool = False, expected_rev: int | None = None,
               expected_origin: str | None = None, attended: bool = False,
-              duplicate_confirmations: tuple[tuple[int, int], ...] = ()) -> ApplyRun:
+              duplicate_confirmations: tuple[str, ...] = ()) -> ApplyRun:
     """ONE dry run or submission attempt of the application's current revision on job.origin_url. Never raises for an
     expected refusal: the returned run has status `blocked` and the reasons in `message`. A submission holds the send lock
     (`send_lock`) for its whole duration unless the caller already holds it (`_lock_held=True`: send_selected, daily_apply);
@@ -577,9 +588,8 @@ async def run(app_id: int, *, mode: Mode, trigger: Literal["auto", "user"], head
         pending = apply_store.outstanding_attempt(app.id)
         if pending is not None:
             return pending.model_copy(update={"status": "blocked", "result": None, "message": UNRESOLVED})
-    checked = frozenset(other for own, other in duplicate_confirmations if own == app_id and other != own) if trigger == "user" else frozenset()
-    confirmed = frozenset(other for other, exact in apply_store.potential_duplicates(app.profile_id, app.id).items()
-                          if not exact and other in checked) if checked else frozenset()
+    confirmed = frozenset(other for other, token in apply_store.confirmation_tokens(app.profile_id, app.id).items()
+                          if token in duplicate_confirmations) if trigger == "user" and duplicate_confirmations else frozenset()
     reasons = _bound_problems(app, job, expected_rev, expected_origin) or _gate(app, job, mode, trigger, **_distinct(confirmed))
     if mode == "supervised" and (headless is True or _lock_held):
         reasons = ["Le mode supervisé exige un navigateur visible et un lancement individuel."]
@@ -588,13 +598,15 @@ async def run(app_id: int, *, mode: Mode, trigger: Literal["auto", "user"], head
     try:
         with send_lock() if mode != "dry_run" and not _lock_held else contextlib.nullcontext():
             return await _run_locked(app, job, mode=mode, trigger=trigger, headless=headless, pool=pool, planner=planner,
-                                     llm=llm, verifier=verifier, attended=attended, confirmed_distinct=confirmed)
+                                     llm=llm, verifier=verifier, attended=attended, confirmed_distinct=confirmed,
+                                     duplicate_confirmations=duplicate_confirmations)
     except SendLocked as e:
         return _refuse(app, job, mode, trigger, [str(e)])
 
 
 async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headless, pool, planner, llm, verifier,
-                      attended: bool = False, confirmed_distinct: frozenset[int] = frozenset()) -> ApplyRun:
+                      attended: bool = False, confirmed_distinct: frozenset[int] = frozenset(),
+                      duplicate_confirmations: tuple[str, ...] = ()) -> ApplyRun:
     run_ = apply_store.start_run(app.id, app.current_rev, mode, trigger, lambda rid: _run_dir(app.job_id, rid),
                                  origin_sha=origin_digest(job.origin_url))
     own_pool = pool is None
@@ -608,7 +620,8 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
             if own_pool and mode != "submit":
                 pool = BrowserPool(headless=False if mode == "supervised" else headless)
             result = await _drive(app, job, run_, mode=mode, trigger=trigger, pool=pool, planner=planner,
-                                  llm=shared_llm, verifier=verifier, out=returned, receipts=receipts, confirmed_distinct=confirmed_distinct)
+                                  llm=shared_llm, verifier=verifier, out=returned, receipts=receipts,
+                                  confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations)
         except ApplyError as e:
             result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)

@@ -9,6 +9,7 @@ from typing import Literal
 
 from jobhunt import db
 from jobhunt.apply import store as apply_store
+from jobhunt.apply.destination import clean_url
 from jobhunt.config import get_settings
 from jobhunt.cv import service, store
 from jobhunt.cv.master import MasterError, load_master
@@ -43,7 +44,8 @@ def _app_keys(other: Application, other_job: MergedJob | None) -> tuple[str, str
     """(role key, canonical URL) of an application, from its job when it still exists, else from what it stored."""
     company = other.company or (other_job.company if other_job else None)
     title = other.job_title or (other_job.title if other_job else None)
-    url = other.sent_origin_url or _canon(other_job.origin_url if other_job else None)
+    recorded = other.sent_origin_url or ""
+    url = (recorded if not _is_http(recorded) else "") or _canon(other_job.origin_url if other_job else None) or _canon(recorded)
     return normalize_role(company, title), url
 
 
@@ -62,8 +64,11 @@ def duplicate_of(app: Application, job: MergedJob, *, confirmed_distinct: frozen
 def _find_duplicate(app, job, reserved, lookup_app, candidates, keys):
     role = normalize_role(job.company, job.title)
     url = _canon(job.origin_url)
+    navigation_url = clean_url(job.origin_url, navigation=True)
+    url_digest = apply_store._url_key(navigation_url) if navigation_url else ""
     for r in reserved:  # role / URL recorded at click time
-        if r["application_id"] != app.id and ((role != "|" and r["role_key"] == role) or (url and r["url_key"] == url)):
+        if r["application_id"] != app.id and ((role != "|" and r["role_key"] == role) or (url and r["url_key"] == url)
+                or (url_digest and r["url_key"] == url_digest)):
             return lookup_app(r["application_id"])
     for other in candidates():
         if other.id == app.id:

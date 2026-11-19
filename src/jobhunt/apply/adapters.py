@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Mapping, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -33,6 +33,7 @@ class Requisition:
     tenant: str
     requisition_id: str | None
     write_origins: tuple[str, ...] = ()
+    endpoints: tuple[tuple[Boundary, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,19 +80,21 @@ class Receipt:
 
 def clean_receipt(receipt: Receipt, attempt: Attempt) -> bool:
     return (receipt.attempt == attempt and receipt.kind in RECEIPT_TYPES
-            and (receipt.outcome != "confirmed" or (receipt.kind == attempt.receipt_kind
-                 and bool(attempt.requisition_id) and bool(attempt.nonce) and bool(receipt.reference)
-                 and receipt.observed_nonce == attempt.nonce and receipt.observed_requisition == attempt.requisition_id))
+            and receipt.kind == attempt.receipt_kind and bool(attempt.requisition_id) and bool(attempt.nonce)
+            and bool(receipt.reference) and receipt.observed_nonce == attempt.nonce
+            and receipt.observed_requisition == attempt.requisition_id
             and receipt.outcome in ("confirmed", "not_sent") and len(receipt.reference) <= 96
             and all(char.isascii() and (char.isalnum() or char in "-_.") for char in receipt.reference))
 
 
 class WriteGate:
     def __init__(self, *, capability: Capability, policies: Mapping[Boundary, BoundaryPolicy], origins: frozenset[str],
-                 recheck: Callable[[], None], dispatch: Dispatch | None = None):
+                 recheck: Callable[[], None], dispatch: Dispatch | None = None,
+                 endpoints: tuple[tuple[Boundary, str], ...] = ()):
         self.capability, self._policies, self._recheck = capability, dict(policies), recheck
         self._recipient = RecipientGuard(origins)
         self._dispatch = dispatch
+        self._endpoints = endpoints
         self.stopped = False
         self.final_called = False
 
@@ -119,6 +122,14 @@ class WriteGate:
         if self.capability != "unattended" or self._dispatch is None or boundary not in {"cv_upload_parse", "final_submit"}:
             self.stop("étape non autorisée")
         url = clean_url(target_url, navigation=True)
+        attempt = self._dispatch.attempt
+        if not attempt.tenant or not attempt.requisition_id or not any(
+            operation == boundary and "{tenant}" in template and "{requisition}" in template
+            and url and target_url == url == template.replace("{tenant}", quote(attempt.tenant, safe=""))
+            .replace("{requisition}", quote(attempt.requisition_id, safe=""))
+            for operation, template in self._endpoints
+        ):
+            self.stop("redirect")
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
             self._enter(boundary, url)
             try:

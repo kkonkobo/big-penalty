@@ -12,8 +12,11 @@ from cv_fakes import save_confirmed
 
 from jobhunt import db
 from jobhunt.apply import engine, service, store
+from jobhunt.apply.destination import RecipientGuard, origin
+from jobhunt.apply.identity import resolved_identity
 from jobhunt.apply.engine import DRY_UNTESTED, UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.types import RunResult, StepLog, StepPlan
+from jobhunt.browser import BrowserPool
 from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
 
@@ -32,6 +35,123 @@ def approved_fixture(profile, tmp_path, url, *, title="Ingénieur systèmes emba
     app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
     cvs.approve(app.id, app.current_rev)
     return job, app
+
+
+@pytest.fixture
+async def production_pool():
+    pool = BrowserPool(headless=False)
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
+async def test_production_supervised_non_http_is_inert_in_pages_frames_and_popups(production_pool, server, profile, tmp_path, fast):
+    foreign = FixtureServer()
+    try:
+        target = foreign.url("collect")
+        script = """<script>
+        window.inert = ['WebSocket', 'WebTransport', 'RTCPeerConnection', 'RTCDataChannel', 'EventSource'].map(name => {
+            try { new window[name](name === 'WebSocket' ? %s : %s); return false; }
+            catch (error) { return error.name === 'SecurityError'; }
+        });</script>""" % (json.dumps(target.replace("http:", "ws:")), json.dumps(target))
+        server.html["/transport"] = script + '<iframe src="/transport-frame"></iframe>'
+        server.html["/transport-frame"] = script
+        _, app = approved_fixture(profile, tmp_path, server.url("transport"))
+
+        class Probe(ScriptedPlanner):
+            async def plan(self, *args, **kwargs):
+                context = next(iter(production_pool._contexts.values()))
+                opened = context.pages[0]
+                assert await opened.evaluate("window.inert", isolated_context=False) == [True] * 5
+                frame = next(frame for frame in opened.frames if frame.url.endswith("/transport-frame"))
+                assert await frame.evaluate("window.inert", isolated_context=False) == [True] * 5
+                async with opened.expect_popup() as pending:
+                    await opened.evaluate("() => { window.open('/transport-frame'); }")
+                popup = await pending.value
+                await popup.wait_for_load_state("domcontentloaded")
+                assert await popup.evaluate("window.inert", isolated_context=False) == [True] * 5
+                await popup.close()
+                await opened.close()
+                return await super().plan(*args, **kwargs)
+
+        probe = Probe([StepPlan(page_kind="other")])
+        result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                                    planner=probe), timeout=20)
+        assert probe.calls and not foreign.requests and not foreign.posts
+        assert store.outstanding_attempt(app.id).id == result.id and not production_pool._contexts
+    finally:
+        foreign.close()
+
+
+@pytest.mark.parametrize("scenario", ["same-origin", "six-hops", "off-origin"])
+async def test_production_initial_redirects_are_bounded_and_validated(scenario, production_pool, server, profile):
+    foreign = FixtureServer()
+    try:
+        server.redirects["/start"] = "/form" if scenario == "same-origin" else foreign.url("collect")
+        if scenario == "six-hops":
+            server.redirects["/start"] = "/hop-1"
+            server.redirects.update({f"/hop-{hop}": f"/hop-{hop + 1}" for hop in range(1, 6)})
+        async with production_pool.page(profile.id, "apply-supervised-redirect", False) as opened:
+            guard = RecipientGuard(frozenset({origin(server.base)}))
+            await guard.install(opened)
+            async def goto(page, target):
+                await page.goto(target, wait_until="domcontentloaded")
+            if scenario == "off-origin":
+                with pytest.raises(Exception):
+                    await guard.navigate(opened, server.url("start"), goto)
+            else:
+                await guard.navigate(opened, server.url("start"), goto)
+            if scenario == "same-origin":
+                assert opened.url == server.url("form") and not guard.refused
+                assert await opened.locator("input").count() > 0
+            else:
+                assert guard.refused and opened.is_closed() and "/hop-6" not in server.requests
+            assert not foreign.requests
+    finally:
+        foreign.close()
+
+
+@pytest.mark.parametrize("mutation", ["variant", "rollback"])
+async def test_production_rechecks_after_last_dom_read(mutation, production_pool, server, profile, tmp_path, fast, monkeypatch):
+    from patchright.async_api import ElementHandle
+
+    server.html["/race"] = (
+        '<form method="post" action="/apply"><label for="tel">Téléphone</label><input id="tel" name="tel" type="tel" maxlength="10">'
+        '<label for="dial">Indicatif de pays</label><select id="dial" name="dial" required><option value="">Choisir</option>'
+        '<option value="be">Belgique (+32)</option><option value="fr">France (+33)</option>'
+        '<option value="ch">Suisse (+41)</option></select><button>Envoyer ma candidature</button></form>'
+        '<script>document.addEventListener("input", event => { if (event.target.id === "tel") '
+        'navigator.sendBeacon("/variant-mutated", "synthetic"); });'
+        'document.addEventListener("change", event => { if (event.target.id === "dial" && event.target.selectedIndex < 0) '
+        'navigator.sendBeacon("/rollback-mutated", "synthetic"); });</script>'
+    )
+    _, app = approved_fixture(profile, tmp_path, server.url("race"))
+    monkeypatch.setattr(service, "_candidate_facts", lambda *args: sample_facts())
+    original = ElementHandle.evaluate
+    revoked = []
+
+    async def revoke(self, expression, *args, **kwargs):
+        result = await original(self, expression, *args, **kwargs)
+        hit = ("getAttribute('maxlength')" in expression if mutation == "variant" else "e.selectedOptions[0]" in expression)
+        if hit and not revoked:
+            with db.connect() as conn:
+                conn.execute("UPDATE applications SET approved_rev=NULL WHERE id=?", (app.id,))
+            revoked.append(True)
+            return result if mutation == "variant" else "Changed after selection"
+        return result
+
+    monkeypatch.setattr(ElementHandle, "evaluate", revoke)
+
+    def plan(snapshot):
+        action = (act(snapshot, "Téléphone", "fill", "phone") if mutation == "variant" else
+                  act(snapshot, "Indicatif", "select", "phone", "France (+33)"))
+        return StepPlan(page_kind="form", actions=[action])
+
+    result = await asyncio.wait_for(service.run(app.id, mode="supervised", trigger="user", pool=production_pool,
+                                                planner=ScriptedPlanner(plan)), timeout=20)
+    assert revoked and not server.posts and not production_pool._contexts
+    assert store.outstanding_attempt(app.id).id == result.id
 
 
 @pytest.mark.parametrize("egress", ["write", "redirect"])
@@ -99,9 +219,55 @@ async def test_supervised_dedupe_canonical_or_legacy_pair_confirmation(canonical
                                     duplicate_confirmations=((first.id, second.id),))
     assert unconfirmed.status == "blocked" and not pool.opened
     await service.run(second.id, mode="supervised", trigger="user", pool=pool,
-                      duplicate_confirmations=((second.id, first.id),), planner=ScriptedPlanner(form))
+                      duplicate_confirmations=tuple(store.confirmation_tokens(profile.id, second.id).values()),
+                      planner=ScriptedPlanner(form))
     assert bool(pool.opened) is not canonical
     assert not server.requests
+
+
+@pytest.mark.parametrize("changed_side", ["first", "second"])
+async def test_duplicate_confirmation_invalidated_inside_reservation(changed_side, production_pool, server, profile, tmp_path, monkeypatch):
+    first_job, first = approved_fixture(profile, tmp_path, server.url("first"))
+    second_job, second = approved_fixture(profile, tmp_path, server.url("second"), title="Ingénieur système embarqué")
+    legacy = store.start_run(first.id, first.current_rev, "submit", "user", lambda rid: tmp_path / "legacy")
+    store.reserve_send(legacy.id, profile_id=profile.id, application_id=first.id, trigger="user", role_key="", url_key="", daily_cap=9)
+    store.finish_and_settle(legacy.id, RunResult(status="failed", message="Essai à vérifier."))
+    token = store.confirmation_tokens(profile.id, second.id)[first.id]
+    reserve = store.reserve_send
+
+    def replace_posting(*args, **kwargs):
+        with db.connect() as conn:
+            conn.execute("UPDATE jobs SET description=? WHERE id=?", ("Fictional changed description",
+                         (first_job if changed_side == "first" else second_job).id))
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(store, "reserve_send", replace_posting)
+    result = await service.run(second.id, mode="supervised", trigger="user", pool=production_pool,
+                               duplicate_confirmations=(token,), planner=ScriptedPlanner(form))
+    assert result.status == "blocked" and "Doublon possible" in result.message
+    assert not production_pool._contexts and not store.outstanding_attempt(second.id) and not server.requests
+
+
+def test_origin_resolution_honors_canonical_ok():
+    metadata = {"submit_ats": "workday", "tenant": "fixture", "requisition": "REQ-7", "canonical_ok": False}
+    assert resolved_identity({"origin_resolution": metadata}) is None
+    assert resolved_identity({"origin_resolution": {**metadata, "canonical_ok": True}}) == ("fixture", "req-7")
+
+
+@pytest.mark.parametrize("phrase", ["Your verification code is 654321", "Votre code de vérification est 654321",
+                                    "Ihr Bestätigungscode lautet 654321"])
+def test_credential_step_persists_only_diagnostics(server, profile, tmp_path, phrase):
+    target = server.url("activate/fixture-secret") + "?token=fixture-token"
+    _, app = approved_fixture(profile, tmp_path, target)
+    run = store.start_run(app.id, app.current_rev, "dry_run", "user", lambda rid: tmp_path / "result")
+    recorded = store.finish_run(run.id, RunResult(status="needs_email", message=phrase, final_url=target,
+                                                 steps=[StepLog(index=1, url=target, page_kind="email_verification",
+                                                                note=phrase, clicked=phrase, screenshot="/local/fixture.png")]))
+    result = recorded.result
+    assert result.final_url == result.steps[0].url == server.base
+    assert result.steps[0].note == "credential_page" and not result.steps[0].clicked and not result.steps[0].screenshot
+    assert "654321" not in result.model_dump_json() and "fixture-secret" not in result.model_dump_json()
+    assert "654321" not in store._safe_result(RunResult(status="failed", message=phrase)).message
 
 
 async def test_secret_url_is_not_navigated_bound_or_persisted(server, profile, tmp_path, monkeypatch):
@@ -116,7 +282,7 @@ async def test_secret_url_is_not_navigated_bound_or_persisted(server, profile, t
     recorded = store.finish_run(run.id, RunResult(status="needs_email", message="OTP: 654321",
                                                  steps=[StepLog(index=1, url=target, page_kind="email_verification",
                                                                 screenshot="/local/fixture.png")]))
-    assert recorded.result.steps[0].url == server.url("form") + "?gh_jid=42"
+    assert recorded.result.steps[0].url == server.base + "?gh_jid=42"
     assert "654321" not in recorded.message and not recorded.result.steps[0].screenshot
 
 
@@ -189,7 +355,8 @@ async def test_supervised_holds_before_headful_browser_and_only_operator_settles
             with db.connect() as conn:
                 import json
                 binding = json.loads(conn.execute("SELECT binding_json FROM apply_reservations").fetchone()[0])
-            assert binding["pdf_sha256"] == app.pdf_sha256 and binding["url"] == job.origin_url
+            assert binding["pdf_sha256"] == app.pdf_sha256 and binding["url"] == server.base
+            assert binding["url_digest"] == store._url_key(job.origin_url)
             assert binding["rev"] == app.current_rev and binding["host"] == "127.0.0.1"
             yield page
 

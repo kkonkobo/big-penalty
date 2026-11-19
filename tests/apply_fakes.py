@@ -136,6 +136,7 @@ class FixtureServer:
         self.sent: list[dict] = []          # EVERY request that carries candidate data: a GET with a query string, any POST
         self.post_pages: dict[str, str] = {}  # POST path -> fixture served in answer (default: confirmation.html)
         self.redirects: dict[str, str] = {}
+        self.html: dict[str, str] = {}
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -163,6 +164,14 @@ class FixtureServer:
                     return
                 if "?" in self.path:
                     outer.sent.append({"method": "GET", "path": self.path})
+                if path in outer.html:
+                    body = outer.html[path].encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if path == "/collect":
                     return self._html("confirmation.html")
                 if path.startswith("/recaptcha/"):
@@ -183,7 +192,7 @@ class FixtureServer:
                     self.send_header("Location", outer.redirects[self.path])
                     self.end_headers()
                     return
-                if self.path == "/adapter-contract" and body.startswith(b"%PDF-") and self.headers.get("X-Application-Attempt"):
+                if self.path == "/adapter-contract/fixture-tenant/req-1" and body.startswith(b"%PDF-") and self.headers.get("X-Application-Attempt"):
                     self.send_response(200)
                     self.send_header("X-Fixture-Receipt", self.headers["X-Application-Attempt"])
                     self.send_header("X-Fixture-Requisition", "req-1")

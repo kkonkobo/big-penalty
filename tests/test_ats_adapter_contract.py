@@ -35,7 +35,8 @@ class FixtureAdapter:
         return float(url in {self.url, self.url + "-duplicate"} and urlsplit(url).hostname == "127.0.0.1")
 
     def resolve(self, url, dom_markers):
-        return Requisition("fixture-tenant", "req-1")
+        endpoint = self.url + "/{tenant}/{requisition}"
+        return Requisition("fixture-tenant", "req-1", endpoints=(("final_submit", endpoint),))
 
     async def supervise(self, request, fill):
         assert not hasattr(fill, "click") and not hasattr(fill, "evaluate")
@@ -48,11 +49,12 @@ class FixtureAdapter:
                                (request.attempt.run_id,)).fetchone()
             assert row
             binding = json.loads(row["binding_json"])
-            for key in ("nonce", "url", "host", "rev", "pdf_sha256", "tenant", "requisition_id", "profile_id"):
+            assert binding == store.binding_record(request.attempt)
+            for key in ("nonce", "host", "rev", "pdf_sha256", "tenant", "requisition_id", "profile_id"):
                 assert binding[key] == getattr(request.attempt, key)
         assert hashlib.sha256(request.pdf).hexdigest() == request.attempt.pdf_sha256
         self.sent.append(request)
-        response = await gate.perform("final_submit", self.url, attach_pdf=True)
+        response = await gate.perform("final_submit", self.url + "/fixture-tenant/req-1", attach_pdf=True)
         if self.scenario == "interrupt":
             raise RuntimeError("fixture interrupted")
         self.evidence = response
@@ -63,12 +65,14 @@ class FixtureAdapter:
             gate.stop("captcha")
         if self.scenario == "redirect":
             return await gate.perform("final_submit", "https://unapproved.example.test/", attach_pdf=True)
+        if self.scenario == "wrong-endpoint":
+            return await gate.perform("final_submit", self.url + "/fixture-tenant/other", attach_pdf=True)
         if self.scenario == "paused-write":
             return await gate.perform("draft_write", request.attempt.url, attach_pdf=True)
         if self.scenario == "policy-change":
             with db.connect() as conn:
                 conn.execute("UPDATE applications SET approved_sha256=NULL WHERE id=?", (request.attempt.application_id,))
-            return await gate.perform("final_submit", request.attempt.url, attach_pdf=True)
+            return await gate.perform("final_submit", self.url + "/fixture-tenant/req-1", attach_pdf=True)
         return await self._post(request, gate)
 
     async def verify_receipt(self, attempt, *, evidence=None):
@@ -81,7 +85,13 @@ class FixtureAdapter:
             return Receipt(attempt, "uncertain")
         attempt = replace(attempt, nonce="different") if self.scenario == "wrong-attempt" else attempt
         if self.scenario == "reconcile-not-sent":
-            return Receipt(attempt, "not_sent", "candidate_home_listing", "synthetic-rejection")
+            return Receipt(attempt, "not_sent", "candidate_home_listing", "synthetic-rejection",
+                           evidence.headers["X-Fixture-Receipt"], evidence.headers["X-Fixture-Requisition"])
+        if self.scenario.startswith("negative-"):
+            return Receipt(attempt, "not_sent", "candidate_home_listing" if self.scenario == "negative-kind" else
+                           "first_party_confirmation", "synthetic-rejection",
+                           "wrong" if self.scenario == "negative-nonce" else evidence.headers["X-Fixture-Receipt"],
+                           "wrong" if self.scenario == "negative-req" else evidence.headers["X-Fixture-Requisition"])
         kind = "candidate_home_listing" if later or self.scenario == "wrong-receipt-kind" else "first_party_confirmation"
         requisition = "different" if self.scenario == "wrong-requisition" else evidence.headers.get("X-Fixture-Requisition", "")
         return Receipt(attempt, "confirmed", kind, "synthetic-receipt", evidence.headers["X-Fixture-Receipt"], requisition)
@@ -94,7 +104,8 @@ def adapter_factory(request):
 
 @pytest.mark.parametrize("scenario", ["verified", "text-only", "wrong-attempt", "interrupt", "stale", "unregistered", "default",
                                       "wrong-tenant", "paused-write", "redirect", "blocker", "policy-change", "duplicate",
-                                      "wrong-receipt-kind", "wrong-requisition", "reconcile", "reconcile-not-sent"])
+                                      "wrong-receipt-kind", "wrong-requisition", "reconcile", "reconcile-not-sent",
+                                      "wrong-endpoint", "negative-kind", "negative-nonce", "negative-req"])
 async def test_adapter_contract(adapter_factory, scenario, server, profile, tmp_path, monkeypatch):
     master = save_confirmed(profile.id)
     job = make_job(profile, url=server.url("adapter-contract"))
@@ -124,7 +135,7 @@ async def test_adapter_contract(adapter_factory, scenario, server, profile, tmp_
         assert result.status == "blocked"
         assert not adapter.sent and not server.sent and not store.active_reservations(profile.id)
         return
-    if scenario in ("paused-write", "redirect", "blocker", "policy-change"):
+    if scenario in ("paused-write", "redirect", "blocker", "policy-change", "wrong-endpoint"):
         assert not adapter.sent and not server.sent and store.outstanding_attempt(app.id).id == result.id
         return
     assert len(adapter.sent) == len(server.posts) == 1
@@ -189,7 +200,7 @@ async def test_adapter_transport_does_not_replay_post_on_307(server, profile, tm
         registry = Registry()
         registry.register(adapter, host="127.0.0.1", unattended_tenants={"fixture-tenant": "first_party_confirmation"})
         monkeypatch.setattr(service, "registry", registry)
-        server.redirects["/adapter-contract"] = foreign.url("collect")
+        server.redirects["/adapter-contract/fixture-tenant/req-1"] = foreign.url("collect")
         result = await service.run(app.id, mode="submit", trigger="user")
         assert len(server.posts) == 1 and not foreign.posts and not foreign.requests
         assert store.outstanding_attempt(app.id).id == result.id and result.status != "submitted"

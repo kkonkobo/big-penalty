@@ -307,9 +307,10 @@ async def test_the_click_reserves_the_send_and_a_submission_records_where_it_wen
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     assert r.status == "submitted" and r.submit_clicked_at is None
     a = store.get_application(app.id)
-    assert a.status == "submitted" and a.sent_origin_url == "careers.exemple.test/jobs/7"
+    assert a.status == "submitted" and a.sent_origin_url == "https://careers.exemple.test/jobs/7"
     res = astore.active_reservations(profile.id)
-    assert [(x["application_id"], x["trigger"]) for x in res] == [(app.id, "user")] and res[0]["url_key"] == a.sent_origin_url
+    assert [(x["application_id"], x["trigger"]) for x in res] == [(app.id, "user")]
+    assert res[0]["url_key"] == astore._url_key("https://careers.exemple.test/jobs/7")
     assert res[0]["role_key"] == policy.normalize_role(job.company, job.title)  # never released after a click
     assert db.get_job(job.id).status == "applied"
 

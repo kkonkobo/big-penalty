@@ -40,7 +40,7 @@
     <div class="row">
       {% if item.bucket == 'paused' %}<a class="btn" href="/apply">Répondre dans la file d'envoi</a>{% endif %}
       {% if (item.supervised or apply_duplicates) and item.app.status == 'approved' and not item.outstanding %}
-      {{ launch_supervised(item.app.id, item.app.current_rev, item.origin_sha, apply_duplicates|default([])) }}
+      {{ launch_supervised(item.app.id, item.app.current_rev, item.origin_sha, apply_duplicates|default({})) }}
       {% elif item.supervised %}<span class="muted small">Approuvez le CV pour envoyer en mode supervisé.</span>{% endif %}
       {% if (item.selectable or item.supervised) and item.app.status != 'failed' and item.bucket in ('to_validate', 'failed') %}
       <form method="post" action="/applications/{{ item.app.id }}/apply/dry-run"><button class="btn">Essai à blanc</button></form>

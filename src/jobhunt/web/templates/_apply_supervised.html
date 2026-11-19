@@ -1,10 +1,10 @@
-{% macro launch_supervised(app_id, rev, origin_sha, duplicates=[]) %}
+{% macro launch_supervised(app_id, rev, origin_sha, duplicates={}) %}
 <form method="post" action="/applications/{{ app_id }}/apply/supervised"
       onsubmit="return confirm('Ouvrir le site en mode supervisé ? La saisie et le dépôt du CV peuvent transmettre des données avant le clic final. Vous seul décidez de cliquer sur Envoyer.')">
   <input type="hidden" name="rev" value="{{ rev }}">
   <input type="hidden" name="origin" value="{{ origin_sha }}">
-  {% for other in duplicates %}
-  <label><input type="checkbox" name="distinct_from" value="{{ other }}" required> Ce n'est pas un doublon de la candidature n°{{ other }}.</label>
+  {% for other, token in duplicates|dictsort %}
+  <label><input type="checkbox" name="distinct_from" value="{{ token }}" required> Ce n'est pas un doublon de la candidature n°{{ other }}.</label>
   {% endfor %}
   <button class="btn">Ouvrir en mode supervisé</button>
 </form>

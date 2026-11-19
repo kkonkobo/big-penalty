@@ -4,6 +4,7 @@ and `apply_reservations`: one per attempted send (quota + duplicate guard), pend
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import sys
@@ -15,11 +16,12 @@ from typing import Callable
 from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
-from jobhunt.apply.destination import clean_text, clean_url
+from jobhunt.apply.destination import audit_url, clean_text, clean_url
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.identity import canonical_identity, resolved_identity, similar_role
+from jobhunt.apply.identity import canonical_identity, posting_fingerprint, resolved_identity, similar_role
 from jobhunt.apply.types import Mode, RunResult, RunStatus
 from jobhunt.db import _dt, _iso, connect, now
+from jobhunt.dedupe import canonical_url
 
 _suppress = contextlib.suppress
 
@@ -40,13 +42,34 @@ def _safe_result(result: RunResult) -> RunResult:
             return [scrub(item) for item in value]
         if isinstance(value, str):
             if key in {"url", "final_url"}:
-                return clean_url(value)
+                return audit_url(value)
             if key == "screenshot":
                 return value if os.getenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS") == "1" else ""
-            return clean_text(value)
+            return clean_text(value, audit=True)
         return value
 
-    return RunResult.model_validate(scrub(result.model_dump(include=_RESULT_FIELDS)))
+    payload = result.model_dump(include=_RESULT_FIELDS)
+    sensitive = {"account_login", "account_signup", "email_verification"}
+    credential_page = False
+    for step in payload["steps"]:
+        if step["page_kind"] in sensitive:
+            credential_page = True
+            step.update(note="credential_page", filled=[], clicked="", screenshot="")
+    if credential_page or result.status == "needs_email":
+        payload.update(message="Vérification ou connexion manuelle requise (credential_page).", questions=[])
+    return RunResult.model_validate(scrub(payload))
+
+
+def _url_key(url: str) -> str:
+    return "sha256:" + hashlib.sha256(url.encode()).hexdigest()
+
+
+def binding_record(attempt: Attempt) -> dict:
+    return {**asdict(attempt), "url": audit_url(attempt.url), "url_digest": _url_key(attempt.url)}
+
+
+def _binding_json(attempt: Attempt) -> str:
+    return json.dumps(binding_record(attempt))
 SENT_NOT_RECORDED_NOTE = "Envoyée sur le site, mais le statut n'a pas pu être mis à jour : ne pas la renvoyer"
 STALE_RUN_AFTER = timedelta(minutes=45)  # a run still "running" after this long is dead unless its owner process is alive
 NOT_ACTIVE = "Cet envoi n'est plus actif (remplacé ou interrompu)"
@@ -207,11 +230,11 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
             verified = False
             if (receipt and held and run["mode"] == "submit" and receipt.attempt.adapter and clean_receipt(receipt, receipt.attempt)
                     and receipt.attempt.run_id == run_id and receipt.attempt.application_id == run["application_id"]
-                    and receipt.attempt.rev == run["rev"] and held["binding_json"] == json.dumps(asdict(receipt.attempt))
+                    and receipt.attempt.rev == run["rev"] and held["binding_json"] == _binding_json(receipt.attempt)
                     and _binding_current(c, run, receipt.attempt)):
                 _save_receipt(c, run_id, receipt)
                 if receipt.outcome == "confirmed":
-                    cvstore.tx_mark_submitted(c, run["application_id"], run["rev"], sent_origin_url=held["url_key"])
+                    cvstore.tx_mark_submitted(c, run["application_id"], run["rev"], sent_origin_url=audit_url(receipt.attempt.url))
                     c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (run_id, run["application_id"]))
                     c.execute("UPDATE jobs SET status='applied' WHERE id=(SELECT job_id FROM applications WHERE id=?)",
                               (run["application_id"],))
@@ -337,8 +360,16 @@ def _save_receipt(conn, run_id: int, receipt: Receipt) -> None:
 
 def held_binding(run_id: int) -> Attempt | None:
     with connect() as conn:
-        row = conn.execute("SELECT binding_json FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (run_id,)).fetchone()
-    return Attempt(**json.loads(row["binding_json"])) if row and row["binding_json"] else None
+        row = conn.execute("SELECT v.binding_json, j.origin_url FROM apply_reservations v JOIN applications a"
+                           " ON a.id=v.application_id JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id"
+                           " WHERE v.run_id=? AND v.released_at IS NULL", (run_id,)).fetchone()
+    if not row or not row["binding_json"]:
+        return None
+    data = json.loads(row["binding_json"])
+    url = clean_url(row["origin_url"], navigation=True)
+    if not url or data.pop("url_digest", None) != _url_key(url):
+        return None
+    return Attempt(**{**data, "url": url})
 
 
 def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = None, receipt: Receipt | None = None) -> None:
@@ -376,13 +407,15 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
             if (not held or not attempt.adapter or not clean_receipt(receipt, attempt) or attempt.run_id != run_id
                     or attempt.application_id != application_id or attempt.rev != a["current_rev"]
                     or not job or clean_url(job["origin_url"], navigation=True) != attempt.url
-                    or held["binding_json"] != json.dumps(asdict(attempt)) or sent != (receipt.outcome == "confirmed")):
+                    or held["binding_json"] != _binding_json(attempt) or sent != (receipt.outcome == "confirmed")):
                 raise ApplyError("Reçu périmé ou différent de la réservation.")
             _save_receipt(c, run_id, receipt)
         if a["status"] != "failed":
             cvstore.tx_force_failed(c, application_id, UNCONFIRMED_NOTE)
         if sent:
-            cvstore.tx_mark_sent_after_failure(c, application_id, sent_origin_url=held["url_key"] if held and held["url_key"] else None)
+            held_record = json.loads(held["binding_json"]) if held and held["binding_json"] else {}
+            cvstore.tx_mark_sent_after_failure(c, application_id, sent_origin_url=held_record.get("url") or
+                                              (held["url_key"] if held and held["url_key"] else None))
             c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (out["id"], application_id))
             c.execute("UPDATE apply_reservations SET pending=0 WHERE run_id=? AND released_at IS NULL", (out["id"],))
             c.execute("UPDATE jobs SET status='applied' WHERE id=? AND profile_id=?", (a["job_id"], a["profile_id"]))
@@ -441,7 +474,7 @@ def binding_active(attempt: Attempt) -> bool:
     with connect() as conn:
         run = conn.execute("SELECT r.* FROM application_runs r JOIN apply_reservations v ON v.run_id=r.id"
                            " WHERE r.id=? AND r.status='running' AND v.released_at IS NULL AND v.binding_json=?",
-                           (attempt.run_id, json.dumps(asdict(attempt)))).fetchone()
+                           (attempt.run_id, _binding_json(attempt))).fetchone()
         return bool(run and run["application_id"] == attempt.application_id and run["rev"] == attempt.rev
                     and _binding_current(conn, run, attempt))
 
@@ -470,7 +503,8 @@ def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=
             binding = {}
         held = canonical_identity(binding.get("tenant"), binding.get("requisition_id")) if isinstance(binding, dict) else None
         exact = (current["id"] == row["job_id"] or bool(canonical and canonical in (held, resolved_identity(row["extra"])))
-                 or bool(current_url and any(current_url == clean_url(row[key]) for key in ("origin_url", "url_key", "sent_origin_url"))))
+                 or bool(current_url and (row["url_key"] in (_url_key(current_url), canonical_url(current_url))
+                         or any(current_url == clean_url(row[key]) for key in ("origin_url", "url_key", "sent_origin_url")))))
         if exact or similar_role(current["company"], current["title"], row["company"], row["title"]):
             found[row["id"]] = exact or found.get(row["id"], False)
     return found
@@ -481,9 +515,29 @@ def potential_duplicates(profile_id: int, application_id: int) -> dict[int, bool
         return _potential_duplicates(conn, profile_id, application_id)
 
 
+def _confirmation_tokens(conn, profile_id: int, application_id: int, others) -> dict[int, str]:
+    ids = {application_id, *others}
+    if len(ids) < 2:
+        return {}
+    rows = conn.execute("SELECT a.id,j.company,j.title,j.location,j.origin_url,j.description,j.extra FROM applications a"
+                        " JOIN jobs j ON j.id=a.job_id AND j.profile_id=a.profile_id WHERE a.profile_id=?"
+                        f" AND a.id IN ({','.join('?' for _ in ids)})", (profile_id, *ids))
+    fingerprints = {row["id"]: posting_fingerprint(row) for row in rows}
+    if application_id not in fingerprints:
+        return {}
+    return {other: hashlib.sha256(json.dumps([application_id, fingerprints[application_id], other, fingerprint])
+                                  .encode()).hexdigest() for other, fingerprint in fingerprints.items() if other != application_id}
+
+
+def confirmation_tokens(profile_id: int, application_id: int) -> dict[int, str]:
+    with connect() as conn:
+        duplicates = _potential_duplicates(conn, profile_id, application_id)
+        return _confirmation_tokens(conn, profile_id, application_id, [aid for aid, exact in duplicates.items() if not exact])
+
+
 def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: str, role_key: str, url_key: str,
                  daily_cap: int, pending: bool = False, at: datetime | None = None, binding: Attempt | None = None,
-                 confirmed_distinct: frozenset[int] = frozenset()) -> None:
+                 duplicate_confirmations: tuple[str, ...] = ()) -> None:
     """The last gate before a click that may send the form, in ONE `BEGIN IMMEDIATE` transaction. The run must still be
     `running`, belong to the application and be its newest run (else ApplyError). Idempotent per run: a run that already holds
     an unreleased reservation only gets it upgraded (pending -> firm) and never fails on its own reservation. Otherwise: for
@@ -508,12 +562,16 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
                         or (run["mode"] == "submit" and not binding.adapter)
                         or not _binding_current(c, run, binding)):
             raise ApplyError("Approbation ou destination modifiée avant l'envoi")
+        confirmed_distinct = frozenset()
         if binding:
             duplicates = _potential_duplicates(c, profile_id, application_id,
                                                canonical_identity(binding.tenant, binding.requisition_id))
             if any(duplicates.values()):
                 raise ApplyError("Un essai existe déjà pour ce poste chez cet employeur.")
-            missing = sorted(set(duplicates) - (confirmed_distinct if trigger == "user" else frozenset()))
+            if trigger == "user":
+                tokens = _confirmation_tokens(c, profile_id, application_id, duplicates)
+                confirmed_distinct = frozenset(other for other, token in tokens.items() if token in duplicate_confirmations)
+            missing = sorted(set(duplicates) - confirmed_distinct)
             if missing:
                 raise ApplyError("Doublon possible : confirmez « ce n'est pas un doublon » pour les candidatures "
                                  + ", ".join(f"n°{item}" for item in missing) + ".")
@@ -547,7 +605,7 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
         c.execute("INSERT INTO apply_reservations(profile_id, application_id, run_id, trigger, role_key, url_key, created_at, pending, binding_json, dedupe_key)"
                   " VALUES (?,?,?,?,?,?,?,?,?,?)",
                   (profile_id, application_id, run_id, trigger, role_key or "", url_key or "", _iso(ts), 1 if pending else 0,
-                   json.dumps(asdict(binding)) if binding else None, binding.dedupe_key if binding else None))
+                   _binding_json(binding) if binding else None, binding.dedupe_key if binding else None))
         if binding:
             return
         col = "nav_clicked_at" if pending else "submit_clicked_at"

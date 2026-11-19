@@ -344,10 +344,10 @@ async def apply_send(request: Request):
     return web._flash("/apply", notice=f"Envoi lancé pour {n} candidature{'s' if n > 1 else ''}")
 
 
-def supervised_duplicates(app) -> list[int]:
+def supervised_duplicates(app) -> dict[int, str]:
     if app.status != "approved":
-        return []
-    return sorted(other for other, exact in apply_store.potential_duplicates(app.profile_id, app.id).items() if not exact)
+        return {}
+    return apply_store.confirmation_tokens(app.profile_id, app.id)
 
 
 @router.post("/applications/{app_id}/apply/supervised")
@@ -360,9 +360,10 @@ async def apply_supervised(request: Request, app_id: str):
     rev = safe_id(str(form.get("rev") or ""))
     origin = _origin_field(form)
     job = db.get_job(app.job_id)
-    duplicates = frozenset(supervised_duplicates(app))
-    checked = frozenset(safe_id(str(value)) for value in form.getlist("distinct_from")) & duplicates
-    if duplicates - checked:
+    duplicates = supervised_duplicates(app)
+    tokens = frozenset(str(value) for value in form.getlist("distinct_from"))
+    checked = frozenset(other for other, token in duplicates.items() if token in tokens)
+    if set(duplicates) - checked:
         return web._flash(f"/applications/{aid}", error="Confirmez « ce n'est pas un doublon » pour chaque candidature signalée.")
     problems = apply_service._bound_problems(app, job, rev or -1, origin) or apply_service._gate(
         app, job, "supervised", "user", **apply_service._distinct(checked))
@@ -370,7 +371,7 @@ async def apply_supervised(request: Request, app_id: str):
         return web._flash("/apply", error=" ; ".join(problems))
     bound = {"rev": rev, "origin": origin}
     if checked:
-        bound["duplicate_confirmations"] = tuple((aid, other) for other in sorted(checked))
+        bound["duplicate_confirmations"] = tuple(duplicates[other] for other in sorted(checked))
     err = _launch(aid, "supervised", False, bound)
     return web._flash("/apply", error=err) if err else web._flash("/apply", notice=apply_service.SUPERVISED_HANDOFF)
 

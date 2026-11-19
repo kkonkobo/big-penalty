@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.destination import clean_text, clean_url
+from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
@@ -1261,12 +1262,24 @@ class _Run:
         return live is not None and live[1] and live[2] and _norm(live[0]) == _norm(f.label)
 
     # ------------------------------------------------------------ execution
+    async def _before_mutation(self, op: str) -> None:
+        if self.mode == "supervised":
+            reasons = await self.before_submit()
+            if reasons:
+                raise _DecisionHold(self._end("blocked", " ; ".join(reasons)))
+            if self.before_field:
+                try:
+                    self.before_field(op)
+                except ApplyError as exc:
+                    raise _DecisionHold(self._end("blocked", str(exc))) from exc
+
     async def _execute(self, it: _Item, loc: Locator | ElementHandle, snap: PageSnapshot, log: StepLog) -> str:
         """Carry out one validated action. Returns the (redacted) value for the log; raises _Skip when it cannot be done."""
         a, f = it.act, it.field
         T = ACTION_TIMEOUT_MS
         if self.mode == "supervised":
             if a.op == "upload_cv" and f.kind == "file" and self.uploads.cv_bytes is not None:
+                await self._before_mutation(a.op)
                 await loc.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": self.uploads.cv_bytes}, timeout=T)
                 self.uploaded = True
                 return "CV.pdf"
@@ -1327,17 +1340,13 @@ class _Run:
                                               ".map(o => (o.label || o.textContent).trim())", o.value)
                 if not matching or any(" ".join(label.split()) != " ".join(o.label.split()) for label in matching):
                     raise _Skip("options du formulaire modifiées depuis la lecture")
-                if self.mode == "supervised":
-                    reasons = await self.before_submit()
-                    if reasons:
-                        raise _DecisionHold(self._end("blocked", " ; ".join(reasons)))
-                    if self.before_field:
-                        self.before_field(a.op)
+            await self._before_mutation(a.op)
             await loc.select_option(value=o.value, timeout=T) if o.value else await loc.select_option(label=o.label, timeout=T)
             shown = str(await loc.evaluate("e => { const o = e.selectedOptions[0]; return o ? (o.label || o.textContent).trim() : ''; }") or "")
             if _norm(shown) != _norm(o.label):  # read back what the control really holds: log THAT, and never keep another choice
                 if it.used == "confirmed_form_choice":
                     raise _Dirty("la sélection confirmée n’a pas été retenue")
+                await self._before_mutation(a.op)
                 with contextlib.suppress(Exception):
                     await loc.evaluate("e => { e.selectedIndex = -1; e.dispatchEvent(new Event('change', {bubbles: true})); }")
                 raise _Skip("valeur lue différente de la réponse validée")
@@ -1361,6 +1370,7 @@ class _Run:
                 ml = await loc.get_attribute("maxlength", timeout=T)
                 pat = await loc.get_attribute("pattern", timeout=T)
             text = pick_variant(fact, f, int(ml) if ml and ml.isdigit() else None, pat)
+        await self._before_mutation(a.op)
         await self._type(loc, f, text)
         return text
 
@@ -1920,12 +1930,6 @@ class _Run:
                         if target is None:
                             return self._end("blocked", "Champ introuvable : saisie annulée.")
                     await self._live_decisions(snap, it.field, approved_choices, pending=pending_choices, applying=it)
-                    if self.mode == "supervised":
-                        reasons = await self.before_submit()
-                        if reasons:
-                            return self._end("blocked", " ; ".join(reasons))
-                        if self.before_field:
-                            self.before_field(it.act.op)
                 except _DecisionHold as hold:
                     return hold.result
                 except Exception:

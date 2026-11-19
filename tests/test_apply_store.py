@@ -106,7 +106,7 @@ def test_run_lifecycle(app):
     assert run.status == "running" and run.out_dir == str(out_dir(run.id)) and run.finished_at is None and run.result is None
     done = astore.finish_run(run.id, RunResult(status="ready", message="Prêt à envoyer", final_url="https://x.test/apply"))
     assert done.status == "ready" and done.message == "Prêt à envoyer" and done.finished_at is not None
-    assert done.result.final_url == "https://x.test/apply" and done.mode == "dry_run" and done.trigger == "user"
+    assert done.result.final_url == "https://x.test" and done.mode == "dry_run" and done.trigger == "user"
     assert astore.get_run(run.id) == done and astore.last_run(app.id) == done
     assert astore.get_run(999) is None and astore.last_run(999) is None
     with pytest.raises(ApplyError):

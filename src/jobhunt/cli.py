@@ -578,24 +578,25 @@ def apply_supervised(app_id: int) -> None:
     from jobhunt import db
     from jobhunt.apply.errors import ApplyError
     from jobhunt.apply.service import SUPERVISED_HANDOFF, origin_digest, run
-    from jobhunt.apply.destination import clean_url
-    from jobhunt.apply.store import potential_duplicates
+    from jobhunt.apply.destination import audit_url, clean_url
+    from jobhunt.apply.store import confirmation_tokens, potential_duplicates
     from jobhunt.cv.store import get_application
 
     app = get_application(app_id)
     if app is None:
         raise typer.BadParameter("candidature introuvable")
     job = db.get_job(app.job_id)
-    destination = clean_url(job.origin_url, navigation=True) if job else ""
+    destination = audit_url(clean_url(job.origin_url, navigation=True)) if job else ""
     console.print(f"Candidature {app.id} · CV révision {app.current_rev} · {destination or 'destination inconnue'}", markup=False)
     console.print(SUPERVISED_HANDOFF, markup=False)
     if not typer.confirm("La saisie et le dépôt du CV peuvent transmettre des données avant le clic final. Continuer ?"):
         raise typer.Exit(1)
     confirmations = []
+    tokens = confirmation_tokens(app.profile_id, app.id)
     for other, exact in sorted(potential_duplicates(app.profile_id, app.id).items()):
-        if exact or not typer.confirm(f"Confirmez : la candidature n°{app.id} n'est pas un doublon de la candidature n°{other} ?"):
+        if exact or other not in tokens or not typer.confirm(f"Confirmez : la candidature n°{app.id} n'est pas un doublon de la candidature n°{other} ?"):
             raise typer.Exit(1)
-        confirmations.append((app.id, other))
+        confirmations.append(tokens[other])
     try:
         result = asyncio.run(run(app_id, mode="supervised", trigger="user", headless=False, expected_rev=app.current_rev,
                                  expected_origin=origin_digest(job.origin_url if job else None),
