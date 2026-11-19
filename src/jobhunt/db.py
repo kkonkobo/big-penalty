@@ -181,14 +181,16 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE applications ADD COLUMN sent_run_id INTEGER;
     """,
-    # 8: who approved the application when a run started ("auto" / "user"): approved_by is cleared when an attempt ends
-    # unconfirmed, and "it was not sent" re-approves automatically only what the tool had approved itself.
+    # 8: who approved the application when a run started ("auto" / "user").
     """
     ALTER TABLE application_runs ADD COLUMN approved_by TEXT;
     """,
     # 9: how many times the automatic pass regenerated the application's CV because its revision had blocking errors.
     """
     ALTER TABLE applications ADD COLUMN auto_regens INTEGER NOT NULL DEFAULT 0;
+    """,
+    """
+    ALTER TABLE application_runs ADD COLUMN operator_not_sent_at TEXT;
     """,
 ]
 

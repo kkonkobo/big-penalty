@@ -124,6 +124,8 @@ def submit_problems(app: Application, job: MergedJob | None, *, trigger: Literal
     elif store.sha256_file(pdf) != app.pdf_sha256 or app.approved_sha256 != app.pdf_sha256:
         out.append("PDF modifié ou différent de celui approuvé")
     if trigger == "auto":
+        if apply_store.requires_manual_retry(app.id):
+            out.append("nouvel envoi manuel requis après vérification")
         if not s.apply_auto:
             out.append("envoi automatique désactivé")
         ok, reasons = service.is_eligible(app)

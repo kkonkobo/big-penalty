@@ -62,6 +62,7 @@ class ApplyRun(BaseModel):
     nav_clicked_at: datetime | None = None     # first click after data was entered (pending reservation): MAY have been sent
     pid: int | None = None                     # process that drives the run (a live owner is never taken over)
     approved_by: str | None = None             # "auto" | "user": who had approved the application when this run started
+    operator_not_sent_at: datetime | None = None
 
 
 def _from_row(r) -> ApplyRun:
@@ -70,7 +71,7 @@ def _from_row(r) -> ApplyRun:
         message=r["message"] or "", result=RunResult.model_validate_json(r["result_json"]) if r["result_json"] else None,
         out_dir=r["out_dir"], started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]),
         submit_clicked_at=_dt(r["submit_clicked_at"]), nav_clicked_at=_dt(r["nav_clicked_at"]), pid=r["pid"],
-        approved_by=r["approved_by"])
+        approved_by=r["approved_by"], operator_not_sent_at=_dt(r["operator_not_sent_at"]))
 
 
 def start_run(application_id: int, rev: int, mode: str, trigger: str, out_dir_for: Callable[[int], Path]) -> ApplyRun:
@@ -187,26 +188,35 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
 
 
 def _outstanding_row(c, application_id: int):
-    """The run owning the application's unreleased FIRM reservation, else (application `failed`) its newest run with a recorded
-    click, else None. A newer refused / dry run never hides it."""
+    """Prefer the finished run owning the hold; fall back to a click on legacy failed rows."""
     r = c.execute("SELECT r.* FROM application_runs r JOIN apply_reservations v ON v.run_id=r.id"
-                  " WHERE v.application_id=? AND v.released_at IS NULL AND v.pending=0 ORDER BY v.id DESC LIMIT 1",
+                  " WHERE v.application_id=? AND r.application_id=v.application_id AND r.status!='running'"
+                  " AND v.released_at IS NULL ORDER BY v.pending, v.id DESC LIMIT 1",
                   (application_id,)).fetchone()
     if r is not None:
         return r
     a = c.execute("SELECT status FROM applications WHERE id=?", (application_id,)).fetchone()
     if a is None or a["status"] != "failed":
         return None
-    return c.execute("SELECT * FROM application_runs WHERE application_id=? AND (submit_clicked_at IS NOT NULL OR nav_clicked_at IS NOT NULL)"
+    return c.execute("SELECT * FROM application_runs WHERE application_id=? AND mode='submit' AND status!='running' AND operator_not_sent_at IS NULL"
+                     " AND (submit_clicked_at IS NOT NULL OR (nav_clicked_at IS NOT NULL AND NOT EXISTS"
+                     " (SELECT 1 FROM apply_reservations v WHERE v.run_id=application_runs.id AND v.pending=1 AND v.released_at IS NOT NULL)))"
                      " ORDER BY id DESC LIMIT 1", (application_id,)).fetchone()
 
 
 def outstanding_attempt(application_id: int) -> ApplyRun | None:
-    """The attempt a human has to settle: the run that owns the application's unreleased firm reservation, else the newest run
+    """The attempt a human has to settle: the run that owns the application's unreleased reservation, else the newest run
     that reached a click while the application is `failed`. Later runs (refused, dry runs) never hide it."""
     with connect() as c:
         r = _outstanding_row(c, application_id)
     return _from_row(r) if r else None
+
+
+def requires_manual_retry(application_id: int) -> bool:
+    """A verified non-send can only be retried by an explicit manual send."""
+    with connect() as c:
+        return c.execute("SELECT 1 FROM application_runs WHERE application_id=? AND operator_not_sent_at IS NOT NULL LIMIT 1",
+                         (application_id,)).fetchone() is not None
 
 
 def auto_regens(application_id: int) -> int:
@@ -234,11 +244,11 @@ def sent_run(application_id: int) -> ApplyRun | None:
 
 
 def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = None) -> None:
-    """Human decision about a `failed` application after a possibly-sent attempt, in ONE transaction (reservation,
-    application status, job status). It is bound to the OUTSTANDING attempt (`outstanding_attempt`): `run_id` (when given)
+    """Human decision after a possibly-sent attempt, in ONE transaction (reservation,
+    application status, job status). It is bound to the OUTSTANDING attempt (`outstanding_attempt`): `run_id`
     must be that run, else "page périmée". Without any such attempt: refused. Only that attempt's reservation is touched.
     sent=True: submitted (+ job applied, `sent_run_id` = that run), reservation kept firm. sent=False: reservation released,
-    back to draft."""
+    back to draft unless another attempt still needs verification."""
     from jobhunt.cv import store as cvstore  # noqa: PLC0415
 
     with connect() as c:
@@ -246,22 +256,32 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
         a = c.execute("SELECT status, profile_id, job_id FROM applications WHERE id=?", (application_id,)).fetchone()
         if a is None:
             raise ApplyError("Candidature introuvable")
-        if a["status"] != "failed":
+        if a["status"] not in ("failed", "draft", "approved"):
             raise ApplyError("Cette candidature n'est pas en échec d'envoi")
         out = _outstanding_row(c, application_id)
         if out is None:
+            if a["status"] != "failed":
+                raise ApplyError("Cette candidature n'est pas en échec d'envoi")
             raise ApplyError("Cette candidature n'a jamais atteint le clic d'envoi : rien à confirmer")
-        if run_id is not None and out["id"] != run_id:
+        if out["id"] != run_id:
             raise ApplyError("Page périmée : un autre essai a eu lieu depuis, recharger la page")
+        if c.execute("SELECT 1 FROM application_runs WHERE application_id=? AND mode='submit' AND status='running' LIMIT 1",
+                     (application_id,)).fetchone():
+            raise ApplyError("Un envoi est encore en cours : vérifier de nouveau après sa fin")
         held = c.execute("SELECT url_key FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (out["id"],)).fetchone()
+        if a["status"] != "failed":
+            cvstore.tx_force_failed(c, application_id, UNCONFIRMED_NOTE)
         if sent:
             cvstore.tx_mark_sent_after_failure(c, application_id, sent_origin_url=held["url_key"] if held and held["url_key"] else None)
             c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (out["id"], application_id))
             c.execute("UPDATE apply_reservations SET pending=0 WHERE run_id=? AND released_at IS NULL", (out["id"],))
             c.execute("UPDATE jobs SET status='applied' WHERE id=? AND profile_id=?", (a["job_id"], a["profile_id"]))
         else:
-            c.execute("UPDATE apply_reservations SET released_at=? WHERE run_id=? AND released_at IS NULL", (_iso(now()), out["id"]))
-            cvstore.tx_set_status(c, application_id, "draft")
+            resolved_at = _iso(now())
+            c.execute("UPDATE apply_reservations SET released_at=? WHERE run_id=? AND released_at IS NULL", (resolved_at, run_id))
+            c.execute("UPDATE application_runs SET operator_not_sent_at=? WHERE id=?", (resolved_at, run_id))
+            if _outstanding_row(c, application_id) is None:
+                cvstore.tx_set_status(c, application_id, "draft")
 
 
 def get_run(run_id: int) -> ApplyRun | None:

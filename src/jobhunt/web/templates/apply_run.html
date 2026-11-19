@@ -1,10 +1,15 @@
 {% extends "base.html" %}
+{% from "_apply_verification.html" import click_evidence, resolve_form %}
+{% block htmx %}{% endblock %}
 {% block title %}Envoi · {{ a.company if a else 'Exécution' }}{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
     <h1>{{ APPLY_MODE_LABELS.get(run.mode, run.mode) }}{% if a %} · {{ a.company or 'Entreprise non précisée' }}{% endif %}</h1>
-    <p class="muted">{% if a %}{{ a.job_title or '' }} · {% endif %}<span class="tag {{ APPLY_RUN_CLASS.get(run.status, '') }}">{{ APPLY_RUN_LABELS.get(run.status, run.status) }}</span></p>
+    <p class="muted">{% if a %}{{ a.job_title or '' }} · {% endif %}
+      {% if verification %}<span class="tag warn">À vérifier</span>
+      {% elif run.operator_not_sent_at %}<span class="tag">Vérifié : non envoyée</span>
+      {% else %}<span class="tag {{ APPLY_RUN_CLASS.get(run.status, '') }}">{{ APPLY_RUN_LABELS.get(run.status, run.status) }}</span>{% endif %}</p>
   </div>
   <div class="row">
     <a class="btn" href="/apply">Retour aux envois</a>
@@ -17,6 +22,18 @@
   </div>
 </div>
 {% if run.mode == 'dry_run' and run.status == 'ready' %}<div class="notice">Formulaire rempli, rien n'a été envoyé</div>{% endif %}
+{% if verification %}
+<section class="card" id="verification">
+  <h2>À vérifier · Essai n°{{ run.id }}</h2>
+  <p>Le statut technique ne dit pas si la candidature a été reçue. Les heures indiquent un clic prévu ou tenté, pas une réception.</p>
+  {{ click_evidence(run) }}
+  {% if run.result and run.result.final_url|http_url %}<p>Dernier site observé : {{ run.result.final_url|host }}</p>{% endif %}
+  <p>Vérifiez l’historique de vos candidatures sur le site de l’entreprise ou cherchez un e-mail de confirmation correspondant à cette offre.
+    L’absence d’e-mail ne prouve pas que rien n’a été envoyé. En cas de doute, ne choisissez aucun résultat.</p>
+  <p class="muted small">Les captures ci-dessous, si disponibles, restent locales et peuvent montrer le formulaire avant le clic.</p>
+  {{ resolve_form(a.id, run) }}
+</section>
+{% endif %}
 
 <dl class="facts wide">
   <div><dt>Mode</dt><dd>{{ APPLY_MODE_LABELS.get(run.mode, run.mode) }}</dd></div>
@@ -24,6 +41,7 @@
   <div><dt>Début</dt><dd>{{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</dd></div>
   <div><dt>Fin</dt><dd>{% if run.finished_at %}{{ run.finished_at.strftime('%d/%m/%Y %H:%M') }}{% else %}en cours{% endif %}</dd></div>
   <div><dt>Version du CV</dt><dd>{{ run.rev }}</dd></div>
+  {% if verification or run.operator_not_sent_at %}<div><dt>Statut technique</dt><dd>{{ APPLY_RUN_LABELS.get(run.status, run.status) }}</dd></div>{% endif %}
   {% if run.result and run.result.untrusted_host %}<div class="span"><dt>Site non approuvé</dt><dd>{{ run.result.untrusted_host }}</dd></div>{% endif %}
   {% if run.message %}<div class="span"><dt>Message</dt><dd>{{ run.message }}</dd></div>{% endif %}
 </dl>

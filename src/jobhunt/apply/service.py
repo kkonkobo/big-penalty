@@ -50,9 +50,10 @@ from jobhunt.sources.base import ChallengeRequired
 #                 site the user has not trusted yet (pause_reason "host")
 #   sending     = a run is in progress
 #   sent        = submitted
-#   failed      = the last attempt failed (incl. "envoi non confirmé": may have been sent, check on the site)
+#   needs_verification = an attempt may have sent; only the operator can settle it
+#   failed      = a technical failure, with no outstanding send to settle
 #   blocked     = cannot be sent as is (CV errors to fix, job too old / closed, duplicate, no company link)
-Bucket = Literal["to_validate", "paused", "sending", "sent", "failed", "blocked"]
+Bucket = Literal["to_validate", "paused", "sending", "sent", "needs_verification", "failed", "blocked"]
 
 
 class QueueItem(BaseModel):
@@ -64,7 +65,7 @@ class QueueItem(BaseModel):
     origin_sha: str = ""               # origin_digest(origin_url) at render time: bound by the send / resume forms
     age_days: float | None = None
     last_run: ApplyRun | None = None
-    outstanding: ApplyRun | None = None  # failed bucket: the attempt that may have been sent (a human settles THAT run)
+    outstanding: ApplyRun | None = None
     auto: bool = False                 # fit >= auto threshold (sent without asking when automatic sending is on)
     problems: list[str] = Field(default_factory=list)   # why it cannot be sent now (policy.submit_problems, trigger "user")
     questions: list[Question] = Field(default_factory=list)  # paused on unknown questions
@@ -98,7 +99,7 @@ class ApplySummary(BaseModel):
                 f"{self.waiting} bloquée(s) · {self.failed} échec(s) technique(s)")
 
 
-BUCKET_ORDER: tuple[str, ...] = ("to_validate", "paused", "sending", "failed", "blocked", "sent")
+BUCKET_ORDER: tuple[str, ...] = ("needs_verification", "to_validate", "paused", "sending", "failed", "blocked", "sent")
 PAUSE_REASON = {"needs_input": "input", "needs_email": "email", "needs_human": "human"}
 UNCONFIRMED_NOTE = apply_store.UNCONFIRMED_NOTE
 SENT_NOT_RECORDED_NOTE = apply_store.SENT_NOT_RECORDED_NOTE
@@ -179,12 +180,16 @@ def _draft_problems(app: Application, job) -> list[str]:
 
 
 def _item(app: Application, job, run_: ApplyRun | None, settings) -> QueueItem:
+    outstanding = apply_store.outstanding_attempt(app.id) if app.status != "submitted" else None
+    manual_retry = app.status in ("draft", "approved") and apply_store.requires_manual_retry(app.id)
     problems = [] if app.status in ("submitted", "failed") else _draft_problems(app, job)
     pause = ""
     questions: list[Question] = []
     untrusted = "" if app.status in ("submitted", "failed") else _host_pause(app, job, run_)
     if app.status == "submitted":
         bucket = "sent"
+    elif outstanding:
+        bucket = "needs_verification"
     elif app.status == "failed":
         bucket = "failed"
     elif run_ is not None and run_.status == "running" and now() - run_.started_at < apply_store.STALE_RUN_AFTER:
@@ -196,7 +201,7 @@ def _item(app: Application, job, run_: ApplyRun | None, settings) -> QueueItem:
         bucket, pause = "paused", "host"
     elif problems:
         bucket = "blocked"
-    elif run_ is not None and run_.status == "failed":
+    elif run_ is not None and run_.status == "failed" and not run_.operator_not_sent_at:
         bucket = "failed"
     else:
         bucket = "to_validate"
@@ -204,8 +209,8 @@ def _item(app: Application, job, run_: ApplyRun | None, settings) -> QueueItem:
     return QueueItem(
         app=app, bucket=bucket, score=job.score if job else None, origin_url=job.origin_url if job else None,  # type: ignore[arg-type]
         origin_host=_host(job.origin_url if job else None), origin_sha=origin_digest(job.origin_url if job else None), age_days=age_days(job) if job else None, last_run=run_,
-        outstanding=apply_store.outstanding_attempt(app.id) if app.status == "failed" else None,
-        auto=bool(job and job.score is not None and job.score >= settings.apply_auto_min_score), problems=problems,
+        outstanding=outstanding,
+        auto=bool(not manual_retry and not outstanding and job and job.score is not None and job.score >= settings.apply_auto_min_score), problems=problems,
         questions=questions, pause_reason=pause, untrusted_host=untrusted if pause == "host" else "",
         selectable=bucket == "to_validate" or (bucket in ("paused", "failed") and open_ and pause != "host"))
 
@@ -641,20 +646,8 @@ def answer_questions(app_id: int, answers: list[tuple[str, str]]) -> None:
 
 
 def resolve_unconfirmed(app_id: int, *, sent: bool, run_id: int | None = None) -> Application:
-    """Human decision on an application left `failed` after a possibly-sent attempt (the user checked the company's site).
-    `sent=True`: it WAS sent -> submitted (job applied). `sent=False`: it was NOT sent -> the reservations are released
-    (quota and duplicate guard) and the application goes back to draft; when the tool had approved it itself (the attempt
-    records `approved_by == "auto"`) and the same revision is still eligible, it is re-approved automatically (volume), else it
-    waits for the user's OK. `run_id` binds the decision to ONE attempt: it must be the OUTSTANDING attempt
-    (`apply_store.outstanding_attempt`). One transaction (apply/store.resolve_attempt); an application without such an attempt
-    is refused."""
-    if cvstore.get_application(app_id) is None:
-        raise ApplyError("Candidature introuvable")
-    attempt = apply_store.outstanding_attempt(app_id)
+    """Settle the exact attempt after the operator checks the outcome; never approve or resend here."""
     apply_store.resolve_attempt(app_id, sent=sent, run_id=run_id)
-    if not sent and attempt is not None and attempt.approved_by == "auto":
-        with contextlib.suppress(CVError):  # not eligible any more (revision, PDF, errors): stays a draft for the user
-            cvs.auto_approve(app_id, expected_rev=attempt.rev)
     return cvstore.get_application(app_id)  # type: ignore[return-value]
 
 
@@ -870,6 +863,10 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
     app = cvstore.get_application(app.id) or app  # someone else (the web portal, the user) may have moved it since the pass began
     if app.status in ("submitted", "withdrawn"):
         emit(f"{tag} : déjà traitée par ailleurs ({'envoyée' if app.status == 'submitted' else 'retirée'})")
+        return
+    if apply_store.requires_manual_retry(app.id):
+        summary.waiting += 1
+        emit(f"{tag} : en attente d'un envoi manuel après vérification")
         return
     last = apply_store.last_run(app.id)
     if last is not None and last.status == "running" and last.pid and last.pid != os.getpid() and apply_store.pid_alive(last.pid):

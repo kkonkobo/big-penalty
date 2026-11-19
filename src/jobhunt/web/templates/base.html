@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Big Penalty{% endblock %} · Big Penalty</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  {% block htmx %}<script src="https://unpkg.com/htmx.org@2.0.4" defer></script>{% endblock %}
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_apply_card.html" import status_box with context %}
+{% from "_apply_verification.html" import click_evidence %}
 {% block title %}Envois{% endblock %}
 {% block content %}
 <div class="page-head">
@@ -9,7 +10,7 @@
       (au plus {{ settings.apply_daily_cap }} par jour) ; les autres attendent ici votre accord.
       {% if settings.apply_auto %}<span class="tag ok">Envoi automatique : activé</span>{% else %}<span class="tag">Envoi automatique : désactivé</span>{% endif %}</p>
     {% set counts = [] %}
-    {% if groups.failed %}{% set _ = counts.append(groups.failed|length ~ ' à vérifier') %}{% endif %}
+    {% if groups.needs_verification %}{% set _ = counts.append(groups.needs_verification|length ~ ' à vérifier') %}{% endif %}
     {% if groups.paused %}{% set _ = counts.append(groups.paused|length ~ ' en pause') %}{% endif %}
     {% if groups.to_validate %}{% set _ = counts.append(groups.to_validate|length ~ (' prêtes' if groups.to_validate|length > 1 else ' prête')) %}{% endif %}
     {% if sent_total %}{% set _ = counts.append(sent_today ~ (' envoyée aujourd\'hui' if sent_today < 2 else ' envoyées aujourd\'hui')) %}{% set _ = counts.append(sent_total ~ ' au total') %}{% endif %}
@@ -29,26 +30,35 @@
 {% for e in errors %}<div class="error-box">{{ e }}</div>{% endfor %}
 {{ status_box(status) }}
 
+{% if groups.needs_verification %}
+<section class="panel flush" id="needs-verification">
+  <div class="panel-head"><h3>À vérifier <span class="count">{{ groups.needs_verification|length }}</span></h3></div>
+  <p class="panel-empty">Ces essais ont pu envoyer une candidature. Aucun renvoi tant que le résultat reste incertain.</p>
+  <table class="tbl">
+    <thead><tr><th>Offre</th><th>Clic enregistré (pas un reçu)</th><th>Vérification</th></tr></thead>
+    <tbody>{% for it in groups.needs_verification %}
+      <tr>
+        <td><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
+          <div class="muted small">{{ it.app.job_title or '' }}</div></td>
+        <td class="small">{{ click_evidence(it.outstanding) }}</td>
+        <td><a class="btn small" href="/apply/runs/{{ it.outstanding.id }}">Vérifier l’essai n°{{ it.outstanding.id }}</a></td>
+      </tr>
+    {% endfor %}</tbody>
+  </table>
+</section>
+{% endif %}
+
 {% if groups.failed %}
 <section class="panel flush" id="failed">
-  <div class="panel-head"><h3>Échecs et envois à vérifier <span class="count">{{ groups.failed|length }}</span></h3></div>
+  <div class="panel-head"><h3>Échecs techniques <span class="count">{{ groups.failed|length }}</span></h3></div>
   <table class="tbl"><tbody>
   {% for it in groups.failed %}
     <tr>
       <td><a class="row-link" href="/applications/{{ it.app.id }}"><strong>{{ it.app.company or 'Entreprise non précisée' }}</strong></a>
         <div class="muted small">{{ it.app.job_title or '' }}</div></td>
-      <td>{% if it.app.status == 'failed' %}
-        <p class="alert"><svg class="ic"><use href="#i-alert"/></svg><span>Envoi non confirmé : vérifier sur le site de l'entreprise</span></p>
-        {% endif %}
-        {% set shown = it.outstanding or it.last_run %}
+      <td>{% set shown = it.last_run %}
         {% if shown %}<span class="muted small">{{ shown.message }}</span> <a class="small" href="/apply/runs/{{ shown.id }}">voir l'essai</a>{% endif %}</td>
-      <td>{% if it.app.status == 'failed' %}{% if it.outstanding %}
-        <form method="post" action="/applications/{{ it.app.id }}/apply/resolve" onsubmit="return confirm('Confirmer : cette candidature a bien été envoyée sur le site de l\'entreprise ?')">
-          <input type="hidden" name="run_id" value="{{ it.outstanding.id }}"><input type="hidden" name="sent" value="1"><button class="btn small">Elle a bien été envoyée</button></form>
-        <form method="post" action="/applications/{{ it.app.id }}/apply/resolve" onsubmit="return confirm('Confirmer : cette candidature n\'a PAS été envoyée ? Elle redeviendra un brouillon à approuver de nouveau.')">
-          <input type="hidden" name="run_id" value="{{ it.outstanding.id }}"><input type="hidden" name="sent" value="0"><button class="btn small">Elle n'a pas été envoyée, réessayer plus tard</button></form>
-        {% endif %}
-        {% elif it.selectable %}
+      <td>{% if it.selectable and it.app.status != 'failed' %}
         <form method="post" action="/apply/send" onsubmit="return confirm('Envoyer 1 candidature sur le site de l\'entreprise ?')">
           <input type="hidden" name="app_id" value="{{ it.app.id }}"><input type="hidden" name="rev_{{ it.app.id }}" value="{{ it.app.current_rev }}"><input type="hidden" name="origin_{{ it.app.id }}" value="{{ it.origin_sha }}">
           <button class="btn small">Réessayer</button></form>{% endif %}</td>

@@ -512,3 +512,53 @@ def test_resolve_attempt_is_atomic(profile, app, monkeypatch):
     with pytest.raises(RuntimeError):
         astore.resolve_attempt(a.id, sent=False, run_id=run.id)
     assert len(astore.active_reservations(profile.id)) == 1 and store.get_application(a.id).status == "failed"
+    assert not astore.requires_manual_retry(a.id)
+
+
+def test_concurrent_opposite_resolutions_only_apply_one_decision(profile, app):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    approved = cvs.approve(app.id, 1)
+    run = failed_after_click(approved)
+    barrier = Barrier(2)
+
+    def resolve(sent):
+        barrier.wait(timeout=5)
+        try:
+            astore.resolve_attempt(app.id, sent=sent, run_id=run.id)
+        except ApplyError:
+            return None
+        return sent
+
+    with ThreadPoolExecutor(2) as pool:
+        winners = [result for result in pool.map(resolve, (True, False)) if result is not None]
+    assert len(winners) == 1
+    assert store.get_application(app.id).status == ("submitted" if winners[0] else "draft")
+    assert [r["run_id"] for r in astore.active_reservations(profile.id)] == ([run.id] if winners[0] else [])
+    assert astore.requires_manual_retry(app.id) is (not winners[0])
+
+
+def test_not_sent_cannot_release_another_hold_for_the_same_application(profile, app, tmp_path):
+    approved = cvs.approve(app.id, 1)
+    first = failed_after_click(approved)
+    second = astore.start_run(app.id, 1, "submit", "user", out_dir)
+    with pytest.raises(ApplyError, match="encore en cours"):
+        astore.resolve_attempt(app.id, sent=False, run_id=first.id)
+    with db.connect() as conn:
+        conn.execute("INSERT INTO apply_reservations(profile_id, application_id, run_id, trigger, role_key, url_key, created_at)"
+                     " VALUES (?, ?, ?, 'user', 'second', 'second', ?)", (profile.id, app.id, second.id, db._iso(astore.now())))
+    astore.finish_and_settle(second.id, RunResult(status="failed", submit_clicked=True))
+    with pytest.raises(ApplyError, match="périmée"):
+        astore.resolve_attempt(app.id, sent=False, run_id=first.id)
+    astore.resolve_attempt(app.id, sent=False, run_id=second.id)
+    assert store.get_application(app.id).status == "failed"
+    assert [r["run_id"] for r in astore.active_reservations(profile.id)] == [first.id]
+    duplicate = make_app(profile, make_job(profile, title="Doublon", company="Autre", url="https://autre.test/2"), tmp_path,
+                         master_hash=app.master_hash)
+    attempt = astore.start_run(duplicate.id, 1, "submit", "user", out_dir)
+    with pytest.raises(ApplyError, match="même offre"):
+        reserve(duplicate, attempt, trigger="user")
+    astore.resolve_attempt(app.id, sent=False, run_id=first.id)
+    assert store.get_application(app.id).status == "draft"
+    reserve(duplicate, attempt, trigger="user")

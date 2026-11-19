@@ -43,6 +43,21 @@ for both tasks. OpenAI fallback uses `gpt-6-luna` for planning and `gpt-6.1-sol`
 for scoring, both at low effort. The benchmark favors Opus medium for avoiding
 high-ranked bad jobs, not for raw accuracy on the imbalanced dataset.
 
+## Verify an uncertain send
+
+In the local **Envois → À vérifier** queue, open the listed attempt to see its
+recorded click times, status and any local captures. A click or a technical failure
+is not a receipt. Confirm **sent** only when the company's application history or
+a matching confirmation email shows receipt; confirm **not sent** only when you
+can verify no submission occurred. If unsure, leave the attempt unresolved.
+The reservation stays in place until verification. A confirmed non-send returns
+the application to draft (unless another attempt still needs verification); only
+a manual send can retry it. No evidence is uploaded.
+
+For CLI use, `big-penalty apply list` shows the exact attempt ID.
+Use `big-penalty apply resolve APP_ID --run-id RUN_ID --sent` or `--not-sent`
+only after verifying that attempt. Bulk resolution requires verified `APP_ID:RUN_ID` pairs.
+
 ## Reproducible LLM benchmark
 
 See [the benchmark report](reports/LLM%20benchmark.md) for measured defaults,

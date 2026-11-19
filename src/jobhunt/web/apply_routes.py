@@ -30,8 +30,9 @@ log = logging.getLogger("jobhunt.web.apply")
 router = APIRouter()
 
 BUCKET_LABELS = {"to_validate": "À valider", "paused": "En pause", "sending": "En cours", "sent": "Envoyée", "failed": "Échec",
-                 "blocked": "Bloquée"}
-BUCKET_CLASS = {"to_validate": "src", "paused": "warn", "sending": "src", "sent": "ok", "failed": "bad", "blocked": "bad"}
+                 "blocked": "Bloquée", "needs_verification": "À vérifier"}
+BUCKET_CLASS = {"to_validate": "src", "paused": "warn", "sending": "src", "sent": "ok", "failed": "bad", "blocked": "bad",
+                "needs_verification": "warn"}
 RUN_STATUS_LABELS = {"running": "En cours", "ready": "Prêt (rien envoyé)", "submitted": "Envoyée", "needs_input": "Question en attente",
                      "needs_email": "E-mail à confirmer", "needs_human": "CAPTCHA à résoudre", "blocked": "Bloquée", "failed": "Échec"}
 RUN_STATUS_CLASS = {"running": "src", "ready": "ok", "submitted": "ok", "needs_input": "warn", "needs_email": "warn",
@@ -110,11 +111,12 @@ def _breakdown(groups: dict[str, list[QueueItem]]) -> list[str]:
         paused[reason] = paused.get(reason, 0) + 1
     if paused:
         out.append("en pause : " + ", ".join(f"{n} {k}" for k, n in sorted(paused.items(), key=lambda kv: (-kv[1], kv[0]))))
-    check = sum(1 for it in groups["failed"] if it.app.status == "failed")
+    check = len(groups["needs_verification"])
     if check:
         out.append(f"{check} envoi{'s' if check > 1 else ''} à vérifier")
-    if len(groups["failed"]) - check:
-        out.append(f"{len(groups['failed']) - check} échec{'s' if len(groups['failed']) - check > 1 else ''} technique{'s' if len(groups['failed']) - check > 1 else ''}")
+    if groups["failed"]:
+        plural = "s" if len(groups["failed"]) > 1 else ""
+        out.append(f"{len(groups['failed'])} échec{plural} technique{plural}")
     fix = sum(1 for it in groups["blocked"] if any("erreur(s) bloquante(s)" in p for p in it.problems))
     if fix:
         out.append(f"{fix} CV à corriger")
@@ -395,6 +397,7 @@ async def apply_resolve(request: Request, app_id: str):
     """The user checked the company's site after an unconfirmed attempt: `sent` = "1" (it was sent) / "0" (it was not).
     `run_id` binds the decision to the attempt the user was shown (it must still be the OUTSTANDING attempt)."""
     web = _web()
+    _require_local_evidence(request)
     aid = _id_or_404(app_id)
     web._application_or_404(aid)
     form = await request.form()
@@ -404,12 +407,16 @@ async def apply_resolve(request: Request, app_id: str):
     run_id = safe_id(str(form.get("run_id") or ""))
     if run_id is None:
         return web._flash("/apply", error="Page périmée : recharger la page")
+    if form.get("verified") != "1":
+        return web._flash("/apply", error="Confirmer d'abord que vous avez vérifié le résultat de cet essai")
     try:
-        apply_service.resolve_unconfirmed(aid, sent=sent == "1", run_id=run_id)
+        resolved = apply_service.resolve_unconfirmed(aid, sent=sent == "1", run_id=run_id)
     except (ApplyError, cvs.CVError) as e:
         return web._flash("/apply", error=str(e))
-    return web._flash("/apply", notice="Candidature marquée comme envoyée" if sent == "1"
-                      else "Candidature remise en brouillon : elle pourra être approuvée et envoyée à nouveau")
+    notice = ("Candidature marquée comme envoyée" if sent == "1" else
+              "Essai marqué non envoyé : un autre essai reste à vérifier" if resolved.status == "failed" else
+              "Candidature remise en brouillon : tout nouvel envoi doit être lancé manuellement")
+    return web._flash("/apply", notice=notice)
 
 
 @router.post("/applications/{app_id}/apply/trust")
@@ -434,6 +441,19 @@ async def apply_trust(request: Request, app_id: str):
 
 
 # ------------------------------------------------------------ run details
+EVIDENCE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+                    "Cross-Origin-Resource-Policy": "same-origin", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"}
+
+
+def _require_local_evidence(request: Request) -> None:
+    web = _web()
+    host, _ = web._host_port(request.headers.get("host", ""), request.url.scheme)
+    peer = request.client.host if request.client else ""
+    local = (host in web.LOOPBACK_HOSTS and peer in web.LOOPBACK_HOSTS) or host in web.EXTRA_ALLOWED_HOSTS
+    if not local or request.headers.get("sec-fetch-site") not in (None, "none", "same-origin"):
+        raise HTTPException(403, "Vérification disponible uniquement dans l'application locale")
+
+
 def _run_or_404(run_id: int):
     run = apply_store.get_run(run_id)
     if run is None:
@@ -444,18 +464,24 @@ def _run_or_404(run_id: int):
 @router.get("/apply/runs/{run_id}", response_class=HTMLResponse)
 def apply_run_page(request: Request, run_id: str):
     web = _web()
+    _require_local_evidence(request)
     run = _run_or_404(_id_or_404(run_id))
     a = cvstore.get_application(run.application_id)
     last = apply_store.last_run(run.application_id)
-    can_send = bool(a and run.mode == "dry_run" and run.status == "ready" and a.status in ("draft", "approved")
+    outstanding = apply_store.outstanding_attempt(a.id) if a and a.status not in ("submitted", "withdrawn") else None
+    can_send = bool(a and not outstanding and run.mode == "dry_run" and run.status == "ready" and a.status in ("draft", "approved")
                     and last is not None and last.id == run.id)
-    return web.render(request, "apply_run.html", run=run, a=a, steps=run.result.steps if run.result else [],
-                      kinds=PAGE_KIND_LABELS, triggers=TRIGGER_LABELS, can_send=can_send,
-                      origin_sha=apply_service.origin_digest(db.get_job(a.job_id).origin_url if a and db.get_job(a.job_id) else None))
+    response = web.render(request, "apply_run.html", run=run, a=a, steps=run.result.steps if run.result else [],
+                          kinds=PAGE_KIND_LABELS, triggers=TRIGGER_LABELS, can_send=can_send,
+                          verification=bool(outstanding and outstanding.id == run.id),
+                          origin_sha=apply_service.origin_digest(db.get_job(a.job_id).origin_url if a and db.get_job(a.job_id) else None))
+    response.headers.update(EVIDENCE_HEADERS)
+    return response
 
 
 @router.get("/apply/runs/{run_id}/shots/{index}")
-def apply_shot(run_id: str, index: str):
+def apply_shot(request: Request, run_id: str, index: str):
+    _require_local_evidence(request)
     run = _run_or_404(_id_or_404(run_id))
     index = int(index) if index.isascii() and index.isdigit() and len(index) <= 6 else -1
     steps = run.result.steps if run.result else []
@@ -469,7 +495,7 @@ def apply_shot(run_id: str, index: str):
         raise HTTPException(404, "Capture introuvable") from None
     if not (out.is_relative_to(root) and shot.is_relative_to(out) and shot.suffix.lower() == ".png" and shot.is_file()):
         raise HTTPException(404, "Capture introuvable")
-    return FileResponse(shot, media_type="image/png")
+    return FileResponse(shot, media_type="image/png", headers=EVIDENCE_HEADERS)
 
 
 # ------------------------------------------------------------ standing answers ("Réponses aux formulaires")

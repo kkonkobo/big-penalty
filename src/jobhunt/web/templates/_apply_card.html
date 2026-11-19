@@ -16,7 +16,10 @@
     <p><span class="tag {{ APPLY_BUCKET_CLASS.get(item.bucket, '') }}">{{ APPLY_BUCKET_LABELS.get(item.bucket, item.bucket) }}</span>
       {% if item.auto %}<span class="tag">automatique</span>{% endif %}
       {% if item.origin_host %}<span class="muted small">{{ item.origin_host }}</span>{% endif %}</p>
-    {% if lr %}
+    {% if item.bucket == 'needs_verification' %}
+    <p class="alert"><svg class="ic"><use href="#i-alert"/></svg><span>Envoi non confirmé : ne pas renvoyer.</span></p>
+    <p><a class="btn small" href="/apply/runs/{{ item.outstanding.id }}">Vérifier l’essai n°{{ item.outstanding.id }}</a></p>
+    {% elif lr %}
     <p class="small"><a href="/apply/runs/{{ lr.id }}">Dernier essai</a> : {{ APPLY_MODE_LABELS.get(lr.mode, lr.mode) }},
       <span class="tag {{ APPLY_RUN_CLASS.get(lr.status, '') }}">{{ APPLY_RUN_LABELS.get(lr.status, lr.status) }}</span>
       <span class="muted">{{ lr.started_at|ago }}</span></p>
@@ -24,18 +27,6 @@
     {% else %}<p class="muted small">Aucun essai pour l'instant.</p>{% endif %}
     {% if item.bucket == 'paused' and item.pause_reason == 'input' %}
     <p><a class="btn small" href="/profiles/{{ item.app.profile_id }}/answers">Compléter mes réponses</a></p>
-    {% endif %}
-    {% if item.app.status == 'failed' %}
-    <p class="alert"><svg class="ic"><use href="#i-alert"/></svg><span>Envoi non confirmé : vérifier sur le site de l'entreprise</span></p>
-    {% endif %}
-    {% if item.app.status == 'failed' and item.outstanding %}
-    {% if not lr or item.outstanding.id != lr.id %}<p class="small"><a href="/apply/runs/{{ item.outstanding.id }}">Essai à vérifier</a> : {{ item.outstanding.started_at|ago }}</p>{% endif %}
-    <div class="row">
-      <form method="post" action="/applications/{{ item.app.id }}/apply/resolve" onsubmit="return confirm('Confirmer : cette candidature a bien été envoyée sur le site de l\'entreprise ?')">
-        <input type="hidden" name="run_id" value="{{ item.outstanding.id }}"><input type="hidden" name="sent" value="1"><button class="btn small">Elle a bien été envoyée</button></form>
-      <form method="post" action="/applications/{{ item.app.id }}/apply/resolve" onsubmit="return confirm('Confirmer : cette candidature n\'a PAS été envoyée ? Elle redeviendra un brouillon à approuver de nouveau.')">
-        <input type="hidden" name="run_id" value="{{ item.outstanding.id }}"><input type="hidden" name="sent" value="0"><button class="btn small">Elle n'a pas été envoyée, réessayer plus tard</button></form>
-    </div>
     {% endif %}
     {% if apply_inferred %}
     <h3>Réponses déduites (à connaître avant l'entretien)</h3>

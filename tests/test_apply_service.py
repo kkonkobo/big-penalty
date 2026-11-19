@@ -568,7 +568,7 @@ def failed_after_click(profile, master, tmp_path, n=1):
 
 def test_resolve_unconfirmed_as_sent(profile, master, tmp_path):
     job, app = failed_after_click(profile, master, tmp_path)
-    out = service.resolve_unconfirmed(app.id, sent=True)
+    out = service.resolve_unconfirmed(app.id, sent=True, run_id=astore.last_run(app.id).id)
     assert out.status == "submitted" and out.submitted_at is not None and out.sent_origin_url == "careers.exemple.test/jobs/1"
     assert db.get_job(job.id).status == "applied" and len(astore.active_reservations(profile.id)) == 1  # still counts / blocks
 
@@ -576,7 +576,7 @@ def test_resolve_unconfirmed_as_sent(profile, master, tmp_path):
 def test_resolve_unconfirmed_as_not_sent_releases_everything(profile, master, tmp_path):
     job, app = failed_after_click(profile, master, tmp_path)
     assert astore.count_auto_submitted(profile.id, datetime(2000, 1, 1, tzinfo=UTC)) == 1
-    out = service.resolve_unconfirmed(app.id, sent=False)
+    out = service.resolve_unconfirmed(app.id, sent=False, run_id=astore.last_run(app.id).id)
     assert out.status == "draft" and astore.active_reservations(profile.id) == []
     assert astore.count_auto_submitted(profile.id, datetime(2000, 1, 1, tzinfo=UTC)) == 0
     assert not astore.has_unconfirmed_click(app.id) and db.get_job(job.id).status != "applied"
@@ -599,11 +599,12 @@ def test_cli_resolve(profile, master, tmp_path):
 
     _, a = failed_after_click(profile, master, tmp_path, 1)
     _, b = failed_after_click(profile, master, tmp_path, 2)
-    assert CliRunner().invoke(cli, ["apply", "resolve", str(a.id), "--sent"]).exit_code == 0
+    assert CliRunner().invoke(cli, ["apply", "resolve", str(a.id), "--run-id", str(astore.last_run(a.id).id), "--sent"]).exit_code == 0
     assert store.get_application(a.id).status == "submitted"
-    r = CliRunner().invoke(cli, ["apply", "resolve", str(b.id), "--not-sent"])
+    args = ["apply", "resolve", str(b.id), "--run-id", str(astore.last_run(b.id).id)]
+    r = CliRunner().invoke(cli, [*args, "--not-sent"])
     assert r.exit_code == 0 and store.get_application(b.id).status == "draft"
-    r = CliRunner().invoke(cli, ["apply", "resolve", str(b.id), "--sent"])  # no longer failed
+    r = CliRunner().invoke(cli, [*args, "--sent"])
     assert r.exit_code == 1 and "pas en échec" in r.output
 
 
@@ -724,13 +725,18 @@ def test_resolve_unconfirmed_refuses_an_application_that_never_clicked(profile, 
     assert store.get_application(app.id).status == "failed"
 
 
-def test_cli_resolve_is_bound_to_the_last_run(profile, master, tmp_path):
+def test_cli_resolve_requires_the_displayed_run_id_and_decision(profile, master, tmp_path):
     from typer.testing import CliRunner
 
     from jobhunt.cli import app as cli
 
     _, a = failed_after_click(profile, master, tmp_path, 1)
-    r = CliRunner().invoke(cli, ["apply", "resolve", str(a.id), "--not-sent"])
+    run_id = astore.last_run(a.id).id
+    args = ["apply", "resolve", str(a.id)]
+    for options in (["--not-sent"], ["--run-id", str(run_id)], ["--run-id", str(run_id + 1), "--not-sent"]):
+        assert CliRunner().invoke(cli, [*args, *options]).exit_code != 0
+        assert store.get_application(a.id).status == "failed"
+    r = CliRunner().invoke(cli, [*args, "--run-id", str(run_id), "--not-sent"])
     assert r.exit_code == 0 and store.get_application(a.id).status == "draft"
 
 
@@ -796,7 +802,8 @@ def test_the_queue_exposes_the_outstanding_attempt(profile, master, tmp_path):
     later = astore.start_run(app.id, 1, "dry_run", "user", lambda rid: tmp_path / f"d{rid}")
     astore.finish_run(later.id, RunResult(status="ready"))
     it = next(i for i in service.queue(profile.id) if i.app.id == app.id)
-    assert it.bucket == "failed" and it.last_run.id == later.id and it.outstanding.id != later.id
+    assert it.bucket == "needs_verification" and it.last_run.id == later.id and it.outstanding.id != later.id
+    assert not it.selectable and not it.auto
     assert it.outstanding.id == astore.outstanding_attempt(app.id).id and it.origin_sha == service.origin_digest(it.origin_url)
 
 
@@ -1122,12 +1129,15 @@ def test_the_attempt_records_who_approved_the_application(profile, master, tmp_p
     assert astore.get_run(run2.id).approved_by == "user"
 
 
-def test_not_sent_re_approves_what_the_tool_had_approved(profile, master, tmp_path):
+def test_not_sent_does_not_reapprove_or_allow_automatic_retry(profile, master, tmp_path, monkeypatch):
     job, app, run = auto_failed(profile, master, tmp_path, 1, by="auto")
     out = service.resolve_unconfirmed(app.id, sent=False, run_id=run.id)
-    assert out.status == "approved" and out.approved_by == "auto" and out.approved_rev == out.current_rev
-    assert policy.submit_problems(out, db.get_job(job.id), trigger="user") == []  # sendable again, nothing reserved
+    assert out.status == "draft" and out.approved_rev is None
     assert astore.active_reservations(profile.id) == []
+    monkeypatch.setattr(get_settings(), "apply_auto", True)
+    approved = cvs.approve(app.id, out.current_rev)
+    assert policy.submit_problems(approved, db.get_job(job.id), trigger="user") == []
+    assert policy.submit_problems(approved, db.get_job(job.id), trigger="auto") == ["nouvel envoi manuel requis après vérification"]
 
 
 def test_not_sent_leaves_a_user_approved_application_a_draft(profile, master, tmp_path):
@@ -1270,11 +1280,12 @@ def test_cli_resolve_many(profile, master, tmp_path):
 
     ids = [failed_after_click(profile, master, tmp_path, n)[1].id for n in (1, 2, 3)]
     _, ok = new_app(profile, master, tmp_path, 4, approve=True)  # not failed: refused
-    r = CliRunner().invoke(cli, ["apply", "resolve-many", "--not-sent", str(ids[0]), str(ids[1]), str(ok.id)])
-    assert r.exit_code == 1 and "2 candidature(s) remise(s) en file (non envoyées), 1 refusée(s)" in r.output and "pas en échec" in r.output
+    pairs = [f"{app_id}:{astore.last_run(app_id).id}" for app_id in ids]
+    r = CliRunner().invoke(cli, ["apply", "resolve-many", "--not-sent", pairs[0], pairs[1], f"{ok.id}:1"])
+    assert r.exit_code == 1 and "2 essai(s) confirmé(s) non envoyé(s), 1 refusé(s)" in r.output and "pas en échec" in r.output
     assert [store.get_application(i).status for i in ids] == ["draft", "draft", "failed"]
-    r = CliRunner().invoke(cli, ["apply", "resolve-many", "--sent", str(ids[2]), str(ids[2])])  # duplicates counted once
-    assert r.exit_code == 0 and "1 candidature(s) marquée(s) comme envoyée(s)." in r.output
+    r = CliRunner().invoke(cli, ["apply", "resolve-many", "--sent", pairs[2], pairs[2]])
+    assert r.exit_code == 0 and "1 essai(s) confirmé(s) envoyé(s)." in r.output
     assert store.get_application(ids[2]).status == "submitted"
     assert CliRunner().invoke(cli, ["apply", "resolve-many", "--sent"]).exit_code != 0
 

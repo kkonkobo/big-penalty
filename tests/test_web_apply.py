@@ -149,12 +149,12 @@ def test_queue_page_renders_each_bucket(client, profile, master, tmp_path, monke
     assert 'href="https://careers.exemple.test/job"' in html
 
 
-def test_failed_status_has_no_retry_and_shows_alert(client, profile, master, tmp_path, monkeypatch):
+def test_technical_failure_without_outstanding_attempt_has_no_verification_action(client, profile, master, tmp_path, monkeypatch):
     a = mk_app(profile, master, tmp_path)
     patch_queue(monkeypatch, [item(a.model_copy(update={"status": "failed"}), "failed", selectable=True)])
     html = client.get("/apply").text
-    assert "Envoi non confirmé : vérifier sur le site de l'entreprise" in html
-    assert "Réessayer" not in html
+    assert "Échecs techniques" in html and "Réessayer" not in html
+    assert not soup(html).select_one("#needs-verification")
 
 
 def test_empty_queue_and_automatic_state(client, monkeypatch):
@@ -358,6 +358,8 @@ def test_screenshot_served_and_refused(client, profile, master, tmp_path):
     run, out = make_run(a, tmp_path)
     r = client.get(f"/apply/runs/{run.id}/shots/0")
     assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content == PNG
+    assert r.headers["cache-control"] == "private, no-store"
+    assert r.headers["cross-origin-resource-policy"] == "same-origin"
     assert client.get(f"/apply/runs/{run.id}/shots/1").status_code == 404
     assert client.get(f"/apply/runs/{run.id}/shots/-1").status_code == 404
     assert client.get("/apply/runs/9999/shots/0").status_code == 404
@@ -405,7 +407,7 @@ def test_queue_item_helper_and_card(client, profile, master, tmp_path, monkeypat
     none_html = tpl.render(item=None)
     assert "Envoi sur le site de l'entreprise" in none_html and "/apply/send" not in none_html
     failed = tpl.render(item=item(a.model_copy(update={"status": "failed"}), "failed", selectable=True))
-    assert "Envoi non confirmé" in failed and "/apply/send" not in failed
+    assert "Envoi non confirmé" not in failed and "/apply/send" not in failed
 
 
 # ------------------------------------------------------------------ stale / forged forms, ids
@@ -538,13 +540,14 @@ def test_unicode_and_huge_ids_are_never_accepted(client, profile, master, tmp_pa
 
 
 # ------------------------------------------------------------------ "was it sent?" reconciliation
-def failed_app(profile, master, tmp_path, n=1):
+def failed_app(profile, master, tmp_path, n=1, *, status="needs_email", pending=False):
     a = mk_app(profile, master, tmp_path, n)
     from jobhunt.cv import service as cvs
     cvs.approve(a.id, 1)
     run = apply_store.start_run(a.id, 1, "submit", "user", lambda rid: tmp_path / str(rid))
-    apply_store.reserve_send(run.id, profile_id=profile.id, application_id=a.id, trigger="user", role_key=f"r{n}", url_key=f"u{n}", daily_cap=9)
-    apply_store.finish_and_settle(run.id, RunResult(status="needs_email", submit_clicked=True))
+    apply_store.reserve_send(run.id, profile_id=profile.id, application_id=a.id, trigger="user", role_key=f"r{n}", url_key=f"u{n}",
+                             daily_cap=9, pending=pending)
+    apply_store.finish_and_settle(run.id, RunResult(status=status, message="Erreur de validation du site", submit_clicked=True))
     from jobhunt.cv import store as cvstore
     return cvstore.get_application(a.id)
 
@@ -556,30 +559,30 @@ def last_id(a):
 def test_resolve_route_both_ways(client, profile, master, tmp_path):
     from jobhunt.cv import store as cvstore
     a, b = failed_app(profile, master, tmp_path, 1), failed_app(profile, master, tmp_path, 2)
-    r = client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": last_id(a)}, follow_redirects=True)
+    r = client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": last_id(a), "verified": "1"}, follow_redirects=True)
     assert "marquée comme envoyée" in r.text and cvstore.get_application(a.id).status == "submitted"
-    r = client.post(f"/applications/{b.id}/apply/resolve", data={"sent": "0", "run_id": last_id(b)}, follow_redirects=True)
+    r = client.post(f"/applications/{b.id}/apply/resolve", data={"sent": "0", "run_id": last_id(b), "verified": "1"}, follow_redirects=True)
     assert "remise en brouillon" in r.text and cvstore.get_application(b.id).status == "draft"
     assert not apply_store.has_unconfirmed_click(b.id) and apply_store.has_unconfirmed_click(a.id)
     assert "Réponse invalide" in client.post(f"/applications/{b.id}/apply/resolve", data={"sent": "2", "run_id": last_id(b)}, follow_redirects=True).text
-    assert "pas en échec" in client.post(f"/applications/{b.id}/apply/resolve", data={"sent": "1", "run_id": last_id(b)}, follow_redirects=True).text
+    assert "pas en échec" in client.post(f"/applications/{b.id}/apply/resolve", data={"sent": "1", "run_id": last_id(b), "verified": "1"}, follow_redirects=True).text
     assert client.post("/applications/9999/apply/resolve", data={"sent": "1", "run_id": "1"}).status_code == 404
 
 
-def test_resolve_buttons_in_the_failed_section_and_the_card(client, profile, master, tmp_path, monkeypatch):
+def test_verification_links_to_local_evidence_with_exact_resolution(client, profile, master, tmp_path):
     a = failed_app(profile, master, tmp_path)
-    it = item(a, "failed", selectable=False, last_run=apply_store.last_run(a.id), outstanding=apply_store.outstanding_attempt(a.id))
-    patch_queue(monkeypatch, [it])
-    s = soup(client.get("/apply").text)
-    forms = s.select(f'#failed form[action="/applications/{a.id}/apply/resolve"]')
-    assert [f.select_one("input[name=sent]")["value"] for f in forms] == ["1", "0"]
-    assert [f.button.text.strip() for f in forms] == ["Elle a bien été envoyée", "Elle n'a pas été envoyée, réessayer plus tard"]
-    assert all(f.select_one("input[name=run_id]")["value"] == last_id(a) for f in forms)  # the outstanding attempt
-    assert all("confirm(" in f["onsubmit"] for f in forms) and not s.select('#failed form[action="/apply/send"]')
+    path = f"/apply/runs/{last_id(a)}"
+    section = soup(client.get("/apply").text).select_one("#needs-verification")
+    assert section.select_one(f'a[href="{path}"]') and not section.select("form")
+    response = client.get(path)
+    assert response.headers["cache-control"] == "private, no-store" and "unpkg.com" not in response.text
+    form = soup(response.text).select_one(f'#verification form[action="/applications/{a.id}/apply/resolve"]')
+    assert form.select_one("input[name=run_id]")["value"] == last_id(a)
+    assert form.select_one("input[name=verified][required]") and [button["value"] for button in form.select("button[name=sent]")] == ["1", "0"]
     apply_routes._register_globals(webapp.templates)
-    card = soup(webapp.templates.env.from_string('{% include "_apply_card.html" %}').render(item=it))
-    cforms = card.select(f'form[action="/applications/{a.id}/apply/resolve"]')
-    assert [f.select_one("input[name=sent]")["value"] for f in cforms] == ["1", "0"] and all("confirm(" in f["onsubmit"] for f in cforms)
+    queue_item = next(i for i in apply_service.queue() if i.app.id == a.id)
+    card = soup(webapp.templates.env.from_string('{% include "_apply_card.html" %}').render(item=queue_item))
+    assert card.select_one(f'a[href="{path}"]') and not card.select("form")
 
 
 def test_run_page_send_button_carries_the_shown_revision(client, profile, master, tmp_path):
@@ -593,6 +596,7 @@ def test_resolve_route_refuses_a_stale_or_missing_run_id(client, profile, master
     from jobhunt.cv import store as cvstore
     a = failed_app(profile, master, tmp_path)
     for data in ({"sent": "1"}, {"sent": "1", "run_id": str(int(last_id(a)) + 5)}, {"sent": "1", "run_id": "x"}):
+        data["verified"] = "1"
         assert "Page périmée" in client.post(f"/applications/{a.id}/apply/resolve", data=data, follow_redirects=True).text
         assert cvstore.get_application(a.id).status == "failed"
     older = int(last_id(a))
@@ -600,10 +604,10 @@ def test_resolve_route_refuses_a_stale_or_missing_run_id(client, profile, master
         c.execute("INSERT INTO application_runs(application_id, rev, mode, trigger, status, started_at) VALUES (?,?,?,?,?,?)",
                   (a.id, 1, "dry_run", "user", "ready", "2026-01-01T00:00:00+00:00"))
     newer = int(last_id(a))
-    assert newer != older and "Page périmée" in client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": str(newer)},
+    assert newer != older and "Page périmée" in client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": str(newer), "verified": "1"},
                                                            follow_redirects=True).text  # a run that is not the outstanding one
     assert cvstore.get_application(a.id).status == "failed"
-    assert "marquée comme envoyée" in client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": str(older)},
+    assert "marquée comme envoyée" in client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": str(older), "verified": "1"},
                                                    follow_redirects=True).text
     assert cvstore.get_application(a.id).status == "submitted"
 
@@ -784,9 +788,9 @@ def test_failed_forms_use_the_outstanding_attempt_not_a_later_refusal(client, pr
     apply_store.finish_run(later.id, RunResult(status="blocked", message="refus"))
     s = soup(client.get("/apply").text)
     assert apply_store.last_run(a.id).id == later.id
-    forms = s.select(f'#failed form[action="/applications/{a.id}/apply/resolve"]')
-    assert [f.select_one("input[name=run_id]")["value"] for f in forms] == [str(first.id)] * 2
-    r = client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": str(first.id)}, follow_redirects=True)
+    assert s.select_one(f'#needs-verification a[href="/apply/runs/{first.id}"]')
+    assert not soup(client.get(f"/apply/runs/{later.id}").text).select_one("#verification")
+    r = client.post(f"/applications/{a.id}/apply/resolve", data={"sent": "1", "run_id": str(first.id), "verified": "1"}, follow_redirects=True)
     assert "marquée comme envoyée" in r.text
 
 
@@ -1290,18 +1294,48 @@ def test_the_captcha_card_says_how_long_the_window_stays_open(client, profile, m
     assert "environ 1 minute, puis" in client.get("/apply").text
 
 
-def test_the_failed_card_shows_the_message_and_both_resolve_buttons(client, profile, master, tmp_path, monkeypatch):
+def test_three_failed_reserved_runs_are_separate_from_technical_failure(client, profile, master, tmp_path):
+    uncertain = [failed_app(profile, master, tmp_path, n, status="failed", pending=n == 2) for n in (1, 2, 3)]
+    technical = mk_app(profile, master, tmp_path, 4)
+    cvstore.force_failed(technical.id, "échec avant le clic")
+    run, _ = make_run(technical, tmp_path, mode="submit", status="failed")
+    page = soup(client.get("/apply").text)
+    assert "3 à vérifier" in page.select_one("#queue-counts").text
+    for application in uncertain:
+        run_path = f"/apply/runs/{last_id(application)}"
+        assert page.select_one(f'#needs-verification a[href="{run_path}"]')
+        assert not page.select_one(f'#failed a[href="{run_path}"]')
+    assert page.select_one(f'#failed a[href="/apply/runs/{run.id}"]')
+    assert not soup(client.get(f"/apply/runs/{run.id}").text).select_one("#verification")
+    assert len(apply_store.active_reservations(profile.id)) == 3
+
+
+def test_evidence_and_mutations_require_local_access_and_attestation(client, profile, master, tmp_path, monkeypatch):
     a = failed_app(profile, master, tmp_path)
-    run_ = apply_store.outstanding_attempt(a.id)
-    assert run_.status == "needs_email"
-    it = item(a, "failed", selectable=False, last_run=run_.model_copy(update={"message": "Erreur de validation du site"}),
-              outstanding=run_.model_copy(update={"message": "Erreur de validation du site"}))
-    patch_queue(monkeypatch, [it])
-    s = soup(client.get("/apply").text)
-    box = s.select_one("#failed")
-    assert "Erreur de validation du site" in box.text and "Envoi non confirmé" in box.text
-    assert [b.text.strip() for b in box.select(f'form[action="/applications/{a.id}/apply/resolve"] button')] == [
-        "Elle a bien été envoyée", "Elle n'a pas été envoyée, réessayer plus tard"]
+    path = f"/apply/runs/{last_id(a)}"
+    resolve = f"/applications/{a.id}/apply/resolve"
+    data = {"sent": "1", "run_id": last_id(a)}
+    assert "confirm" in client.post(resolve, data=data, follow_redirects=True).text.lower()
+    monkeypatch.setenv("JOBHUNT_WEB_ALLOWED_HOSTS", "network.test")
+    for url in (path, f"{path}/shots/0"):
+        assert client.get(url, headers={"Host": "network.test"}).status_code == 403
+        assert client.get(url, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert client.post(resolve, data={**data, "verified": "1"}, headers={"Host": "network.test"}).status_code == 403
+    assert cvstore.get_application(a.id).status == "failed" and apply_store.has_unconfirmed_click(a.id)
+
+
+def test_finished_hold_is_visible_even_if_application_status_was_not_settled(client, profile, master, tmp_path):
+    application = mk_app(profile, master, tmp_path)
+    attempt = apply_store.start_run(application.id, 1, "submit", "auto", lambda run_id: tmp_path / str(run_id))
+    apply_store.reserve_send(attempt.id, profile_id=profile.id, application_id=application.id, trigger="auto",
+                             role_key="role", url_key="site.test/offre", daily_cap=10, pending=True)
+    apply_store.finish_run(attempt.id, RunResult(status="failed", final_url="https://site.test/private?token=only-local"))
+    response = client.get(f"/apply/runs/{attempt.id}")
+    assert "Navigation :" in response.text and "site.test" in response.text and "only-local" not in response.text
+    assert soup(client.get("/apply").text).select_one(f'#needs-verification a[href="/apply/runs/{attempt.id}"]')
+    client.post(f"/applications/{application.id}/apply/resolve", data={"sent": "0", "run_id": str(attempt.id), "verified": "1"})
+    assert not apply_store.active_reservations(profile.id)
+    assert cvstore.get_application(application.id).status == "draft"
 
 
 def test_queue_puts_blockers_first_with_a_count_line(client, profile, master, tmp_path, monkeypatch):
@@ -1310,11 +1344,11 @@ def test_queue_puts_blockers_first_with_a_count_line(client, profile, master, tm
     run_in, _ = make_run(apps[0], tmp_path, mode="submit", status="needs_input", questions=QUESTIONS)
     items = [item(apps[1], "to_validate", selectable=True), item(apps[2], "to_validate", selectable=True),
              item(apps[0], "paused", pause_reason="input", last_run=run_in, questions=QUESTIONS),
-             item(f1, "failed", last_run=apply_store.last_run(f1.id), outstanding=apply_store.outstanding_attempt(f1.id))]
+             item(f1, "needs_verification", last_run=apply_store.last_run(f1.id), outstanding=apply_store.outstanding_attempt(f1.id))]
     patch_queue(monkeypatch, items)
     s = soup(client.get("/apply").text)
     order = [sec["id"] for sec in s.select("section.panel")]
-    assert order.index("failed") < order.index("paused") < order.index("to-validate")
+    assert order.index("needs-verification") < order.index("paused") < order.index("to-validate")
     assert s.select_one("#queue-counts").text.strip() == "1 à vérifier · 1 en pause · 2 prêtes"
     patch_queue(monkeypatch, [item(apps[1], "to_validate", selectable=True)])
     s = soup(client.get("/apply").text)
@@ -1392,7 +1426,7 @@ def test_the_queue_header_breaks_down_what_blocks_it(client, profile, master, tm
         item(a_mail, "paused", pause_reason="email", last_run=run(a_mail, "needs_email")),
         item(a_cap, "paused", pause_reason="human", last_run=run(a_cap, "needs_human").model_copy(update={"message": "Un CAPTCHA"})),
         item(a_acc, "paused", pause_reason="human", last_run=run(a_acc, "needs_human").model_copy(update={"message": "Création de compte impossible"})),
-        item(check, "failed", last_run=apply_store.last_run(check.id), outstanding=apply_store.outstanding_attempt(check.id)),
+        item(check, "needs_verification", last_run=apply_store.last_run(check.id), outstanding=apply_store.outstanding_attempt(check.id)),
         item(a_tech, "failed", last_run=run(a_tech, "failed")),
         item(a_fix, "blocked", problems=["1 erreur(s) bloquante(s) dans le CV"]),
         item(a_blk, "blocked", problems=["Offre fermée"]),

@@ -488,7 +488,7 @@ apply_app = typer.Typer(help="Candidature sur le site de l'entreprise : file d'e
 app.add_typer(apply_app, name="apply")
 HeadlessOpt = Annotated[Optional[bool], typer.Option("--headless/--headful", help="défaut : visible, sauf JOBHUNT_HEADLESS=1")]
 BUCKET_FR = {"to_validate": "à valider", "paused": "en pause", "sending": "en cours", "failed": "échec", "blocked": "bloquée",
-             "sent": "envoyée"}
+             "sent": "envoyée", "needs_verification": "à vérifier"}
 
 
 def _print_run(run) -> None:
@@ -514,10 +514,11 @@ def apply_list(profile: Annotated[Optional[int], typer.Option("--profile", "-p")
     """File d'envoi : chaque candidature avec son état, son dernier essai et ce qui la bloque."""
     from jobhunt.apply.service import queue
 
-    t = Table("id", "score", "entreprise", "poste", "état", "dernier essai", "problèmes")
+    t = Table("id", "score", "entreprise", "poste", "état", "essai", "problèmes")
     for i in queue(profile):
-        shown = i.outstanding or i.last_run  # a failed application shows the attempt to settle, not a later refusal
-        last = f"{shown.status} — {shown.message}"[:60] if shown else ""
+        shown = i.outstanding or i.last_run
+        last = (f"n°{shown.id} · /apply/runs/{shown.id}" if i.outstanding else
+                f"{shown.status} — {shown.message}"[:60] if shown else "")
         t.add_row(str(i.app.id), "" if i.score is None else f"{i.score:.0f}", (i.app.company or "")[:25], (i.app.job_title or "")[:40],
                   BUCKET_FR[i.bucket], last,
                   " ; ".join(([f"formulaire hébergé sur {i.untrusted_host} (apply trust)"] if i.untrusted_host else []) + i.problems)[:70])
@@ -574,46 +575,50 @@ def apply_send(app_ids: Annotated[list[int], typer.Argument(help="numéros de ca
 
 
 @apply_app.command("resolve")
-def apply_resolve(app_id: int, sent: Annotated[bool, typer.Option("--sent/--not-sent", help="elle a bien / n'a pas été envoyée")]) -> None:
-    """Après un envoi non confirmé (candidature en échec) : dire, après vérification sur le site de l'entreprise, si elle est partie."""
+def apply_resolve(app_id: int, run_id: Annotated[int, typer.Option("--run-id", min=1)],
+                  sent: Annotated[bool, typer.Option("--sent/--not-sent", help="résultat vérifié : envoyée / non envoyée")]) -> None:
+    """Confirme le résultat de l'essai indiqué, uniquement après avoir vérifié sa réception ou sa non-réception."""
     from jobhunt.apply.errors import ApplyError
     from jobhunt.apply.service import resolve_unconfirmed
-    from jobhunt.apply.store import outstanding_attempt
     from jobhunt.cv.errors import CVError
 
-    pending = outstanding_attempt(app_id)  # bound to the outstanding attempt (the one that may have been sent), not the newest run
     try:
-        out = resolve_unconfirmed(app_id, sent=sent, run_id=pending.id if pending else None)
+        out = resolve_unconfirmed(app_id, sent=sent, run_id=run_id)
     except (ApplyError, CVError) as e:
         console.print(f"Erreur : {e}", markup=False)
         raise typer.Exit(1) from None
     console.print("Candidature marquée comme envoyée." if sent else
-                  f"Candidature remise en brouillon (statut : {out.status}) : l'approuver puis la renvoyer.", markup=False)
+                  "Essai marqué non envoyé : un autre essai reste à vérifier." if out.status == "failed" else
+                  "Candidature remise en brouillon : tout nouvel envoi doit être lancé manuellement.", markup=False)
 
 
 @apply_app.command("resolve-many")
 def apply_resolve_many(
-    app_ids: Annotated[list[int], typer.Argument(help="numéros de candidature")],
+    attempts: Annotated[list[str], typer.Argument(help="paires CANDIDATURE:ESSAI déjà vérifiées")],
     sent: Annotated[bool, typer.Option("--sent/--not-sent", help="elles ont bien / n'ont pas été envoyées")],
 ) -> None:
     """Règle d'un coup plusieurs envois non confirmés (mêmes règles que `resolve`, une par une) puis résume."""
     from jobhunt.apply.errors import ApplyError
     from jobhunt.apply.service import resolve_unconfirmed
-    from jobhunt.apply.store import outstanding_attempt
     from jobhunt.cv.errors import CVError
 
+    pairs = []
+    for attempt in attempts:
+        parts = attempt.split(":")
+        if len(parts) != 2 or not all(p.isascii() and p.isdecimal() and len(p) <= 12 and int(p) > 0 for p in parts):
+            raise typer.BadParameter("Indiquer chaque essai sous la forme CANDIDATURE:ESSAI")
+        pairs.append(tuple(map(int, parts)))
     ok, failed = 0, []
-    for app_id in dict.fromkeys(app_ids):
-        pending = outstanding_attempt(app_id)
+    for app_id, run_id in dict.fromkeys(pairs):
         try:
-            resolve_unconfirmed(app_id, sent=sent, run_id=pending.id if pending else None)
+            resolve_unconfirmed(app_id, sent=sent, run_id=run_id)
         except (ApplyError, CVError) as e:
-            failed.append(app_id)
-            console.print(f"  n°{app_id} : {e}", markup=False, highlight=False)
+            failed.append(f"{app_id}:{run_id}")
+            console.print(f"  n°{app_id}:{run_id} : {e}", markup=False, highlight=False)
         else:
             ok += 1
-    what = "marquée(s) comme envoyée(s)" if sent else "remise(s) en file (non envoyées)"
-    console.print(f"{ok} candidature(s) {what}" + (f", {len(failed)} refusée(s) : {', '.join(map(str, failed))}." if failed else "."),
+    what = "confirmé(s) envoyé(s)" if sent else "confirmé(s) non envoyé(s)"
+    console.print(f"{ok} essai(s) {what}" + (f", {len(failed)} refusé(s) : {', '.join(failed)}." if failed else "."),
                   markup=False, highlight=False)
     if failed:
         raise typer.Exit(1)
