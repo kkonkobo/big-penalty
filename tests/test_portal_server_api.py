@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -356,7 +357,7 @@ def test_snapshot_is_stored_encrypted(h, tmp_path):
     for needle in ("Toulouse", "Société Exemple", "06 00 00 00 00", "Léa", "Permis de conduire"):
         assert needle.encode() not in raw
     assert PDF_A not in raw and b"%PDF-" not in raw
-    assert (tmp_path / "data" / "portal.sqlite3").stat().st_mode & 0o777 == 0o600
+    assert os.name != "posix" or (tmp_path / "data" / "portal.sqlite3").stat().st_mode & 0o777 == 0o600
 
 
 def test_snapshot_row_moved_to_another_profile_fails(h):

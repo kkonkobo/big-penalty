@@ -29,7 +29,7 @@ def test_migration_and_permissions(tmp_path):
     p = tmp_path / "d" / "portal.sqlite3"
     j = Journal(p)
     assert j.schema_version() == 9
-    assert stat.S_IMODE(p.stat().st_mode) == 0o600 and stat.S_IMODE(p.parent.stat().st_mode) == 0o700
+    assert os.name != "posix" or (stat.S_IMODE(p.stat().st_mode) == 0o600 and stat.S_IMODE(p.parent.stat().st_mode) == 0o700)
     Journal(p)  # opening again does not migrate twice or fail
     assert j.schema_version() == 9
     c = sqlite3.connect(p)

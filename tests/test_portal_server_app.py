@@ -182,7 +182,7 @@ def test_purge_runs_at_startup_and_at_most_hourly(tmp_path, monkeypatch):
 def test_database_setup(tmp_path):
     path = tmp_path / "nested" / "dir" / "p.sqlite3"
     db = dbmod.Database(path)
-    assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
+    assert os.name != "posix" or (path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700)
     c = db.conn
     assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal" and c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert c.execute("PRAGMA synchronous").fetchone()[0] == 2 and c.execute("PRAGMA busy_timeout").fetchone()[0] == 5000

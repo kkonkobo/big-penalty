@@ -99,7 +99,7 @@ def load_token(origin: str, kind: str) -> str | None:
         mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
         return None
-    if mode & 0o077:
+    if os.name == "posix" and mode & 0o077:  # Windows has no POSIX mode bits; the file lives in the user profile
         raise PortalSecretError("Le fichier du jeton est lisible par d'autres utilisateurs : corrigez ses droits (chmod 600) avant de continuer.")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

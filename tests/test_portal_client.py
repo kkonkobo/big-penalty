@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import json
 import stat
 
@@ -162,7 +163,7 @@ def test_document_upload_headers():
 def test_file_token_store_is_0600_and_bound_to_the_origin():
     secrets.store_token("https://a.test", TOKEN, "file")
     path = secrets._file()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert os.name != "posix" or stat.S_IMODE(path.stat().st_mode) == 0o600
     assert secrets.load_token("https://a.test", "file") == TOKEN
     assert secrets.load_token("https://other.test", "file") is None
     path.chmod(0o644)
