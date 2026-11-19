@@ -1,0 +1,45 @@
+{% macro intent_form(grant, label, retour, primary=False) %}
+<form method="post" action="{{ base }}/confirmer">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="retour" value="{{ retour }}">
+  <input type="hidden" name="g" value="{{ grant }}">
+  <button class="btn{% if primary %} primary{% endif %}" type="submit">{{ label }}</button>
+</form>
+{% endmacro %}
+
+{% macro cancel_form(event_id) %}
+<form class="inline-form row" method="post" action="{{ base }}/annuler">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="event" value="{{ event_id }}">
+  <button class="btn" type="submit">Annuler</button>
+</form>
+{% endmacro %}
+
+{% macro intent_status(event_id, view) %}
+<span class="tag warn">{{ 'Annulation demandée' if event_id in view.cancelling_intents else 'Demande envoyée, en attente du Mac' }}</span>
+{% if event_id in view.cancellable_intents %}{{ cancel_form(event_id) }}{% endif %}
+{% endmacro %}
+
+{% macro ext_link(url, label) %}{% if url|safe_url %}<a href="{{ url }}" rel="noopener noreferrer"><svg class="ic" aria-hidden="true"><use href="#i-out"/></svg>{{ label }}</a>{% endif %}{% endmacro %}
+
+{% macro cv_link(doc_id, docs, label="Voir le CV") %}{% if doc_id and doc_id in docs %}<a href="{{ base }}/documents/{{ doc_id }}"><svg class="ic" aria-hidden="true"><use href="#i-doc"/></svg>{{ label }}</a>{% else %}<span class="muted small">CV non disponible sur le portail</span>{% endif %}{% endmacro %}
+
+{% macro field_control(name, spec, value, write_only=False) %}
+{%- if spec.widget == 'select' -%}
+<select name="{{ name }}">
+  <option value="">{{ 'Remplacer par…' if write_only else 'Non renseigné' }}</option>
+  {%- for o in spec.options if o %}
+  <option value="{{ o }}"{% if not write_only and o == value %} selected{% endif %}>{{ o }}</option>
+  {%- endfor %}
+  {%- if not write_only and value and value not in spec.options %}
+  <option value="{{ value }}" selected>{{ value }}</option>
+  {%- endif %}
+</select>
+{%- elif spec.widget == 'date' -%}
+<input type="date" name="{{ name }}" value="{{ value or '' }}">
+{%- elif spec.widget == 'textarea' -%}
+<textarea name="{{ name }}" rows="4" maxlength="{{ spec.max_len }}" placeholder="{{ 'Remplacer par…' if write_only else spec.placeholder }}">{{ value or '' }}</textarea>
+{%- else -%}
+<input type="text" name="{{ name }}" maxlength="{{ spec.max_len }}" value="{{ value or '' }}" placeholder="{{ 'Remplacer par…' if write_only else spec.placeholder }}" autocomplete="off">
+{%- endif -%}
+{% endmacro %}

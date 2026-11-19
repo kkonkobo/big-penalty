@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ext_link, cv_link with context %}
+{% block title %}Confirmer{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>{{ heading }}</h1>
+<p class="muted">Rien n'est fait tant que vous n'avez pas confirmé.</p></div></div>
+<section class="panel">
+  {% for e in entries %}
+  <div class="item">
+    <h3>{{ e.company or 'Entreprise non précisée' }}</h3>
+    <p class="lead-line">{{ e.title }}</p>
+    {% if e.host %}<p class="muted small">Site de destination : {{ e.host }}</p>{% endif %}
+    {% if e.kind == 'send' %}
+    <p>Le Mac enverra cette candidature à sa prochaine synchronisation.</p>
+    <div class="links">{{ cv_link(e.doc_id, docs) }}{{ ext_link(e.job_url, "Voir l'annonce") }}</div>
+    {% elif e.kind == 'resume' %}
+    <p>Le Mac reprendra cette candidature à sa prochaine synchronisation, après la confirmation de votre e-mail.</p>
+    {% elif e.kind == 'sent' %}
+    <p>Elle sera marquée comme envoyée et ne sera pas renvoyée.</p>
+    {% else %}
+    <p>La candidature retournera dans la file et pourra être envoyée à nouveau.</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+<form class="stack" method="post" action="{{ base }}/intentions">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="retour" value="{{ retour }}">
+  {% for e in entries %}<input type="hidden" name="g" value="{{ e.grant }}">{% endfor %}
+  <button class="btn primary block" type="submit">Confirmer</button>
+  <a class="btn block" href="{{ base }}/{{ retour }}">Annuler</a>
+</form>
+{% endblock %}

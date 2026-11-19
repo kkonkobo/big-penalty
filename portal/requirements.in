@@ -1,0 +1,8 @@
+# Runtime dependencies of the portal server image (nothing else is installed).
+# Regenerate portal/requirements.txt after any change here or in uv.lock (the command is in that file's header).
+fastapi>=0.163.1
+uvicorn>=0.54.0
+jinja2>=3.1.6
+python-multipart>=0.0.34
+pydantic>=2.14.3
+cryptography>=50.0.2

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Envoyées{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Candidatures envoyées</h1></div></div>
+{% if not items %}<p class="panel">Aucune candidature envoyée pour l'instant.</p>{% else %}
+<section class="panel flush">
+  <ul class="plain-list">
+  {% for s in items %}
+    <li><a href="{{ base }}/candidatures/{{ s.ref }}"><span><span class="pick-title">{{ s.company or 'Entreprise non précisée' }}</span>
+      <span class="muted">{{ s.title }}</span>
+      <span class="muted small">{% if s.submitted_at %}{{ s.submitted_at|date_fr }}{% else %}Date inconnue{% endif %}{% if s.host %} · {{ s.host }}{% endif %}</span></span></a></li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ext_link, cv_link with context %}
+{% block title %}{{ s.company or 'Candidature' }}{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ s.company or 'Entreprise non précisée' }}</h1>
+  <p class="lead-line">{{ s.title }}</p>
+  <p class="muted small">{% if s.submitted_at %}Envoyée le {{ s.submitted_at|date_fr }}{% endif %}{% if s.host %} · Site : {{ s.host }}{% endif %}</p>
+  <div class="links">{{ ext_link(s.url, "Voir l'annonce") }}{{ cv_link(s.doc_id, docs) }}</div>
+</div></div>
+<section class="panel">
+  <div class="panel-head plain"><h2>Réponses déduites (à connaître avant l'entretien)</h2></div>
+  {% if s.inferred is none %}<p>Le détail des réponses n'est pas disponible pour cette candidature.</p>
+  {% elif not s.inferred %}<p>Aucune réponse déduite.</p>
+  {% else %}
+  <dl class="defs">
+    {% for i in s.inferred %}<dt>{{ i.label }}</dt><dd>{{ i.value }}{% if i.basis %}<span class="sub">{{ i.basis }}</span>{% endif %}</dd>{% endfor %}
+  </dl>
+  {% endif %}
+</section>
+{% if s.prep %}
+<section class="panel">
+  <div class="panel-head plain"><h2>Préparation entretien</h2></div>
+  {% for p in s.prep %}<div class="item"><p>{{ p.message }}</p>{% if p.hint %}<p class="muted small">{{ p.hint }}</p>{% endif %}</div>{% endfor %}
+</section>
+{% endif %}
+<p><a class="btn block" href="{{ base }}/candidatures">Retour aux candidatures</a></p>
+{% endblock %}
