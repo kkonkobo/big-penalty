@@ -166,11 +166,12 @@ def test_file_token_store_is_0600_and_bound_to_the_origin():
     assert os.name != "posix" or stat.S_IMODE(path.stat().st_mode) == 0o600
     assert secrets.load_token("https://a.test", "file") == TOKEN
     assert secrets.load_token("https://other.test", "file") is None
-    path.chmod(0o644)
-    with pytest.raises(secrets.PortalSecretError) as e:
-        secrets.load_token("https://a.test", "file")
-    assert TOKEN not in str(e.value)
-    path.chmod(0o600)
+    if os.name == "posix":  # the owner-only mode check exists only where mode bits do
+        path.chmod(0o644)
+        with pytest.raises(secrets.PortalSecretError) as e:
+            secrets.load_token("https://a.test", "file")
+        assert TOKEN not in str(e.value)
+        path.chmod(0o600)
     secrets.delete_token("https://a.test", "file")
     assert secrets.load_token("https://a.test", "file") is None
     secrets.delete_token("https://a.test", "file")  # already gone: fine

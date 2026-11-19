@@ -20,6 +20,8 @@ For rollback, close intake and stop both sides again. Restore matching pre-upgra
 
 ### Offline rehearsal results
 
+The throttling hardening updates the server schema from `6` to `7`, but leaves the Mac journal and v3 protocol unchanged. It backfills counter expiry without resetting live limits. Use a server backup for rollback; older server binaries refuse schema `7`.
+
 1. Archive the v1 (`3a640bc`) and v2 (`ef6d424`) sources. Run their `Database` and `Journal` constructors against separate synthetic pairs. Seed a fictional device/profile, queued intent and offered grant, plus placeholder server snapshot, results, manifest, document and event rows. Use SQLite's backup API to make a matching pair before upgrading.
 2. Reopen the v1 files under v2, then v3; also reopen the separate v2 pair directly under v3. The server/journal versions went from `4/7` to `5/8` to `6/9`. Both upgrades fenced the previous server event sequence, cleared the snapshot/results, manifest and documents, cancelled the queued intent and voided its grant.
 3. With the same fictional bearer, the matching `/app/api/vN/status` returned `200` and the other two versions returned `404` at each stage. Archived v1 and v2 constructors refused the upgraded databases. Restoring each matched backup under its original software restored authenticated status and the old queued intent and offered grant, so retire restored requests before reopening intake. No real data or VPS was used.
