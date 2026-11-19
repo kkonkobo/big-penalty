@@ -11,7 +11,7 @@ import contextlib
 import hashlib
 import json
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Literal
 from urllib.parse import urlparse
@@ -701,8 +701,6 @@ def pending_questions(profile_id: int) -> list[tuple[Application, ApplyRun, Ques
     return sorted(out, key=lambda t: -counts[norm_question(t[2].label)])
 
 
-EMAIL_RESUME_AFTER = timedelta(minutes=30)   # the candidate may have clicked the link by then
-EMAIL_MAX_RESUMES = 2
 
 
 def _questions_answered_since(app: Application, last: ApplyRun) -> bool:
@@ -719,20 +717,19 @@ def _questions_answered_since(app: Application, last: ApplyRun) -> bool:
     return last.finished_at is not None and mtime > last.finished_at
 
 
-def _waiting_on_user(app: Application, job, last: ApplyRun | None, *, retry_captcha: bool = False) -> bool:
-    """The last run of this revision waits for the user: an answer, an e-mail link, a CAPTCHA or trust in a host.
-    The automatic pass still goes on when: the questions were answered since (`needs_input`); 30 minutes passed since an e-mail
-    pause (at most twice per revision); or it is an ATTENDED visible pass and the run was stopped by a CAPTCHA (`needs_human`)."""
-    if last is None or last.rev != app.current_rev:
+def _waiting_on_user(app: Application, job, last: ApplyRun | None) -> bool:
+    """A CAPTCHA or email pause requires an explicit resume, not a new automatic pass.
+
+    New local answers or explicit host trust can still unblock their respective handoffs.
+    """
+    if last is None:
         return False
-    if retry_captcha and last.status == "needs_human":
+    if last.status in ("needs_email", "needs_human"):
+        return True
+    if last.rev != app.current_rev:
         return False
     if last.status == "needs_input" and _questions_answered_since(app, last):
         return False
-    if last.status == "needs_email" and last.finished_at is not None and now() - last.finished_at >= EMAIL_RESUME_AFTER:
-        n = sum(1 for r in apply_store.list_runs(app.id) if r.rev == app.current_rev and r.status == "needs_email")
-        if n <= EMAIL_MAX_RESUMES:
-            return False
     return last.status in PAUSE_REASON or bool(_host_pause(app, job, last))
 
 
@@ -873,7 +870,7 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         summary.waiting += 1
         emit(f"{tag} : bloquée (un envoi est déjà en cours pour cette candidature)")
         return
-    if _waiting_on_user(app, job, last, retry_captcha=attended and not headless):
+    if _waiting_on_user(app, job, last):
         summary.paused += 1
         summary.paused_by["en attente"] = summary.paused_by.get("en attente", 0) + 1
         emit(f"{tag} : en pause (en attente de votre réponse)")

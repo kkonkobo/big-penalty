@@ -245,6 +245,7 @@ _ATS_HTML_HINTS: list[tuple[str, re.Pattern]] = [
     ("workable", re.compile(r"apply\.workable\.com/[\w-]+|workable\.com/widget", re.I)),
     ("recruitee", re.compile(r"[\w-]+\.recruitee\.com", re.I)),
 ]
+KNOWN_ATS_IDS = frozenset(ats for ats, *_ in [*_ATS_RULES, *_ATS_HTML_HINTS])
 
 
 def classify_ats(url: str, html: str | None = None) -> str | None:

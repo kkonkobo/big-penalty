@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sqlite3
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -523,6 +524,36 @@ def apply_list(profile: Annotated[Optional[int], typer.Option("--profile", "-p")
                   BUCKET_FR[i.bucket], last,
                   " ; ".join(([f"formulaire hébergé sur {i.untrusted_host} (apply trust)"] if i.untrusted_host else []) + i.problems)[:70])
     console.print(t)
+
+
+@apply_app.command("diagnostics")
+def apply_diagnostics(
+    days: Annotated[int, typer.Option("--days", min=1, max=3650, help="nombre de jours à examiner")] = 30,
+    database: Annotated[Optional[Path], typer.Option("--db", help="autre base locale (ex. base de test)")] = None,
+) -> None:
+    """Bilan local agrégé des échecs et pauses, sans ouvrir de site ni envoyer de données."""
+    from jobhunt.apply.diagnostics import failure_breakdown
+
+    try:
+        groups = failure_breakdown(days=days, path=database)
+    except sqlite3.Error:
+        console.print("Diagnostic indisponible : base locale absente, illisible ou sans historique compatible.")
+        raise typer.Exit(1) from None
+    if not groups:
+        console.print(f"Aucun échec ni pause enregistré sur les {days} derniers jours.")
+        return
+    table = Table(padding=(0, 0))
+    for label in ("rang", "mode", "ATS", "catégorie", "motif", "dossiers", "essais"):
+        table.add_column(label, overflow="fold")
+    rank = 0
+    for group in groups:
+        if group.rankable:
+            rank += 1
+        table.add_row(str(rank) if group.rankable else "—", group.mode, group.ats, group.category, group.reason,
+                      str(group.applications), str(group.runs))
+    console.print(table)
+    if not rank:
+        console.print("Aucun échec moteur récurrent attribué à un ATS connu.")
 
 
 @apply_app.command("dry-run")

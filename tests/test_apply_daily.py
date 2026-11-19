@@ -497,9 +497,8 @@ async def test_the_answers_file_older_than_the_pause_does_not_resume_it(env, pro
     assert not env.runs and s.paused == 1
 
 
-async def test_an_email_pause_is_resumed_after_30_minutes_at_most_twice(env, profile):
+async def test_an_email_pause_does_not_resume_on_a_timer(env, profile):
     job = env.job(1)
-    env.run_status = "needs_email"  # every resume pauses again on the same e-mail verification
     app = paused_run(env, job, "needs_email", age=timedelta(minutes=5))
     s, _ = await daily(profile)
     assert not env.runs and s.paused == 1  # too early: the candidate may not have clicked yet
@@ -509,23 +508,25 @@ async def test_an_email_pause_is_resumed_after_30_minutes_at_most_twice(env, pro
             c.execute("UPDATE application_runs SET finished_at=? WHERE id=(SELECT MAX(id) FROM application_runs WHERE application_id=?)",
                       (db._iso(datetime.now(UTC) - timedelta(minutes=minutes)), app.id))
 
-    for resume in (1, 2):
-        age_last(45)
+    for minutes in (45, 120, 1440):
+        age_last(minutes)
         s, _ = await daily(profile)
-        assert len(env.runs) == resume, resume  # resumed once the link had time to be clicked
-    age_last(45)
-    s, _ = await daily(profile)
-    assert len(env.runs) == 2 and s.paused == 1  # two resumes spent: it waits for the user for good
+        assert not env.runs and s.paused == 1
 
 
-async def test_a_captcha_pause_waits_for_an_attended_visible_pass(env, profile):
+async def test_a_captcha_pause_needs_an_explicit_resume_even_on_attended_pass(env, profile):
     job = env.job(1)
     paused_run(env, job, "needs_human", message="CAPTCHA")
-    for kw in ({}, {"headless": False}, {"attended": True}):
+    for kw in ({}, {"headless": False}, {"attended": True}, {"headless": False, "attended": True}):
         s, _ = await daily(profile, **kw)
-        assert not env.runs and s.paused == 1, kw  # unattended, or visible but nobody there: never retried
-    s, _ = await daily(profile, headless=False, attended=True)
-    assert len(env.runs) == 1 and env.runs[0][1]["attended"] is True
+        assert not env.runs and s.paused == 1, kw
+
+
+@pytest.mark.parametrize("status", ["needs_email", "needs_human"])
+async def test_a_new_cv_revision_does_not_clear_a_site_handoff(env, profile, status):
+    job = env.job(1)
+    app = paused_run(env, job, status)
+    assert service._waiting_on_user(app.model_copy(update={"current_rev": app.current_rev + 1}), job, astore.last_run(app.id))
 
 
 async def test_a_technical_failure_without_a_click_is_retried_twice_per_revision(env, profile):

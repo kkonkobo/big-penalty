@@ -7,6 +7,20 @@ Created in [T3 Code](https://t3.codes).
 **Desktop app:** Big Penalty also ships as a double-click app for macOS and Windows. See
 [packaging/README.md](packaging/README.md) for installing, where keys and data live, and building.
 
+## Auto-apply diagnostics
+
+`uv run big-penalty apply diagnostics --days 30` reports completed apply runs from the local SQLite database.
+Use `--db PATH` to inspect a separate database, such as a fictional test database. The command opens the database
+read-only, does not migrate it, and does not read logs, run payloads, CVs or screenshots, open a browser, or make network calls.
+
+Rows show fixed ATS and reason codes with distinct application and run counts. Simulations and submit attempts are
+counted separately. Only engine symptoms attributed to a known ATS on at least two distinct applications receive a rank;
+application count sorts first, then run count. The ATS is the application's saved label, not a verified failure-page vendor.
+Unknown labels and unmatched historical reasons stay in `unknown` and `unclassified_failure` rather than exposing raw text.
+Missing input, CAPTCHA and email verification appear as handoffs, not ranked failures. A later auto pass does not reopen
+a CAPTCHA or email pause; use an explicit resume after checking the handoff. A ranked symptom is a lead for a fixture, not
+proof of an ATS bug or permission to retry an application.
+
 ## LLM providers
 
 Always start with `cd /Volumes/SSD/Dev/big-penalty && . ./env.sh`.
