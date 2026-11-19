@@ -220,10 +220,11 @@ def test_queue_buckets_and_order(profile, master, tmp_path):
     assert items[errs.id].problems and any("erreur" in p for p in items[errs.id].problems)
     assert any("PDF" in p for p in items[nopdf.id].problems) and any("jours" in p for p in items[old.id].problems)
     p = items[paused.id]
-    assert p.pause_reason == "input" and [q.label for q in p.questions] == ["Permis ?"] and p.selectable
-    assert items[ok_high.id].auto and items[ok_low.id].auto and items[ok_high.id].origin_host == "careers.exemple.test"
-    assert items[ok_high.id].selectable and not items[errs.id].selectable and not items[sending.id].selectable
-    assert items[failed_run.id].selectable and not items[failed_app.id].selectable and not items[sent.id].selectable
+    assert p.pause_reason == "input" and [q.label for q in p.questions] == ["Permis ?"] and p.supervised
+    assert not items[ok_high.id].auto and not items[ok_low.id].auto and items[ok_high.id].origin_host == "careers.exemple.test"
+    assert not any(item.selectable for item in items.values())
+    assert items[ok_high.id].supervised and not items[errs.id].supervised and not items[sending.id].supervised
+    assert items[failed_run.id].supervised and not items[failed_app.id].supervised and not items[sent.id].supervised
     order = [i.bucket for i in service.queue(profile.id)]
     assert order == sorted(order, key=service.BUCKET_ORDER.index)
     todo = [i.app.id for i in service.queue(profile.id) if i.bucket == "to_validate"]
@@ -1319,7 +1320,7 @@ async def test_send_selected_forwards_the_expected_revision_and_destination_to_r
 
 
 async def test_a_change_between_the_early_check_and_the_run_is_caught_by_run_itself(profile, master, tmp_path, monkeypatch):
-    j, a = new_app(profile, master, tmp_path, 1)
+    j, a = new_app(profile, master, tmp_path, 1, approve=True)
     calls = stub_engine(monkeypatch, RunResult(status="submitted", message="ok"))
     real = service._bound_problems
 
@@ -1329,7 +1330,9 @@ async def test_a_change_between_the_early_check_and_the_run_is_caught_by_run_its
             c.execute("UPDATE jobs SET origin_url='https://evil.exemple.test/job' WHERE id=?", (job.id,))
         return out
 
-    monkeypatch.setattr(service, "_bound_problems", lambda *a_, **k: late_change(*a_, **k) if a_[2] is not None else real(*a_, **k))
-    runs = await service.send_selected([a.id], pool=FakePool(), expected_revs={a.id: a.current_rev},
-                                       expected_origins={a.id: service.origin_digest(j.origin_url)})
-    assert runs[0].status == "blocked" and "le lien de l'offre a changé depuis l'affichage" in runs[0].message and not calls
+    monkeypatch.setattr(service, "_bound_problems", late_change)
+    pool = FakePool()
+    result = await service.run(a.id, mode="supervised", trigger="user", pool=pool, expected_rev=a.current_rev,
+                               expected_origin=service.origin_digest(j.origin_url))
+    assert result.status == "blocked" and "destination a changé" in result.message
+    assert not calls and not pool.opened and not astore.active_reservations(profile.id)
