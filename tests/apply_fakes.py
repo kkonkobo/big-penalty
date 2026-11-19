@@ -162,6 +162,12 @@ class FixtureServer:
                 body = self.rfile.read(n)
                 outer.posts.append({"path": self.path, "body": body})
                 outer.sent.append({"method": "POST", "path": self.path, "body": body})
+                if self.path == "/adapter-contract" and body.startswith(b"%PDF-") and self.headers.get("X-Fixture-Nonce"):
+                    self.send_response(200)
+                    self.send_header("X-Fixture-Receipt", self.headers["X-Fixture-Nonce"])
+                    self.end_headers()
+                    self.wfile.write(b"<p>Candidature recue (fixture).</p>")
+                    return
                 self._html(outer.post_pages.get(self.path.split("?")[0], "confirmation.html"))
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)

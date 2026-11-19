@@ -349,7 +349,7 @@ def test_run_page_shows_steps_fields_and_send_button(client, profile, master, tm
     r = client.get(f"/apply/runs/{run.id}")
     s = soup(r.text)
     assert r.status_code == 200
-    assert "Formulaire rempli, rien n'a été envoyé" in r.text
+    assert "Inspection seule" in r.text
     assert "Formulaire de candidature" in r.text and "Essai à blanc" in r.text and "Message du run" in r.text
     assert "Prénom" in r.text and "Léa" in r.text and "first_name" in r.text and "•••" in r.text
     assert "Suivant" in r.text
@@ -427,6 +427,28 @@ def test_queue_item_helper_and_card(client, profile, master, tmp_path, monkeypat
 
 
 # ------------------------------------------------------------------ stale / forged forms, ids
+def test_supervised_launch_requires_approval_and_the_shown_destination(client, profile, master, tmp_path, monkeypatch):
+    app = mk_app(profile, master, tmp_path)
+    action = f"/applications/{app.id}/apply/supervised"
+    origin_sha = revs(app)[f"origin_{app.id}"]
+    payload = {"rev": str(app.current_rev), "origin": origin_sha}
+    launched = []
+
+    def launch(*args):
+        launched.append(args)
+
+    monkeypatch.setattr(apply_routes, "_launch", launch)
+    denied = client.post(action, data=payload, follow_redirects=True)
+    assert "approbation" in denied.text and not launched
+    cvs.approve(app.id, app.current_rev)
+    stale = client.post(action, data={**payload, "origin": "0" * 64}, follow_redirects=True)
+    assert "lien de l&#39;offre a changé" in stale.text or "lien de l'offre a changé" in stale.text
+    assert not launched
+    accepted = client.post(action, data=payload, follow_redirects=True)
+    assert "Vous seul pouvez cliquer sur Envoyer" in accepted.text
+    assert launched == [(app.id, "supervised", False, {"rev": app.current_rev, "origin": origin_sha})]
+
+
 def test_send_requires_the_revision_the_user_was_shown(client, profile, master, tmp_path, monkeypatch):
     a, b = mk_app(profile, master, tmp_path, 1), mk_app(profile, master, tmp_path, 2)
     calls = []

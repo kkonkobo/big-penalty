@@ -61,7 +61,8 @@ def test_v3_database_migrates_to_v4_keeping_data(tmp_path, monkeypatch):
         assert "submit_clicked_at" in {r["name"] for r in c.execute("PRAGMA table_info(application_runs)")}
         assert "sent_origin_url" in {r["name"] for r in c.execute("PRAGMA table_info(applications)")}
         assert {r["name"] for r in c.execute("PRAGMA table_info(apply_reservations)")} == {
-            "id", "profile_id", "application_id", "run_id", "trigger", "role_key", "url_key", "created_at", "released_at", "pending"}
+            "id", "profile_id", "application_id", "run_id", "trigger", "role_key", "url_key", "created_at", "released_at", "pending",
+            "binding_json", "dedupe_key", "receipt_kind", "receipt_outcome", "receipt_at"}
         assert {"nav_clicked_at", "pid"} <= {r["name"] for r in c.execute("PRAGMA table_info(application_runs)")}  # migration 6
     assert a.sent_origin_url is None and run.submit_clicked_at is None and run.nav_clicked_at is None and run.pid == os.getpid()
 

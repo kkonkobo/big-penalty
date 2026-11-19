@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 
@@ -11,6 +12,7 @@ import pytest
 from apply_fakes import (CONFIRMED, FIXTURES, FACT_PASSWORD, TEST_PASSWORD, FakeVerifier, ScriptedPlanner, act, cv_pdf, fast,  # noqa: F401
                          form_actions, form_plan, job_plan, page, password_for, release, sample_facts, server)  # noqa: F401
 from jobhunt.apply import engine
+from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.engine import Letter, Uploads, confirmation_evidence, pick_variant, run_application
 from jobhunt.apply.types import Action, Fact, FormField, Question, StepPlan
 from jobhunt.llm import LLMError
@@ -36,49 +38,60 @@ def apply_posts(server):
     return server.posts_to("/apply")
 
 
+async def attended_form(page, server, planner, tmp_path, cv_pdf, monkeypatch, *, start="form", **kwargs):
+    url = server.url(start)
+    pdf = cv_pdf.read_bytes()
+    attempt = Attempt(1, 1, 1, hashlib.sha256(pdf).hexdigest(), url, "127.0.0.1", "fixture", None)
+    monkeypatch.setattr(engine, "binding_active", lambda binding: binding == attempt)
+    kwargs.setdefault("before_submit", no_reasons)
+    return await go(page, server, planner, tmp_path, cv_pdf, mode="supervised", url=url,
+                    uploads=Uploads(cv_pdf=cv_pdf, cv_bytes=pdf), supervised_attempt=attempt, **kwargs)
+
+
 # ------------------------------------------------------------------ happy paths
-async def test_dry_run_fills_everything_and_never_sends(page, server, fast, cv_pdf, tmp_path):
-    planner = ScriptedPlanner([job_plan, form_plan("submit")])
-    res = await go(page, server, planner, tmp_path, cv_pdf)
-    assert res.status == "ready" and not apply_posts(server), res.message
+async def test_supervised_fills_everything_and_never_sends(page, server, fast, cv_pdf, tmp_path, monkeypatch):
+    res = await attended_form(page, server, ScriptedPlanner([form_plan()]), tmp_path, cv_pdf, monkeypatch)
+    assert res.status == "needs_input" and not apply_posts(server), res.message
     assert await page.input_value("#fn") == "Camille" and await page.input_value("input[name=last_name]") == "Durand"
     assert await page.input_value("#em") == "camille@example.test"
-    assert await page.input_value("#tel") == "+33 6 00 00 00 00"  # variant matching the +33 placeholder
+    assert await page.input_value("#tel") == "+33 6 00 00 00 00", res.steps[-1].note
     assert await page.input_value("#sit") == "alt"
-    assert await page.evaluate("document.querySelector('input[name=dispo]:checked').value") == "oui"
-    assert await page.evaluate("document.getElementById('cv').files[0].name") == cv_pdf.name
-    assert await page.is_checked("input[name=available]") and not await page.is_checked("input[name=newsletter]")
-    assert [s.page_kind for s in res.steps] == ["job_page", "form"] and res.steps[0].clicked == "Postuler" and res.steps[1].clicked == ""
+    assert not await page.locator('input[name=dispo]:checked').count()
+    assert await page.evaluate("document.getElementById('cv').files[0].name") == "CV.pdf"
+    assert not await page.is_checked("input[name=available]") and not await page.is_checked("input[name=newsletter]")
+    assert [s.page_kind for s in res.steps] == ["form"] and not res.steps[0].clicked
     assert all(s.screenshot and (tmp_path / "shots" / f"step-{s.index}.png").is_file() for s in res.steps)
-    assert {f.fact for f in res.steps[1].filled} >= {"first_name", "email", "phone", "available_now"}
+    assert {f.fact for f in res.steps[0].filled} >= {"first_name", "email", "phone"}
     assert res.final_url.endswith("/form") and res.finished_at is not None
 
 
 @pytest.mark.parametrize("role", ["next", "open_form", "login", "signup", "cookies", "other", None])
-async def test_dry_run_cannot_send_even_if_planner_mislabels_the_final_button(page, server, fast, cv_pdf, tmp_path, role):
-    planner = ScriptedPlanner([job_plan, form_plan(role)])  # type: ignore[arg-type]
-    res = await go(page, server, planner, tmp_path, cv_pdf, max_steps=4)
-    assert not apply_posts(server) and res.status != "submitted"
-    if role in ("next", "open_form", "login", "signup", "cookies"):
-        assert res.status == "ready"  # re-classified as submit -> stop before clicking
+async def test_supervised_never_clicks_a_mislabeled_final_button(page, server, fast, cv_pdf, tmp_path, monkeypatch, role):
+    planner = ScriptedPlanner([form_plan(role)])  # type: ignore[arg-type]
+    res = await attended_form(page, server, planner, tmp_path, cv_pdf, monkeypatch)
+    assert not apply_posts(server) and res.status == "needs_input" and not res.submit_clicked
+    assert all(not step.clicked for step in res.steps)
 
 
-async def test_submit_mode_posts_exactly_once(page, server, fast, cv_pdf, tmp_path):
-    planner = ScriptedPlanner([job_plan, form_plan("submit"), CONFIRMED])
+async def test_supervised_only_operator_click_posts(page, server, fast, cv_pdf, tmp_path, monkeypatch):
+    planner = ScriptedPlanner([form_plan(), CONFIRMED])
     seen = []
 
     async def before():
         seen.append(1)
         return []
 
-    res = await go(page, server, planner, tmp_path, cv_pdf, mode="submit", before_submit=before)
-    assert res.status == "submitted" and seen == [1]
+    res = await attended_form(page, server, planner, tmp_path, cv_pdf, monkeypatch, before_submit=before)
+    assert res.status == "needs_input" and len(seen) >= 6 and not apply_posts(server)
+    await page.locator('input[name=dispo][value=oui]').check()
+    await page.locator('input[name=available]').check()
+    await page.get_by_role("button", name="Envoyer ma candidature").click()
     posts = apply_posts(server)
     assert len(posts) == 1
     body = posts[0]["body"]
-    assert b"Camille" in body and b"camille@example.test" in body and cv_pdf.name.encode() in body and b'name="available"' in body
+    assert b"Camille" in body and b"camille@example.test" in body and b"CV.pdf" in body and b'name="available"' in body
     assert b'name="newsletter"' not in body
-    assert res.steps[-1].page_kind == "confirmation" and res.steps[-2].clicked == "Envoyer ma candidature"
+    assert res.steps[-1].page_kind == "form" and not res.submit_clicked
 
 
 async def test_before_submit_reasons_block_without_posting(page, server, fast, cv_pdf, tmp_path):
@@ -2825,13 +2838,14 @@ def scoped_plan(snapshot):
     ("value=\"enabled\"", "value=\"other\""), (">Later", ">Later (updated)"),
     ("type=\"submit\"", "type=\"submit\" formmethod=\"get\""),
 ])
-async def test_saved_choice_requires_unchanged_live_form(page, server, fast, cv_pdf, tmp_path, old, new):
+async def test_saved_choice_requires_unchanged_live_form(page, server, fast, cv_pdf, tmp_path, monkeypatch, old, new):
     await serve(page, "decision", SCOPED_DECISION)
-    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="decision")
+    result = await attended_form(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, monkeypatch, start="decision")
     assert result.questions[0].choice_binding and "fictional-route-marker" not in result.model_dump_json()
     choices = {result.questions[0].choice_binding: 1}
     await serve(page, "decision", SCOPED_DECISION.replace(old, new))
-    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="decision", choices=choices)
+    result = await attended_form(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, monkeypatch,
+                                 start="decision", choices=choices)
     assert result.status == "needs_input" and not await page.input_value("#choice") and not server.sent
 
 

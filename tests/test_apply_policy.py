@@ -149,7 +149,7 @@ def test_a_possibly_sent_application_is_a_duplicate_through_its_reservation(prof
     astore.release_reservation(a1.id)
     assert policy.duplicate_of(a2, second) is None
     ready = next(item for item in apply_service.queue(profile.id) if item.app.id == a2.id)
-    assert ready.bucket == "to_validate" and ready.selectable
+    assert ready.bucket == "to_validate" and ready.supervised and not ready.selectable
 
 
 def test_a_failed_or_draft_application_is_not_a_duplicate(profile, master, tmp_path):
@@ -254,7 +254,8 @@ def test_an_earlier_unconfirmed_send_blocks_everything(profile, app, job, trigge
     assert paused.problems == problems(app, job, "user")
     astore.release_reservation(app.id)  # a human said "not sent"
     assert not any("envoi précédent" in p for p in problems(app, job, trigger))
-    assert apply_service.queue(profile.id)[0].selectable
+    ready = apply_service.queue(profile.id)[0]
+    assert ready.supervised and not ready.selectable
 
 
 def test_unapproved_or_stale_approval(profile, job, master, tmp_path):

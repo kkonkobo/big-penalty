@@ -1,6 +1,10 @@
 """Local dispatch boundary regressions; the employer page, candidate and PDF are fictional."""
 
 from apply_cv_helpers import make_app, make_job
+import asyncio
+from contextlib import asynccontextmanager
+
+import pytest
 from apply_fakes import FakeVerifier, ScriptedPlanner, act, cv_pdf, fast, page, sample_facts, server  # noqa: F401
 from apply_service_fakes import FakePool
 from cv_fakes import save_confirmed
@@ -61,8 +65,68 @@ async def test_even_an_approved_live_service_run_opens_no_ats_session(profile, t
 
     result = await service.run(app.id, mode="submit", trigger="user", pool=pool)
 
-    assert result.status == "blocked" and result.message == UNSUPPORTED_DISPATCH
+    assert result.status == "blocked" and service.SUPERVISED_ONLY in result.message
     assert not pool.opened and not store.active_reservations(profile.id)
+
+
+@pytest.mark.parametrize("decision", [True, False])
+async def test_supervised_holds_before_headful_browser_and_only_operator_settles(page, server, fast, profile, tmp_path, decision):
+    master = save_confirmed(profile.id)
+    job = make_job(profile, url=server.url("dry_egress"))
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+
+    class Pool(FakePool):
+        @asynccontextmanager
+        async def page(self, profile_id, site, headless):
+            reservations = store.active_reservations(profile_id)
+            assert headless is False and len(reservations) == 1 and not server.requests
+            with db.connect() as conn:
+                import json
+                binding = json.loads(conn.execute("SELECT binding_json FROM apply_reservations").fetchone()[0])
+            assert binding["pdf_sha256"] == app.pdf_sha256 and binding["url"] == job.origin_url
+            assert binding["rev"] == app.current_rev and binding["host"] == "127.0.0.1"
+            yield page
+
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=Pool(),
+                                           planner=ScriptedPlanner(form), verifier=FakeVerifier()))
+    try:
+        await page.locator("aside").wait_for(timeout=6000)
+        assert await page.input_value("input[name=first_name]")
+        assert await page.locator("input[type=file]").evaluate("el => el.files[0].name") == "CV.pdf"
+        assert not server.posts_to("/apply")
+        assert cvstore.get_application(app.id).status == "approved"
+    finally:
+        await page.close()
+        result = await asyncio.wait_for(task, timeout=5)
+    assert result.status == "failed" and not result.submit_clicked_at
+    assert store.outstanding_attempt(app.id).id == result.id
+    assert db.get_job(job.id).status != "applied"
+    service.resolve_unconfirmed(app.id, sent=decision, run_id=result.id)
+    assert cvstore.get_application(app.id).status == ("submitted" if decision else "draft")
+    if not decision:
+        assert store.requires_manual_retry(app.id) and not store.active_reservations(profile.id)
+
+
+async def test_supervised_browser_start_crash_is_held_without_relaunch(profile, tmp_path):
+    master = save_confirmed(profile.id)
+    job = make_job(profile)
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+
+    class CrashedPool(FakePool):
+        @asynccontextmanager
+        async def page(self, profile_id, site, headless):
+            self.opened.append((profile_id, site, headless))
+            assert store.active_reservations(profile_id)
+            raise RuntimeError("fixture launch crashed")
+            yield
+
+    pool = CrashedPool()
+    result = await service.run(app.id, mode="supervised", trigger="user", pool=pool, planner=ScriptedPlanner(form))
+    assert result.status == "failed" and store.outstanding_attempt(app.id).id == result.id
+    refused = await service.run(app.id, mode="supervised", trigger="user", pool=pool)
+    assert refused.status == "blocked" and len(pool.opened) == 1
 
 
 def test_unbacked_positive_status_does_not_automatically_settle(profile, tmp_path):

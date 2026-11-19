@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
 
 from jobhunt import db
 from jobhunt.apply import policy, service
+from jobhunt.apply.adapters import Registry, Requisition
 from jobhunt.apply import store as astore
 from jobhunt.apply.types import RunResult
 from jobhunt.config import get_settings
@@ -52,6 +55,10 @@ class Env:
         self.flags: dict[int, list] = {}
         monkeypatch.setattr(cvs, "prepare_application", self.prepare)
         monkeypatch.setattr(service, "run", self.run)
+        registry = Registry()
+        registry.register(DailyEligibilityAdapter(), host="careers.exemple.test",
+                          unattended_tenants={"daily-fixture": "first_party_confirmation"})
+        monkeypatch.setattr(service, "registry", registry)
 
     def job(self, n, score=88.0, **kw):
         return make_job(self.profile, title=f"Stage numéro {n}", company=f"Société {n}", score=score,
@@ -87,6 +94,21 @@ class Env:
         return res
 
 
+class DailyEligibilityAdapter:
+    """Registry double only. Env.run records dispatch, and no ATS I/O is possible here."""
+
+    name = "daily-fixture"
+    capability = "unattended"
+    retry_rule = "never"
+    boundaries = {"final_submit": "auto"}
+
+    def matches(self, url, dom_markers):
+        return float(urlsplit(url).path.startswith("/jobs/"))
+
+    def resolve(self, url, dom_markers):
+        return Requisition("daily-fixture", urlsplit(url).path.rsplit("/", 1)[-1])
+
+
 @pytest.fixture
 def env(monkeypatch, profile, master, tmp_path):
     return Env(monkeypatch, profile, master, tmp_path)
@@ -106,6 +128,15 @@ async def test_prepares_approves_and_sends_automatically(env, profile):
     assert all(m["trigger"] == "auto" and m["headless"] is True and m["mode"] == "submit" for _, m in env.runs)
     assert all(store.get_application(a).approved_by == "auto" for a, _ in env.runs)
     assert any("Société 1" in line for line in lines) and not any("camille" in line.lower() for line in lines)
+
+
+async def test_daily_lists_unadapted_application_without_launch(env, profile, monkeypatch):
+    monkeypatch.setattr(service, "registry", Registry())
+    app = env.draft(env.job(1))
+    summary, lines = await daily(profile)
+    assert not env.runs and summary.sent == 0
+    assert store.get_application(app.id).approved_by is None
+    assert any(service.SUPERVISED_ONLY.lower() in line for line in lines)
 
 
 async def test_daily_cap_stops_sending(env, profile, settings, monkeypatch):
@@ -200,11 +231,11 @@ async def test_a_failed_preparation_is_recorded_and_the_next_job_still_runs(env,
     assert any("timeout" in e or "LLM" in e or "openai" in e for e in s.errors)
 
 
-async def test_shared_pool_is_not_closed_when_given_and_created_lazily_otherwise(env, profile, monkeypatch):
+async def test_daily_adapter_dispatch_does_not_take_ownership_of_browser_pool(env, profile, monkeypatch):
     pool = FakePool()
     env.job(1)
     await daily(profile, pool=pool)
-    assert not pool.closed and env.runs[0][1]["pool"] is pool
+    assert not pool.closed and not pool.opened and env.runs[0][1]["pool"] is None
     created = []
 
     class Spy(FakePool):
@@ -217,7 +248,7 @@ async def test_shared_pool_is_not_closed_when_given_and_created_lazily_otherwise
     assert not created
     env.job(2)
     await daily(profile, pool=None)
-    assert len(created) == 1 and created[0].closed
+    assert len(env.runs) == 1 and not created
 
 
 async def test_live_score_drop_before_auto_approval_keeps_the_draft(env, profile, monkeypatch):
@@ -342,17 +373,18 @@ async def test_min_score_only_raises_the_thresholds(env, profile):
     assert lo.id in env.prepared and store.find_application(profile.id, lo.id).status == "draft" and s.waiting == 1
 
 
-async def test_headless_and_attended_are_passed_to_every_run(env, profile):
+async def test_legacy_browser_flags_do_not_enable_attended_daily_dispatch(env, profile):
     env.job(1)
     await daily(profile)
-    assert env.runs[0][1]["headless"] is True and env.runs[0][1]["attended"] is False
+    assert env.runs[0][1]["headless"] is True and env.runs[0][1]["attended"] is None
     env.runs.clear()
     env.job(2)
     await daily(profile, headless=False, attended=True)
-    assert env.runs[0][1]["headless"] is False and env.runs[0][1]["attended"] is True
+    assert env.runs[0][1]["headless"] is False and env.runs[0][1]["attended"] is None
+    assert env.runs[0][1]["mode"] == "submit"
 
 
-async def test_a_visible_pool_is_created_when_headful(env, profile, monkeypatch):
+async def test_no_generic_browser_is_created_when_daily_is_headful(env, profile, monkeypatch):
     seen = []
 
     class Spy(FakePool):
@@ -362,7 +394,7 @@ async def test_a_visible_pool_is_created_when_headful(env, profile, monkeypatch)
     monkeypatch.setattr(service, "BrowserPool", Spy)
     env.job(1)
     await daily(profile, pool=None, headless=False)
-    assert seen == [False]
+    assert seen == [] and env.runs[0][1]["mode"] == "submit"
 
 
 async def test_one_application_raising_never_stops_the_pass(env, profile):
