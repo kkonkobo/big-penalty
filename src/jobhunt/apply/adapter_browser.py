@@ -1,0 +1,131 @@
+"""Posting-bound audience for the service-owned unattended browser."""
+
+from urllib.parse import urlsplit
+
+from jobhunt.apply.autonomous import Audience
+from jobhunt.apply.destination import clean_url, is_bound_pdf, origin
+from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.supervised import require_posting
+
+
+class AdapterAudience(Audience):
+    def __init__(self, attempt, match, gate, recheck, *, pdf_bytes):
+        super().__init__(attempt.url, (), recheck, pdf_bytes=pdf_bytes)
+        self.attempt, self.match, self.gate = attempt, match, gate
+        self.adapter = match.adapter
+        self.upload_pending = False
+        self.click_boundary = None
+
+    def posting(self, *urls):
+        try:
+            require_posting(self.match, self.attempt, *urls)
+        except ApplyError:
+            return False
+        return True
+
+    def write_recipient(self, url):
+        return bool(url and origin(url) == origin(self.reserved_url))
+
+    def initial_redirect(self, source, destination):
+        return self.write_recipient(destination) and self.posting(destination)
+
+    def form_allowed(self, document, targets, endpoint):
+        return all(self.write_recipient(url) and self.posting(url)
+                   for url in (document, endpoint, *targets[2]))
+
+    def click_endpoint_allowed(self, document, endpoint):
+        return self.write_recipient(endpoint) and self.posting(endpoint)
+
+    async def check_click(self, target, field, role, final):
+        live = await target.evaluate("node => [node.isConnected, node.getAttribute('data-automation-id') || '', "
+                                     "(node.innerText || node.value || '').trim()]")
+        boundary = self.adapter.browser_control(self.live_url, field.automation_id, field.label, role, final)
+        if (not live[0] or live[1] != field.automation_id or not boundary
+                or self.adapter.browser_control(self.live_url, live[1], live[2], role, final) != boundary
+                or self.adapter.boundaries.get(boundary) != 'auto'):
+            raise ApplyError("Commande de candidature non autorisée.")
+        if not final and urlsplit(self.endpoint).path.rstrip('/').endswith('/submit'):
+            raise ApplyError("Destination d’envoi hors étape finale.")
+        if self.method == 'POST' and not self.adapter.browser_native_post(self.live_url, self.endpoint, boundary):
+            raise ApplyError("Destination du formulaire non déclarée.")
+        self.click_boundary = boundary
+
+    def continuation(self, snapshot):
+        return (self.click_boundary in {'account_creation', 'draft_write'} and self.click_write is not None
+                and self.posting(snapshot.url) and self.adapter.browser_continuation(snapshot.url, self.click_source))
+
+    def arm_click(self, *, scripted):
+        self.click_source = self.live_url
+        super().arm_click(scripted=scripted)
+
+    def request_allowed(self, request, page, *, initial):
+        url, method = request.url, request.method
+        navigation = request.is_navigation_request()
+        reading = method in {'GET', 'HEAD'}
+        if request.frame != page.main_frame:
+            return False
+        if initial:
+            return reading and navigation and self.initial_redirect(self.reserved_url, url)
+        if reading and not navigation and origin(url) in self.match.requisition.read_origins:
+            return not self.active and not urlsplit(url).query
+        upload = self.gate.matches_endpoint('cv_upload_parse', url)
+        if not self.write_recipient(url) and not upload:
+            return False
+        if navigation and reading:
+            if self.final_started:
+                return self.final_response and self.receipt_url(url)
+            if self.clicking and self.posting(request.frame.url, url):
+                self.next_document = url
+                return True
+            return False
+        if reading:
+            return not urlsplit(url).query and (not self.active or self.posting(url))
+        if not self.posting(page.url, request.frame.url) or request.frame.url != self.live_url:
+            return False
+        if upload and self.upload_pending and not navigation and not self.clicking:
+            if method == 'OPTIONS':
+                return True
+            if method == 'POST' and is_bound_pdf(request.headers.get('content-type', ''), request.post_data_buffer,
+                                                 self.pdf_bytes):
+                self.upload_pending = False
+                return True
+            return False
+        if method != 'POST' or not self.clicking or not self.click_boundary:
+            return False
+        if navigation:
+            if self.method != 'POST' or url != self.endpoint or not self.posting(url):
+                return False
+            self.next_document = url
+        elif not self.scriptable or not self.gate.matches_endpoint(self.click_boundary, url):
+            return False
+        return self._admit_click_write(request)
+
+    async def after_click(self, page, *, observing=False):
+        if self.final_started:
+            return
+        live = page.url
+        if not self.initial_redirect(self.document, live):
+            await page.close()
+            raise ApplyError("Identité du poste modifiée.")
+        if live != self.live_url or self.next_document == live:
+            self.document = clean_url(live, navigation=True)
+            await self.bind_document(page)
+        if not observing:
+            self.clicking = False
+            self.next_document = ''
+
+    def confirmation_redirect(self, url):
+        return url if self.receipt_url(url) else ''
+
+    def receipt_url(self, url):
+        return self.write_recipient(url) and self.adapter.browser_receipt_url(self.attempt, url)
+
+    async def inspect_receipt(self, request, response):
+        return None
+
+    async def document_receipt(self, page, snapshot, *, positive_text):
+        receipt_url = self.final_receipt_url or page.url
+        if not self.write_recipient(page.url) or not self.write_recipient(receipt_url):
+            return 'none'
+        return await self.adapter.browser_receipt(self.attempt, page, receipt_url, positive_text,
+                                                  self.posting(page.url))

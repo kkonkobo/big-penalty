@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from jobhunt import db
 from jobhunt.apply import accounts, policy
 from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Match, Receipt, WriteGate, clean_receipt, origin, registry
+from jobhunt.apply.adapter_browser import AdapterAudience
 from jobhunt.apply.autonomous import Audience
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
@@ -364,12 +365,27 @@ def _default_verifier(llm: _Llm):
 
 def _unattended(job) -> bool:
     match = registry.find(job.origin_url, job.origin_ats)
-    return bool(match and match.capability == "unattended")
+    return bool(match and match.capability == "unattended" and (
+        not getattr(match.adapter, "browser_planner", None) or
+        (get_settings().apply_autonomous and not apply_store.host_paused(_host(job.origin_url)))))
+
+
+def _browser_adapter(job) -> bool:
+    match = registry.find(job.origin_url, job.origin_ats)
+    return bool(match and match.capability == "unattended" and getattr(match.adapter, "browser_planner", None))
+
+
+def _dispatch_match(job, mode: Mode) -> Match | None:
+    match = registry.find(job.origin_url, job.origin_ats)
+    if mode == "supervised" and match and match.capability == "unattended" and getattr(match.adapter, "browser_planner", None):
+        return Match(match.adapter, match.requisition, "supervised", getattr(match.adapter, "supervised_receipt_kind", match.receipt_kind))
+    return match
 
 
 def _generic_enabled(job, *, check_host: bool = True) -> bool:
     return bool(get_settings().apply_autonomous and job and policy._usable_origin(job)
-                and clean_url(job.origin_url, navigation=True) and not _unattended(job)
+                and clean_url(job.origin_url, navigation=True)
+                and not ((match := registry.find(job.origin_url, job.origin_ats)) and match.capability == "unattended")
                 and (not check_host or not apply_store.host_paused(_host(job.origin_url))))
 
 
@@ -401,6 +417,7 @@ def _check_boundary(run_: ApplyRun, started_job, mode: Mode, trigger: str, *, re
 
 
 def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match | None = None, *,
+             browser_adapter: bool = False,
              confirmed_distinct: frozenset[int] = frozenset(), duplicate_confirmations: tuple[str, ...] = ()) -> Dispatch:
     app, job, host, url = _check_boundary(run_, started_job, mode, trigger, confirmed_distinct=confirmed_distinct)
     pdf_path = cvs.safe_pdf(app)
@@ -419,8 +436,9 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     canonical = ["req", *identity] if identity else ["job", job.id]
     dedupe_key = hashlib.sha256(json.dumps([app.profile_id, *canonical]).encode()).hexdigest()
     autonomous = mode == "submit" and (not match or match.capability != "unattended")
-    dispatch_match = None if autonomous else match
-    tenant, requisition_id = ((requisition.tenant, requisition.requisition_id) if requisition and not autonomous
+    dispatch_match = None if autonomous and not browser_adapter else match
+    autonomous = autonomous or browser_adapter
+    tenant, requisition_id = ((requisition.tenant, requisition.requisition_id) if requisition and dispatch_match
                               else identity or ("", None))
     attempt = Attempt(run_.id, app.id, run_.rev, digest, url, host, secrets.token_urlsafe(24),
                       dispatch_match.adapter.name if dispatch_match else None, tenant, requisition_id, dedupe_key, app.profile_id,
@@ -437,7 +455,7 @@ def _write_gate(request: Dispatch, run_: ApplyRun, job, mode: Mode, trigger: str
                 confirmed_distinct: frozenset[int] = frozenset(), diagnostics: DispatchDiagnostics | None = None) -> WriteGate:
     def recheck() -> None:
         _check_boundary(run_, job, mode, trigger, reserved=True, confirmed_distinct=confirmed_distinct)
-        if not apply_store.binding_active(request.attempt) or registry.find(job.origin_url, job.origin_ats) != match:
+        if not apply_store.binding_active(request.attempt) or _dispatch_match(job, mode) != match:
             raise ApplyError("Réservation ou politique d'adaptateur périmée.")
 
     destinations = frozenset({origin(request.attempt.url), *match.requisition.write_origins})
@@ -475,11 +493,11 @@ async def fill_step(app_id: int, token: str, *, run_id: int | None = None) -> Ru
 
 
 async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifier, browser, out, match,
-                         confirmed_distinct, duplicate_confirmations, diagnostics):
-    if not _generic_enabled(job):
+                         confirmed_distinct, duplicate_confirmations, diagnostics, browser_adapter=False):
+    if not (_unattended(job) if browser_adapter else _generic_enabled(job)):
         return RunResult(status="needs_human", message=SUPERVISED_ONLY)
     request = _reserve(run_, job, "submit", trigger, match, confirmed_distinct=confirmed_distinct,
-                       duplicate_confirmations=duplicate_confirmations)
+                       duplicate_confirmations=duplicate_confirmations, browser_adapter=browser_adapter)
     attempt = request.attempt
 
     def check():
@@ -488,7 +506,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         if not eligible:
             raise ApplyError(" ; ".join(reasons))
         if (not get_settings().apply_autonomous or registry.find(job.origin_url, job.origin_ats) != match
-                or not apply_store.binding_active(attempt)):
+                or not apply_store.binding_active(attempt) or apply_store.host_paused(attempt.host)):
             raise ApplyError(SUPERVISED_ONLY)
 
     async def recheck():
@@ -501,8 +519,14 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     metadata = job.extra.get("origin_resolution") if isinstance(job.extra, dict) else None
     raw_urls = metadata.get("verified_urls") if isinstance(metadata, dict) and metadata.get("canonical_ok") is True else None
     verified = [clean_url(url, navigation=True) for url in raw_urls if isinstance(url, str)] if isinstance(raw_urls, list) else []
-    audience = Audience(attempt.url, verified, check, pdf_bytes=request.pdf)
-    guard = RecipientGuard(frozenset({origin(attempt.url)}), audience=audience)
+    if browser_adapter:
+        gate = _write_gate(request, run_, job, "submit", trigger, match, confirmed_distinct=confirmed_distinct)
+        audience = AdapterAudience(attempt, match, gate, check, pdf_bytes=request.pdf)
+        planner = match.adapter.browser_planner(attempt)
+    else:
+        audience = Audience(attempt.url, verified, check, pdf_bytes=request.pdf)
+    guard = RecipientGuard(frozenset({origin(attempt.url), *(match.requisition.write_origins if browser_adapter else ())}),
+                           audience=audience)
     browser.append((attempt, guard))
     facts = _candidate_facts(app, job)
     email_fact = facts.get("account_email")
@@ -513,7 +537,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
 
     password, account_known = accounts.guarded_account_callbacks(
         email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document)
-    ) if email else (None, None)
+    ) if email and (not browser_adapter or match.adapter.boundaries.get("account_creation") == "auto") else (None, None)
 
     async def mark_submit():
         apply_store.mark_autonomous_submit(attempt)
@@ -536,6 +560,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 verifier=verifier if verifier is not None or planner is not None else _default_verifier(llm),
                 uploads=Uploads(cv_pdf=cvs.safe_pdf(app), cv_bytes=request.pdf), mode="submit", current_step=True,
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
+                supervised_widgets=browser_adapter,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
                 password=password, account_known=account_known, diagnostics=diagnostics,
                 host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),
@@ -564,10 +589,15 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                  diagnostics: DispatchDiagnostics | None = None) -> RunResult:
     """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
     follows cannot lose it."""
-    match = registry.find(job.origin_url, job.origin_ats) if mode != "dry_run" else None
+    match = _dispatch_match(job, mode) if mode != "dry_run" else None
     if diagnostics is None:
         diagnostics = DispatchDiagnostics()
     if mode == "submit":
+        if match and match.capability == "unattended" and getattr(match.adapter, "browser_planner", None):
+            return await _drive_generic(app, job, run_, trigger=trigger, pool=pool, planner=planner, llm=llm,
+                                        verifier=verifier, browser=browser, out=out, match=match,
+                                        confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations,
+                                        diagnostics=diagnostics, browser_adapter=True)
         if (match is None or match.capability != "unattended") and get_settings().apply_autonomous and browser is not None:
             return await _drive_generic(app, job, run_, trigger=trigger, pool=pool, planner=planner, llm=llm,
                                         verifier=verifier, browser=browser, out=out, match=match,
@@ -627,7 +657,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             live, _, _, _ = _check_boundary(run_, job, mode, trigger, reserved=True, confirmed_distinct=confirmed_distinct)
             if not apply_store.binding_active(request.attempt):
                 return ["Réservation ou approbation périmée : saisie annulée."]
-            if match and registry.find(job.origin_url, job.origin_ats) != match:
+            if match and _dispatch_match(job, mode) != match:
                 return ["Politique d’adaptateur périmée : saisie annulée."]
             if page.url != "about:blank" and (origin(page.url) != origin(started_origin)
                     or not clean_url(page.url, navigation=True)
@@ -860,7 +890,7 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
     browser = []
     try:
         try:
-            if own_pool and (mode != "submit" or _generic_enabled(job, check_host=False)):
+            if own_pool and (mode != "submit" or _generic_enabled(job, check_host=False) or _browser_adapter(job)):
                 pool = BrowserPool(headless=False if mode == "supervised" else headless)
             result = await _drive(app, job, run_, mode=mode, trigger=trigger, pool=pool, planner=planner,
                                   llm=shared_llm, verifier=verifier, out=returned, receipts=receipts,
@@ -1032,7 +1062,8 @@ async def _send_each(app_ids: list[int], *, headless, on_progress, pool, planner
                             on_progress(app_id, res)
                         continue
                 res = await run(app_id, mode="submit", trigger="user", headless=headless, _lock_held=True,
-                                **({"pool": shared.get(), "planner": planner, "llm": llm, "verifier": verifier} if generic else {}),
+                                **({"pool": shared.get(), "planner": planner, "llm": llm, "verifier": verifier}
+                                   if generic or _browser_adapter(live_job) else {}),
                                 expected_rev=None if expected_revs is None else expected_revs.get(app_id, -1),
                                 expected_origin=None if expected_origins is None else expected_origins.get(app_id, ""))
             except ApplyError:
@@ -1078,7 +1109,9 @@ async def reconcile_attempt(run_id: int, *, evidence: object = None) -> Receipt 
         if not outstanding or outstanding.id != run_id or not job or clean_url(job.origin_url, navigation=True) != attempt.url:
             return None
         match = registry.find(attempt.url, job.origin_ats)
-        if (not match or match.adapter.name != attempt.adapter or match.receipt_kind != attempt.receipt_kind
+        if (not match or match.adapter.name != attempt.adapter
+                or (match.receipt_kind != attempt.receipt_kind and
+                    getattr(match.adapter, 'supervised_receipt_kind', None) != attempt.receipt_kind)
                 or match.requisition.tenant != attempt.tenant
                 or match.requisition.requisition_id != attempt.requisition_id):
             return None
@@ -1379,7 +1412,8 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         return
     try:
         res = await run(app.id, mode="submit", trigger="auto", headless=None if generic else headless, _lock_held=True,
-                        **({"pool": pool.pool, "planner": planner, "verifier": verifier, "llm": llm.llm} if generic else {}))
+                        **({"pool": pool.pool, "planner": planner, "verifier": verifier, "llm": llm.llm}
+                           if generic or _browser_adapter(job) else {}))
     except (ApplyError, CVError) as e:
         summary.waiting += 1
         emit(f"{tag} : bloquée ({e})")

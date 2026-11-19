@@ -16,6 +16,7 @@ import html
 import os
 import random
 import re
+import secrets
 import time
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime
@@ -846,7 +847,16 @@ class _Run:
         seen: set[str] = set()
         clicks: list[tuple[FormField, str]] = []
         manual_refs = {question.ref for question in plan.unknown} if self.mode == "supervised" else set()
-        for field in snap.fields if self.mode != "supervised" or plan.page_kind == "form" else ():
+        for field in snap.fields:
+            if self.mode == "supervised" and self.supervised_widgets and field.form.startswith("0:") and field.destination:
+                selected = self._autonomous_decision(field)
+                if selected and selected[0] in {"eeo_opt_out", "eeo_race_ethnicity"}:
+                    code, index = selected
+                    seen.add(field.ref)
+                    v.items.append(_Item(Action(ref=field.ref, op="select"), field, option_index=index, used=code))
+                    continue
+            if self.mode == "supervised" and plan.page_kind != "form":
+                continue
             if self.autonomous:
                 selected = self._autonomous_decision(field)
                 if selected:
@@ -1354,6 +1364,8 @@ class _Run:
         if self.autonomous:
             try:
                 await self.autonomous.target(target)
+                if op == 'upload_cv' and hasattr(self.autonomous, 'upload_pending'):
+                    self.autonomous.upload_pending = True
             except ManualField:
                 raise
             except ApplyError:
@@ -1370,6 +1382,22 @@ class _Run:
         """Carry out one validated action. Returns the (redacted) value for the log; raises _Skip when it cannot be done."""
         a, f = it.act, it.field
         T = ACTION_TIMEOUT_MS
+        if self.supervised_widgets and f.kind == "combobox" and a.op == "select":
+            return await self._supervised_combobox(loc, f, it)
+        if it.used in {"eeo_opt_out", "eeo_race_ethnicity"}:
+            if self.autonomous:
+                nonce = self.autonomous.document_nonce
+            else:
+                nonce = secrets.token_urlsafe(24)
+                await self.page.evaluate("nonce => { document.__bp_autonomous_document = nonce; }", nonce, isolated_context=True)
+            await self._before_mutation(a.op, loc)
+            try:
+                applied = await apply_demographic_choice(loc, f, it.option_index, url=snap.url, nonce=nonce)
+            except Exception:
+                applied = False
+            if not applied:
+                raise _DecisionHold(self._end("blocked", "Une question ou sa sélection a changé : action annulée."))
+            return f.options[it.option_index].label
         if self.autonomous:
             if a.op == "upload_cv" and f.kind == "file":
                 await self._before_mutation(a.op, loc)
@@ -1382,21 +1410,9 @@ class _Run:
                 if a.op == "check":
                     self.consent_codes.add(it.used)
                 return "true" if a.op == "check" else "false"
-            if it.used in {"eeo_opt_out", "eeo_race_ethnicity"}:
-                await self._before_mutation(a.op, loc)
-                try:
-                    applied = await apply_demographic_choice(loc, f, it.option_index, url=snap.url,
-                                                            nonce=self.autonomous.document_nonce)
-                except Exception:
-                    applied = False
-                if not applied:
-                    raise _DecisionHold(self._end("blocked", "Une question ou sa sélection a changé : action annulée."))
-                return f.options[it.option_index].label
             if f.kind not in {"select", "text", "email", "tel", "url", "number", "date", "textarea", "password"}:
                 raise ManualField()
         if self.mode == "supervised":
-            if self.supervised_widgets and f.kind == "combobox" and a.op == "select":
-                return await self._supervised_combobox(loc, f, it)
             if a.op == "upload_cv" and f.kind == "file" and self.uploads.cv_bytes is not None:
                 await self._before_mutation(a.op, loc)
                 await loc.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": self.uploads.cv_bytes}, timeout=T)
@@ -1806,15 +1822,27 @@ class _Run:
             has_form = self._has_form(snap)
             if self.autonomous and self.nav_pending:
                 has_form = has_form or any(field.form and field.kind in FILLABLE for field in snap.fields)
-            if self.last_sent is not None and not self.last_sent.final and not has_form:
+            continuation = getattr(self.autonomous, 'continuation', None)
+            proven_continuation = bool(continuation and continuation(snap))
+            if self.last_sent is not None and not self.last_sent.final and not has_form and not proven_continuation:
                 self.final_clicked = True  # the form of a navigation click is gone: it may have been sent
             if snap.has_captcha:
                 await self._shot(log)
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if self.autonomous and self.final_awaiting:
                 trace = self.diagnostics
+                document_receipt = getattr(self.autonomous, 'document_receipt', None)
                 if not self.autonomous.final_response:
                     trace.receipt_reason = "no_final_response"
+                elif document_receipt:
+                    editable_form = any(field.form and field.kind in FILLABLE for field in snap.fields)
+                    kind = await document_receipt(self.page, snap,
+                                                  positive_text=not has_form and not editable_form and self._confirmed(snap, self.last_sent))
+                    if kind != 'none' and self.autonomous.receipt_settled():
+                        trace.receipt_kind = kind
+                        trace.receipt_reason = 'attested'
+                        return self._end('submitted', 'Candidature envoyée.')
+                    trace.receipt_reason = 'form_still_present' if has_form else 'no_confirmation'
                 elif self.autonomous.final_json and not (has_form and (
                         any(f.error for f in snap.fields) or await self._banner_error()
                         or {(_norm(_label(f)), f.kind) for f in snap.fields if f.kind in FILLABLE}
@@ -1841,7 +1869,8 @@ class _Run:
             # changes the message of the final (unconfirmed) result
             errors_seen = errors_seen or (has_form and any(f.error for f in snap.fields if f.kind not in ("button", "link"))) \
                 or await self._banner_error()
-            if has_form and self.nav_pending and not errors_seen and self._distinct_step(snap):
+            if self.nav_pending and not errors_seen and ((has_form and self._distinct_step(snap))
+                                                        or proven_continuation):
                 self.nav_pending = False
                 if self.autonomous:
                     await self.autonomous.after_click(self.page)
@@ -2379,6 +2408,9 @@ class _Run:
                         await recheck()
                         try:
                             await self.autonomous.target(target, button=True, final=final)
+                            if check_click := getattr(self.autonomous, 'check_click', None):
+                                await check_click(target, field, role, final)
+                                self.autonomous.recheck()
                             if final and self.on_submit_click is not None:
                                 await self.on_submit_click()
                                 self.diagnostics.receipt_reason = "submit_unverified"
@@ -2472,5 +2504,5 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     if diagnostics is not None:
         flow.diagnostics = diagnostics
     flow.attended_accounts = attended_accounts
-    flow.supervised_widgets = mode == "supervised" and supervised_widgets
+    flow.supervised_widgets = (mode == "supervised" or autonomous is not None) and supervised_widgets
     return await flow.run()

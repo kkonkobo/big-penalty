@@ -102,8 +102,9 @@ class SameTabConfirmation:
 
 
 class SmartRecruitersPlanner:
-    def __init__(self, url: str):
+    def __init__(self, url: str, adapter=None):
         self.url = url
+        self.adapter = adapter
 
     async def plan(self, snapshot: PageSnapshot, facts: FactSheet, **_context) -> StepPlan:
         if snapshot.has_captcha:
@@ -119,7 +120,7 @@ class SmartRecruitersPlanner:
         for field in snapshot.fields:
             label, name, group = map(_words, (field.label, field.name, field.group))
             if NOTICE.search(f"{label} {name} {group}"):
-                if field.kind not in {"button", "link"}:
+                if not self.adapter and field.kind not in {"button", "link"}:
                     manual.append(Question(ref=field.ref, label=field.label, kind=field.kind, required=field.required,
                                            reason="decision", category="consent"))
                 continue
@@ -157,19 +158,62 @@ class SmartRecruitersPlanner:
         repeated_history_facts = {action.fact for action in actions
                                   if sum(other.fact == action.fact for other in actions) > 1
                                   and re.search(r"\b(?:education|experience|formation)\b", _words(by_ref[action.ref].group))}
-        return StepPlan(page_kind="form", actions=[action for action in actions if action.fact not in repeated_history_facts],
-                        unknown=manual)
+        actions = [action for action in actions if action.fact not in repeated_history_facts]
+        if self.adapter:
+            controls = [(role, field) for field in snapshot.fields if field.kind in {'button', 'link'}
+                        for role in ('next', 'submit') if self.adapter.browser_control(
+                            snapshot.url, field.automation_id, field.label, role, role == 'submit')]
+            if len(controls) == 1:
+                role, field = controls[0]
+                actions.append(Action(ref=field.ref, op='click', click_role=role))
+        return StepPlan(page_kind="form", actions=actions, unknown=manual)
 
 
 class SmartRecruitersAdapter:
     name = "smartrecruiters"
-    capability: Literal["supervised"] = "supervised"
+    capability: Literal["unattended"] = "unattended"
     retry_rule: Literal["never"] = "never"
     boundaries: dict[Boundary, BoundaryPolicy] = {
         "account_creation": "forbidden", "login_otp": "forbidden", "import_profile": "forbidden",
-        "challenge": "pause_for_human", "cv_upload_parse": "auto", "field_entry": "auto", "draft_write": "pause_for_human",
-        "final_submit": "pause_for_human",
+        "challenge": "pause_for_human", "cv_upload_parse": "auto", "field_entry": "auto", "draft_write": "auto",
+        "final_submit": "auto",
     }
+
+    def browser_enrollable(self, url):
+        identity = _identity(url)
+        return bool(identity and identity[2] == 'publication')
+
+    def browser_planner(self, attempt):
+        return SmartRecruitersPlanner(attempt.url, self)
+
+    def browser_control(self, url, automation_id, label, role, final):
+        if not self.browser_enrollable(url):
+            return None
+        marker, text = automation_id.casefold(), _words(label)
+        if (final and role == 'submit' and marker in {'', 'submitbutton', 'submit-application'}
+                and text in {'submit application', 'send application', 'envoyer ma candidature', 'submit'}):
+            return 'final_submit'
+        if (not final and role == 'next' and marker in {'', 'nextbutton', 'continue-button'}
+                and text in {'next', 'continue', 'suivant', 'continuer'}):
+            return 'draft_write'
+        return None
+
+    def browser_receipt_url(self, attempt, url):
+        return _identity(url, confirmation=True) == (attempt.tenant, attempt.requisition_id, 'publication')
+
+    def browser_continuation(self, url, previous_url):
+        return url != previous_url and urlsplit(url).path.rstrip('/').endswith('/review')
+
+    def browser_native_post(self, source, target, boundary):
+        path = urlsplit(target).path.rstrip('/')
+        if boundary == 'final_submit':
+            return path.endswith(('/apply/submit', '/application/submit'))
+        return boundary == 'draft_write' and path.endswith(('/questions', '/review')) and source != target
+
+    async def browser_receipt(self, attempt, page, receipt_url, positive_text, posting):
+        if positive_text and (posting or self.browser_receipt_url(attempt, receipt_url)):
+            return 'first_party_confirmation'
+        return 'none'
 
     def matches(self, url: str, dom_markers: frozenset[str]) -> float:
         return 1.0 if self.resolve(url, dom_markers) else 0.0
@@ -196,8 +240,10 @@ class SmartRecruitersAdapter:
         tenant, requisition, _ = next(iter(targets)) if targets else direct
         guest = direct and direct[2] == "publication"
         return Requisition(tenant, requisition, (UPLOAD_ORIGIN,) if guest else (),
-                           endpoints=tuple(("cv_upload_parse", host + UPLOAD_PATH)
-                                           for host in dict.fromkeys((UPLOAD_ORIGIN, origin(source)))) if guest else (),
+                           endpoints=(*(("cv_upload_parse", host + UPLOAD_PATH)
+                                        for host in dict.fromkeys((UPLOAD_ORIGIN, origin(source)))),
+                                      ('draft_write', origin(source) + UPLOAD_PATH.removesuffix('/attachments') + '/draft'),
+                                      ('final_submit', origin(source) + UPLOAD_PATH.removesuffix('/attachments') + '/submit')) if guest else (),
                            read_origins=(STATIC_ORIGIN,) if direct else ())
 
     async def supervise(self, request, fill):

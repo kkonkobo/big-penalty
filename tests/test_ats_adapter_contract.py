@@ -16,6 +16,7 @@ from cv_fakes import save_confirmed
 from jobhunt import db
 from jobhunt.apply import scoped_choices, service, smartrecruiters, store
 from jobhunt.apply.adapters import Attempt, Dispatch, Receipt, Registry, Requisition, clean_receipt, registry as production_registry
+from jobhunt.apply.facts import save_answers
 from jobhunt.apply.snapshot import take_snapshot
 from jobhunt.apply.types import Fact, FactSheet, StepPlan
 from jobhunt.apply.workday import CandidateHomeEvidence, WorkdayAdapter, WorkdayPlanner
@@ -274,12 +275,11 @@ def workday_registry(server, monkeypatch):
     return registry
 
 
-def test_workday_production_registry_is_supervised():
+def test_workday_production_registry_enrolls_verified_tenants():
     match = production_registry.find(WORKDAY_POSTING, "careers_site")
-    assert match.capability == "supervised" and match.receipt_kind == "candidate_home_listing"
-    assert match.requisition == Requisition("demo.wd3.myworkdayjobs.com/external", "JR123",
-                                            ("https://demo.wd3.myworkdayjobs.com",), endpoints=(
-                                                ("cv_upload_parse", "https://demo.wd3.myworkdayjobs.com/wday/cxs/{tenant}/job/{requisition}/attachments"),))
+    assert match.capability == "unattended" and match.receipt_kind == "candidate_home_listing"
+    assert (match.requisition.tenant, match.requisition.requisition_id) == ("demo.wd3.myworkdayjobs.com/external", "JR123")
+    assert ("cv_upload_parse", "https://demo.wd3.myworkdayjobs.com/wday/cxs/{tenant}/job/{requisition}/attachments") in match.requisition.endpoints
     assert production_registry.find("https://wd5.myworkdaysite.com/recruiting/example/External/job/Stage_R12/apply", None)
     assert production_registry.find(WORKDAY_POSTING.replace("en-US", "fr-FR") + "/apply?utm_source=fixture", None) == match
     for url in (WORKDAY_POSTING.replace(".com/", ".com.fixture.test/"), WORKDAY_POSTING.replace("demo.wd3.", ""),
@@ -342,6 +342,29 @@ async def test_workday_planner_maps_synthetic_steps(server, page):
     await page.get_by_text("Continue to verification").click()
     assert (await plan()).page_kind == "email_verification" and not (await plan()).actions
     assert not server.posts
+
+
+@pytest.mark.parametrize("stored,expected", [("Black", "noir"), ("", "optout")])
+async def test_supervised_workday_ethnicity(stored, expected, workday_registry, server, page, profile, tmp_path, fast):
+    server.html["/workday-race"] = (
+        '<h1>Voluntary Disclosures</h1><form><label>Origine ethnique<select required>'
+        '<option value="">Choisir</option><option value="noir">Noire</option>'
+        '<option value="optout">Je ne souhaite pas répondre</option></select></label>'
+        '<label>I accept the privacy policy<input type="checkbox"></label><button>Save and Continue</button></form>')
+    master = save_confirmed(profile.id)
+    job = make_job(profile, url=server.url("workday-race"))
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+    save_answers(profile.id, {"race_ethnicity": stored})
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=FakePool(page)))
+    try:
+        await page.locator("aside").wait_for(timeout=60_000)
+        assert await page.locator("select").input_value() == expected
+        assert not await page.get_by_role("checkbox").is_checked()
+        assert not server.posts
+    finally:
+        await page.close()
+        await asyncio.wait_for(task, 60)
 
 
 @pytest.mark.parametrize("step", ["experience", "autosave", "auth", "otp", "foreign-upload"])
@@ -523,7 +546,7 @@ def test_smartrecruiters_production_registry_and_canonical_aliases():
     advert = "https://jobs.smartrecruiters.com/FIXTURECO/744000123456789-synthetic-role"
     branded = "https://careers.fixture.test/offers/synthetic-role"
     match = production_registry.find(SMART_URL, None)
-    assert match.capability == "supervised" and match.receipt_kind == "first_party_confirmation"
+    assert match.capability == "unattended" and match.receipt_kind == "first_party_confirmation"
     assert match.requisition.tenant == "fixtureco" and match.requisition.requisition_id == PUBLICATION
     assert production_registry.find(advert, None).requisition.requisition_id == "744000123456789"
     assert adapter.resolve(advert, frozenset({smartrecruiters.same_job_marker(advert, SMART_URL)})).requisition_id == PUBLICATION
