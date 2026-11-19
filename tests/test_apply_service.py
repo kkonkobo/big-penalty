@@ -51,7 +51,6 @@ def step1(snap):
 
 def step2(snap):
     return StepPlan(page_kind="form", actions=[act(snap, r"^CV", "upload_cv", kind="file"),
-                                               act(snap, r"confidentialité", "check", "consent_required"),
                                                act(snap, r"Envoyer", "click", role="submit")])
 
 

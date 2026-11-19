@@ -46,7 +46,7 @@ def test_facts_payload_accepts_preserialised_lists():
 
 def test_system_prompt_states_the_guardrails():
     flat = " ".join(SYSTEM.split())
-    for needle in ("`inferred: true`", "HARD FACTS", "never contradict a", "candidate_profile", "`today`", "upload_cv", "letter_text", "consent_required", "consent_optional",
+    for needle in ("`inferred: true`", "HARD FACTS", "never contradict a", "candidate_profile", "`today`", "upload_cv", "letter_text", "require an explicit user decision", "consent_optional",
                    "At most ONE click", "When unsure whether a button sends the application, say `submit`", "account_password"):
         assert needle in flat
 

@@ -21,7 +21,7 @@ from jobhunt.apply import accounts, facts, missing_answers, scoped_choices
 from jobhunt.apply import service as apply_service
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, international_calling_code, technical_key
+from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, decision_key, international_calling_code, technical_key
 from jobhunt.apply.service import QueueItem
 from jobhunt.apply.types import Question
 from jobhunt.config import get_settings
@@ -605,7 +605,7 @@ def answers_page(request: Request, pid: str, f: str | None = None):
             ctx["custom"] = [entry for entry in ctx["custom"] if facts.norm_question(entry["question"]) not in restricted]
             for item in resumable:
                 bound = {q.choice_binding: q for q in item.questions if _allows_bound_choice(q)}
-                if not bound or not item.origin_sha:
+                if not bound or not _choice_run_current(item.app, item.last_run, item.origin_sha):
                     continue
                 saved = scoped_choices.load(profile_id, item.app.id, item.app.current_rev, item.origin_sha)
                 choices.extend({"item": item, "question": question, "options": scoped_choices.labels(question),
@@ -627,7 +627,15 @@ STALE_ANSWER = "cette réponse a changé entre-temps"
 
 def _allows_bound_choice(question: Question) -> bool:
     return bool(question.choice_binding and question.kind in {"select", "radio"} and question.reason != "technical"
+                and question.category != "consent" and decision_key(question.label) != "consent"
                 and not technical_key(question.label, question.kind))
+
+
+def _choice_run_current(app, run, origin: str) -> bool:
+    return bool(app and run and run.result and not run.result.submit_clicked and run.status == "needs_input"
+                and app.status in {"draft", "approved"} and run.rev == app.current_rev
+                and (app.status != "approved" or (app.approved_rev == app.current_rev and app.approved_sha256))
+                and origin and run.origin_sha == origin and run.application_version == db._iso(app.updated_at))
 
 
 @router.post("/profiles/{pid}/answers/choice")
@@ -638,23 +646,29 @@ async def answers_choice(request: Request, pid: str):
     back = f"/profiles/{profile_id}/answers"
     form = await request.form()
     aid = safe_id(form.get("application_id"))
-    app = cvstore.get_application(aid) if aid is not None else None
-    run = apply_store.last_run(aid) if aid is not None else None
-    job = db.get_job(app.job_id) if app is not None else None
     origin = _origin_field(form)
     binding = str(form.get("binding") or "")
     token = str(form.get("choice") or "")
-    if not (app and app.profile_id == profile_id and app.status in {"draft", "approved"} and run and run.result
-            and run.status == "needs_input" and run.rev == app.current_rev and safe_id(form.get("run_id")) == run.id
-            and job and job.origin_url and origin == apply_service.origin_digest(job.origin_url)
-            and re.fullmatch(r"[0-9a-f]{64}", binding) and re.fullmatch(r"[0-9]{1,4}", token)):
-        return web._flash(back, error="Choix absent, invalide ou périmé. Vérifiez le formulaire.")
-    prompts = [q for q in run.result.questions if q.choice_binding == binding]
-    if not prompts or any(not _allows_bound_choice(q) or
-                          int(token) not in {index for index, _ in scoped_choices.labels(q)} for q in prompts):
-        return web._flash(back, error="Choix absent, invalide ou périmé. Vérifiez le formulaire.")
+    stale = "Choix absent, invalide ou périmé. Vérifiez le formulaire."
+    if aid is None or not re.fullmatch(r"[0-9a-f]{64}", binding) or not re.fullmatch(r"[0-9]{1,4}", token):
+        return web._flash(back, error=stale)
     try:
-        scoped_choices.save(profile_id, app.id, run.rev, origin, binding, int(token))
+        with facts.answers_lock(profile_id), db.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            app = cvstore.get_application(aid)
+            run = apply_store.last_run(aid)
+            job = db.get_job(app.job_id) if app else None
+            if (not _choice_run_current(app, run, origin) or app.profile_id != profile_id
+                    or safe_id(form.get("run_id")) != run.id or not job or job.profile_id != profile_id
+                    or not job.origin_url or origin != apply_service.origin_digest(job.origin_url)
+                    or apply_store.outstanding_attempt(aid) is not None):
+                return web._flash(back, error=stale)
+            prompts = [q for q in run.result.questions if q.choice_binding == binding]
+            if (not prompts or any(not _allows_bound_choice(q) or int(token) not in
+                                  {index for index, _ in scoped_choices.labels(q)} for q in prompts)):
+                return web._flash(back, error=stale)
+            if not scoped_choices.save_once(profile_id, app.id, run.rev, origin, binding, int(token)):
+                return web._flash(back, error="Un choix a déjà été confirmé pour ce formulaire. Aucun choix modifié.")
     except (ApplyError, OSError):
         return web._flash(back, error="Choix non enregistré.")
     return web._flash(back, notice="Choix confirmé pour ce formulaire. Aucun essai lancé.")

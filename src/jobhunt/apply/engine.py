@@ -38,8 +38,8 @@ step, before the first field interaction (a refusal = nothing entered), and is n
 unanswered-required-question check precedes every click that is final or post-data (only a pre-data cookies / open_form click and
 a real cookie-banner button are exempt), whatever role the planner gave it. `nav_pending`: from a recorded post-data navigation
 click until a snapshot shows a continuing form, every result carries `submit_clicked`.
-`inferred` is False only for answers code establishes (verbatim fact, strict date, option equal to the fact, code-accepted CV /
-privacy consent) or a `custom_*` fact confirmed by the verifier; every other accepted answer is recorded as inferred with a basis.
+`inferred` is False only for answers code establishes (verbatim fact, strict date, option equal to the fact, code-accepted CV,
+or an exact user-confirmed choice) or a `custom_*` fact confirmed by the verifier; other accepted answers carry an inference basis.
 
 RESIDUAL LIMIT (accepted by the owner): the real network egress of a trusted page (third-party scripts, redirects of the employer's
 own endpoint) is not enforced: legitimate ATS post to other domains. At most ONE final dispatch per run; a field error after a
@@ -83,7 +83,7 @@ from pydantic import BaseModel
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload
-from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code
+from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, live_button, take_snapshot
 from jobhunt.apply.types import (Action, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
@@ -289,7 +289,9 @@ _FORM_INFO_JS = r"""(e) => {
 _RADIOS_JS = r"""(els) => els.map((e) => {
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const label = (e.labels && e.labels.length ? clean(e.labels[0].textContent) : '') || (e.closest('label') ? clean(e.closest('label').textContent) : '')
-    || clean(e.nextSibling && e.nextSibling.nodeType === 3 ? e.nextSibling.textContent : '') || clean(e.getAttribute('aria-label')) || e.value;
+    || clean(e.nextSibling && e.nextSibling.nodeType === 3 ? e.nextSibling.textContent : '')
+    || clean((e.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => e.getRootNode().getElementById(id)?.textContent || '').join(' '))
+    || clean(e.getAttribute('aria-label'));
   return {value: e.value, label, checked: e.checked};
 })"""
 # the file input a styled upload button / label stands for: its label's control, a data target, or the only file input of a nearby container
@@ -451,6 +453,11 @@ class _Skip(Exception):
     """An action that cannot be carried out (short reason, never page content)."""
 
 
+class _DecisionHold(Exception):
+    def __init__(self, result: RunResult):
+        self.result = result
+
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", fold(s)).strip()
 
@@ -478,6 +485,8 @@ def _match_option(f: FormField, want: str | None) -> int:
 
 
 def _is_empty(f: FormField) -> bool:
+    if f.kind in {"radio", "select"} and f.choice_options:
+        return not f.selected
     return f.value in ("", "false") if f.kind == "checkbox" else not f.value.strip()
 
 
@@ -497,6 +506,23 @@ def _unlabeled(f: FormField) -> bool:
     return not f.label.strip() or _norm(f.label) == _norm(f.kind)
 
 
+CHOICE_KINDS = {"checkbox", "radio", "select", "combobox"}
+
+
+def _site_consent(f: FormField) -> bool:
+    return ("consent" in {decision_key(f.label), decision_key(f.group)}
+            or bool(PRIVACY_RE.search(fold(f"{f.label} {f.group} {f.name}").translate(_QUOTES))))
+
+
+def _choice_shape(f: FormField) -> tuple:
+    return (f.form, f.kind, f.name, f.label, f.wording, f.group, f.required, f.multiple, f.autocomplete,
+            f.destination, f.choice_destination, f.choice_options, f.options)
+
+
+def _choice_state(f: FormField) -> tuple:
+    return (_choice_shape(f), f.selected, f.value)
+
+
 def _secure_url(url: str, fallback: str = "") -> bool:
     """https, or http on loopback (tests). A blank / srcdoc frame inherits the page that holds it."""
     if url.startswith("about:") and fallback:
@@ -506,7 +532,7 @@ def _secure_url(url: str, fallback: str = "") -> bool:
 
 
 def _dial_selector(f: FormField, snap: PageSnapshot) -> bool:
-    """A phone dial-code selector (pre-selected "+33"): the only pre-selected required choice that is not a question."""
+    """Recognize a calling-code prompt, without assuming the current selection is correct."""
     if fact_key(_question(f)) == "phone_calling_code":
         return True
     if f.kind == "select" and f.options and 2 * sum(bool(DIAL_OPTION_RE.match(o.label)) for o in f.options) >= len(f.options):
@@ -574,7 +600,6 @@ class _Run:
         self.nav_pending = False    # a recorded post-data navigation click whose outcome no snapshot has shown yet
         self.final_awaiting = False  # a final click was dispatched and its receipt (or rejection) is not known yet
         self.gated_step = 0         # step whose before_submit() already ran
-        self.chosen: set[tuple[str, str]] = set()  # (label, kind) of every choice the engine itself made in this run
         self.pending: _Sent | None = None   # the click just made, evaluated on the next snapshot
         self.last_sent: _Sent | None = None
         self.opened: list[Page] = []
@@ -619,7 +644,13 @@ class _Run:
         """The snapshot as the planner may see it (secrets masked) and whether anything had to be masked."""
         pub = snap.model_copy(deep=True)
         self._scrub(pub)
-        return pub, bool(self.secrets) and pub.model_dump_json() != snap.model_dump_json()
+        masked = bool(self.secrets) and pub.model_dump_json() != snap.model_dump_json()
+        for field in pub.fields:
+            if technical_key(field.label, field.kind, group=field.group, autocomplete=field.autocomplete) == "credentials":
+                field.value = SECRET_LOG if field.value else ""
+            field.destination = field.choice_destination = None
+            field.choice_options = []
+        return pub, masked
 
     def _frame_url(self, resolve: Resolver, ref: str) -> str:
         fn = getattr(resolve, "frame_url", None)
@@ -704,7 +735,8 @@ class _Run:
                 for field in snapshot.fields:
                     question = _question(field)
                     self.questions_by_ref[field.ref] = question
-                    if question.reason == "technical" or question.category == "ambiguous_country" or not field.form.startswith("0:"):
+                    if (question.reason == "technical" or question.category == "ambiguous_country"
+                            or not field.form.startswith("0:") or _dial_selector(field, snapshot) or _site_consent(field)):
                         continue
                     binding = field_choices(self.page.url, field)
                     if binding:
@@ -870,6 +902,9 @@ class _Run:
             v.click = clicks[-1]
             if len(clicks) > 1:
                 v.notes.append("plusieurs clics proposés : seul le dernier est conservé")
+        v.items = [item for item in v.items if item.used != "confirmed_form_choice" or (
+            v.click and v.click[0].native_submit and v.click[0].form == item.field.form
+            and v.click[0].destination == item.field.choice_destination)]
         return v
 
     @staticmethod
@@ -902,7 +937,98 @@ class _Run:
         code = international_calling_code(fact.value or "")
         matches = [index for index, option in enumerate(f.options)
                    if re.findall(r"\+\s*[0-9]+", option.label) == [code]] if code else []
-        return matches[0] if len(matches) == 1 else -1
+        if not fact.exact or len(matches) != 1:
+            return -1
+        option = f.options[matches[0]]
+        if f.choice_options and sum(value == option.value or code in re.findall(r"\+\s*[0-9]+", label)
+                                    for value, label, _, _ in f.choice_options) != 1:
+            return -1
+        return matches[0]
+
+    def _confirmed_dial_selection(self, field: FormField, snap: PageSnapshot) -> bool:
+        phone = self.facts.get("phone")
+        if not phone or field.kind != "select" or field.multiple or not _dial_selector(field, snap):
+            return False
+        index = self._dial_option(field, phone)
+        return index >= 0 and self._selection_matches(field, field.options[index])
+
+    @staticmethod
+    def _selection_matches(field: FormField, option) -> bool:
+        if field.kind == "combobox":
+            return field.value == option.label
+        if len(field.selected) != 1:
+            return False
+        value, label, disabled, _ = field.choice_options[field.selected[0]]
+        return not disabled and (value, label) == (option.value, option.label)
+
+    def _open_decision(self, field: FormField, snap: PageSnapshot) -> bool:
+        active = not _is_empty(field)
+        if field.kind not in CHOICE_KINDS:
+            return (field.kind != "password" and _question(field).category == "credentials"
+                    and (field.required or active))
+        if _site_consent(field):
+            return field.required or active
+        if not active:
+            return field.required and (decision_key(field.label) or decision_key(field.group)) not in (
+                None, "ambiguous_country", "work_authorization_review") \
+                and fact_key(_question(field)) != "needs_visa_sponsorship"
+        return not self._confirmed_dial_selection(field, snap)
+
+    @staticmethod
+    def _in_scope(field: FormField, target: FormField) -> bool:
+        return not target.form or not field.form or field.form == target.form
+
+    async def _live_decisions(self, snap: PageSnapshot, target: FormField, approved: dict[str, tuple], *,
+                              pending: set[str] = frozenset(), applying: _Item | None = None) -> None:
+        """Read the whole live decision scope without retagging the original dispatch target."""
+        fresh, _ = await take_snapshot(self.page, read_only=True)
+        current = next((field for field in fresh.fields if field.live_ref == target.ref), None)
+        if (fresh.url != snap.url or fresh.has_captcha or current is None or current.form != target.form
+                or current.kind != target.kind or current.destination != target.destination or current.native_submit != target.native_submit
+                or current.name != target.name or current.label != target.label or current.wording != target.wording
+                or current.group != target.group or current.autocomplete != target.autocomplete):
+            raise _DecisionHold(self._end("blocked", "Le formulaire a changé depuis la lecture : action annulée."))
+        if applying and applying.used == "confirmed_form_choice":
+            entry = self.choice_fields.get(target.ref)
+            if (not entry or field_choices(fresh.url, current) != entry[1:]
+                    or self.choices.get(entry[1]) != applying.option_index
+                    or sum(field_choices(fresh.url, field) == entry[1:] for field in fresh.fields) != 1):
+                raise _DecisionHold(self._end("blocked", "Le choix confirmé ne correspond plus au formulaire : action annulée."))
+        originals = {field.ref: field for field in snap.fields}
+        questions = []
+        live_refs = {field.live_ref for field in fresh.fields if self._in_scope(field, current)}
+        if any(field.ref not in live_refs and self._in_scope(field, target) and field.kind in CHOICE_KINDS
+               and (field.required or field.ref in approved or not _is_empty(field)) for field in snap.fields):
+            raise _DecisionHold(self._end("blocked", "Une question n’est plus accessible : action annulée."))
+        for field in fresh.fields:
+            if not self._in_scope(field, current):
+                continue
+            original = originals.get(field.live_ref)
+            if field.kind in CHOICE_KINDS:
+                expected = approved.get(field.live_ref)
+                if expected is not None and expected == _choice_state(field):
+                    continue
+                if ((original and _choice_state(original) != _choice_state(field)) or expected is not None
+                        or (not original and (field.required or not _is_empty(field)))):
+                    raise _DecisionHold(self._end("blocked", "Une question ou sa sélection a changé : action annulée."))
+            awaiting_action = field.live_ref in pending and (_is_empty(field) or field.live_ref == current.live_ref)
+            if not awaiting_action and self._open_decision(field, fresh):
+                questions.append(_question(original) if original else _question(field).model_copy(update={"ref": ""}))
+        if questions:
+            raise _DecisionHold(self._end("needs_input", "Décisions à vérifier avant de continuer.", questions))
+
+    async def _record_choice(self, snap: PageSnapshot, item: _Item, shown: str, approved: dict[str, tuple]) -> None:
+        field = item.field
+        if field.kind not in CHOICE_KINDS:
+            return
+        fresh, _ = await take_snapshot(self.page, read_only=True)
+        current = next((entry for entry in fresh.fields if entry.live_ref == field.ref), None)
+        if (fresh.url != snap.url or current is None or _choice_shape(current) != _choice_shape(field)
+                or (field.kind == "checkbox" and current.value != shown)
+                or (field.kind in {"select", "radio"} and not self._selection_matches(current, field.options[item.option_index]))
+                or (field.kind == "combobox" and current.value != shown)):
+            raise _DecisionHold(self._end("blocked", "La sélection appliquée n’a pas pu être vérifiée : action annulée."))
+        approved[field.ref] = _choice_state(current)
 
     @staticmethod
     def _cv_by_code(f: FormField, snap: PageSnapshot) -> bool:
@@ -916,6 +1042,9 @@ class _Run:
     def _check(self, a: Action, f: FormField, v: _Validated, snap: PageSnapshot, resolve: Resolver | None) -> _Item | None:
         drop = lambda why, ask=True: self._drop(v, f, why, ask)  # noqa: E731
         op, k = a.op, f.kind
+        if _question(f).category == "credentials" and k != "password":
+            return drop("mot de passe et champ incompatibles" if a.fact == "account_password"
+                        else "identifiant technique à saisir sur le site")
         if op in ("upload_cv", "upload_letter"):
             if k == "file" and self._file_satisfied(f, snap):
                 return drop("fichier déjà déposé dans cette candidature", ask=False)
@@ -943,6 +1072,10 @@ class _Run:
         exact_key = fact_key(_question(f))
         dial = k in ("select", "combobox") and _dial_selector(f, snap)
         choice = decision_key(f.label) or decision_key(f.group)
+        if k in CHOICE_KINDS and _unlabeled(f):
+            return drop("case ou liste sans libellé lisible : jamais cochée ni choisie")
+        if a.fact == "consent_required" or (k in CHOICE_KINDS and _site_consent(f)):
+            return drop("consentement à donner sur le site")
         if choice and exact_key not in {"work_authorization", "needs_visa_sponsorship"} and not (
                 choice == "ambiguous_country" and (dial or exact_key == "country")):
             return drop("décision à confirmer sur le site")
@@ -974,8 +1107,6 @@ class _Run:
                 return drop("mot de passe et champ incompatibles")
         elif (k == "password") != fact.secret:
             return drop("mot de passe et champ incompatibles")
-        if op in ("select", "check", "uncheck") and k in ("checkbox", "radio", "select") and _unlabeled(f):
-            return drop("case ou liste sans libellé lisible : jamais cochée ni choisie")
         if fact is not None and fact.secret:
             frame_url = self._frame_url(resolve, f.ref) if resolve else self.page.url
             if self.mode == "dry_run":
@@ -1007,9 +1138,6 @@ class _Run:
         if op in ("check", "uncheck"):
             if op == "check" and not f.required and ((fact is not None and fact.key == "consent_optional") or MARKETING_RE.search(f.label)):
                 return drop("case facultative non cochée")
-            if op == "check" and fact is not None and fact.key == "consent_required" \
-                    and PRIVACY_RE.search(fold(f"{f.label} {f.name}").translate(_QUOTES)):
-                return item  # required privacy / terms box: accepted by code
             return need_verdict("true" if op == "check" else "false", False)
         if fact is not None and fact.key == "phone" and dial:
             item.option_index = self._dial_option(f, fact)  # the code of the candidate's own phone decides, not the planner's text
@@ -1223,6 +1351,8 @@ class _Run:
             try:
                 await tgt.check(timeout=T)
             except Exception:
+                if it.used == "confirmed_form_choice":
+                    raise
                 await tgt.check(force=True, timeout=T)
             after = [r for r in await loc.evaluate_all(_RADIOS_JS) if r["checked"]]
             if len(after) != 1 or _norm(after[0]["label"]) != _norm(want.label) or (want.value and after[0]["value"] != want.value):
@@ -1239,6 +1369,8 @@ class _Run:
             await loc.select_option(value=o.value, timeout=T) if o.value else await loc.select_option(label=o.label, timeout=T)
             shown = str(await loc.evaluate("e => { const o = e.selectedOptions[0]; return o ? (o.label || o.textContent).trim() : ''; }") or "")
             if _norm(shown) != _norm(o.label):  # read back what the control really holds: log THAT, and never keep another choice
+                if it.used == "confirmed_form_choice":
+                    raise _Dirty("la sélection confirmée n’a pas été retenue")
                 with contextlib.suppress(Exception):
                     await loc.evaluate("e => { e.selectedIndex = -1; e.dispatchEvent(new Event('change', {bubbles: true})); }")
                 raise _Skip("valeur lue différente de la réponse validée")
@@ -1358,7 +1490,7 @@ class _Run:
         except Exception:
             return False
 
-    async def _click(self, target: ElementHandle | Locator) -> None:
+    async def _click(self, target: ElementHandle | Locator, *, recheck=None) -> None:
         """Activate the exact element EXACTLY ONCE. Actionability is learnt with non-dispatching trials (retried after scrolling
         into view); the dispatch is then one normal click (trial passed) or, when the element stays covered, one `e.click()`.
         A dispatch that raises is never retried: it may have fired -> `_Dispatched`."""
@@ -1372,6 +1504,8 @@ class _Run:
             with contextlib.suppress(Exception):
                 await el.evaluate("e => e.scrollIntoView({block: 'center', inline: 'center'})")
             ok = await _Run._trial(el, ACTION_TIMEOUT_MS // 2)
+        if recheck is not None:
+            await recheck()
         try:
             if ok:
                 await el.click(timeout=ACTION_TIMEOUT_MS)
@@ -1746,6 +1880,7 @@ class _Run:
                 if bad is not None:
                     return bad
             handled: set[str] = set()
+            approved_choices: dict[str, tuple] = {}
             # Many ATS parse the uploaded CV and re-render (and pre-fill) the form: every other ref of this snapshot would
             # be stale. So a step that uploads AND fills does the uploads alone first, then the page is read again. Once per
             # page URL, so a form that keeps asking for the file cannot loop.
@@ -1761,13 +1896,23 @@ class _Run:
                 if bad is not None:
                     return bad
             dirty = False
+            pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
             for it in v.items:
+                try:
+                    await self._live_decisions(snap, it.field, approved_choices, pending=pending_choices, applying=it)
+                except _DecisionHold as hold:
+                    return hold.result
+                except Exception:
+                    return self._end("blocked", "Impossible de vérifier les décisions du formulaire.")
+                pending_choices.discard(it.field.ref)
                 self.touched = True  # (before the action: a handler may react while it runs; also closes the dry-run guard)
                 if plan.page_kind not in ACCOUNT_KINDS and not (it.fact and (it.fact.secret or it.fact.key.startswith("account_"))):
                     self.app_touched = True
                 try:
                     shown = await self._execute(it, resolve(it.field.ref), snap, log)
                 except _Skip as e:
+                    if it.used == "confirmed_form_choice":
+                        return self._end("blocked", "Le choix confirmé n’a pas pu être appliqué : action annulée.")
                     v.notes.append(f"{_label(it.field)} : {e}")
                     if it.field.required:
                         v.questions.append(_question(it.field))
@@ -1776,12 +1921,16 @@ class _Run:
                         v.upload_refs.add(it.field.ref)
                     shown = None
                 except _Dirty as e:
+                    if it.used == "confirmed_form_choice":
+                        return self._end("blocked", "Le choix confirmé n’a pas pu être vérifié : action annulée.")
                     v.notes.append(f"{_label(it.field)} : {e}")
                     dirty = True
                     if not any(q.ref == it.field.ref for q in v.questions):
                         v.questions.append(_question(it.field))
                     shown = None
                 except Exception as e:
+                    if it.used == "confirmed_form_choice":
+                        return self._end("blocked", "Le choix confirmé n’a pas pu être appliqué : action annulée.")
                     v.notes.append(f"{_label(it.field)} : échec ({type(e).__name__})")
                     if it.field.required:
                         v.questions.append(_question(it.field))
@@ -1790,10 +1939,15 @@ class _Run:
                         v.upload_refs.add(it.field.ref)
                     shown = None
                 if shown is not None:
+                    try:
+                        await self._record_choice(snap, it, shown, approved_choices)
+                    except _DecisionHold as hold:
+                        return hold.result
+                    except Exception:
+                        return self._end("blocked", "Impossible de vérifier la sélection appliquée.")
                     if it.act.op in ("upload_cv", "upload_letter"):
                         self.uploaded_files.append((self._host(), _norm(_label(it.field)), fold(Path(shown).stem)))
                     handled.add(it.field.ref)
-                    self.chosen.add((_norm(_label(it.field)), it.field.kind))
                     log.filled.append(FilledField(label=self._r(_label(it.field)), op=it.act.op, fact=it.used or it.act.fact,
                                                   value="Choix confirmé" if it.used == "confirmed_form_choice" else self._r(shown),
                                                   inferred=it.inferred, basis=self._r(it.basis)))
@@ -1854,6 +2008,10 @@ class _Run:
             # required questions are checked first. Only a pre-data cookies / open_form click is exempt.
             cookie_banner = bool(v.click) and self._is_cookie_click(v.click[0], role) and not final  # a real banner button, by its label
             guarded = v.click is None or role in GUARDED or final or (post_data and not cookie_banner)
+            if self.mode == "submit" and v.click and (post_data or final):
+                bad = await self._dest_result(resolve, [], v.click[0])
+                if bad is not None:
+                    return bad
             if guarded:
                 questions = list(v.questions)
                 questions += [q for q in plan.unknown if q.required]
@@ -1864,12 +2022,7 @@ class _Run:
                 questions += [_question(f) for f in mine if f.required and f.kind not in ("button", "link")
                               and f.ref not in handled and _is_empty(f) and not (self.mode == "dry_run" and f.kind == "password")
                               and not self._file_satisfied(f, snap)]
-                questions += [_question(f) for f in mine if f.required and f.kind in ("select", "radio") and f.value.strip()
-                              and f.ref not in handled and (_norm(_label(f)), f.kind) not in self.chosen
-                              and not _dial_selector(f, snap)]  # pre-selected: not ours (dial codes excepted)
-                questions += [_question(f) for f in mine if f.kind in ("checkbox", "select", "radio", "combobox") and f.ref not in handled
-                              and not _is_empty(f) and (decision_key(f.label) or decision_key(f.group)) in {
-                                  "ai_opt_in", "ai_opt_out", "ai_review", "marketing", "recruiting", "former_employer", "conflict"}]
+                questions += [_question(f) for f in mine if f.ref not in handled and self._open_decision(f, snap)]
                 seen: set[str] = set()
                 uniq = []
                 for q in questions:
@@ -1905,10 +2058,13 @@ class _Run:
                     log.note = self._r(f"{log.note}; formulaire déjà rempli sur le site : clic refusé")[:900]
                     return self._end("ready", f"Formulaire déjà rempli sur le site : le clic « {field.label[:60]} » n'a pas été effectué, "
                                               "rien n'a été envoyé (simulation).")
-            if post_data or final:  # destination binding again, right before any click made after data entry (or a final one)
-                bad = await self._dest_result(resolve, [], field)
-                if bad is not None:
-                    return bad
+                if post_data or final:
+                    bad = await self._dest_result(resolve, [], field)
+                    if bad is not None:
+                        return bad
+            if planned == "cookies" and re.search(r"\b(?:accepter|accepte|accept|agree|allow|autoriser)\b", _norm(field.label)) \
+                    and not re.search(r"\b(?:sans|without|refuser|reject)\b", _norm(field.label)):
+                return self._end("needs_input", "Préférences de cookies à confirmer sur le site.")
             if self.mode == "submit" and (final or post_data):
                 # EVERY click after candidate data was entered (account pages, cookie buttons, "Continuer"...) may send it
                 if final and self.submit_clicks >= MAX_SUBMIT_CLICKS:
@@ -1920,6 +2076,22 @@ class _Run:
             if not await self._same_target(target, field):
                 log.note = f"{log.note}; « {field.label[:40]} » a changé depuis la lecture : clic annulé"
                 continue
+            async def recheck():
+                try:
+                    if _site_consent(field):
+                        raise _DecisionHold(self._end("needs_input", "Consentement à donner sur le site."))
+                    await self._live_decisions(snap, field, approved_choices)
+                except _DecisionHold:
+                    raise
+                except Exception:
+                    raise _DecisionHold(self._end("blocked", "Impossible de vérifier les décisions du formulaire.")) from None
+
+            recheck_click = guarded or attach or post_data or bool(info and info.get("submit"))
+            if recheck_click:
+                try:
+                    await recheck()
+                except _DecisionHold as hold:
+                    return hold.result
             before = (self.final_clicked, self.submit_clicks, self.nav_pending, self.pending, self.last_sent, self.nav_ref, self.final_awaiting)
             if final:
                 try:
@@ -1969,7 +2141,13 @@ class _Run:
                 with contextlib.suppress(Exception):
                     self.login_unknown_try = not self.account_known(self._host())
             try:
-                await self._click(target)  # type: ignore[arg-type]
+                if recheck_click:
+                    await self._click(target, recheck=recheck)  # type: ignore[arg-type]
+                else:
+                    await self._click(target)  # type: ignore[arg-type]
+            except _DecisionHold as hold:
+                log.clicked = ""
+                return hold.result
             except _Dispatched as e:  # the click may have fired: after data / final it is "possibly sent", never retried
                 if self.mode == "submit" and (final or post_data):
                     return self._unconfirmed()

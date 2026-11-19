@@ -30,17 +30,17 @@ MAX_TEXT = 4000
 Resolver = Callable[[str], Locator]  # the returned object also has `.frame_url(ref)` (URL of the frame holding the element)
 
 _JS = r"""
-(start) => {
+([start, readOnly]) => {
   // refs -> the very elements tagged below (a page script may clone an element WITH its attributes: the attribute alone
   // cannot tell the original from its clone, this registry can)
   const reg = {};
-  Object.defineProperty(window, '__bpEls', {value: reg, configurable: true, writable: true});
-  const tagRef = (el, ref) => { el.setAttribute('data-bp-ref', ref); reg[ref] = el; };
+  if (!readOnly) Object.defineProperty(window, '__bpEls', {value: reg, configurable: true, writable: true});
+  const tagRef = (el, ref) => { if (!readOnly) { el.setAttribute('data-bp-ref', ref); reg[ref] ??= el; } };
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const els = [];
   const walk = (root) => {
     for (const el of root.querySelectorAll('*')) {
-      if (el.hasAttribute('data-bp-ref')) el.removeAttribute('data-bp-ref');
+      if (!readOnly && el.hasAttribute('data-bp-ref')) el.removeAttribute('data-bp-ref');
       els.push(el);
       if (el.shadowRoot) walk(el.shadowRoot);
     }
@@ -119,7 +119,7 @@ _JS = r"""
     if (!r || !r.host || r.querySelectorAll('input,select,textarea').length !== 1) return '';
     return clean(r.host.getAttribute('aria-label')) || clean(r.host.getAttribute('label'));
   };
-  const labelOf = (el) => {
+  const labelOf = (el, allowName = true) => {
     let t = '';
     if (el.labels && el.labels.length) t = clean([...el.labels].map(textOf).join(' '));
     if (!t && el.id) {
@@ -134,7 +134,7 @@ _JS = r"""
     if (!t) t = legendOf(el);
     if (!t) t = preceding(el);
     if (!t) t = clean(el.getAttribute('placeholder'));
-    if (!t) t = el.getAttribute('name') || '';
+    if (!t && allowName) t = el.getAttribute('name') || '';
     return t;
   };
   const errorOf = (el) => {
@@ -211,13 +211,57 @@ _JS = r"""
     if (!forms.has(fm)) forms.set(fm, forms.size);
     return String(forms.get(fm));
   };
-  const base = (ref, kind, el) => ({ref, kind, label: '', name: el.getAttribute('name') || '', placeholder: el.getAttribute('placeholder') || '',
-    required: false, options: [], value: '', accept: '', group: '', error: '', prio: false, form: formKey(el)});
+  const formDestination = (form, submitter = null) => {
+    if (!form) return null;
+    const actionOverride = submitter && submitter.getAttribute('formaction');
+    const methodOverride = submitter && submitter.getAttribute('formmethod');
+    const action = actionOverride ?? form.getAttribute('action');
+    const method = (methodOverride ?? form.getAttribute('method') ?? '').toLowerCase();
+    try {
+      const url = new URL(action || document.URL, document.baseURI);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || method === 'dialog') return null;
+      return [url.href, method === 'post' ? 'POST' : 'GET'];
+    } catch (_) { return null; }
+  };
+  const isSubmitter = (el) => (el.tagName === 'BUTTON' && el.type === 'submit')
+    || (el.tagName === 'INPUT' && ['submit', 'image'].includes(el.type));
+  const formDestinations = new Map();
+  const choiceDestination = (form) => {
+    if (!form) return null;
+    if (!formDestinations.has(form)) {
+      const dest = formDestination(form);
+      const alternatives = els.filter(el => el.form === form && isSubmitter(el) && !el.matches(':disabled'));
+      formDestinations.set(form, alternatives.every(el => JSON.stringify(formDestination(form, el)) === JSON.stringify(dest)) ? dest : null);
+    }
+    return formDestinations.get(form);
+  };
+  const base = (ref, kind, el) => {
+    const oldRef = el.getAttribute('data-bp-ref');
+    let destination = formDestination(el.form, isSubmitter(el) ? el : null);
+    if (kind === 'link') {
+      try { destination = [new URL(el.getAttribute('href'), document.baseURI).href, 'GET']; }
+      catch (_) { destination = null; }
+    }
+    return {ref, kind, label: '', name: el.getAttribute('name') || '', placeholder: el.getAttribute('placeholder') || '',
+      required: false, options: [], value: '', accept: '', group: '', error: '', prio: false, form: formKey(el),
+      autocomplete: el.getAttribute('autocomplete') || '', destination, native_submit: !!el.form && isSubmitter(el),
+      choice_destination: ['select', 'radio', 'checkbox', 'combobox'].includes(kind) ? choiceDestination(el.form) : null,
+      live_ref: readOnly && oldRef && (window.__bpEls || {})[oldRef] === el ? oldRef : ''};
+  };
   const groupOf = (el) => {
     let t = legendOf(el);
-    if (!t) { const s = el.closest('section,[role=group]'); const h = s && s.querySelector('h1,h2,h3,h4'); if (h) t = clean(h.textContent); }
+    if (!t) {
+      const section = el.closest('section,[role=group],[role=radiogroup]');
+      const heading = section && section.querySelector('h1,h2,h3,h4');
+      if (section) t = idsText(section, 'aria-labelledby') || clean(section.getAttribute('aria-label'));
+      if (!t && heading) t = clean(heading.textContent);
+    }
     return t;
   };
+  const radioLabel = (el) => (el.labels && el.labels.length ? textOf(el.labels[0]) : '')
+    || (el.closest('label') ? textOf(el.closest('label')) : '')
+    || clean(el.nextSibling && el.nextSibling.nodeType === 3 ? el.nextSibling.textContent : '')
+    || idsText(el, 'aria-labelledby') || clean(el.getAttribute('aria-label'));
 
   for (const el of els) {
     const kind = kindOf(el);
@@ -232,23 +276,29 @@ _JS = r"""
       // not rendered (a form in a closed tab on the ad page): it cannot be used yet and would make the ad look like a form.
       if (!fileUsable(el)) continue;
     } else if (kind === 'checkbox' || kind === 'radio') {
-      if (!vis(el) && !(el.labels && [...el.labels].some(vis)) && !(el.nextElementSibling && vis(el.nextElementSibling))) continue;
-    } else if (!vis(el)) continue;
+      if (!vis(el) && !(el.labels && [...el.labels].some(vis)) && !(el.nextElementSibling && vis(el.nextElementSibling))
+          && !(readOnly && el.form && (el.checked || el.required))) continue;
+    } else if (!vis(el) && !(readOnly && kind === 'select' && el.form && (el.value || el.required))) continue;
 
     if (kind === 'radio') {
       const fi = el.form ? (forms.has(el.form) ? forms.get(el.form) : (forms.set(el.form, forms.size), forms.size - 1)) : -1;
       const key = el.name ? fi + '|' + el.name : 'solo' + (n + 1) + out.length;
-      const lab = (el.labels && el.labels.length ? textOf(el.labels[0]) : '')
-        || (el.closest('label') ? textOf(el.closest('label')) : '')
-        || clean(el.nextSibling && el.nextSibling.nodeType === 3 ? el.nextSibling.textContent : '')
-        || clean(el.getAttribute('aria-label')) || el.value;
+      const lab = radioLabel(el);
       let g = groups.get(key);
       if (!g) {
-        const rg = el.closest('[role=radiogroup],[role=group]');
-        let raw = legendOf(el) || (rg ? (idsText(rg, 'aria-labelledby') || clean(rg.getAttribute('aria-label'))) : '')
-          || preceding(el.closest('label') || el) || el.name || '';
+        const questionOf = (member) => {
+          const rg = member.closest('[role=radiogroup],[role=group]');
+          return legendOf(member) || (rg ? (idsText(rg, 'aria-labelledby') || clean(rg.getAttribute('aria-label'))) : '')
+            || preceding(member.closest('label') || member) || '';
+        };
+        const raw = questionOf(el);
         g = base('f' + (++n), 'radio', el);
-        g.label = tidy(raw); g.required = reqOf(el, raw); g.group = groupOf(el); g.error = errorOf(el);
+        g.label = tidy(raw); g.wording = raw; g.required = reqOf(el, raw); g.group = groupOf(el); g.error = errorOf(el);
+        const members = el.name ? els.filter(member => member.type === 'radio' && member.name === el.name
+            && member.form === el.form && member.getRootNode() === el.getRootNode()) : [el];
+        g.choice_options = members.map(member => [member.value, radioLabel(member), member.matches(':disabled')
+          || member.getAttribute('aria-disabled') === 'true', groupOf(member)]);
+        g.selected = members.flatMap((member, index) => member.checked ? [index] : []);
         groups.set(key, g); out.push(g);
       }
       if (el.required) g.required = true;
@@ -301,9 +351,13 @@ _JS = r"""
 
     const f = base('f' + (++n), kind, el);
     const raw = labelOf(el);
-    f.label = tidy(raw); f.required = reqOf(el, raw); f.group = groupOf(el); f.error = errorOf(el);
+    f.label = tidy(raw); f.wording = kind === 'select' ? labelOf(el, false) : raw;
+    f.required = reqOf(el, raw); f.group = groupOf(el); f.error = errorOf(el);
     if (kind === 'select') {
       f.multiple = el.multiple;
+      f.choice_options = [...el.options].map(o => [o.value, clean(o.label || o.textContent),
+        o.matches(':disabled'), o.closest('optgroup')?.label || '']);
+      f.selected = [...el.selectedOptions].filter(o => o.value !== '').map(o => o.index);
       f.options = [...el.options].filter((o) => o.value !== '' && !o.disabled && !o.closest('optgroup[disabled]'))
         .map((o) => ({value: o.value, label: clean(o.label || o.textContent)}));
       const s = el.selectedOptions[0];
@@ -511,7 +565,7 @@ async def live_button(target: Locator | ElementHandle) -> tuple[str, bool, bool]
         return None
 
 
-async def take_snapshot(page: Page) -> tuple[PageSnapshot, Resolver]:
+async def take_snapshot(page: Page, *, read_only: bool = False) -> tuple[PageSnapshot, Resolver]:
     """Snapshot of the page (all frames) + `resolve(ref) -> Locator`. Refs are valid until the next snapshot."""
     fields: list[FormField] = []
     texts: list[str] = []
@@ -523,8 +577,10 @@ async def take_snapshot(page: Page) -> tuple[PageSnapshot, Resolver]:
         if frame.is_detached() or not await _frame_shown(frame, page):
             continue
         try:
-            res = await frame.evaluate(_JS, start)
+            res = await frame.evaluate(_JS, [start, read_only])
         except Exception:  # frame navigated / cross-process hiccup: skip it, the engine re-snapshots
+            if read_only:
+                raise
             continue
         start = res["next"]
         for d in res["fields"]:
@@ -537,7 +593,8 @@ async def take_snapshot(page: Page) -> tuple[PageSnapshot, Resolver]:
         if res["text"]:
             texts.append(res["text"])
         captcha = captcha or res["captcha"]
-    fields = _cap(fields, prio)
+    if not read_only:
+        fields = _cap(fields, prio)
     try:
         title = await page.title()
     except Exception:

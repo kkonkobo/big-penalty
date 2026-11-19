@@ -30,9 +30,9 @@ async def test_form_fields_labels_required_options(page, server):
     cv = next(f for f in snap.fields if f.kind == "file")
     assert cv.label == "Curriculum vitae (PDF)" and cv.required and cv.accept == ".pdf"  # hidden input still listed
     boxes = {f.label: f for f in snap.fields if f.kind == "checkbox"}
-    rgpd = boxes["J'accepte le traitement de mes données personnelles (RGPD)"]
+    availability = boxes["Disponible immédiatement"]
     news = next(f for f in boxes.values() if "newsletter" in f.label)
-    assert rgpd.required and not news.required and rgpd.value == "false"
+    assert availability.required and not news.required and availability.value == "false"
     assert any(f.kind == "button" and f.label == "Envoyer ma candidature" for f in snap.fields)
     assert "Votre candidature" in snap.text and not snap.has_captcha and snap.title.startswith("Candidature")
     # the resolver points at the live element

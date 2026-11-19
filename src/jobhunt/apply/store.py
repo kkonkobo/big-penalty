@@ -75,6 +75,8 @@ class ApplyRun(BaseModel):
     pid: int | None = None                     # process that drives the run (a live owner is never taken over)
     approved_by: str | None = None             # "auto" | "user": who had approved the application when this run started
     operator_not_sent_at: datetime | None = None
+    origin_sha: str | None = None
+    application_version: str | None = None
 
 
 def _from_row(r) -> ApplyRun:
@@ -83,10 +85,12 @@ def _from_row(r) -> ApplyRun:
         message=r["message"] or "", result=RunResult.model_validate_json(r["result_json"]) if r["result_json"] else None,
         out_dir=r["out_dir"], started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]),
         submit_clicked_at=_dt(r["submit_clicked_at"]), nav_clicked_at=_dt(r["nav_clicked_at"]), pid=r["pid"],
-        approved_by=r["approved_by"], operator_not_sent_at=_dt(r["operator_not_sent_at"]))
+        approved_by=r["approved_by"], operator_not_sent_at=_dt(r["operator_not_sent_at"]),
+        origin_sha=r["origin_sha"], application_version=r["application_version"])
 
 
-def start_run(application_id: int, rev: int, mode: str, trigger: str, out_dir_for: Callable[[int], Path]) -> ApplyRun:
+def start_run(application_id: int, rev: int, mode: str, trigger: str, out_dir_for: Callable[[int], Path], *,
+              origin_sha: str | None = None) -> ApplyRun:
     """Insert a `running` row (with this process's pid). ONE transaction: refused while another run of the application is
     running AND its owner is alive (pid alive on this machine; an unknown pid counts as alive for 45 min). A `running` row
     whose owner is dead is marked failed ("interrompu"); if it had reached a click (`submit_clicked_at` or `nav_clicked_at`)
@@ -110,9 +114,11 @@ def start_run(application_id: int, rev: int, mode: str, trigger: str, out_dir_fo
                       " approved_by=NULL, notes=?, updated_at=? WHERE id=? AND status NOT IN ('submitted', 'withdrawn')",
                       (UNCONFIRMED_NOTE, _iso(ts), application_id))
         else:
-            cur = c.execute("INSERT INTO application_runs(application_id, rev, mode, trigger, status, started_at, pid, approved_by)"
-                            " VALUES (?,?,?,?,'running',?,?,(SELECT approved_by FROM applications WHERE id=? AND status='approved'))",
-                            (application_id, rev, mode, trigger, _iso(ts), os.getpid(), application_id))
+            cur = c.execute("INSERT INTO application_runs(application_id, rev, mode, trigger, status, started_at, pid,"
+                            " approved_by, origin_sha, application_version)"
+                            " SELECT id, ?, ?, ?, 'running', ?, ?, CASE WHEN status='approved' THEN approved_by END, ?, updated_at"
+                            " FROM applications WHERE id=?",
+                            (rev, mode, trigger, _iso(ts), os.getpid(), origin_sha, application_id))
             run_id = int(cur.lastrowid)
             c.execute("UPDATE application_runs SET out_dir=? WHERE id=?", (str(out_dir_for(run_id)), run_id))
     if possibly_sent:  # raised after the commit above (an exception inside `connect()` would roll the takeover back)

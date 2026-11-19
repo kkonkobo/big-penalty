@@ -482,7 +482,8 @@ async def run(app_id: int, *, mode: Mode, trigger: Literal["auto", "user"], head
 
 async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headless, pool, planner, llm, verifier,
                       attended: bool = False) -> ApplyRun:
-    run_ = apply_store.start_run(app.id, app.current_rev, mode, trigger, lambda rid: _run_dir(app.job_id, rid))  # ApplyError propagates
+    run_ = apply_store.start_run(app.id, app.current_rev, mode, trigger, lambda rid: _run_dir(app.job_id, rid),
+                                 origin_sha=origin_digest(job.origin_url))
     own_pool = pool is None
     shared_llm = _Llm(llm)
     reraise: BaseException | None = None

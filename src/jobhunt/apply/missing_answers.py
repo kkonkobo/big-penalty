@@ -69,7 +69,7 @@ def fact_key(question: Question) -> str | None:
 
 
 def capture(field: FormField, label: str) -> Question:
-    blocker = technical_key(label, field.kind)
+    blocker = technical_key(label, field.kind, group=field.group, autocomplete=field.autocomplete)
     question = Question(ref=field.ref, label=label, kind=field.kind,
                         options=[] if blocker else [option.label for option in field.options])
     if blocker:
@@ -79,7 +79,7 @@ def capture(field: FormField, label: str) -> Question:
     if key in {"city", "postal_code", "country"} and any(term in group for term in (
             "birth", "naissance", "geburt", "previous", "ancien", "school", "ecole", "preferred", "souhaite", "employer", "arbeitgeber")):
         key = None
-    choice = decision_key(label)
+    choice = decision_key(label) or decision_key(field.group)
     if choice == "ambiguous_country" and group in {"current address", "residential address", "adresse de residence", "wohnanschrift"} \
             and norm_question(label) in {"pays", "country", "land", "country region", "pays region"}:
         key = "country"
@@ -133,11 +133,12 @@ DECISIONS = {
     "conflict": "Déclaration de conflit d’intérêts (par employeur)",
     "former_employer": "Emploi antérieur (par employeur)", "marketing": "Préférences marketing (par site)",
     "recruiting": "Préférences de recrutement (par site)",
+    "consent": "Confidentialité et conditions : répondre sur le site",
     "ambiguous_country": "Pays ou indicatif : vérifier ce que le formulaire demande",
     "work_authorization_review": "Autorisation de travail ou parrainage : vérifier la question exacte",
 }
 TECHNICAL = {
-    "credentials": "Mot de passe ou confirmation", "account": "Compte ou connexion", "cv_upload": "Dépôt du CV",
+    "credentials": "Mot de passe ou code de vérification", "account": "Compte ou connexion", "cv_upload": "Dépôt du CV",
     "letter_upload": "Dépôt de la lettre de motivation", "photo_upload": "Dépôt de la photo",
     "file_upload": "Dépôt d’un fichier", "recheck": "Vérifier le champ ou le format proposé",
 }

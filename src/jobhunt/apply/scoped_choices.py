@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from jobhunt.apply.facts import answers_lock, answers_path
-from jobhunt.apply.prompt_rules import decision_key
+from jobhunt.apply.prompt_rules import decision_key, requires_site_consent, technical_key
 from jobhunt.apply.types import FormField, Question
 
 
@@ -19,9 +19,13 @@ def _digest(data: object) -> str:
 
 
 def field_choices(url: str, field: FormField) -> tuple[str, list[int]] | None:
-    if field.kind not in {"select", "radio"} or field.multiple or not field.name or not field.form or not field.label:
+    if (field.kind not in {"select", "radio"} or field.multiple or not field.name or not field.form or not field.wording
+            or not field.choice_destination or not field.choice_options
+            or technical_key(field.label, field.kind, group=field.group, autocomplete=field.autocomplete)
+            or (decision_key(field.label) or decision_key(field.group)) == "consent"
+            or requires_site_consent(field.group)):
         return None
-    if not field.required and not (field.value and decision_key(field.label)):
+    if not field.required and not (field.selected and (decision_key(field.label) or decision_key(field.group))):
         return None
     original = [(option.value, option.label) for option in field.options]
     by_value: dict[str, set[str]] = {}
@@ -34,11 +38,15 @@ def field_choices(url: str, field: FormField) -> tuple[str, list[int]] | None:
     unique = {}
     for index, (value, label) in enumerate(original):
         shown = " ".join(label.split())
-        if value and shown and len(by_value[value]) == 1 and len(by_label[shown.casefold()]) == 1:
+        live = [(option_label, disabled) for option_value, option_label, disabled, _ in field.choice_options if option_value == value]
+        if (value and shown and len(by_value[value]) == 1 and len(by_label[shown.casefold()]) == 1
+                and live and (field.kind != "radio" or len(live) == 1)
+                and all(shown == " ".join(option_label.split()) and not disabled for option_label, disabled in live)):
             unique.setdefault((value, shown), index)
     if not unique:
         return None
-    binding = _digest([url, field.form, field.kind, field.name, field.label, field.group, original])
+    binding = _digest(["v2", url, field.form, field.choice_destination, field.kind, field.name, field.wording, field.group,
+                       field.required, field.choice_options, original])
     return binding, list(unique.values())
 
 
@@ -60,10 +68,12 @@ def load(profile_id: int, app_id: int, rev: int, origin: str) -> dict[str, int]:
         return {}
 
 
-def save(profile_id: int, app_id: int, rev: int, origin: str, binding: str, index: int) -> None:
+def save_once(profile_id: int, app_id: int, rev: int, origin: str, binding: str, index: int) -> bool:
     path = _path(profile_id, app_id, rev, origin)
     with answers_lock(profile_id):
         data = load(profile_id, app_id, rev, origin)
+        if binding in data:
+            return False
         data[binding] = index
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix="ats-choice-", delete=False) as temporary:
@@ -74,3 +84,4 @@ def save(profile_id: int, app_id: int, rev: int, origin: str, binding: str, inde
                 os.replace(temporary.name, path)
             finally:
                 Path(temporary.name).unlink(missing_ok=True)
+        return True

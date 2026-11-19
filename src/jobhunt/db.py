@@ -192,6 +192,10 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE application_runs ADD COLUMN operator_not_sent_at TEXT;
     """,
+    """
+    ALTER TABLE application_runs ADD COLUMN origin_sha TEXT;
+    ALTER TABLE application_runs ADD COLUMN application_version TEXT;
+    """,
 ]
 
 

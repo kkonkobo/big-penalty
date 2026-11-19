@@ -145,8 +145,8 @@ def test_missing_answers_file_values_are_unknown(profile):
 def test_job_facts_and_consents(profile):
     s = sheet(profile, make_job(profile, source="linkedin"))
     assert val(s, "job_source") == "LinkedIn" and val(s, "job_title").startswith("Stage ingénieur") and val(s, "company") == "Exemple SAS"
-    assert val(s, "consent_required") == "oui" and val(s, "consent_optional") == "non"
-    assert "OBLIGATOIRES" in s.get("consent_required").label and "refuser" in s.get("consent_optional").label
+    assert s.get("consent_required") is None and val(s, "consent_optional") == "non"
+    assert "refuser" in s.get("consent_optional").label
     no_sighting = make_job(profile, title="Sans source")
     no_sighting.sightings = []
     assert val(sheet(profile, no_sighting), "job_source") is None

@@ -12,12 +12,16 @@ def norm_question(label: str) -> str:
 CREDENTIAL_ERROR = "Cette question doit être traitée sur le site ; aucune réponse n’a été enregistrée."
 
 
-def technical_key(label: str, kind: str = "") -> str | None:
+def technical_key(label: str, kind: str = "", *, group: str = "", autocomplete: str = "") -> str | None:
+    if set(autocomplete.lower().split()) & {"one-time-code", "current-password", "new-password"}:
+        return "credentials"
+    if group and technical_key(group) == "credentials":
+        return "credentials"
     label = norm_question(label)
     if kind == "password" or re.search(r"mot de passe|password|passwort|kennwort|contrase[nñ]a|senha|wachtwoord|\bmdp\b|passcode", label):
         return "credentials"
     if re.search(r"\b(?:otp|totp|one time code|one time password|verification code|security code|code de verification|"
-                 r"code de securite|code a usage unique|code de connexion|einmalcode|bestatigungscode|sicherheitscode)\b", label):
+                 r"code de securite|code a usage unique|code de connexion|code de validation|einmalcode|bestatigungscode|sicherheitscode)\b", label):
         return "credentials"
     if label in {"confirmation", "confirm", "bestatigung", "wiederholen", "repeat", "confirmer"}:
         return "credentials"
@@ -36,6 +40,13 @@ def technical_key(label: str, kind: str = "") -> str | None:
     return None
 
 
+def requires_site_consent(label: str) -> bool:
+    return bool(re.search(r"\b(?:privacy|rgpd|gdpr|dsgvo|datenschutz\w*|confidentialite|consent\w*|einwillig\w*|"
+                          r"terms|cgu|conditions generales|bedingungen|agb|personal data|donnees personnelles|"
+                          r"data processing|traitement des donnees|background check|i agree|i accept|i authorize|"
+                          r"j accepte|j autorise|je consens|je renonce|ich stimme zu)\b", norm_question(label)))
+
+
 def decision_key(label: str) -> str | None:
     """Only group recognizable decisions, never convert a choice between polarities."""
     label = norm_question(label)
@@ -45,6 +56,8 @@ def decision_key(label: str) -> str | None:
         if re.search(r"\b(?:opt in|consent\w*|agree|accept\w*|autorise\w*|zustimm\w*|einwillig\w*|yes|enable|allow)\b", label):
             return "ai_opt_in"
         return "ai_review"
+    if requires_site_consent(label):
+        return "consent"
     if re.search(r"conflict of interest|conflit d interet|interessenkonflikt", label):
         return "conflict"
     if re.search(r"former employer|previously employed|previously worked (?:for|at|with us)|already worked (?:for|at|with us)|"

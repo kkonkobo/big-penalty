@@ -14,12 +14,14 @@ import pytest
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 
+from jobhunt import db
 from jobhunt.apply import service as apply_service
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.service import QueueItem
 from jobhunt.apply.types import FilledField, Question, RunResult, StepLog
 from jobhunt.config import get_settings
+from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
 from jobhunt.web import apply_routes
 from jobhunt.web import app as webapp
@@ -99,7 +101,8 @@ def wait_idle(tries=200):
     raise AssertionError("background task still running")
 
 
-def make_run(a, tmp_path, *, mode="dry_run", status="ready", shot=True, shot_path=None, questions=(), untrusted_host="", filled=()):
+def make_run(a, tmp_path, *, mode="dry_run", status="ready", shot=True, shot_path=None, questions=(), untrusted_host="", filled=(),
+             origin_sha=None):
     out = get_settings().applications_dir / f"runs-{a.id}-{mode}-{status}"
     out.mkdir(parents=True, exist_ok=True)
     png = out / "step0.png"
@@ -108,7 +111,7 @@ def make_run(a, tmp_path, *, mode="dry_run", status="ready", shot=True, shot_pat
                      filled=[FilledField(label="Prénom", op="fill", fact="first_name", value="Léa"),
                              FilledField(label="Mot de passe", op="fill", fact="account_password", value="•••"), *filled],
                      clicked="Suivant", screenshot=str(shot_path or png) if shot else "")]
-    run = apply_store.start_run(a.id, a.current_rev, mode, "user", lambda rid: out)
+    run = apply_store.start_run(a.id, a.current_rev, mode, "user", lambda rid: out, origin_sha=origin_sha)
     return apply_store.finish_run(run.id, RunResult(status=status, message="Message du run", steps=steps,
                                                        questions=list(questions), untrusted_host=untrusted_host)), out
 
@@ -994,13 +997,17 @@ def test_typed_choices_and_technical_prompts_are_handled_without_retry(client, p
     from jobhunt.apply.types import FieldOption, FormField
 
     app = mk_app(profile, master, tmp_path)
+    origin = apply_service.origin_digest(db.get_job(app.job_id).origin_url)
     field = FormField(ref="f1", name="assist", form="0:0", kind="select", label="KI-Unterstützung zustimmen",
+                      wording="KI-Unterstützung zustimmen", choice_destination=("https://fictional.test/submit", "POST"),
+                      choice_options=[("", "Bitte wählen", False, ""), ("enable", "Ja", False, ""),
+                                      ("enable", "Ja", False, ""), ("disable", "Nein", False, "")],
                       required=True, options=[FieldOption(value="", label="Bitte wählen"),
                       FieldOption(value="enable", label=" Ja "), FieldOption(value="enable", label="Ja"),
                       FieldOption(value="disable", label="Nein")])
     binding, indices = scoped_choices.field_choices("https://fictional.test/apply", field)
     question = capture(field, field.label).model_copy(update={"choice_binding": binding, "choice_indices": indices})
-    run, _ = make_run(app, tmp_path, status="needs_input", questions=[question,
+    run, _ = make_run(app, tmp_path, status="needs_input", origin_sha=origin, questions=[question,
         Question(label="Wiederholen", kind="password"), Question(label="Votre CV", kind="file"),
         Question(label="CV personale", kind="file"), Question(label="Land", kind="select"),
         Question(label="Postleitzahl"), Question(label="Postal Code"), Question(label="First name")])
@@ -1028,6 +1035,7 @@ def test_typed_choices_and_technical_prompts_are_handled_without_retry(client, p
         assert "invalide ou périmé" in client.post(endpoint, data={**form, "choice": invalid}, follow_redirects=True).text
     assert not scoped_choices.load(profile.id, app.id, run.rev, form["origin"])
     assert "Aucun essai lancé" in client.post(endpoint, data={**form, "choice": "3"}, follow_redirects=True).text
+    assert "déjà été confirmé" in client.post(endpoint, data={**form, "choice": "1"}, follow_redirects=True).text
     assert scoped_choices.load(profile.id, app.id, run.rev, form["origin"]) == {binding: 3}
     assert not apply_facts.answers_path(profile.id).exists()
 
@@ -1038,6 +1046,37 @@ def test_typed_choices_and_technical_prompts_are_handled_without_retry(client, p
     for response in (profile_post, single_post):
         assert "aucune réponse" in response.text and password_payload not in response.text
     assert apply_facts.load_answers(profile.id) == {} and calls == []
+
+
+@pytest.mark.parametrize("change", ["origin", "approval", "run", "legacy"])
+def test_scoped_choice_stale_capture_cannot_save(client, profile, master, tmp_path, monkeypatch, change):
+    from jobhunt.apply import scoped_choices
+
+    app = mk_app(profile, master, tmp_path)
+    job = db.get_job(app.job_id)
+    captured_origin = apply_service.origin_digest(job.origin_url)
+    binding = "7" * 64
+    question = Question(label="AI assistance", kind="select", reason="decision", category="ai_review",
+                        choice_binding=binding, options=["Yes", "No"], choice_indices=[0, 1])
+    run, _ = make_run(app, tmp_path, status="needs_input", questions=[question],
+                      origin_sha=None if change == "legacy" else captured_origin)
+    if change == "origin":
+        with db.connect() as connection:
+            connection.execute("UPDATE jobs SET origin_url=origin_url || '?fictional=1' WHERE id=?", (job.id,))
+    elif change == "approval":
+        cvs.approve(app.id, app.current_rev)
+    elif change == "run":
+        make_run(app, tmp_path, status="needs_input", questions=[question], origin_sha=captured_origin)
+    current_origin = apply_service.origin_digest(db.get_job(job.id).origin_url)
+    if change != "run":
+        assert "name=\"binding\"" not in client.get(answers_url(profile)).text
+    recorded = record_runs(monkeypatch)
+    for origin in {captured_origin, current_origin}:
+        response = client.post(f"{answers_url(profile)}/choice", follow_redirects=True,
+                               data={"origin": origin, "run_id": run.id, "application_id": app.id, "binding": binding, "choice": "1"})
+        assert "invalide ou périmé" in response.text
+        assert not scoped_choices.load(profile.id, app.id, app.current_rev, origin)
+    assert recorded == []
 
 
 def test_custom_answers_can_be_edited_and_removed_by_stable_id(client, profile):

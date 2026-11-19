@@ -40,17 +40,17 @@ def apply_posts(server):
 async def test_dry_run_fills_everything_and_never_sends(page, server, fast, cv_pdf, tmp_path):
     planner = ScriptedPlanner([job_plan, form_plan("submit")])
     res = await go(page, server, planner, tmp_path, cv_pdf)
-    assert res.status == "ready" and not apply_posts(server)
+    assert res.status == "ready" and not apply_posts(server), res.message
     assert await page.input_value("#fn") == "Camille" and await page.input_value("input[name=last_name]") == "Durand"
     assert await page.input_value("#em") == "camille@example.test"
     assert await page.input_value("#tel") == "+33 6 00 00 00 00"  # variant matching the +33 placeholder
     assert await page.input_value("#sit") == "alt"
     assert await page.evaluate("document.querySelector('input[name=dispo]:checked').value") == "oui"
     assert await page.evaluate("document.getElementById('cv').files[0].name") == cv_pdf.name
-    assert await page.is_checked("input[name=rgpd]") and not await page.is_checked("input[name=newsletter]")
+    assert await page.is_checked("input[name=available]") and not await page.is_checked("input[name=newsletter]")
     assert [s.page_kind for s in res.steps] == ["job_page", "form"] and res.steps[0].clicked == "Postuler" and res.steps[1].clicked == ""
     assert all(s.screenshot and (tmp_path / "shots" / f"step-{s.index}.png").is_file() for s in res.steps)
-    assert {f.fact for f in res.steps[1].filled} >= {"first_name", "email", "phone", "consent_required"}
+    assert {f.fact for f in res.steps[1].filled} >= {"first_name", "email", "phone", "available_now"}
     assert res.final_url.endswith("/form") and res.finished_at is not None
 
 
@@ -76,7 +76,7 @@ async def test_submit_mode_posts_exactly_once(page, server, fast, cv_pdf, tmp_pa
     posts = apply_posts(server)
     assert len(posts) == 1
     body = posts[0]["body"]
-    assert b"Camille" in body and b"camille@example.test" in body and cv_pdf.name.encode() in body and b'name="rgpd"' in body
+    assert b"Camille" in body and b"camille@example.test" in body and cv_pdf.name.encode() in body and b'name="available"' in body
     assert b'name="newsletter"' not in body
     assert res.steps[-1].page_kind == "confirmation" and res.steps[-2].clicked == "Envoyer ma candidature"
 
@@ -113,7 +113,6 @@ def step1(snap):
 
 def step2(role="submit"):
     return lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^CV", "upload_cv", kind="file"),
-                                                           act(snap, r"confidentialité", "check", "consent_required"),
                                                            act(snap, r"Envoyer", "click", role=role)])
 
 
@@ -182,11 +181,11 @@ async def test_action_citing_unknown_or_empty_fact_is_dropped(page, server, fast
 
 
 async def test_missing_required_field_is_added_by_the_engine(page, server, fast, cv_pdf, tmp_path):
-    def plan(snap):  # planner forgets the CV and the consent and says nothing about them
+    def plan(snap):  # planner forgets the CV and availability box and says nothing about them
         acts = [a for a in form_actions(snap) if a.op not in ("upload_cv", "check")]
         return StepPlan(page_kind="form", actions=[*acts, act(snap, r"Envoyer", "click", role="submit")])
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="form")
-    assert res.status == "needs_input" and {"Curriculum vitae (PDF)", "J'accepte le traitement de mes données personnelles (RGPD)"} <= {
+    assert res.status == "needs_input" and {"Curriculum vitae (PDF)", "Disponible immédiatement"} <= {
         q.label for q in res.questions}
 
 
@@ -213,12 +212,12 @@ async def test_bad_actions_are_dropped_with_notes(page, server, fast, cv_pdf, tm
         from jobhunt.apply.types import Action
         return StepPlan(page_kind="form", actions=[
             Action(ref="f999", op="fill", fact="first_name"),                     # unknown ref
-            act(snap, r"RGPD", "fill", "first_name"),                              # op does not fit the kind
-            act(snap, r"newsletter", "check", "consent_required"),                 # optional marketing box is never ticked
+            act(snap, r"^Disponible immédiatement", "fill", "first_name"),        # op does not fit the kind
+            act(snap, r"newsletter", "check", "available_now"),                   # optional marketing box is never ticked
             act(snap, r"Prénom", "check", "first_name"),
             act(snap, r"Envoyer", "fill", "first_name")])
     res = await go(page, server, ScriptedPlanner([plan, plan]), tmp_path, cv_pdf, start="form", max_steps=3)
-    assert not await page.is_checked("input[name=newsletter]") and not await page.is_checked("input[name=rgpd]")
+    assert not await page.is_checked("input[name=newsletter]") and not await page.is_checked("input[name=available]")
     assert "référence inconnue" in res.steps[0].note and "incompatible" in res.steps[0].note and "décision à confirmer" in res.steps[0].note
     assert res.status == "needs_input" and not apply_posts(server)  # nothing usable, required fields left empty
 
@@ -716,15 +715,14 @@ async def test_new_residence_fields_are_typed_and_cannot_take_a_mismatched_fact(
     assert prompts["Postleitzahl"].reason == "fact" and prompts["Postleitzahl"].fact_id == "postal_code"
 
 
-async def test_cv_upload_and_privacy_consent_are_accepted_by_code_without_the_llm(page, server, fast, cv_pdf, tmp_path):
+async def test_cv_upload_is_accepted_by_code_without_the_llm(page, server, fast, cv_pdf, tmp_path):
     def plan(snap):
         return StepPlan(page_kind="form", actions=[act(snap, r"Curriculum|CV", "upload_cv", kind="file"),
-                                                   act(snap, r"RGPD", "check", "consent_required"),
                                                    act(snap, r"Envoyer", "click", role="submit")])
     for verifier in (None, FakeVerifier(lambda i: False)):
         res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="form", verifier=verifier)
-        assert await page.evaluate("document.getElementById('cv').files.length") == 1 and await page.is_checked("input[name=rgpd]")
-        assert {f.fact for f in res.steps[0].filled} == {"cv", "consent_required"}  # the fact actually used
+        assert await page.evaluate("document.getElementById('cv').files.length") == 1
+        assert {f.fact for f in res.steps[0].filled} == {"cv"}
 
 
 async def test_upload_cv_on_a_letter_field_needs_the_verifier(page, server, fast, cv_pdf, tmp_path):
@@ -840,7 +838,7 @@ TRIGGERS = {
     "typing": '<label for=fn>Prénom *</label><input id=fn name=first_name oninput="f.submit()">',
     "radio": '<fieldset><legend>Êtes-vous disponible immédiatement ? *</legend><label><input type=radio name=d value=oui onchange="f.submit()"> Oui</label>'
              '<label><input type=radio name=d value=non> Non</label></fieldset>',
-    "checkbox": '<label><input type=checkbox name=rgpd onchange="f.submit()"> J\'accepte le traitement de mes données personnelles (RGPD) *</label>',
+    "checkbox": '<label><input type=checkbox name=available onchange="f.submit()"> Disponible immédiatement *</label>',
     "select": '<label for=sit>Situation *</label><select id=sit name=s onchange="f.submit()"><option value="">Choisir...</option>'
               '<option value=alt>Alternance</option><option value=stage>Stage</option></select>',
     "combobox_click": '<label for=city>Ville de résidence *</label><input id=city role=combobox aria-controls=lb autocomplete=off onclick="f.submit()">'
@@ -850,7 +848,7 @@ TRIGGERS = {
 }
 TRIGGER_ACTIONS = {
     "focus": (r"^Prénom", "fill", "first_name", None), "typing": (r"^Prénom", "fill", "first_name", None),
-    "radio": (r"disponible", "select", "available_now", "Oui"), "checkbox": (r"RGPD", "check", "consent_required", None),
+    "radio": (r"disponible", "select", "available_now", "Oui"), "checkbox": (r"Disponible", "check", "available_now", None),
     "select": (r"Situation", "select", "situation", "Alternance"), "combobox_click": (r"Ville", "select", "city", "Toulouse"),
     "combobox_option": (r"Ville", "select", "city", "Toulouse"),
 }
@@ -1442,7 +1440,7 @@ async def test_before_submit_runs_once_per_step_before_any_field_is_touched(page
     seen = []
 
     async def gate():
-        seen.append((await page.input_value("#fn"), await page.is_checked("input[name=rgpd]")))
+        seen.append((await page.input_value("#fn"), await page.is_checked("input[name=available]")))
         return []
     res = await go(page, server, ScriptedPlanner([job_plan, form_plan("submit"), CONFIRMED]), tmp_path, cv_pdf, mode="submit", before_submit=gate)
     assert res.status == "submitted" and seen == [("", False)]
@@ -1456,7 +1454,7 @@ async def test_before_submit_refusal_blocks_before_anything_is_entered(page, ser
         return ["déjà postulé"]
     res = await go(page, server, ScriptedPlanner([job_plan, form_plan("submit")]), tmp_path, cv_pdf, mode="submit", before_submit=gate)
     assert res.status == "blocked" and "déjà postulé" in res.message and calls == [1]
-    assert await page.input_value("#fn") == "" and not await page.is_checked("input[name=rgpd]") and not server.sent
+    assert await page.input_value("#fn") == "" and not await page.is_checked("input[name=available]") and not server.sent
     assert not res.submit_clicked and not res.steps[-1].filled
 
 
@@ -1587,7 +1585,7 @@ CONSENT_FORM = ('<form method="post" action="/apply"><fieldset><legend>Données 
                 '<button type="submit">Envoyer ma candidature</button></form>')
 
 
-async def test_only_privacy_consents_are_ticked_by_code(page, server, fast, cv_pdf, tmp_path):
+async def test_privacy_and_terms_are_never_auto_confirmed(page, server, fast, cv_pdf, tmp_path):
     plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"accept", "check", "consent_required"),  # noqa: E731
                                                             act(snap, r"Envoyer", "click", role="submit")])
     await serve(page, "consent", CONSENT_FORM.format(label="J'accepte les conditions de l'offre salariale"))
@@ -1595,12 +1593,12 @@ async def test_only_privacy_consents_are_ticked_by_code(page, server, fast, cv_p
     assert res.status == "needs_input" and not await page.is_checked("input[name=c]")   # (its group says "Données personnelles": not enough)
     v = FakeVerifier(lambda i: "supported")
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="consent", verifier=v)
-    assert len(v.calls) == 1 and await page.is_checked("input[name=c]") and res.steps[0].filled[0].inferred
+    assert not v.calls and res.status == "needs_input" and not await page.is_checked("input[name=c]")
     for label in ("J'accepte la politique de confidentialité", "J’accepte les conditions générales d’utilisation",
                   "J'accepte le traitement de mes données personnelles", "I accept the privacy policy"):
         await serve(page, "consent", CONSENT_FORM.format(label=label))
         res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="consent", verifier=None)
-        assert res.status == "ready" and await page.is_checked("input[name=c]") and not res.steps[0].filled[0].inferred, label
+        assert res.status == "needs_input" and not await page.is_checked("input[name=c]") and not server.sent, label
 
 
 # ------------------------------------------------------------------ 8. a recorded navigation click stays "possibly sent" until a form is seen again
@@ -1608,7 +1606,9 @@ async def test_failure_after_a_recorded_nav_click_keeps_the_submit_clicked_flag(
     real = engine.take_snapshot
     calls = []
 
-    async def flaky(p):
+    async def flaky(p, *, read_only=False):
+        if read_only:
+            return await real(p, read_only=True)
         calls.append(1)
         if len(calls) >= 2:   # every snapshot after the first (the page left by the click) fails
             raise RuntimeError("page gone")
@@ -1738,7 +1738,9 @@ async def test_real_click_is_activated_exactly_once(page, server, fast, cv_pdf, 
 
 
 async def test_a_dispatch_that_raises_is_unconfirmed_for_a_final_click_and_failed_before_data(page, server, fast, cv_pdf, tmp_path, monkeypatch):
-    async def boom(self, target):
+    async def boom(self, target, *, recheck=None):
+        if recheck:
+            await recheck()
         raise engine._Dispatched("x")
     monkeypatch.setattr(engine._Run, "_click", boom)
     res = await go(page, server, ScriptedPlanner([job_plan, form_plan("submit")]), tmp_path, cv_pdf, mode="submit")
@@ -2197,7 +2199,7 @@ def test_quoted_or_reported_receipt_phrases_are_no_receipt(text, ok):
 
 async def test_dry_run_guard_blocks_a_post_navigation_even_before_any_data_entry(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "choices", '<form id=f method="post" action="/apply"><label for=s>Pays</label>'
-                                 '<select id=s name=s><option value="fr" selected>France</option><option value="be">Belgique</option></select>'
+                                 '<select id=s name=s><option value="">Choisir</option><option value="fr">France</option></select>'
                                  '<button type="button" onclick="document.getElementById(\'f\').requestSubmit()">Continuer</button></form>')
     res = await go(page, server, ScriptedPlanner([open_continuer, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="choices", max_steps=3)
     assert not server.posts and not server.sent and res.status == "ready"
@@ -2347,14 +2349,14 @@ async def test_dry_run_refuses_the_click_of_a_choice_only_draft_in_an_applicatio
                                    '<select id=s name=s><option value="fr" selected>France</option><option value="be">Belgique</option></select>'
                                    '<button type="submit">Continuer</button></form>')
     res = await go(page, server, ScriptedPlanner([open_continuer, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="appframe", max_steps=3)
-    assert not server.posts and res.status == "ready" and res.steps[-1].clicked == ""
+    assert not server.posts and res.status == "needs_input" and res.steps[-1].clicked == ""
 
 
 async def test_checked_boxes_and_radios_of_the_same_form_count_too(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "boxes", '<form method="post" action="/apply"><label><input type=checkbox name=c checked> Je confirme</label>'
                                '<button type="submit">Continuer</button></form>')
     res = await go(page, server, ScriptedPlanner([open_continuer]), tmp_path, cv_pdf, start="boxes", max_steps=3)
-    assert res.status == "ready" and not server.posts and res.steps[-1].clicked == ""
+    assert res.status == "needs_input" and not server.posts and res.steps[-1].clicked == ""
 
 
 async def test_a_language_picker_elsewhere_does_not_block_the_apply_click(page, server, fast, cv_pdf, tmp_path):
@@ -2429,11 +2431,11 @@ def radio_plan():
     return deduce_plan(lambda s: act(s, r"Disponible", "select", "auth2", "Yes"))
 
 
-async def test_a_radio_group_reordered_by_the_page_still_gets_the_validated_answer(page, server, fast, cv_pdf, tmp_path):
+async def test_a_radio_group_reordered_by_the_page_is_left_untouched(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "radios", RADIO_PAGE.format(move=MOVE_NO_FIRST, onyes=""))
     res = await go(page, server, ScriptedPlanner([radio_plan()]), tmp_path, cv_pdf, start="radios", facts=radio_facts(), verifier=None)
-    assert await page.evaluate("document.querySelector('input[name=a]:checked').value") == "yes"
-    assert filled_of(res, "Disponible le lundi ?").value == "Yes" and not filled_of(res, "Disponible le lundi ?").inferred
+    assert await page.locator('input[name=a]:checked').count() == 0
+    assert res.status == "blocked" and not server.sent
 
 
 async def test_a_radio_that_ends_up_on_the_wrong_answer_stops_the_step_with_a_question(page, server, fast, cv_pdf, tmp_path):
@@ -2446,11 +2448,11 @@ async def test_a_radio_that_ends_up_on_the_wrong_answer_stops_the_step_with_a_qu
 async def test_a_checkbox_whose_label_changed_since_the_read_is_not_ticked(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "boxlabel", '<form method="post" action="/apply"><label for=fn>Prénom *</label>'
                                   '<input id=fn name=first_name required oninput="document.getElementById(\'lb\').textContent=\'Je renonce à tout recours\'">'
-                                  '<label><input type=checkbox name=c required> <span id=lb>J\'accepte la politique de confidentialité</span></label>'
+                                  '<label><input type=checkbox name=c required> <span id=lb>Disponible immédiatement</span></label>'
                                   '<button type="submit">Envoyer ma candidature</button></form>')
-    plan = deduce_plan(lambda s: act(s, r"confidentialité", "check", "consent_required"))
+    plan = deduce_plan(lambda s: act(s, r"Disponible immédiatement", "check", "available_now"))
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="boxlabel")
-    assert not await page.is_checked("input[name=c]") and res.status == "needs_input"
+    assert not await page.is_checked("input[name=c]") and res.status == "blocked"
 
 
 # ------------------------------------------------------------------ 3. own means of transport is a hard fact, willingness is not
@@ -2481,7 +2483,7 @@ async def test_a_checked_box_associated_to_the_form_from_outside_counts(page, se
     await serve(page, "outbox", '<form id=f method="get" action="/form"><button type="submit">Continuer</button></form>'
                                 '<input type=checkbox form=f name=c checked id=c><label for=c>Je confirme</label>')
     res = await go(page, server, ScriptedPlanner([open_continuer, StepPlan(page_kind="other")]), tmp_path, cv_pdf, start="outbox", max_steps=3)
-    assert res.status == "ready" and not server.sent and res.steps[-1].clicked == ""
+    assert res.status == "needs_input" and not server.sent and res.steps[-1].clicked == ""
 
 
 async def test_a_get_form_submission_is_aborted_in_dry_run_but_links_keep_working(page, server, fast, cv_pdf, tmp_path):
@@ -2803,6 +2805,89 @@ async def test_captured_ats_selection_uses_only_confirmed_exact_option(page, ser
     preselected = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="decision")
     assert preselected.status == "needs_input" and not preselected.submit_clicked
     assert preselected.questions[0].choice_binding
+
+
+SCOPED_DECISION = ('<form action="/apply?fictional-route-marker=1" method="post">'
+                   '<fieldset><legend>Hiring preferences</legend>'
+                   '<label for="choice">AI assistance</label><select id="choice" name="ai" required>'
+                   '<option value="">Choose</option><option value="enabled">Yes</option>'
+                   '<option value="disabled">No</option><option value="later" disabled>Later</option></select>'
+                   '<button type="submit">Send application</button></fieldset></form>')
+
+
+def scoped_plan(snapshot):
+    return StepPlan(page_kind="form", actions=[act(snapshot, "Send application", "click", role="submit")])
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("fictional-route-marker=1", "fictional-route-marker=2"), ("method=\"post\"", "method=\"get\""),
+    ("Hiring preferences", "Hiring preferences for future jobs"), ("AI assistance", "AI assistance for all jobs"),
+    ("value=\"enabled\"", "value=\"other\""), (">Later", ">Later (updated)"),
+    ("type=\"submit\"", "type=\"submit\" formmethod=\"get\""),
+])
+async def test_saved_choice_requires_unchanged_live_form(page, server, fast, cv_pdf, tmp_path, old, new):
+    await serve(page, "decision", SCOPED_DECISION)
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="decision")
+    assert result.questions[0].choice_binding and "fictional-route-marker" not in result.model_dump_json()
+    choices = {result.questions[0].choice_binding: 1}
+    await serve(page, "decision", SCOPED_DECISION.replace(old, new))
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="decision", choices=choices)
+    assert result.status == "needs_input" and not await page.input_value("#choice") and not server.sent
+
+
+@pytest.mark.parametrize("stage", ["gate", "progress"])
+async def test_rechecks_decisions_after_awaited_callbacks(page, server, fast, cv_pdf, tmp_path, stage):
+    await serve(page, "decision", SCOPED_DECISION)
+    first = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="decision")
+    choices = {first.questions[0].choice_binding: 1}
+
+    async def gate():
+        if stage == "gate":
+            await page.locator('#choice option[value="enabled"]').evaluate("option => option.textContent = 'Updated yes'")
+        return []
+
+    async def progress(_result):
+        if stage == "progress":
+            await page.locator('#choice option[value="enabled"]').evaluate("option => option.textContent = 'Updated yes'")
+
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="decision", mode="submit",
+                      choices=choices, before_submit=gate, on_progress=progress)
+    assert result.status == "blocked" and not server.sent and not result.steps[-1].clicked
+    assert await page.input_value("#choice") == ("" if stage == "gate" else "disabled")
+
+
+async def test_unlabeled_radio_is_not_exposed_as_an_option_to_confirm(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "decision", '<form action="/apply" method="post"><fieldset><legend>AI assistance</legend>'
+                '<input type="radio" name="choice" value="fictional-opaque-option" required checked>'
+                '<label><input type="radio" name="choice" value="no">No</label>'
+                '<button type="submit">Send application</button></fieldset></form>')
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="decision", mode="submit")
+    assert result.status == "needs_input" and not server.sent
+    assert result.questions[0].options == ["", "No"] and result.questions[0].choice_indices == [1]
+    assert "fictional-opaque-option" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(("selected", "duplicate", "expected"), [
+    ("33", "", "ready"), ("32", "", "needs_input"),
+    ("33", '<option value="other" disabled>Other (+33)</option>', "needs_input"),
+])
+async def test_preselected_dial_code_requires_exact_confirmed_phone(page, server, fast, cv_pdf, tmp_path, selected, duplicate, expected):
+    await serve(page, "dial", '<form action="/apply" method="post"><label for="dial">Country calling code</label>'
+                f'<select id="dial" name="dial" required><option value="{selected}">Selected (+{selected})</option>'
+                f'{duplicate}</select><button type="submit">Send application</button></form>')
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="dial")
+    assert result.status == expected and not server.sent
+    assert not any(question.choice_binding for question in result.questions)
+
+
+@pytest.mark.parametrize("metadata", ['autocomplete="section-login one-time-code"', ''])
+async def test_code_prompt_is_technical_from_autocomplete_or_group(page, server, fast, cv_pdf, tmp_path, metadata):
+    await serve(page, "code", '<form action="/apply" method="post"><fieldset>'
+                f'<legend>{"Security" if metadata else "Verification code"}</legend><label for="entry">Entry</label>'
+                f'<input id="entry" name="entry" required {metadata}>'
+                '<button type="submit">Send application</button></fieldset></form>')
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="code", mode="submit")
+    assert result.status == "needs_input" and result.questions[0].category == "credentials" and not server.sent
 
 
 UNRELATED_AD = ('<div><label for=a>Lieu</label><input id=a name=lieu value="France"><label for=b>Métier</label><input id=b name=metier value="technicien">'

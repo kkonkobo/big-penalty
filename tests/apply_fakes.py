@@ -87,7 +87,7 @@ def form_actions(snap: PageSnapshot, **extra) -> list[Action]:
         act(snap, r"Situation", "select", "situation", "alternance"),
         act(snap, r"disponible", "select", "available_now", "Oui"),
         act(snap, r"Curriculum|CV", "upload_cv", kind="file"),
-        act(snap, r"RGPD", "check", "consent_required"),
+        act(snap, r"^Disponible immédiatement", "check", "available_now"),
     ]
 
 

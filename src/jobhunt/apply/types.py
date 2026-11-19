@@ -62,6 +62,14 @@ class FormField(BaseModel):
     group: str = ""               # fieldset legend / nearest section heading
     error: str = ""               # validation message attached to the field, if any
     form: str = ""                # identity of the enclosing <form> ("<frame>:<n>"), "" when outside any form
+    autocomplete: str = Field(default="", exclude=True, repr=False)
+    destination: tuple[str, str] | None = Field(default=None, exclude=True, repr=False)
+    choice_destination: tuple[str, str] | None = Field(default=None, exclude=True, repr=False)
+    native_submit: bool = Field(default=False, exclude=True, repr=False)
+    wording: str = Field(default="", exclude=True, repr=False)
+    choice_options: list[tuple[str, str, bool, str]] = Field(default_factory=list, exclude=True, repr=False)
+    selected: list[int] = Field(default_factory=list, exclude=True, repr=False)
+    live_ref: str = Field(default="", exclude=True, repr=False)
 
 
 class PageSnapshot(BaseModel):

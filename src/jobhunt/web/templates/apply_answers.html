@@ -48,15 +48,15 @@
     <form method="post" action="/profiles/{{ profile.id }}/answers/choice" class="form">
       <input type="hidden" name="application_id" value="{{ choice.item.app.id }}">
       <input type="hidden" name="run_id" value="{{ choice.item.last_run.id }}">
-      <input type="hidden" name="origin" value="{{ choice.item.origin_sha }}">
+      <input type="hidden" name="origin" value="{{ choice.item.last_run.origin_sha }}">
       <input type="hidden" name="binding" value="{{ choice.question.choice_binding }}">
       <label>{{ choice.question.label }} · <a href="/apply/runs/{{ choice.item.last_run.id }}">Candidature nº {{ choice.item.app.id }}</a>
-        <select name="choice" required><option value="">Choisir…</option>
+        {% if not choice.saved %}<select name="choice" required><option value="">Choisir…</option>
           {% for index, label in choice.options %}<option value="{{ index }}">{{ label }}</option>{% endfor %}
-        </select>
+        </select>{% endif %}
       </label>
-      {% if choice.saved %}<small>Un choix a été confirmé pour ce formulaire.</small>{% endif %}
-      <button class="btn small" type="submit">Confirmer ce choix</button>
+      {% if choice.saved %}<small>Un choix a été confirmé pour ce formulaire.</small>
+      {% else %}<button class="btn small" type="submit">Confirmer ce choix</button>{% endif %}
     </form>
   {% endif %}{% endfor %}
   {% else %}<p class="panel-empty muted">Aucune décision particulière repérée.</p>{% endif %}

@@ -33,8 +33,6 @@ from jobhunt.dedupe import MergedJob
 from jobhunt.models import ContractType, Profile
 
 SECRET_PLACEHOLDER = "(mot de passe géré par le système)"
-CONSENT_REQUIRED_LABEL = ("Accepter les consentements OBLIGATOIRES : politique de confidentialité / traitement des données de "
-                          "candidature / CGU")
 CONSENT_OPTIONAL_LABEL = "Consentements FACULTATIFS (newsletter, marketing, vivier de talents, partage à des tiers) : refuser"
 
 
@@ -604,7 +602,6 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
     add("job_source", "Où avez-vous vu l'offre ? (source réelle de l'annonce)", _source_label(job))
     add("job_title", "Intitulé du poste", job.title)
     add("company", "Entreprise", job.company)
-    add("consent_required", CONSENT_REQUIRED_LABEL, "oui")
     add("consent_optional", CONSENT_OPTIONAL_LABEL, "non")
     add("account_email", "E-mail du compte candidat", _s(account_email) or email, exact=True,
         label_re=LABEL_RE["account_email"])
