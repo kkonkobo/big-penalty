@@ -590,7 +590,7 @@ def apply_diagnostics(
 
 @apply_app.command("dry-run")
 def apply_dry_run(app_id: int, headless: HeadlessOpt = None) -> None:
-    """Inspecte le formulaire sans saisir de données, joindre de document ni cliquer."""
+    """Inspecte le formulaire sans saisie, pièce jointe ni envoi."""
     from jobhunt.apply.errors import ApplyError
     from jobhunt.apply.service import run
 

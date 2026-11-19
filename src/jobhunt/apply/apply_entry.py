@@ -144,8 +144,6 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
     guard.probe = probe
     accepted = False
     try:
-        if guard.inspection_only:
-            await page.context.set_offline(False)
         state = await page.evaluate_handle(_POSTING, isolated_context=True)
         data = await state.get_properties()
         if (await data["url"].json_value() != audience.live_url or not audience.document_nonce

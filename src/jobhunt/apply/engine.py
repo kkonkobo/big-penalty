@@ -1766,7 +1766,7 @@ class _Run:
             try:
                 if not self.current_step:
                     await (self.goto or _default_goto)(self.page, self.url)
-                if self._inspection_only:
+                if self._inspection_only and not self.apply_entry:
                     self.inspection_offline = True
                     await ctx.set_offline(True)
                 res = await self._loop()
@@ -2083,6 +2083,8 @@ class _Run:
                 finally:
                     self.discovering_apply_entry = False
                     self.inspection_offline = self._inspection_only
+                    if self._inspection_only:
+                        await self.page.context.set_offline(True)
                 if landing is not None:
                     self.page = landing
                     self.apply_link_followed = True
@@ -2097,7 +2099,7 @@ class _Run:
                     return result
                 if navigated:
                     continue
-            if self.autonomous and kind == "job_page":
+            if self.autonomous and self.apply_entry and kind == "job_page":
                 result = self._end("needs_human", "Page d’offre, pas de formulaire de candidature vérifié.")
                 result.diagnostic_code = "job_page_no_apply_control"
                 return result

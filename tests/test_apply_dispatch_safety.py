@@ -113,6 +113,44 @@ async def test_readonly_apply_input_blocks_foreign_write(foreign_write, server, 
     assert not server.posts and not server.sent and "/blocked" not in server.requests
 
 
+async def test_dry_hydrates_posting_online_then_inspects_landing_offline(server, profile, tmp_path, fast, monkeypatch):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = '<main><h1>Ingénieur systèmes embarqués</h1></main>'
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    server.html["/hydrate"] = "ready"
+    pages = []
+    discover = service.discover
+
+    async def check_discovery(page, *args, **kwargs):
+        assert await page.evaluate("""async () => {
+            const response = await fetch('/hydrate');
+            const button = document.createElement('button');
+            button.textContent = 'Postuler';
+            button.onclick = () => location.assign('/jobs/100/apply');
+            document.querySelector('main').append(button);
+            return response.ok;
+        }""")
+        result = await discover(page, *args, **kwargs)
+        pages.append(result[0])
+        return result
+
+    class Planner(ScriptedPlanner):
+        async def plan(self, snapshot, facts, **kwargs):
+            assert all(fact.value is None for fact in facts.facts)
+            if pages:
+                assert await pages[0].evaluate("""async () => {
+                    try { await fetch('/offline-check'); return false; } catch { return true; }
+                }""")
+            return await super().plan(snapshot, facts, **kwargs)
+
+    monkeypatch.setattr(service, "discover", check_discovery)
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=Planner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == "dry_apply_form_found"
+    assert "/hydrate" in server.requests and "/offline-check" not in server.requests
+    assert not server.posts and not server.sent and not store.outstanding_attempt(app.id)
+
+
 @pytest.mark.parametrize("identifier, expected", [("JR100", "dry_apply_form_found"), ("JR200", "apply_target_unverified")])
 async def test_readonly_scripted_ats_landing_checks_structured_identity(identifier, expected, server, profile, tmp_path, fast, monkeypatch):
     _, app = approved_fixture(profile, tmp_path, server.url("jobs/JR100"))
