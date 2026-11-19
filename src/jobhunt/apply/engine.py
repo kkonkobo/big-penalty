@@ -129,7 +129,7 @@ FIELD_ERROR_MSG = ("Le site signale une erreur de saisie après le clic : vérif
                    "est partie")
 UNCONFIRMED_MSG = "Envoi non confirmé : vérifier sur le site de l'entreprise"
 UNSUPPORTED_DISPATCH = "Envoi bloqué : aucun adaptateur d'envoi et de reçu vérifié pour ce site."
-DRY_UNTESTED = "Simulation non testée : inspection hors ligne, sans saisie, fichier ni clic sur le site."
+DRY_UNTESTED = "Simulation non testée : inspection hors ligne, sans saisie, fichier ni envoi de candidature."
 # What the live control is, read at click time: its destination (the form it OWNS - `.form`, so an explicit form="id" wins over
 # the closest ancestor, which is used only when `.form` is null - or a link's href), whether it is a submit control and whether
 # its form already holds data (a text-like value or a selected file; hidden inputs, boxes and radios do not count).
@@ -2374,6 +2374,8 @@ class _Run:
                 result = self._end("blocked", DRY_UNTESTED)
                 if self.apply_link_followed and kind == "form" and self._has_form(snap):
                     result.diagnostic_code = "dry_apply_form_found"
+                elif self.apply_link_followed and (kind in ACCOUNT_KINDS or any(f.kind == "password" for f in snap.fields)):
+                    result.diagnostic_code = "dry_account_gate"
                 return result
             if self.mode == "supervised":
                 return self._end("ready", "Vérifiez le formulaire. Vous seul pouvez cliquer sur Envoyer.")

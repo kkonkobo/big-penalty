@@ -41,7 +41,7 @@ def resolved_identity(extra) -> tuple[str, str] | None:
 
 
 def ats_target(url: str) -> tuple[str | None, tuple[str, str] | None]:
-    from jobhunt.origin import _identity, classify_ats
+    from jobhunt.origin import _identity, classify_ats, workday_requisition
 
     parsed = urlsplit(url)
     ats = classify_ats(url)
@@ -51,6 +51,8 @@ def ats_target(url: str) -> tuple[str | None, tuple[str, str] | None]:
     identity = canonical_identity(*_identity(ats, url)[:2]) if ats else None
     if identity and any(value.casefold() != identity[1] for _, value in parse_qsl(parsed.query)):
         identity = None
+    if ats == "workday" and identity:
+        identity = identity[0], workday_requisition(identity[1])
     return ats, identity
 
 
@@ -71,7 +73,11 @@ def dispatch_url(original: str | None, extra, *, autonomous: bool) -> str:
             or not isinstance(confidence, (int, float)) or not MIN_CONFIDENCE <= confidence <= 1
             or fallback not in (posting, target) or not origin(target) or not ats):
         return fallback
-    return target if ats_target(target) == (ats, resolved_identity(extra)) else fallback
+    expected = resolved_identity(extra)
+    if ats == "workday":
+        from jobhunt.origin import workday_requisition
+        expected = expected[0], workday_requisition(expected[1])
+    return target if ats_target(target) == (ats, expected) else fallback
 
 
 def posting_fingerprint(row) -> str:

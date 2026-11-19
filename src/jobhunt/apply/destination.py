@@ -8,9 +8,9 @@ import re
 from collections.abc import Callable
 from email import policy
 from email.parser import BytesParser
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
-_REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid"}
+_REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid", "jobreqid", "career_job_req_id"}
 _TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid"}
 _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
@@ -58,6 +58,10 @@ def audit_url(url: str | None) -> str:
     path = parsed.path if _JOB_PATH.fullmatch(parsed.path) else ""
     query = [(key, value) for key, value in parse_qsl(parsed.query) if re.fullmatch(r"[0-9]{1,18}", value)]
     return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query), ""))
+
+
+def _navigation_matches(actual: str, expected: str) -> bool:
+    return bool(expected and actual == quote(expected, safe=":/?#[]@!$&'()*+,;=%"))
 
 
 def clean_text(text: str, *, audit: bool = False) -> str:
@@ -174,21 +178,32 @@ class RecipientGuard:
             navigation = request.is_navigation_request()
             read = request.method in {"GET", "HEAD"}
             write = not read
+            entry_post = False
+            if self.probe and navigation and read:
+                with contextlib.suppress(Exception):
+                    if request.frame.parent_frame is not None:
+                        await route.abort()
+                        return
             if self.probe and write:
-                if self.probe.same_site(request.url):
-                    await route.abort()
-                else:
-                    await refuse(route, "apply_target_unverified")
-                return
-            if self.inspection_only and write:
+                try:
+                    entry_post = self.probe.allow_post(request)
+                except Exception:
+                    pass
+                if not entry_post:
+                    if self.probe.same_site(request.url):
+                        await route.abort()
+                    else:
+                        await refuse(route, "apply_target_unverified")
+                    return
+            if self.inspection_only and write and not entry_post:
                 await route.abort()
                 return
             permitted = self.allows(request.url) or (read and not navigation and origin(request.url) in self.read_only)
             if self.probe:
-                permitted = self.probe.allows(request)
+                permitted = entry_post or self.probe.allows(request)
             elif self.audience:
                 try:
-                    permitted = self.audience.request_allowed(request, self.page, initial=request.url == self._initial_url)
+                    permitted = self.audience.request_allowed(request, self.page, initial=_navigation_matches(request.url, self._initial_url))
                 except Exception:
                     permitted = False
             if not permitted:
@@ -219,7 +234,8 @@ class RecipientGuard:
                     return
                 if self.audience and (write or (self.audience.active and urlsplit(request.url).query)):
                     self.audience.recheck()
-                    self.transmitted = True
+                    if not entry_post:
+                        self.transmitted = True
                 final_request = self.final_started and write and self.audience.click_write is request
                 response = await route.fetch(max_redirects=0, max_retries=0)
                 if final_request and request.is_navigation_request() and response.status in {301, 302, 303} and response.headers.get("location"):
@@ -234,11 +250,12 @@ class RecipientGuard:
                         self.audience.final_receipt_url = target
                 if self.refusal_status(response.status):
                     target = urljoin(request.url, response.headers.get("location", ""))
-                    if (self.probe and 300 <= response.status < 400 and response.headers.get("location")
+                    if (self.probe and response.status in ({301, 302, 303} if entry_post else {301, 302, 303, 307, 308})
+                            and response.headers.get("location")
                             and request.is_navigation_request() and self.probe.redirect(target)):
                         await route.fulfill(status=200, content_type="text/plain", body="")
                     elif (300 <= response.status < 400 and response.headers.get("location")
-                            and request.method in {"GET", "HEAD"} and request.url == self._initial_url
+                            and request.method in {"GET", "HEAD"} and _navigation_matches(request.url, self._initial_url)
                             and request.is_navigation_request() and request.frame == page.main_frame
                             and (self.audience.initial_redirect(request.url, target) if self.audience else self.allows(target))
                             and (safe_target := clean_url(target, navigation=True))):
@@ -249,7 +266,7 @@ class RecipientGuard:
                         await route.abort()
                     else:
                         await refuse(route, "recipient_refused_redirect" if 300 <= response.status < 400 else
-                                     "recipient_refused_response")
+                                     "challenge_or_rate_limited" if self.inspection_only and navigation else "recipient_refused_response")
                 elif self.refused:
                     await route.abort()
                 else:

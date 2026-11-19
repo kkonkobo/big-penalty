@@ -151,6 +151,94 @@ async def test_dry_hydrates_posting_online_then_inspects_landing_offline(server,
     assert not server.posts and not server.sent and not store.outstanding_attempt(app.id)
 
 
+@pytest.mark.parametrize("scenario", ["system_only", "visible", "wrong_requisition", "redirect_no_replay"])
+async def test_talentsoft_entry_posts_only_bound_system_fields(scenario, server, profile, tmp_path, fast, monkeypatch):
+    url = server.url("jobs/100")
+    monkeypatch.setattr(apply_entry, "ats_target", lambda target: ("talentsoft", ("fixture", "100")) if target == url else (None, None))
+    _, app = approved_fixture(profile, tmp_path, url)
+    extra = '<input type="text" name="name" value="fixture">' if scenario == "visible" else ""
+    req = "200" if scenario == "wrong_requisition" else "100"
+    system_form = f'''<form method="post" action="/jobs/100/apply"><input type="hidden" name="idOffre" value="{req}">
+        <input type="hidden" name="culture" value="fr">{extra}<input type="submit" value="Postuler"></form>'''
+    server.html["/jobs/100"] = '<main><h1>Offre</h1>' + system_form * (1 if scenario == "visible" else 2) + '</main>'
+    server.post_pages["/jobs/100/apply"] = "form.html"
+    if scenario == "redirect_no_replay":
+        server.redirects["/jobs/100/apply"] = "/jobs/100/redirect"
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), StepPlan(page_kind="form")]))
+    if scenario == "system_only":
+        assert server.posts == [{"path": "/jobs/100/apply", "body": b"idOffre=100&culture=fr"}]
+        assert result.result.diagnostic_code in {"dry_apply_form_found", "dry_apply_form_needs_input"}
+    elif scenario == "redirect_no_replay":
+        assert server.posts == [{"path": "/jobs/100/apply", "body": b"idOffre=100&culture=fr"}]
+        assert "/jobs/100/redirect" not in server.requests and result.result.diagnostic_code == "recipient_refused_redirect"
+    else:
+        assert not server.posts and result.result.diagnostic_code == "apply_target_unverified"
+    assert not store.outstanding_attempt(app.id)
+
+
+async def test_dry_initial_navigation_accepts_utf8_encoded_path(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100/ingénieur-d’étude"))
+    server.html["/jobs/100/ing%C3%A9nieur-d%E2%80%99%C3%A9tude"] = (
+        '<main><h1>Ingénieur</h1><a href="/jobs/100/apply">Postuler</a></main>'
+    )
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == "dry_apply_form_found"
+    assert not server.posts
+
+
+@pytest.mark.parametrize("second_id", ["100", "200"])
+async def test_sap_entry_prefers_bound_apply_and_ignores_subframe(second_id, server, profile, tmp_path, fast, monkeypatch):
+    source = server.url("jobs/100")
+    monkeypatch.setattr(apply_entry, "ats_target", lambda url: ("successfactors", None) if url == source else (None, None))
+    _, app = approved_fixture(profile, tmp_path, source)
+    server.html["/jobs/100"] = f'''<main><h1>Offre</h1><a href="/talentcommunity/apply/100/">Postuler</a>
+        <a href="/talentcommunity/apply/{second_id}/">Apply</a></main>'''
+    frame = server.url("map").replace("127.0.0.1", "localhost")
+    server.html["/talentcommunity/apply/100/"] = f'<iframe src="{frame}"></iframe>' + posting_form("/talentcommunity/apply/100/")
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == ("dry_apply_form_found" if second_id == "100" else "apply_control_ambiguous")
+    assert "/map" not in server.requests and not server.posts
+
+
+def test_workday_alias_and_smartrecruiters_publication_require_exact_binding():
+    posting = "https://example.wd3.myworkdayjobs.com/External/job/Paris/Engineer_R0341251-1"
+    entry = apply_entry._workday_entry(posting)
+    assert entry == posting + "/apply/applyManually"
+    probe = apply_entry.Probe(posting, "R0341251", [])
+    assert probe.navigation(entry)
+    assert not probe.navigation(entry.replace("R0341251", "R0341252"))
+    assert not probe.navigation(entry.replace("-1/", "-123/"))
+    smart = apply_entry.Probe("https://jobs.smartrecruiters.com/Example/123456-Engineer", None, [])
+    uuid = "aea65468-b6ed-4f80-9d0d-60ee2cd01f22"
+    assert not apply_entry._smart_entry(smart, {"id": "123457", "publicationId": uuid})
+    target = apply_entry._smart_entry(smart, {"id": "123456", "publicationId": uuid})
+    assert smart.navigation(target) and not smart.navigation(target.replace("/example/", "/other/"))
+
+
+@pytest.mark.parametrize("challenge", [False, True])
+async def test_workday_direct_entry_waits_for_late_render(challenge, server, profile, tmp_path, fast, monkeypatch):
+    path = "External/job/Paris/Engineer_R0341251-1"
+    entry_path = f"/{path}/apply/applyManually"
+    monkeypatch.setattr(apply_entry, "ats_target", lambda url: ("workday", ("fixture", "r0341251"))
+                        if urlsplit(url).path.startswith(f"/{path}") else (None, None))
+    _, app = approved_fixture(profile, tmp_path, server.url(path))
+    server.html[f"/{path}"] = "<main><h1>Offre</h1></main>"
+    delayed = json.dumps(posting_form(entry_path))
+    server.html[entry_path] = ("<title>Just a moment...</title>" if challenge else
+        f'''<main></main><script>setTimeout(() => {{
+            document.querySelector('main').innerHTML = {delayed};
+            document.querySelector('main').dataset.automationId = 'applyManually';
+        }}, 500)</script>''')
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == ("challenge_or_rate_limited" if challenge else "dry_apply_form_found")
+    assert entry_path in server.requests and not server.posts
+
+
 @pytest.mark.parametrize("identifier, expected", [("JR100", "dry_apply_form_found"), ("JR200", "apply_target_unverified")])
 async def test_readonly_scripted_ats_landing_checks_structured_identity(identifier, expected, server, profile, tmp_path, fast, monkeypatch):
     _, app = approved_fixture(profile, tmp_path, server.url("jobs/JR100"))

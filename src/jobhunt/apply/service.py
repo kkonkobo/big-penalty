@@ -567,7 +567,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             nonlocal attempt, password, account_known
             try:
                 landing, target = await discover(tab, guard, audience, requisition=attempt.requisition_id,
-                                                 require_posting=require_posting)
+                                                 require_posting=require_posting, platform=job.origin_ats)
                 if landing is not None:
                     if clean_url(landing.url, navigation=True) != target or guard.refused:
                         return None, "apply_target_unverified"
@@ -786,7 +786,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                     identity = resolved_identity(job.extra)
                     try:
                         landing, target = await discover(tab, guard, audience, requisition=identity[1] if identity else None,
-                                                         require_posting=require_posting)
+                                                         require_posting=require_posting, platform=job.origin_ats)
                         if landing is not None:
                             audience.bind_recipient(target)
                             await audience.bind_document(landing, entry=True)
@@ -810,7 +810,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
                 res = res.model_copy(update={"status": "needs_human", "diagnostic_code": guard.refusal_code,
                                              "message": RECIPIENT_REFUSED})
             if challenge and res.status == "failed":
-                res = res.model_copy(update={"status": "needs_human", "diagnostic_code": "challenge"})
+                res = res.model_copy(update={"status": "needs_human", "diagnostic_code": "challenge_or_rate_limited"})
             if out is not None:
                 out.append(res)
             return res
