@@ -24,6 +24,7 @@ import yaml
 from pydantic import BaseModel
 
 from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, is_manual_choice, norm_question, technical_key
 from jobhunt.apply.types import Fact, FactSheet
 from jobhunt.config import get_settings
 from jobhunt.filelock import try_lock, unlock
@@ -55,12 +56,7 @@ def load_answers(profile_id: int) -> dict:
     return data
 
 
-def _norm_question(q: str) -> str:
-    q = "".join(c for c in unicodedata.normalize("NFKD", q or "") if not unicodedata.combining(c))
-    return re.sub(r"[^a-z0-9]+", " ", q.casefold().replace("’", "'")).strip()
-
-
-norm_question = _norm_question  # public: how two question labels are compared (accents, case, punctuation ignored)
+_norm_question = norm_question
 
 
 _held_lock = threading.Lock()
@@ -157,6 +153,8 @@ def _write_answers(profile_id: int, data: dict) -> None:
 @_locked
 def save_custom_answers(profile_id: int, pairs: list[tuple[str, str]]) -> None:
     """Append (or update, same normalized question) `custom` entries; every other key is kept (comments may be lost)."""
+    if any(answer and (technical_key(question) or is_manual_choice(question)) for question, answer in pairs):
+        raise ApplyError(CREDENTIAL_ERROR)
     data = load_answers(profile_id)
     custom = [c for c in (data.get("custom") or []) if isinstance(c, dict)]
     for question, answer in pairs:
@@ -232,7 +230,8 @@ ANSWER_FIELDS: tuple[AnswerField, ...] = (
     _F(path="postal_code", label="Code postal", section=S_ID),
     _F(path="city", label="Ville", section=S_ID),
     _F(path="department", label="Département", section=S_ID, placeholder="Haute-Garonne"),
-    _F(path="country", label="Pays", section=S_ID, placeholder="France"),
+    _F(path="country", label="Pays de résidence", section=S_ID),
+    _F(path="phone_device_type", label="Type de téléphone déclaré", widget="select", options=("", "Mobile", "Fixe"), section=S_ID),
     _F(path="work_authorization", label="Autorisation de travail en France", widget="textarea", max_len=1000, section=S_ADMIN,
        help="Nationalité ou titre de séjour, et ce qui permet de travailler en France."),
     _F(path="needs_visa_sponsorship", label="Besoin d'un visa ou d'un permis de travail", widget="select",
@@ -366,7 +365,8 @@ def custom_id(question: str) -> str:
 def custom_answers(profile_id: int) -> list[dict]:
     """The `custom` entries (id, question, answer) in the order build_facts numbers them (custom_1, custom_2...)."""
     return [{"id": custom_id(str(c.get("question") or "")), "question": str(c.get("question") or ""), "answer": str(c.get("answer") or "")}
-            for c in (load_answers(profile_id).get("custom") or []) if isinstance(c, dict)]
+            for c in (load_answers(profile_id).get("custom") or []) if isinstance(c, dict)
+            and not technical_key(str(c.get("question") or "")) and not is_manual_choice(str(c.get("question") or ""))]
 
 
 def _custom_entry(data: dict, custom_id_: str) -> dict | None:
@@ -398,6 +398,8 @@ def update_custom_answer(profile_id: int, custom_id_: str, answer: str, previous
     entry = _custom_entry(data, custom_id_)
     if entry is None or str(entry.get("answer") or "") != previous:
         return False
+    if technical_key(str(entry.get("question") or "")) or is_manual_choice(str(entry.get("question") or "")):
+        raise ApplyError(CREDENTIAL_ERROR)
     entry["answer"] = answer
     _write_answers(profile_id, data)
     return True
@@ -445,7 +447,7 @@ LABEL_RE: dict[str, str] = {
     "full_name": _label_re(_FULL_NAME + r"|your name|votre nom|(?<![a-z])name(?![a-z])",
                            _NOT_A_PERSON_NAME + r"|first|last|given|family|surname|forename|nachname|vorname"),
     "email": _label_re("mail|courriel"),
-    "phone": _label_re(r"(?<![a-z])tel(?![a-z])|telephone|phone|mobile|portable|(?<![a-z])gsm"),
+    "phone": _label_re(r"(?<![a-z])tel(?![a-z])|telefon|telephone|phone|mobile|portable|(?<![a-z])gsm"),
     "linkedin": _label_re("linkedin"),
     "account_password": _label_re("mot de passe|password|passwort|mdp|kennwort|contrase[nñ]a|senha|wachtwoord|has[lł]o|parola|密码"),
 }
@@ -520,6 +522,18 @@ def _source_label(job: MergedJob) -> str | None:
 
 
 # ---------------------------------------------------------------- the sheet
+def identity_answers(profile: Profile, master: Master | None, answers: dict) -> dict[str, str | None]:
+    identity = master.identity if master is not None else None
+    name = _s(identity.name if identity else None) or _s(profile.name)
+    parts = (name or "").split()
+    return {
+        "full_name": name, "first_name": _s(answers.get("first_name")) or (parts[0] if parts else None),
+        "last_name": _s(answers.get("last_name")) or (" ".join(parts[1:]) or None),
+        "email": _s(identity.email if identity else None) or _s(profile.email),
+        "phone": _s(identity.phone if identity else None) or _s(profile.phone),
+    }
+
+
 def build_facts(profile: Profile, master: Master | None, answers: dict, job: MergedJob, *, account_email: str | None = None,
                 today: date | None = None) -> FactSheet:
     facts: list[Fact] = []
@@ -528,18 +542,16 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
         facts.append(Fact(key=key, label=label, value=value if kw.get("secret") else _s(value), **kw))  # secret: "" placeholder
 
     ident = master.identity if master else None
-    full_name = _s(ident.name if ident else None) or _s(profile.name)
-    parts = (full_name or "").split()
-    email = _s(ident.email if ident else None) or _s(profile.email)
-    phone = _s(ident.phone if ident else None) or _s(profile.phone)
+    identity = identity_answers(profile, master, answers)
+    email, phone = identity["email"], identity["phone"]
     linkedin = _s(ident.linkedin if ident else None)
-    add("full_name", "Nom complet", full_name, exact=True, label_re=LABEL_RE["full_name"])
-    add("first_name", "Prénom", _s(answers.get("first_name")) or (parts[0] if parts else None), exact=True,
-        label_re=LABEL_RE["first_name"])
-    add("last_name", "Nom de famille", _s(answers.get("last_name")) or (" ".join(parts[1:]) or None), exact=True,
-        label_re=LABEL_RE["last_name"])
+    add("full_name", "Nom complet", identity["full_name"], exact=True, label_re=LABEL_RE["full_name"])
+    add("first_name", "Prénom", identity["first_name"], exact=True, label_re=LABEL_RE["first_name"])
+    add("last_name", "Nom de famille", identity["last_name"], exact=True, label_re=LABEL_RE["last_name"])
     add("email", "Adresse e-mail", email, exact=True, label_re=LABEL_RE["email"])
     add("phone", "Téléphone", phone, exact=True, variants=phone_variants(phone), label_re=LABEL_RE["phone"])
+    add("phone_device_type", "Type de téléphone déclaré (Mobile ou Fixe)",
+        answers.get("phone_device_type") if answers.get("phone_device_type") in ("Mobile", "Fixe") else None)
     # Forms validate this field as a URL ("Veuillez entrer une url LinkedIn valide" on a real site when the scheme was
     # missing): the value typed is always the full https URL; the shorter spellings stay as accepted variants.
     full_linkedin = linkedin_full_url(linkedin)
@@ -598,6 +610,8 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
         label_re=LABEL_RE["account_email"])
     add("account_password", "Mot de passe du compte candidat", "", exact=True, secret=True, label_re=LABEL_RE["account_password"])
     for i, c in enumerate([c for c in (answers.get("custom") or []) if isinstance(c, dict)], 1):
+        if technical_key(str(c.get("question") or "")) or is_manual_choice(str(c.get("question") or "")):
+            continue
         add(f"custom_{i}", str(c.get("question") or f"Question {i}"), c.get("answer"))
     return FactSheet(facts=facts)
 

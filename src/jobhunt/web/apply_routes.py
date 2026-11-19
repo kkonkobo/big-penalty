@@ -17,14 +17,17 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 
 from jobhunt import db
-from jobhunt.apply import accounts, facts, missing_answers
+from jobhunt.apply import accounts, facts, missing_answers, scoped_choices
 from jobhunt.apply import service as apply_service
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.errors import ApplyError
+from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, international_calling_code, technical_key
 from jobhunt.apply.service import QueueItem
+from jobhunt.apply.types import Question
 from jobhunt.config import get_settings
 from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
+from jobhunt.cv.master import MasterError, load_master
 
 log = logging.getLogger("jobhunt.web.apply")
 router = APIRouter()
@@ -60,7 +63,8 @@ def _web():
 
 def _register_globals(templates) -> None:
     templates.env.globals.update(APPLY_BUCKET_LABELS=BUCKET_LABELS, APPLY_BUCKET_CLASS=BUCKET_CLASS,
-                                 APPLY_RUN_LABELS=RUN_STATUS_LABELS, APPLY_RUN_CLASS=RUN_STATUS_CLASS, APPLY_MODE_LABELS=MODE_LABELS)
+                                 APPLY_RUN_LABELS=RUN_STATUS_LABELS, APPLY_RUN_CLASS=RUN_STATUS_CLASS, APPLY_MODE_LABELS=MODE_LABELS,
+                                 editable_custom=missing_answers.editable_custom)
 
 
 def install(app, templates) -> None:
@@ -372,17 +376,25 @@ async def apply_answers(request: Request, app_id: str):
     if (origin == "" or last is None or safe_id(str(form.get("run_id") or "")) != last.id or last.status != "needs_input"
             or last.rev != app.current_rev or last.result is None):
         return web._flash("/apply", error=stale)
-    asked = {_norm(q.label) for q in last.result.questions}
+    asked: dict[str, list[Question]] = {}
+    for question in last.result.questions:
+        asked.setdefault(facts.norm_question(question.label), []).append(question)
+    restricted = {facts.norm_question(q.label) for q in last.result.questions if not missing_answers.editable_custom(q)}
     pairs: list[tuple[str, str]] = []
     for key in form.keys():
         m = re.fullmatch(r"q_([0-9]{1,4})", key)
         if not m:
             continue
         label, answer = str(form.get(key) or "").strip(), str(form.get(f"a_{m.group(1)}") or "").strip()
-        if label and _norm(label) not in asked:
+        normalized = facts.norm_question(label)
+        if answer and normalized in restricted:
+            return web._flash("/apply", error=CREDENTIAL_ERROR)
+        if label and normalized not in asked:
             return web._flash("/apply", error=stale)
         if label and answer:
-            pairs.append((label, answer))
+            if any(question.options and answer not in question.options for question in asked[normalized]):
+                return web._flash("/apply", error="Ce choix n’est pas proposé par le formulaire.")
+            pairs.append((" ".join(asked[normalized][0].label.split()), answer))
     if not pairs:
         return web._flash("/apply", error="Aucune réponse saisie")
     try:
@@ -523,23 +535,37 @@ def _answers_context(pid: int, answers: dict | None = None) -> dict[str, Any]:
                          "legacy": bool(stored and f.widget == "date" and not shown),
                          "extra_option": bool(f.widget == "select" and stored and stored not in f.options)})
         sections.append({"title": name, "rows": rows})
-    return {"sections": sections, "country_suggestion": facts.COUNTRY_SUGGESTION, "custom": facts.custom_answers(pid),
+    return {"sections": sections, "custom": facts.custom_answers(pid),
             "hosts": facts.trusted_hosts(pid)}
 
 
-def _pending_answer_prompts(items: list[QueueItem], grouped_keys: set[str], answered_labels: set[str]) -> list[dict[str, Any]]:
+def _restricted_labels(items: list[QueueItem]) -> set[str]:
+    return {facts.norm_question(q.label) for item in items for q in item.questions if not missing_answers.editable_custom(q)}
+
+
+def _pending_answer_prompts(items: list[QueueItem], restricted: set[str], answered_labels: set[str]) -> list[dict[str, Any]]:
     prompts = {}
     affected: dict[str, set[int]] = {}
     for item in items:
         for question in item.questions:
             key = facts.norm_question(question.label)
-            if not key or key in answered_labels or missing_answers.fact_key(question) in grouped_keys:
+            if not key or key in answered_labels or key in restricted:
                 continue
             affected.setdefault(key, set()).add(item.app.id)
             prompts.setdefault(key, {"app": item.app, "q": question, "i": len(prompts)})
     for key, prompt in prompts.items():
         prompt["count"] = len(affected[key])
     return sorted(prompts.values(), key=lambda prompt: -prompt["count"])
+
+
+def _answer_actions(profile_id: int) -> dict[str, tuple[str, str]]:
+    actions = {key: (facts.ANSWER_BY_PATH[key].label, "#" + _field_name(key))
+               for key in missing_answers.ALIASES if key in facts.ANSWER_BY_PATH}
+    actions.update({key: (label, f"/profiles/{profile_id}/edit") for key, label in {
+        "full_name": "Nom complet", "email": "Adresse e-mail", "phone": "Numéro de téléphone",
+        "phone_calling_code": "Numéro de téléphone au format international",
+    }.items()})
+    return actions
 
 
 @router.get("/profiles/{pid}/answers", response_class=HTMLResponse)
@@ -555,25 +581,83 @@ def answers_page(request: Request, pid: str, f: str | None = None):
         ctx = _answers_context(profile_id, answers)
         recorded_keys = {key for key in missing_answers.ALIASES if facts.get_answer(answers, key)}
     except ApplyError as e:  # unreadable answers.yaml
-        ctx = {"sections": [], "country_suggestion": "", "custom": [], "hosts": []}
+        ctx = {"sections": [], "custom": [], "hosts": []}
         errors.append(str(e))
-    groups, pending, resumable = [], [], []
+    groups, pending, resumable, decisions, technical, choices = [], [], [], [], [], []
     try:
         resumable = list(missing_answers.input_pauses(profile_id, apply_service.queue(profile_id)))
+        restricted = _restricted_labels(resumable)
         if recorded_keys is not None:
+            try:
+                master = load_master(profile_id)
+            except MasterError:
+                master = None
+            identity = facts.identity_answers(profile, master if master and master.is_confirmed else None, answers)
+            recorded_keys.update(key for key, value in identity.items() if value)
+            if international_calling_code(identity["phone"] or ""):
+                recorded_keys.add("phone_calling_code")
+            if facts.get_answer(answers, "phone_device_type") not in {"Mobile", "Fixe"}:
+                recorded_keys.discard("phone_device_type")
             answered = {facts.norm_question(entry["question"]) for entry in ctx["custom"] if entry["answer"].strip()}
             groups = missing_answers.project(profile_id, resumable, recorded_fact_keys=recorded_keys, answered_labels=answered)
-            pending = _pending_answer_prompts(resumable, {group.fact_key for group in groups},
-                                              {facts.norm_question(entry["question"]) for entry in ctx["custom"]})
+            decisions, technical = missing_answers.review_groups(resumable, recorded_keys, answered)
+            pending = _pending_answer_prompts(resumable, restricted, answered)
+            ctx["custom"] = [entry for entry in ctx["custom"] if facts.norm_question(entry["question"]) not in restricted]
+            for item in resumable:
+                bound = {q.choice_binding: q for q in item.questions if _allows_bound_choice(q)}
+                if not bound or not item.origin_sha:
+                    continue
+                saved = scoped_choices.load(profile_id, item.app.id, item.app.current_rev, item.origin_sha)
+                choices.extend({"item": item, "question": question, "options": scoped_choices.labels(question),
+                                "saved": binding in saved} for binding, question in bound.items())
     except Exception as e:  # noqa: BLE001 - the form itself must still render
         log.exception("pending questions failed")
-        groups, pending, resumable = [], [], []
+        groups, pending, resumable, decisions, technical, choices = [], [], [], [], [], []
+        ctx["custom"] = []
         errors.append(_msg(e))
     return web.render(request, "apply_answers.html", profile=profile, pending=pending, resumable=resumable, notice=notice,
-                      errors=errors, mode_labels=MODE_LABELS, missing_groups=groups, answer_fields=facts.ANSWER_BY_PATH, **ctx)
+                      errors=errors, mode_labels=MODE_LABELS, missing_groups=groups, answer_actions=_answer_actions(profile_id),
+                      decisions=decisions, technical=technical, choices=choices, decision_titles=missing_answers.DECISIONS,
+                      technical_titles=missing_answers.TECHNICAL,
+                      runs={item.app.id: item.last_run.id for item in resumable}, **ctx)
 
 
 STALE_ANSWER = "cette réponse a changé entre-temps"
+
+
+def _allows_bound_choice(question: Question) -> bool:
+    return bool(question.choice_binding and question.kind in {"select", "radio"} and question.reason != "technical"
+                and not technical_key(question.label, question.kind))
+
+
+@router.post("/profiles/{pid}/answers/choice")
+async def answers_choice(request: Request, pid: str):
+    web = _web()
+    profile_id = _id_or_404(pid)
+    web._profile_or_404(profile_id)
+    back = f"/profiles/{profile_id}/answers"
+    form = await request.form()
+    aid = safe_id(form.get("application_id"))
+    app = cvstore.get_application(aid) if aid is not None else None
+    run = apply_store.last_run(aid) if aid is not None else None
+    job = db.get_job(app.job_id) if app is not None else None
+    origin = _origin_field(form)
+    binding = str(form.get("binding") or "")
+    token = str(form.get("choice") or "")
+    if not (app and app.profile_id == profile_id and app.status in {"draft", "approved"} and run and run.result
+            and run.status == "needs_input" and run.rev == app.current_rev and safe_id(form.get("run_id")) == run.id
+            and job and job.origin_url and origin == apply_service.origin_digest(job.origin_url)
+            and re.fullmatch(r"[0-9a-f]{64}", binding) and re.fullmatch(r"[0-9]{1,4}", token)):
+        return web._flash(back, error="Choix absent, invalide ou périmé. Vérifiez le formulaire.")
+    prompts = [q for q in run.result.questions if q.choice_binding == binding]
+    if not prompts or any(not _allows_bound_choice(q) or
+                          int(token) not in {index for index, _ in scoped_choices.labels(q)} for q in prompts):
+        return web._flash(back, error="Choix absent, invalide ou périmé. Vérifiez le formulaire.")
+    try:
+        scoped_choices.save(profile_id, app.id, run.rev, origin, binding, int(token))
+    except (ApplyError, OSError):
+        return web._flash(back, error="Choix non enregistré.")
+    return web._flash(back, notice="Choix confirmé pour ce formulaire. Aucun essai lancé.")
 
 
 @router.post("/profiles/{pid}/answers")
@@ -603,8 +687,15 @@ async def answers_save(request: Request, pid: str):
                     stale.append(f"« {f.label} » : {STALE_ANSWER}")
                 else:
                     changes[f.path] = str(form.get(name) or "")
-        asked = {facts.norm_question(q.label): q.label for _, _, q in apply_service.pending_questions(profile_id)}
-        have = {facts.norm_question(c["question"]) for c in facts.custom_answers(profile_id)}
+        pauses = list(missing_answers.input_pauses(profile_id, apply_service.queue(profile_id)))
+        restricted = _restricted_labels(pauses)
+        asked: dict[str, list[Question]] = {}
+        for item in pauses:
+            for question in item.questions:
+                if missing_answers.editable_custom(question):
+                    asked.setdefault(facts.norm_question(question.label), []).append(question)
+        stored_custom = {c["id"]: c for c in facts.custom_answers(profile_id)}
+        have = {facts.norm_question(c["question"]) for c in stored_custom.values()}
         pairs: list[tuple[str, str]] = []
         for key in form.keys():
             m = re.fullmatch(r"pqa_([0-9]{1,4})", key)
@@ -612,12 +703,16 @@ async def answers_save(request: Request, pid: str):
             label = str(form.get(f"pql_{m.group(1)}") or "") if m else ""
             if m and answer:
                 norm = facts.norm_question(label)
+                if norm in restricted or not missing_answers.editable_custom(Question(label=label)):
+                    return web._flash(back, error=CREDENTIAL_ERROR)
+                if norm in have:
+                    stale.append(STALE_ANSWER)
+                    continue
                 if norm not in asked:
-                    if norm in have:  # answered in another tab since: never overwritten
-                        stale.append(f"« {label} » : {STALE_ANSWER}")
-                        continue
                     return web._flash(back, error="Page périmée : les questions ont changé, recharger la page")
-                pairs.append((asked[norm], answer))
+                if any(question.options and answer not in question.options for question in asked[norm]):
+                    return web._flash(back, error="Ce choix n’est pas proposé par le formulaire.")
+                pairs.append((asked[norm][0].label, answer))
         edits: list[tuple[str, str, str, str]] = []
         for key in form.keys():
             m = re.fullmatch(r"ca_([0-9a-f]{16})", key)
@@ -625,7 +720,9 @@ async def answers_save(request: Request, pid: str):
                 continue
             new = " ".join(str(form.get(key) or "").split())
             prev = form.get("caprev_" + m.group(1))
-            label = next((c["question"] for c in facts.custom_answers(profile_id) if c["id"] == m.group(1)), "Réponse enregistrée")
+            label = stored_custom.get(m.group(1), {}).get("question", "Réponse enregistrée")
+            if new and facts.norm_question(label) in restricted:
+                return web._flash(back, error=CREDENTIAL_ERROR)
             if prev is None:
                 if new:
                     stale.append(f"« {label} » : {STALE_ANSWER}")

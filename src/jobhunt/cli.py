@@ -674,11 +674,12 @@ def apply_trust(profile_id: int, host: Annotated[str, typer.Argument(help="nom d
 @apply_app.command("answer")
 def apply_answer(app_id: int) -> None:
     """Répond aux questions du dernier essai en pause ; les réponses servent pour tous les formulaires suivants."""
+    from jobhunt.apply.missing_answers import editable_custom
     from jobhunt.apply.service import answer_questions
     from jobhunt.apply.store import last_run
 
     run = last_run(app_id)
-    qs = run.result.questions if run and run.result else []
+    qs = [question for question in run.result.questions if editable_custom(question)] if run and run.result else []
     if not qs:
         console.print("Aucune question en attente pour cette candidature.", markup=False)
         raise typer.Exit(1)

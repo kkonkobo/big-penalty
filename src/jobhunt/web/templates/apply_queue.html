@@ -79,19 +79,21 @@
         {% if it.last_run %}<a class="small" href="/apply/runs/{{ it.last_run.id }}">voir l'essai</a>{% endif %}</p>
       {% if it.pause_reason == 'input' %}
       <p><a class="btn small" href="/profiles/{{ it.app.profile_id }}/answers">Compléter mes réponses</a></p>
-      <form method="post" action="/applications/{{ it.app.id }}/apply/answers" class="form">
+      {% set editable = namespace(count=0) %}
+      {% for q in it.questions %}{% if editable_custom(q) %}{% set editable.count = editable.count + 1 %}{% endif %}{% endfor %}
+      {% if editable.count %}<form method="post" action="/applications/{{ it.app.id }}/apply/answers" class="form">
         <input type="hidden" name="run_id" value="{{ it.last_run.id }}"><input type="hidden" name="origin" value="{{ it.origin_sha }}">
         <p class="muted small">Le formulaire pose des questions auxquelles l'outil ne peut pas répondre seul. Vos réponses sont gardées pour les prochains formulaires.</p>
-        {% for q in it.questions %}
+        {% for q in it.questions %}{% if editable_custom(q) %}
         <label>{{ q.label }}
           <input type="hidden" name="q_{{ loop.index0 }}" value="{{ q.label }}">
           {% if q.options %}
           <select name="a_{{ loop.index0 }}"><option value="">Choisir…</option>{% for o in q.options %}<option>{{ o }}</option>{% endfor %}</select>
           {% else %}<input name="a_{{ loop.index0 }}" {{ 'required' if q.required }}>{% endif %}
         </label>
-        {% endfor %}
+        {% endif %}{% endfor %}
         <div><button class="btn">Enregistrer et reprendre</button></div>
-      </form>
+      </form>{% endif %}
       {% elif it.pause_reason == 'email' %}
       <p>{{ it.last_run.message if it.last_run and it.last_run.message else "Le site a envoyé un e-mail de vérification : cliquer sur le lien qu'il contient." }}</p>
       <form method="post" action="/applications/{{ it.app.id }}/apply/resume">

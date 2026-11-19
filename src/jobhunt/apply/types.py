@@ -55,6 +55,7 @@ class FormField(BaseModel):
     name: str = ""
     placeholder: str = ""
     required: bool = False
+    multiple: bool = False
     options: list[FieldOption] = Field(default_factory=list)  # select options / radio group choices (one field per group)
     value: str = ""               # current value ("true"/"false" for a checkbox, selected label for select/radio)
     accept: str = ""              # file inputs
@@ -98,6 +99,11 @@ class Question(BaseModel):
     kind: str = "text"
     options: list[str] = Field(default_factory=list)
     required: bool = True
+    fact_id: str | None = None
+    reason: Literal["fact", "decision", "technical", "unmapped"] | None = None
+    category: str | None = None
+    choice_binding: str | None = None
+    choice_indices: list[int] = Field(default_factory=list)
 
 
 class StepPlan(BaseModel):

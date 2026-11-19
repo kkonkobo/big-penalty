@@ -303,7 +303,8 @@ _JS = r"""
     const raw = labelOf(el);
     f.label = tidy(raw); f.required = reqOf(el, raw); f.group = groupOf(el); f.error = errorOf(el);
     if (kind === 'select') {
-      f.options = [...el.options].filter((o) => o.value !== '' && !(o.disabled && o.index === 0))
+      f.multiple = el.multiple;
+      f.options = [...el.options].filter((o) => o.value !== '' && !o.disabled && !o.closest('optgroup[disabled]'))
         .map((o) => ({value: o.value, label: clean(o.label || o.textContent)}));
       const s = el.selectedOptions[0];
       f.value = s && s.value !== '' && !(s.disabled && s.index === 0) ? clean(s.label || s.textContent) : '';

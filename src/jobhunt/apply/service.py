@@ -20,11 +20,13 @@ from pydantic import BaseModel, Field
 
 from jobhunt import db
 from jobhunt.apply import accounts, policy
-from jobhunt.apply import store as apply_store
+from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import Letter, Uploads, run_application
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.facts import answers_path as facts_answers_path
 from jobhunt.apply.facts import build_facts, custom_answers, load_answers, norm_question, save_custom_answers, trusted_hosts
+from jobhunt.apply.missing_answers import editable_custom
+from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR
 from jobhunt.apply.letter import ensure_letter
 from jobhunt.apply.planner import LLMPlanner
 from jobhunt.apply.store import ApplyRun
@@ -360,7 +362,7 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
         master = load_master(app.profile_id)
     except MasterError:
         master = None
-    facts = build_facts(profile, master, load_answers(app.profile_id), job)  # type: ignore[arg-type]
+    facts = build_facts(profile, master if master and master.is_confirmed else None, load_answers(app.profile_id), job)  # type: ignore[arg-type]
     cv_pdf = cvs.safe_pdf(app)
     assert cv_pdf is not None and job.origin_url
     started_origin = job.origin_url  # the link this run was started with: it must still be the job's link at the final click
@@ -439,7 +441,8 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
             on_submit_click=reserve(False) if submit else None, on_nav_click=reserve(True) if submit else None,
             host_allowed=host_allowed, verifier=verifier,
             max_steps=get_settings().apply_max_steps, goto=goto, on_progress=progress if submit else None,
-            captcha_wait_s=captcha_wait_s)
+            captcha_wait_s=captcha_wait_s,
+            choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(started_origin)) if trigger == "user" else None)
         if out is not None:
             out.append(res)
         _confirm_accounts(res, pw_hosts, account_email)
@@ -657,6 +660,10 @@ def answer_questions(app_id: int, answers: list[tuple[str, str]]) -> None:
         raise ApplyError("Candidature introuvable")
     pairs = [(q, a) for q, a in answers if (a or "").strip() and (q or "").strip()]
     if pairs:
+        run = apply_store.last_run(app_id)
+        restricted = {norm_question(q.label) for q in run.result.questions if not editable_custom(q)} if run and run.result else set()
+        if any(norm_question(label) in restricted for label, _ in pairs):
+            raise ApplyError(CREDENTIAL_ERROR)
         save_custom_answers(app.profile_id, pairs)
 
 

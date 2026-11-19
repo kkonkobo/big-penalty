@@ -49,8 +49,9 @@ Rules:
    motivation / message-to-the-recruiter textarea -> `letter_text`; both ONLY when the field is required (optional cover
    letter: skip it). Other optional uploads (portfolio, transcripts): skip. A required upload that is neither the CV nor the
    letter goes to `unknown`.
-5. Consents: required privacy / data-processing / terms checkboxes -> `check` with fact `consent_required`. Optional
-   marketing / newsletter / talent-pool checkboxes stay unticked (`uncheck` with fact `consent_optional` only if pre-ticked).
+5. Consents: required privacy / data-processing / terms checkboxes -> `check` with fact `consent_required`. AI assistance,
+   marketing / newsletter, talent pools and employer-specific disclosures require an explicit user decision. Do not infer one
+   or change the control; report required or preselected controls under `unknown`.
 6. Sensitive optional questions (gender, age, disability, origin, diversity surveys): choose the "ne souhaite pas répondre /
    prefer not to say" option citing `consent_optional` when such an option exists, otherwise skip. If required, without that
    option and without a fact -> `unknown`.

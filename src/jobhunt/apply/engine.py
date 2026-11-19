@@ -81,7 +81,10 @@ from patchright.async_api import ElementHandle, Locator, Page
 from pydantic import BaseModel
 
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
+from jobhunt.apply.missing_answers import capture, fact_key
 from jobhunt.apply.planner import Planner, facts_payload
+from jobhunt.apply.prompt_rules import decision_key, device_type, international_calling_code
+from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, live_button, take_snapshot
 from jobhunt.apply.types import (Action, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan)
@@ -116,7 +119,6 @@ REQUEST_RE = re.compile(
     r"\bplease\b|\bkindly\b|\bveuillez\b|\bmerci de\b|\bpriere de\b|\bconfirm(?:ez|er)?\b.*\b(?:your|votre)\b|\bverifie[zr]\b|"
     r"\bcheck (?:that|whether|if)\b|\bmake sure\b|\bassurez|\bensure\b|\bclick\b|\bcliquez\b|\bto (?:submit|send|complete)\b|"
     r"\bpour (?:envoyer|soumettre|finaliser|valider)\b")
-DIAL_LABEL_RE = re.compile(r"indicatif|\bdial|prefix|country code|code pays|phone code")  # accent-stripped lowercase
 DIAL_OPTION_RE = re.compile(r"^\s*\(?\+\d{1,4}")
 TEXT_KINDS = {"text", "email", "tel", "url", "number", "date", "password", "textarea", "combobox"}
 PROFILE_KINDS = {"text", "email", "tel", "url", "number", "date", "textarea"}  # a pre-filled value there = a form with a profile
@@ -458,7 +460,7 @@ def _label(f: FormField) -> str:
 
 
 def _question(f: FormField) -> Question:
-    return Question(ref=f.ref, label=_label(f), kind=f.kind, options=[o.label for o in f.options], required=True)
+    return capture(f, _label(f))
 
 
 def _match_option(f: FormField, want: str | None) -> int:
@@ -505,7 +507,7 @@ def _secure_url(url: str, fallback: str = "") -> bool:
 
 def _dial_selector(f: FormField, snap: PageSnapshot) -> bool:
     """A phone dial-code selector (pre-selected "+33"): the only pre-selected required choice that is not a question."""
-    if DIAL_LABEL_RE.search(fold(f"{f.label} {f.name}")):
+    if fact_key(_question(f)) == "phone_calling_code":
         return True
     if f.kind == "select" and f.options and 2 * sum(bool(DIAL_OPTION_RE.match(o.label)) for o in f.options) >= len(f.options):
         return any(x.kind == "tel" and x.group == f.group for x in snap.fields)
@@ -543,7 +545,7 @@ class _Run:
                  on_submit_click: Callable[[], Awaitable[None]] | None, on_nav_click: Callable[[], Awaitable[None]] | None,
                  verifier: AnswerVerifier | None, host_allowed: Callable[[str], bool] | None, max_steps: int, goto,
                  on_progress: Callable[[RunResult], Awaitable[None]] | None = None, captcha_wait_s: float = 0.0,
-                 account_known: Callable[[str], bool] | None = None):
+                 account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None):
         self.page, self.url, self.facts, self.planner, self.uploads, self.mode = page, url, facts, planner, uploads, mode
         self.out_dir, self.job_title, self.company, self.password = out_dir, job_title, company, password
         self.before_submit, self.on_submit_click, self.on_nav_click = before_submit, on_submit_click, on_nav_click
@@ -551,6 +553,9 @@ class _Run:
         self.max_steps, self.goto = max_steps, goto
         self.on_progress, self.captcha_wait_s = on_progress, captcha_wait_s
         self.account_known = account_known   # host -> does the credential store hold an account for it (None: not told to the planner)
+        self.choices = choices or {}
+        self.choice_fields: dict[str, tuple[Question, str, list[int]]] = {}
+        self.questions_by_ref: dict[str, Question] = {}
         self.login_unknown_try = False       # a login was attempted on a host without a known account
         self.uploaded = False                # a file was set by the engine in this run
         self.uploaded_files: list[tuple[str, str, str]] = []  # (host, normalized label, file name stem in lowercase) of every upload done
@@ -632,7 +637,18 @@ class _Run:
 
     # ------------------------------------------------------------ helpers
     def _end(self, status: RunStatus, message: str, questions: list[Question] | None = None) -> RunResult:
-        return RunResult(status=status, message=self._r(message), questions=questions or [])
+        bound = []
+        for question in questions or []:
+            if question.reason is None and question.ref in self.questions_by_ref:
+                question = self.questions_by_ref[question.ref]
+            entry = self.choice_fields.get(question.ref)
+            if entry and entry[0] == question:
+                _, binding, indices = entry
+                question = question.model_copy(update={"choice_binding": binding, "choice_indices": indices})
+            if question.reason is None:
+                question = _question(FormField(ref=question.ref, kind=question.kind, label=question.label))
+            bound.append(question)
+        return RunResult(status=status, message=self._r(message), questions=bound)
 
     async def _shot(self, log: StepLog) -> None:
         if log.screenshot:
@@ -681,7 +697,22 @@ class _Run:
     async def _snapshot(self) -> tuple[PageSnapshot, Resolver]:
         for attempt in range(3):
             try:
-                return await take_snapshot(self.page)
+                snapshot, resolve = await take_snapshot(self.page)
+                choices = {}
+                repeated = set()
+                self.questions_by_ref = {}
+                for field in snapshot.fields:
+                    question = _question(field)
+                    self.questions_by_ref[field.ref] = question
+                    if question.reason == "technical" or question.category == "ambiguous_country" or not field.form.startswith("0:"):
+                        continue
+                    binding = field_choices(self.page.url, field)
+                    if binding:
+                        if any(entry[1] == binding[0] for entry in choices.values()):
+                            repeated.add(binding[0])
+                        choices[field.ref] = question, *binding
+                self.choice_fields = {ref: entry for ref, entry in choices.items() if entry[1] not in repeated}
+                return snapshot, resolve
             except Exception:  # navigation in flight
                 if attempt == 2:
                     raise
@@ -801,6 +832,14 @@ class _Run:
         by_ref = {f.ref: f for f in snap.fields}
         seen: set[str] = set()
         clicks: list[tuple[FormField, str]] = []
+        for field in snap.fields:
+            entry = self.choice_fields.get(field.ref)
+            if not entry or entry[0] != _question(field) or field_choices(self.page.url, field) != entry[1:]:
+                continue
+            index = self.choices.get(entry[1])
+            if index is not None and index in entry[2]:
+                seen.add(field.ref)
+                v.items.append(_Item(Action(ref=field.ref, op="select"), field, option_index=index, used="confirmed_form_choice"))
         for a in plan.actions:
             f = by_ref.get(a.ref)
             if f is None:
@@ -859,14 +898,11 @@ class _Run:
 
     @staticmethod
     def _dial_option(f: FormField, fact: Fact) -> int:
-        """Index of the option whose dial code ("+33" in "France (+33)") is the longest prefix of the candidate's international phone."""
-        digits = {re.sub(r"\D", "", v) for v in [fact.value or "", *fact.variants] if (v or "").strip().startswith("+")}
-        best, idx = 0, -1
-        for i, o in enumerate(f.options):
-            m = re.search(r"\+\s*(\d{1,4})", o.label)
-            if m and any(d.startswith(m.group(1)) for d in digits) and len(m.group(1)) > best:
-                best, idx = len(m.group(1)), i
-        return idx
+        """Only a unique exact option for the country calling code of a confirmed international number."""
+        code = international_calling_code(fact.value or "")
+        matches = [index for index, option in enumerate(f.options)
+                   if re.findall(r"\+\s*[0-9]+", option.label) == [code]] if code else []
+        return matches[0] if len(matches) == 1 else -1
 
     @staticmethod
     def _cv_by_code(f: FormField, snap: PageSnapshot) -> bool:
@@ -904,7 +940,33 @@ class _Run:
                 "uncheck": k == "checkbox"}
         if not fits.get(op, False):
             return drop(f"opération {op} incompatible avec un champ {k}")
+        exact_key = fact_key(_question(f))
+        dial = k in ("select", "combobox") and _dial_selector(f, snap)
+        choice = decision_key(f.label) or decision_key(f.group)
+        if choice and exact_key not in {"work_authorization", "needs_visa_sponsorship"} and not (
+                choice == "ambiguous_country" and (dial or exact_key == "country")):
+            return drop("décision à confirmer sur le site")
+        if a.fact == "work_authorization" or exact_key == "work_authorization":
+            if exact_key != "work_authorization" or a.fact != exact_key or op != "fill" or a.inferred:
+                return drop("autorisation de travail : question ou format non confirmé")
+        address_facts = {"city", "postal_code", "country", "phone_device_type"}
+        if exact_key in address_facts or a.fact in address_facts:
+            if a.fact != exact_key or a.inferred:
+                return drop("information exacte du candidat nécessaire")
+        if dial and (a.fact != "phone" or a.inferred):
+            return drop("indicatif international confirmé nécessaire")
         fact = self.facts.get(a.fact)
+        if a.fact == "needs_visa_sponsorship" or exact_key == "needs_visa_sponsorship":
+            if (exact_key != "needs_visa_sponsorship" or a.fact != exact_key or a.inferred or op != "select"
+                    or not fact or _norm(fact.value or "") not in {"oui", "yes", "non", "no", "ja", "nein"}):
+                return drop("parrainage de visa : question ou format non confirmé")
+            affirmative = {"oui", "yes", "ja"}
+            negative = {"non", "no", "nein"}
+            labels = affirmative if _norm(fact.value or "") in affirmative else negative
+            matches = [index for index, option in enumerate(f.options) if _norm(option.label) in labels]
+            if len(matches) != 1 or (a.value and _norm(a.value) not in labels):
+                return drop("aucun choix simple et exact pour le parrainage de visa")
+            return _Item(a, f, fact, option_index=matches[0], used=fact.key)
         if fact is None:
             if not a.inferred:
                 return drop("fait cité inconnu")
@@ -932,7 +994,8 @@ class _Run:
         if fact is not None and op == "fill" and not self._label_matches(f, fact):
             return drop("champ sans rapport avec le fait cité")
         item = _Item(a, f, fact, used=fact.key if fact else "", hard=is_hard_fact(f"{f.label} {f.group}", f.name, f.placeholder))
-        want = fact.value if fact is not None and fact.exact else (a.value or (fact.value if fact is not None else None))
+        want = fact.value if fact is not None and (fact.exact or fact.key in address_facts | {"work_authorization"}) else (
+            a.value or (fact.value if fact is not None else None))
         item.value = want
 
         def need_verdict(answer: str, backed: bool) -> _Item | None:
@@ -948,10 +1011,16 @@ class _Run:
                     and PRIVACY_RE.search(fold(f"{f.label} {f.name}").translate(_QUOTES)):
                 return item  # required privacy / terms box: accepted by code
             return need_verdict("true" if op == "check" else "false", False)
-        if fact is not None and fact.key == "phone" and k in ("select", "combobox") and f.options and _dial_selector(f, snap):
+        if fact is not None and fact.key == "phone" and dial:
             item.option_index = self._dial_option(f, fact)  # the code of the candidate's own phone decides, not the planner's text
             if item.option_index < 0:
                 return drop("indicatif téléphonique introuvable pour ce numéro")
+            return need_verdict(f.options[item.option_index].label, True)
+        if fact is not None and fact.key == "phone_device_type":
+            matches = [index for index, option in enumerate(f.options) if device_type(option.label) == fact.value]
+            if len(matches) != 1:
+                return drop("type de téléphone déclaré absent des options")
+            item.option_index = matches[0]
             return need_verdict(f.options[item.option_index].label, True)
         if k in ("select", "radio") or (k == "combobox" and f.options):
             item.option_index = _match_option(f, want)
@@ -1161,6 +1230,12 @@ class _Run:
             return after[0]["label"]
         if f.kind == "select":
             o = f.options[it.option_index]
+            if it.used == "confirmed_form_choice":
+                matching = await loc.evaluate("(e, value) => Array.from(e.options).filter(o => !o.disabled && "
+                                              "!o.closest('optgroup[disabled]') && o.value === value)"
+                                              ".map(o => (o.label || o.textContent).trim())", o.value)
+                if not matching or any(" ".join(label.split()) != " ".join(o.label.split()) for label in matching):
+                    raise _Skip("options du formulaire modifiées depuis la lecture")
             await loc.select_option(value=o.value, timeout=T) if o.value else await loc.select_option(label=o.label, timeout=T)
             shown = str(await loc.evaluate("e => { const o = e.selectedOptions[0]; return o ? (o.label || o.textContent).trim() : ''; }") or "")
             if _norm(shown) != _norm(o.label):  # read back what the control really holds: log THAT, and never keep another choice
@@ -1720,7 +1795,8 @@ class _Run:
                     handled.add(it.field.ref)
                     self.chosen.add((_norm(_label(it.field)), it.field.kind))
                     log.filled.append(FilledField(label=self._r(_label(it.field)), op=it.act.op, fact=it.used or it.act.fact,
-                                                  value=self._r(shown), inferred=it.inferred, basis=self._r(it.basis)))
+                                                  value="Choix confirmé" if it.used == "confirmed_form_choice" else self._r(shown),
+                                                  inferred=it.inferred, basis=self._r(it.basis)))
                 if self.mode == "dry_run" and self.blocked_requests:  # (also when the aborted navigation made the action fail)
                     break
             if self.mode == "dry_run" and self.blocked_requests:
@@ -1791,12 +1867,15 @@ class _Run:
                 questions += [_question(f) for f in mine if f.required and f.kind in ("select", "radio") and f.value.strip()
                               and f.ref not in handled and (_norm(_label(f)), f.kind) not in self.chosen
                               and not _dial_selector(f, snap)]  # pre-selected: not ours (dial codes excepted)
+                questions += [_question(f) for f in mine if f.kind in ("checkbox", "select", "radio", "combobox") and f.ref not in handled
+                              and not _is_empty(f) and (decision_key(f.label) or decision_key(f.group)) in {
+                                  "ai_opt_in", "ai_opt_out", "ai_review", "marketing", "recruiting", "former_employer", "conflict"}]
                 seen: set[str] = set()
                 uniq = []
                 for q in questions:
                     key = q.ref or _norm(q.label)
-                    if key not in seen and _norm(q.label) not in seen:
-                        seen |= {key, _norm(q.label)}
+                    if key not in seen:
+                        seen.add(key)
                         uniq.append(q)
                 v.questions = uniq
             if v.notes:
@@ -1912,7 +1991,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           allowed_hosts: set[str] | None = None, host_allowed: Callable[[str], bool] | None = None,
                           max_steps: int = 12, goto: Callable[[Page, str], Awaitable[None]] | None = None,
                           on_progress: Callable[[RunResult], Awaitable[None]] | None = None, captcha_wait_s: float = 0.0,
-                          account_known: Callable[[str], bool] | None = None) -> RunResult:
+                          account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None) -> RunResult:
     """Fill (dry_run) or fill and send (submit) the application at `url` on the caller's open `page`.
     Guarantees: dry_run never sends; submit without `before_submit` is blocked; every filled value traces to a known fact or is
     a recorded deduction; data is only entered / sent on hosts accepted by `host_allowed` (or `allowed_hosts`, the legacy set;
@@ -1928,4 +2007,4 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                       job_title=job_title, company=company, password=password, before_submit=before_submit,
                       on_submit_click=on_submit_click, on_nav_click=on_nav_click, verifier=verifier,
                       host_allowed=host_allowed, max_steps=max_steps, goto=goto, on_progress=on_progress,
-                      captcha_wait_s=captcha_wait_s, account_known=account_known).run()
+                      captcha_wait_s=captcha_wait_s, account_known=account_known, choices=choices).run()

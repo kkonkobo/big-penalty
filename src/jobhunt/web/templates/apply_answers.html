@@ -13,24 +13,66 @@
 </div>
 {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
 {% for e in errors %}<div class="error-box">{{ e }}</div>{% endfor %}
-{% if missing_groups %}
+{% macro affected(group, run_links=false) %}
+  <details><summary>Voir les candidatures concernées</summary>
+    <ul>{% for app_id in group.application_ids %}<li>
+      <a href="{{ '/apply/runs/' ~ runs[app_id] if run_links else '/applications/' ~ app_id }}">Candidature nº {{ app_id }}</a>
+    </li>{% endfor %}</ul>
+  </details>
+{% endmacro %}
 <section class="panel" id="missing-answers">
-  <div class="panel-head plain"><h2>Informations à confirmer</h2></div>
+  <div class="panel-head plain"><h2>À compléter une fois</h2></div>
+  {% if missing_groups %}
   <p class="muted small">Chaque réponse peut lever un blocage. Une candidature peut figurer dans plusieurs lignes et rester en pause pour d'autres raisons.</p>
   <ul class="plain-list">
   {% for group in missing_groups %}
     {% set count = group.application_count %}
     <li data-fact-key="{{ group.fact_key }}">
-      <a href="#ans_{{ group.fact_key }}">Renseigner : {{ answer_fields[group.fact_key].label }}</a>
+      <a href="{{ answer_actions[group.fact_key][1] }}">Renseigner : {{ answer_actions[group.fact_key][0] }}</a>
       <span class="tag warn">{{ count }} candidature{{ 's' if count > 1 }} potentiellement débloquée{{ 's' if count > 1 }}</span>
-      <details><summary>Voir les candidatures concernées</summary>
-        <ul>{% for app_id in group.application_ids %}<li><a href="/applications/{{ app_id }}">Candidature nº {{ app_id }}</a></li>{% endfor %}</ul>
-      </details>
+      {{ affected(group) }}
     </li>
   {% endfor %}
   </ul>
+  {% else %}<p class="panel-empty muted">Aucune information réutilisable manquante repérée.</p>{% endif %}
 </section>
-{% endif %}
+<section class="panel" id="answer-decisions">
+  <div class="panel-head plain"><h2>À décider</h2></div>
+  {% if decisions or choices %}
+  <p class="muted small">Confirmez une option du formulaire quand elle est disponible. Sinon, vérifiez la question sur le site concerné.</p>
+  <ul class="plain-list">{% for group in decisions %}
+    <li data-decision="{{ group.fact_key }}">{{ decision_titles[group.fact_key] }}
+      <span class="count">{{ group.application_count }}</span>{{ affected(group, true) }}</li>
+  {% endfor %}</ul>
+  {% for choice in choices %}{% if choice.options %}
+    <form method="post" action="/profiles/{{ profile.id }}/answers/choice" class="form">
+      <input type="hidden" name="application_id" value="{{ choice.item.app.id }}">
+      <input type="hidden" name="run_id" value="{{ choice.item.last_run.id }}">
+      <input type="hidden" name="origin" value="{{ choice.item.origin_sha }}">
+      <input type="hidden" name="binding" value="{{ choice.question.choice_binding }}">
+      <label>{{ choice.question.label }} · <a href="/apply/runs/{{ choice.item.last_run.id }}">Candidature nº {{ choice.item.app.id }}</a>
+        <select name="choice" required><option value="">Choisir…</option>
+          {% for index, label in choice.options %}<option value="{{ index }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      {% if choice.saved %}<small>Un choix a été confirmé pour ce formulaire.</small>{% endif %}
+      <button class="btn small" type="submit">Confirmer ce choix</button>
+    </form>
+  {% endif %}{% endfor %}
+  {% else %}<p class="panel-empty muted">Aucune décision particulière repérée.</p>{% endif %}
+</section>
+<section class="panel" id="technical-blocks">
+  <div class="panel-head plain"><h2>Blocages techniques</h2></div>
+  {% if technical %}
+  <p class="muted small">Ouvrez l’essai pour vérifier le champ ou le format. Ne saisissez ni fichier ni mot de passe dans les réponses enregistrées.</p>
+  <ul class="plain-list">{% for group in technical %}
+    {% set key = group.fact_key.removeprefix('recheck:') %}
+    <li data-blocker="{{ group.fact_key }}">
+      {% if key != group.fact_key %}À revérifier : {{ answer_actions[key][0] }}{% else %}{{ technical_titles[key] }}{% endif %}
+      <span class="count">{{ group.application_count }}</span>{{ affected(group, true) }}</li>
+  {% endfor %}</ul>
+  {% else %}<p class="panel-empty muted">Aucun blocage technique repéré.</p>{% endif %}
+</section>
 {% if resumable %}
 <section class="panel" id="resumable">
   <div class="panel-head plain"><h2>Candidatures en pause <span class="count">{{ resumable|length }}</span></h2></div>
@@ -92,8 +134,7 @@
       {% endif %}
       <input type="hidden" name="prev_{{ r.name[4:] }}" value="{{ r.value }}">
       {% if r.legacy %}<small>Valeur enregistrée : « {{ r.stored }} ». Elle est conservée tant que vous ne choisissez pas de date.</small>{% endif %}
-      {% if f.help %}<small>{{ f.help }}</small>{% endif %}
-      {% if f.path == 'country' and not r.value %}<small>Suggestion : {{ country_suggestion }}</small>{% endif %}</label>
+      {% if f.help %}<small>{{ f.help }}</small>{% endif %}</label>
     {% endfor %}
   </div>
 </section>

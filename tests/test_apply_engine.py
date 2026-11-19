@@ -218,7 +218,7 @@ async def test_bad_actions_are_dropped_with_notes(page, server, fast, cv_pdf, tm
             act(snap, r"Envoyer", "fill", "first_name")])
     res = await go(page, server, ScriptedPlanner([plan, plan]), tmp_path, cv_pdf, start="form", max_steps=3)
     assert not await page.is_checked("input[name=newsletter]") and not await page.is_checked("input[name=rgpd]")
-    assert "référence inconnue" in res.steps[0].note and "incompatible" in res.steps[0].note and "non cochée" in res.steps[0].note
+    assert "référence inconnue" in res.steps[0].note and "incompatible" in res.steps[0].note and "décision à confirmer" in res.steps[0].note
     assert res.status == "needs_input" and not apply_posts(server)  # nothing usable, required fields left empty
 
 
@@ -665,7 +665,7 @@ async def test_exact_name_fact_is_refused_in_a_field_labelled_ville(page, server
     def plan(snap):
         return StepPlan(page_kind="form", actions=[act(snap, r"^Ville", "fill", "first_name"), act(snap, r"Envoyer", "click", role="submit")])
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="experience", facts=facts)
-    assert await page.input_value("#fn") == "" and "sans rapport" in res.steps[0].note
+    assert await page.input_value("#fn") == "" and "information exacte du candidat nécessaire" in res.steps[0].note
     assert "Ville" in {q.label for q in res.questions}
     # and accepted where the label fits
     res = await go(page, server, ScriptedPlanner([form_plan("submit")]), tmp_path, cv_pdf, start="form", facts=facts)
@@ -689,20 +689,30 @@ async def test_date_derivation_month_year_accepted_full_date_needs_a_verdict(pag
     assert {i.question for i in v.calls[0]} == {"Disponible à partir de", "Mois de début"} and v.calls[0][0].fact_value == "septembre 2026"
 
 
-async def test_select_not_supported_by_the_verifier_becomes_a_question(page, server, fast, cv_pdf, tmp_path):
+async def test_work_authorization_text_never_becomes_a_yes_no_choice(page, server, fast, cv_pdf, tmp_path):
     def plan(snap):
         return StepPlan(page_kind="form", actions=[act(snap, r"autorisé", "select", "work_auth", "Oui"),
                                                    act(snap, r"Envoyer", "click", role="submit")])
     ok = FakeVerifier(lambda i: i.answer == "Oui" and "séjour" in i.fact_value)
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="experience", facts=extra_facts(), verifier=ok)
-    assert await page.input_value("#q") == "o" and len(ok.calls) == 1  # (other required fields still asked)
-    item = ok.calls[0][0]
-    assert item.kind == "select" and item.options == ["Oui", "Non"] and "autorisé" in item.question and item.fact_label == "Autorisation de travail"
-    assert any(f.fact == "work_auth" for f in res.steps[0].filled)
-    for verifier in (FakeVerifier(lambda i: False), FakeVerifier(error=RuntimeError("llm down")), None):
-        res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="experience", facts=extra_facts(), verifier=verifier)
-        assert await page.input_value("#q") == "" and any("autorisé" in q.label for q in res.questions), verifier
-        assert "non étayée" in res.steps[0].note
+    assert await page.input_value("#q") == "" and not ok.calls
+    question = next(question for question in res.questions if "autorisé" in question.label)
+    assert question.category == "work_authorization_review" and question.options == ["Oui", "Non"]
+
+
+async def test_new_residence_fields_are_typed_and_cannot_take_a_mismatched_fact(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "residence", '<form><fieldset><legend>Place of birth</legend>'
+                '<label for="born">City</label><input id="born" name="born" required></fieldset>'
+                '<fieldset><legend>Wohnanschrift</legend><label for="postcode">Postleitzahl</label>'
+                '<input id="postcode" name="postcode" required></fieldset></form>')
+    sheet = extra_facts()
+    sheet.facts.append(Fact(key="city", label="Ville de résidence", value="Ville-Test"))
+    planner = ScriptedPlanner([lambda snapshot: StepPlan(page_kind="form", actions=[act(snapshot, "City", "fill", "city")])])
+    result = await go(page, server, planner, tmp_path, cv_pdf, start="residence", facts=sheet)
+    prompts = {prompt.label: prompt for prompt in result.questions}
+    assert result.status == "needs_input" and await page.input_value("#born") == ""
+    assert prompts["City"].reason == "unmapped" and prompts["City"].fact_id is None
+    assert prompts["Postleitzahl"].reason == "fact" and prompts["Postleitzahl"].fact_id == "postal_code"
 
 
 async def test_cv_upload_and_privacy_consent_are_accepted_by_code_without_the_llm(page, server, fast, cv_pdf, tmp_path):
@@ -1172,7 +1182,7 @@ async def test_label_re_looks_at_the_visible_label_first(page, server, fast, cv_
     await serve(page, "tricky", '<form><label for=a>Ville *</label><input id=a name="first_name" placeholder="Prénom"><button>Envoyer ma candidature</button></form>')
     plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Ville", "fill", "first_name"), act(snap, r"Envoyer", "click", role="submit")])  # noqa: E731
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="tricky", facts=facts)
-    assert await page.input_value("#a") == "" and "sans rapport" in res.steps[0].note
+    assert await page.input_value("#a") == "" and "information exacte du candidat nécessaire" in res.steps[0].note
     await serve(page, "nolabel", '<form><input id=a name="first_name" placeholder="Prénom"><button>Envoyer ma candidature</button></form>')
     plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"Pr", "fill", "first_name"), act(snap, r"Envoyer", "click", role="submit")])  # noqa: E731
     await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="nolabel", facts=facts)
@@ -1274,16 +1284,20 @@ async def test_verifier_down_fact_backed_answers_pass_and_deductions_pause(page,
 
 
 async def test_boolean_verdicts_of_an_old_verifier_are_still_read(page, server, fast, cv_pdf, tmp_path):
-    plan = lambda s: StepPlan(page_kind="form", actions=[act(s, r"autorisé", "select", "work_auth", "Oui"), act(s, r"Envoyer", "click", role="submit")])  # noqa: E731
-    await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="experience", facts=extra_facts(), verifier=FakeVerifier(lambda i: True))
+    await serve(page, "legacy_verdict", '<form><label for=q>Connaissez-vous ce logiciel ?</label>'
+                '<select id=q required><option value="">Choisir</option><option value=o>Oui</option></select></form>')
+    sheet = extra_facts()
+    sheet.facts.append(Fact(key="software", label="Logiciels", value="Utilisé en cours"))
+    plan = lambda s: StepPlan(page_kind="form", actions=[act(s, r"logiciel", "select", "software", "Oui")])  # noqa: E731
+    await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="legacy_verdict", facts=sheet, verifier=FakeVerifier(lambda i: True))
     assert await page.input_value("#q") == "o"
-    await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="experience", facts=extra_facts(), verifier=FakeVerifier(lambda i: False))
+    await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="legacy_verdict", facts=sheet, verifier=FakeVerifier(lambda i: False))
     assert await page.input_value("#q") == ""
 
     class Old:   # check(items) only, no facts argument
         async def check(self, items):
             return {i.ref: True for i in items}
-    await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="experience", facts=extra_facts(), verifier=Old())
+    await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="legacy_verdict", facts=sheet, verifier=Old())
     assert await page.input_value("#q") == "o"
 
 
@@ -2146,10 +2160,9 @@ async def test_a_qualified_option_is_never_code_backed_on_a_hard_fact_field(page
     for verifier in (FakeVerifier(lambda i: "plausible"), None):
         res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="sponsor", facts=sponsorship_facts(), verifier=verifier)
         assert await page.input_value("#v") == "" and res.status == "needs_input"
-    # supported: filled, but reported (the option carries a qualifier the fact does not state)
+    # Even a positive verifier cannot supply the option's unconfirmed qualifier.
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="sponsor", facts=sponsorship_facts(), verifier=FakeVerifier(lambda i: "supported"))
-    f = filled_of(res, "Do you need visa sponsorship?")
-    assert await page.input_value("#v") == "ys" and f.inferred and f.basis
+    assert await page.input_value("#v") == "" and res.status == "needs_input"
     # the exact option is code-backed (no verifier needed) and not inferred
     plan = deduce_plan(lambda s: act(s, r"sponsorship", "select", "needs_visa_sponsorship", "Yes"))
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="sponsor", facts=sponsorship_facts(), verifier=None)
@@ -2227,7 +2240,7 @@ async def test_a_clean_re_render_is_still_a_continuation(page, server, fast, cv_
 
 # ------------------------------------------------------------------ 2. dynamic combobox: strict option, read-back
 COMBO_DYNAMIC = ('<form method="post" action="/apply"><label for=fn>Prénom *</label><input id=fn name=first_name required>'
-                 '<label for=w>Are you authorized to work? *</label><input id=w role=combobox aria-expanded=false autocomplete=off>'
+                 '<label for=w>Available on Monday? *</label><input id=w role=combobox aria-expanded=false autocomplete=off>'
                  '<div id=lb role=listbox hidden></div><button type="submit">Envoyer ma candidature</button></form>'
                  '<script>const w=document.getElementById("w"),lb=document.getElementById("lb");'
                  'w.addEventListener("focus",()=>setTimeout(()=>{lb.innerHTML=OPTIONS;lb.hidden=false},40));'
@@ -2240,31 +2253,31 @@ def combo_page(options, pick="(t => t)"):
 
 def work_facts():
     facts = extra_facts()
-    facts.facts.append(Fact(key="auth", label="Autorisation de travail", value="Yes"))
+    facts.facts.append(Fact(key="auth", label="Available on Monday", value="Yes"))
     return facts
 
 
 def auth_plan():
-    return deduce_plan(lambda s: act(s, r"authorized", "select", "auth", "Yes"))
+    return deduce_plan(lambda s: act(s, r"Available", "select", "auth", "Yes"))
 
 
 async def test_dynamic_combobox_never_picks_a_qualified_option_by_substring(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "dyn", combo_page(["Yes, with sponsorship"]))
     res = await go(page, server, ScriptedPlanner([auth_plan()]), tmp_path, cv_pdf, start="dyn", facts=work_facts(), verifier=FakeVerifier(lambda i: "supported"))
-    assert await page.input_value("#w") == "" and res.status == "needs_input" and "Are you authorized to work?" in {q.label for q in res.questions}
-    assert not any(f.label.startswith("Are you") for f in res.steps[0].filled)
+    assert await page.input_value("#w") == "" and res.status == "needs_input" and "Available on Monday?" in {q.label for q in res.questions}
+    assert not any(f.label.startswith("Available") for f in res.steps[0].filled)
 
 
 async def test_dynamic_combobox_picks_the_strictly_equal_option_and_logs_the_live_label(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "dyn", combo_page(["Yes, with sponsorship", "Yes"]))
     res = await go(page, server, ScriptedPlanner([auth_plan()]), tmp_path, cv_pdf, start="dyn", facts=work_facts(), verifier=FakeVerifier(lambda i: "supported"))
-    assert await page.input_value("#w") == "Yes" and filled_of(res, "Are you authorized to work?").value == "Yes"
+    assert await page.input_value("#w") == "Yes" and filled_of(res, "Available on Monday?").value == "Yes"
 
 
 async def test_combobox_read_back_that_differs_is_a_failure_and_the_field_is_cleared(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "dyn", combo_page(["Yes"], pick="(t => t + ', with sponsorship')"))   # the page stores something else than the option
     res = await go(page, server, ScriptedPlanner([auth_plan()]), tmp_path, cv_pdf, start="dyn", facts=work_facts(), verifier=FakeVerifier(lambda i: "supported"))
-    assert await page.input_value("#w") == "" and res.status == "needs_input" and not any(f.label.startswith("Are you") for f in res.steps[0].filled)
+    assert await page.input_value("#w") == "" and res.status == "needs_input" and not any(f.label.startswith("Available") for f in res.steps[0].filled)
 
 
 async def test_native_select_read_back_is_what_gets_logged(page, server, fast, cv_pdf, tmp_path):
@@ -2399,7 +2412,7 @@ async def test_an_error_banner_vetoes_the_receipt_classification(page, server, f
 
 # ------------------------------------------------------------------ 2. live resolution of radios / selects / boxes
 RADIO_PAGE = ('<form method="post" action="/apply"><label for=fn>Prénom *</label><input id=fn name=first_name required oninput="{move}">'
-              '<fieldset id=g><legend>Êtes-vous autorisé à travailler ? *</legend>'
+              '<fieldset id=g><legend>Disponible le lundi ? *</legend>'
               '<label><input type=radio name=a value=yes required {onyes}> Yes</label><label><input type=radio name=a value=no id=rno> No</label></fieldset>'
               '<button type="submit">Envoyer ma candidature</button></form>')
 MOVE_NO_FIRST = "var g=document.getElementById('g');g.insertBefore(g.lastElementChild,g.children[1])"
@@ -2407,25 +2420,25 @@ MOVE_NO_FIRST = "var g=document.getElementById('g');g.insertBefore(g.lastElement
 
 def radio_facts():
     facts = extra_facts()
-    facts.facts.append(Fact(key="auth2", label="Autorisation", value="Yes"))
+    facts.facts.append(Fact(key="auth2", label="Disponible le lundi", value="Yes"))
     return facts
 
 
 def radio_plan():
-    return deduce_plan(lambda s: act(s, r"autorisé", "select", "auth2", "Yes"))
+    return deduce_plan(lambda s: act(s, r"Disponible", "select", "auth2", "Yes"))
 
 
 async def test_a_radio_group_reordered_by_the_page_still_gets_the_validated_answer(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "radios", RADIO_PAGE.format(move=MOVE_NO_FIRST, onyes=""))
     res = await go(page, server, ScriptedPlanner([radio_plan()]), tmp_path, cv_pdf, start="radios", facts=radio_facts(), verifier=None)
     assert await page.evaluate("document.querySelector('input[name=a]:checked').value") == "yes"
-    assert filled_of(res, "Êtes-vous autorisé à travailler ?").value == "Yes" and not filled_of(res, "Êtes-vous autorisé à travailler ?").inferred
+    assert filled_of(res, "Disponible le lundi ?").value == "Yes" and not filled_of(res, "Disponible le lundi ?").inferred
 
 
 async def test_a_radio_that_ends_up_on_the_wrong_answer_stops_the_step_with_a_question(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "radios", RADIO_PAGE.format(move="", onyes="onchange=\"document.getElementById('rno').checked=true\""))
     res = await go(page, server, ScriptedPlanner([radio_plan()]), tmp_path, cv_pdf, start="radios", facts=radio_facts(), verifier=None, mode="submit")
-    assert res.status == "needs_input" and not server.posts and not any(f.label.startswith("Êtes-vous") for f in res.steps[0].filled)
+    assert res.status == "needs_input" and not server.posts and not any(f.label.startswith("Disponible") for f in res.steps[0].filled)
     assert not res.steps[0].clicked
 
 
@@ -2760,6 +2773,37 @@ async def test_the_dial_code_matching_the_phone_is_chosen_and_code_backed(page, 
 
 
 # ================================================================== second real automatic batch
+async def test_captured_ats_selection_uses_only_confirmed_exact_option(page, server, fast, cv_pdf, tmp_path):
+    document = ('<form><label for="decision">KI-Unterstützung zustimmen</label>'
+                '<select name="ai" id="decision" required><option value="">Bitte wählen</option>'
+                '<option value="disabled" disabled>Gesperrt</option>'
+                '<option value="site-yes">Ja</option><option value="site-no">Nein</option></select>'
+                '<button type="submit">Envoyer</button></form>')
+    await serve(page, "decision", document)
+
+    def plan(snapshot):
+        return StepPlan(page_kind="form", actions=[act(snapshot, "KI-Unterstützung", "select", "consent_required", "Ja"),
+                                                     act(snapshot, "Envoyer", "click", role="submit")])
+
+    first = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="decision")
+    assert first.status == "needs_input" and await page.input_value("#decision") == ""
+    question = first.questions[0]
+    assert question.reason == "decision" and question.category == "ai_opt_in"
+    assert question.choice_binding and question.options == ["Ja", "Nein"] and question.choice_indices == [0, 1]
+    choices = {question.choice_binding: 1}
+    picked = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="decision", choices=choices)
+    assert picked.status == "ready" and await page.input_value("#decision") == "site-no"
+    await serve(page, "decision", document.replace("site-no", "changed-code"))
+    changed = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="decision", choices=choices)
+    assert changed.status == "needs_input" and await page.input_value("#decision") == ""
+
+    await serve(page, "decision", document.replace('id="decision" required', 'id="decision"')
+                .replace('value="site-yes"', 'value="site-yes" selected'))
+    preselected = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="decision")
+    assert preselected.status == "needs_input" and not preselected.submit_clicked
+    assert preselected.questions[0].choice_binding
+
+
 UNRELATED_AD = ('<div><label for=a>Lieu</label><input id=a name=lieu value="France"><label for=b>Métier</label><input id=b name=metier value="technicien">'
                 '<label for=c>Contrat</label><input id=c name=contrat value="alternance"></div>'
                 '<button type="button" onclick="location.href=\'{dest}\'">{label}</button>')

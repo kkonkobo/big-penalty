@@ -30,7 +30,7 @@ from cv_fakes import save_confirmed
 
 NO_ORIGIN = "<no origin field>"
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 16
-QUESTIONS = [Question(label="Permis B ?"), Question(label="Salaire"), Question(label="Ville")]
+QUESTIONS = [Question(label="Permis B ?"), Question(label="Salaire"), Question(label="Disponibilité")]
 
 
 @pytest.fixture
@@ -304,11 +304,11 @@ def test_answers_are_stored_then_resumed(client, profile, master, tmp_path, monk
     stored = []
     monkeypatch.setattr(apply_service, "answer_questions", lambda app_id, answers: stored.append((app_id, answers)))
     run, _ = make_run(a, tmp_path, mode="submit", status="needs_input", questions=QUESTIONS)
-    data = {"run_id": str(run.id), "q_0": "Permis B ?", "a_0": "Oui", "q_1": "Salaire", "a_1": "  ", "q_2": "Ville", "a_2": "Toulouse"}
+    data = {"run_id": str(run.id), "q_0": "Permis B ?", "a_0": "Oui", "q_1": "Salaire", "a_1": "  ", "q_2": "Disponibilité", "a_2": "Janvier"}
     r = client.post(f"/applications/{a.id}/apply/answers", data=data, follow_redirects=True)
     assert "Réponses enregistrées" in r.text
     wait_idle()
-    assert stored == [(a.id, [("Permis B ?", "Oui"), ("Ville", "Toulouse")])]
+    assert stored == [(a.id, [("Permis B ?", "Oui"), ("Disponibilité", "Janvier")])]
     assert calls[0]["mode"] == "submit"
 
 
@@ -323,10 +323,20 @@ def test_answers_refuse_empty_and_report_errors(client, profile, master, tmp_pat
     monkeypatch.setattr(apply_service, "answer_questions", refuse)
     rid = str(run.id)
     assert "Aucune réponse saisie" in client.post(f"/applications/{a.id}/apply/answers",
-                                                  data={"run_id": rid, "q_0": "Ville", "a_0": ""}, follow_redirects=True).text
+                                                  data={"run_id": rid, "q_0": "Disponibilité", "a_0": ""}, follow_redirects=True).text
     assert "Réponse refusée" in client.post(f"/applications/{a.id}/apply/answers",
-                                            data={"run_id": rid, "q_0": "Ville", "a_0": "y"}, follow_redirects=True).text
+                                            data={"run_id": rid, "q_0": "Disponibilité", "a_0": "y"}, follow_redirects=True).text
     assert not calls
+
+
+def test_single_application_rejects_legacy_option_not_on_form(client, profile, master, tmp_path, monkeypatch):
+    app = mk_app(profile, master, tmp_path)
+    calls = record_runs(monkeypatch)
+    run, _ = make_run(app, tmp_path, status="needs_input", questions=[Question(label="Créneau", kind="select", options=["Matin"])])
+    response = client.post(f"/applications/{app.id}/apply/answers", data={"run_id": str(run.id),
+                           "q_0": "Créneau", "a_0": "Soir"}, follow_redirects=True)
+    assert "Ce choix n’est pas proposé" in response.text
+    assert apply_facts.load_answers(profile.id) == {} and not calls
 
 
 # ------------------------------------------------------------------ run page + screenshots
@@ -461,7 +471,7 @@ def test_stale_answers_form_is_refused_and_nothing_is_saved(client, profile, mas
     stored = []
     monkeypatch.setattr(apply_service, "answer_questions", lambda app_id, answers: stored.append(answers))
     old, _ = make_run(a, tmp_path, mode="submit", status="needs_input", questions=QUESTIONS)
-    ok = {"q_0": "Ville", "a_0": "Toulouse"}
+    ok = {"q_0": "Disponibilité", "a_0": "Janvier"}
 
     def post(**data):
         return client.post(f"/applications/{a.id}/apply/answers", data=data, follow_redirects=True).text
@@ -469,7 +479,7 @@ def test_stale_answers_form_is_refused_and_nothing_is_saved(client, profile, mas
     assert "Page périmée" in post(**ok)  # no run_id at all
     assert "Page périmée" in post(run_id="x", **ok)
     assert "Page périmée" in post(run_id=str(old.id), q_0="Question inventée", a_0="x")  # label not asked by that run
-    assert "Page périmée" in post(run_id=str(old.id), q_0="Ville", a_0="x", q_1="Autre", a_1="y")  # one bad label refuses all
+    assert "Page périmée" in post(run_id=str(old.id), q_0="Disponibilité", a_0="x", q_1="Autre", a_1="y")  # one bad label refuses all
     newer, _ = make_run(a, tmp_path, mode="submit", status="failed")  # the form belongs to an older run
     assert "Page périmée" in post(run_id=str(old.id), **ok)
     assert "Page périmée" in post(run_id=str(newer.id), **ok)  # last run, but not waiting for answers
@@ -840,7 +850,8 @@ def other_profile():
 def test_answers_page_renders_every_section_and_field(client, profile):
     s = soup(client.get(answers_url(profile)).text)
     assert not s.select("form form") and s.select_one("h1").text == "Réponses aux formulaires"
-    assert [h.text.strip() for h in s.select("section.panel h2")][:5] == list(apply_facts.ANSWER_SECTIONS)
+    assert [h.text.strip() for h in s.select("section.panel h2")][:3] == ["À compléter une fois", "À décider", "Blocages techniques"]
+    assert [h.text.strip() for h in s.select('section[id^="section-"] h2')] == list(apply_facts.ANSWER_SECTIONS)
     for f in apply_facts.ANSWER_FIELDS:
         el = s.select_one(f'[name="ans_{f.path.replace(".", "__")}"]')
         assert el is not None, f.path
@@ -848,7 +859,7 @@ def test_answers_page_renders_every_section_and_field(client, profile):
         if f.widget == "date":
             assert el["type"] == "date"
     assert len(s.select("button.primary")) == 1 and s.select_one("button.primary").text.strip() == "Enregistrer les réponses"
-    assert s.select_one("#pending") is None and "Suggestion : France" in client.get(answers_url(profile)).text
+    assert s.select_one("#pending") is None and not s.select_one('input[name="ans_country"]')["value"]
     assert 'name="ans_civility"' in client.get(answers_url(profile)).text
     assert [o.text for o in s.select('select[name="ans_civility"] option')] == ["Non renseigné", "M.", "Mme"]
 
@@ -970,9 +981,63 @@ def test_missing_fact_groups_link_to_existing_fields_and_disappear_on_save(clien
     assert apply_facts.answers_path(profile.id).read_bytes() == before
 
     response = save(client, profile, {"ans_city": "Ville-Test"})
-    assert response.status_code == 200 and soup(response.text).select_one("#missing-answers") is None
+    after = soup(response.text)
+    assert response.status_code == 200 and after.select_one("#missing-answers [data-fact-key]") is None
+    assert after.select_one('[data-blocker="recheck:city"] .count').text == "2"
     assert apply_facts.load_answers(profile.id)["city"] == "Ville-Test"
     assert apply_store.last_run(first.id).status == "needs_input"
+
+
+def test_typed_choices_and_technical_prompts_are_handled_without_retry(client, profile, master, tmp_path, monkeypatch):
+    from jobhunt.apply import scoped_choices
+    from jobhunt.apply.missing_answers import capture
+    from jobhunt.apply.types import FieldOption, FormField
+
+    app = mk_app(profile, master, tmp_path)
+    field = FormField(ref="f1", name="assist", form="0:0", kind="select", label="KI-Unterstützung zustimmen",
+                      required=True, options=[FieldOption(value="", label="Bitte wählen"),
+                      FieldOption(value="enable", label=" Ja "), FieldOption(value="enable", label="Ja"),
+                      FieldOption(value="disable", label="Nein")])
+    binding, indices = scoped_choices.field_choices("https://fictional.test/apply", field)
+    question = capture(field, field.label).model_copy(update={"choice_binding": binding, "choice_indices": indices})
+    run, _ = make_run(app, tmp_path, status="needs_input", questions=[question,
+        Question(label="Wiederholen", kind="password"), Question(label="Votre CV", kind="file"),
+        Question(label="CV personale", kind="file"), Question(label="Land", kind="select"),
+        Question(label="Postleitzahl"), Question(label="Postal Code"), Question(label="First name")])
+    original = apply_service.queue
+    calls = record_runs(monkeypatch)
+    queue_calls = []
+
+    def queue(profile_id):
+        queue_calls.append(profile_id)
+        return original(profile_id)
+
+    monkeypatch.setattr(apply_service, "queue", queue)
+    page = soup(client.get(answers_url(profile)).text)
+    assert queue_calls == [profile.id]
+    assert page.select_one('[data-blocker="cv_upload"] .count').text == "1"
+    assert page.select_one('[data-blocker="recheck:first_name"]')
+    assert page.select_one('[data-fact-key="postal_code"] .tag').text.startswith("1 candidature")
+    assert page.select_one('[data-decision="ambiguous_country"]')
+    select = page.select_one('#answer-decisions select[name="choice"]')
+    assert [(option["value"], option.text) for option in select.select("option")] == [("", "Choisir…"), ("1", "Ja"), ("3", "Nein")]
+    assert not select.select("option[selected]")
+    form = {element["name"]: element["value"] for element in select.find_parent("form").select('input[type="hidden"]')}
+    endpoint = f"{answers_url(profile)}/choice"
+    for invalid in ("", "0", "2", "999", "enable"):
+        assert "invalide ou périmé" in client.post(endpoint, data={**form, "choice": invalid}, follow_redirects=True).text
+    assert not scoped_choices.load(profile.id, app.id, run.rev, form["origin"])
+    assert "Aucun essai lancé" in client.post(endpoint, data={**form, "choice": "3"}, follow_redirects=True).text
+    assert scoped_choices.load(profile.id, app.id, run.rev, form["origin"]) == {binding: 3}
+    assert not apply_facts.answers_path(profile.id).exists()
+
+    password_payload = "fictional-private-marker"
+    profile_post = save(client, profile, {"pql_0": "Wiederholen", "pqa_0": password_payload, "ans_city": "Ville-Test"})
+    single_post = client.post(f"/applications/{app.id}/apply/answers", data={"run_id": str(run.id),
+                              "q_0": "Wiederholen", "a_0": password_payload}, follow_redirects=True)
+    for response in (profile_post, single_post):
+        assert "aucune réponse" in response.text and password_payload not in response.text
+    assert apply_facts.load_answers(profile.id) == {} and calls == []
 
 
 def test_custom_answers_can_be_edited_and_removed_by_stable_id(client, profile):
@@ -1236,14 +1301,14 @@ async def test_the_task_rechecks_the_destination_when_it_starts(profile, master,
     APPLYING.clear()
 
 
-@pytest.mark.parametrize("route, extra", [("resume", {"mode": "submit", "rev": "1"}), ("answers", {"q_0": "Ville ?", "a_0": "Albi"}),
+@pytest.mark.parametrize("route, extra", [("resume", {"mode": "submit", "rev": "1"}), ("answers", {"q_0": "Disponibilité ?", "a_0": "Janvier"}),
                                           ("trust", {"host": "jobs.autre-site.test"})])
 def test_single_resume_answers_and_trust_require_the_destination_digest(client, profile, master, tmp_path, monkeypatch, route, extra):
     a = mk_app(profile, master, tmp_path)
     if route == "trust":
         run_, _ = make_run(a, tmp_path, mode="submit", status="blocked", untrusted_host="jobs.autre-site.test")
     else:
-        run_, _ = make_run(a, tmp_path, mode="submit", status="needs_input", questions=[Question(label="Ville ?")])
+        run_, _ = make_run(a, tmp_path, mode="submit", status="needs_input", questions=[Question(label="Disponibilité ?")])
     calls = record_runs(monkeypatch)
     url = f"/applications/{a.id}/apply/{route}"
     data = {"run_id": str(run_.id), **extra}

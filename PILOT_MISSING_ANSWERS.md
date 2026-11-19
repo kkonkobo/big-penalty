@@ -1,6 +1,6 @@
 # Pilot 1: missing confirmed answers — portal handoff
 
-The local implementation is at `GET /profiles/{pid}/answers`, under **Informations à confirmer**. This change does not add an API, schema migration, or new write or resume path. It has no dependency on the VPS web-portal worktree.
+The local implementation is at `GET /profiles/{pid}/answers`, under **À compléter une fois**, **À décider**, and **Blocages techniques**. This extends the first pilot without a database migration or dependency on the VPS web-portal worktree.
 
 ## Read model
 
@@ -22,6 +22,12 @@ Use the portal's existing editor for each key and its existing authorization for
 
 ## Matching and privacy
 
-The existing question payload does not carry a canonical fact ID. Reuse the exact normalized FR/EN aliases and field-kind checks in `missing_answers.py`, not fuzzy matching. In particular, unqualified `City`, `Postal code`, `Country`, and `Graduation date` are ambiguous without context. Leave them in the existing question-level workflow instead of mapping them to candidate facts. An exact saved custom answer suppresses only its normalized question, not all aliases of a fact. Unknown questions and continued pauses with recorded values stay available for manual review.
+New captures carry `fact_id`, `reason`, and `category` where appropriate; older records retain the exact FR/EN/DE label and control-kind fallback in `missing_answers.py`. Bare country is ambiguous unless a new capture has an explicit residential-address group. Use `facts.identity_answers` with the authorized profile and confirmed master to mirror the engine's identity resolution; pass presence only. Use `missing_answers.review_groups` on the same queue snapshot for decisions and technical blockers. Recorded or unsupported fields that are still paused remain visible for re-check. The local GET builds the queue once.
 
 This integration must not prefill, infer, or copy an ATS answer. Keep the portal's current answer-write and stale-edit checks, including `facts.answers_lock` for answer mutations. Preserve existing write-only fields and don't add answer values to the projection, URLs, markup for the widget, or logs. For integration tests use fictional records only.
+
+## Per-form choices
+
+- Native, identifiable single-select/radio controls can carry `choice_binding` and `choice_indices`. Use `scoped_choices.labels(question)` to render only the presentation labels and opaque index tokens, with a blank default. Disabled and indistinguishable choices are omitted. Do not expose raw ATS values or collapse opposite consent questions. Unbound, ambiguous and unsupported controls remain for site/operator review. Use established standing choices such as internship agreement and declared device type; this checkout has no verified general country catalog.
+- The local `POST /profiles/{pid}/answers/choice` validates `application_id`, `run_id`, `origin`, `binding`, and `choice` against the authorized profile, latest eligible run, revision, destination and record. Technical prompts never accept answers. Persist via `scoped_choices.save` under `facts.answers_lock`, outside label-based custom answers. Saving launches nothing. Only a later explicit manual run can use the choice, and only when the page, form, field and exact option snapshot still match. Existing submit gates are unchanged.
+- Reuse a calling code only from a supported unambiguous international number. Device type and residence must not be inferred. France permit prose only answers the exact descriptive field; an explicitly configured sponsorship answer can match a unique simple yes/no option on the exact question, not a qualified option or a blanket authorization question.

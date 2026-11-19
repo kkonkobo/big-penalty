@@ -2,10 +2,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from jobhunt.apply.missing_answers import MissingAnswer, fact_key, project
+from jobhunt.apply.missing_answers import MissingAnswer, capture, fact_key, project
+from jobhunt.apply.prompt_rules import decision_key, international_calling_code
 from jobhunt.apply.service import QueueItem
 from jobhunt.apply.store import ApplyRun
-from jobhunt.apply.types import Question
+from jobhunt.apply.types import FormField, Question
 from jobhunt.cv.store import Application
 from jobhunt.cv.tailored import TailoredCV
 
@@ -25,9 +26,14 @@ def pause(app_id, *labels, profile_id=1, rev=2, status="needs_input", bucket="pa
     ("Country of residence?", "combobox", "country"),
     ("Date prévue d’obtention du diplôme", "date", "graduation_date"),
     ("Can your school provide an internship agreement?", "radio", "internship_agreement"),
-    ("City", "text", None),
+    ("City", "text", "city"),
     ("Pays", "select", None),
-    ("Postal code", "text", None),
+    ("Postal code", "text", "postal_code"),
+    ("Postleitzahl", "text", "postal_code"),
+    ("Pays/région de résidence", "select", "country"),
+    ("Country/Region of Residence", "select", "country"),
+    ("Land", "select", None),
+    ("Telefon-Gerätetyp", "select", "phone_device_type"),
     ("Postal code of your previous address", "text", None),
     ("Ville de naissance", "text", None),
     ("Preferred city of residence", "text", None),
@@ -60,3 +66,22 @@ def test_projection_deduplicates_distinct_apps_and_uses_only_current_input_pause
     assert groups == [MissingAnswer("city", (3, 8)), MissingAnswer("graduation_date", (3, 8)),
                       MissingAnswer("country", (3,)), MissingAnswer("internship_agreement", (3,))]
     assert [group.application_count for group in groups] == [2, 2, 1, 1]
+
+
+def test_capture_distinguishes_context_and_choice_polarity():
+    def country(group):
+        return capture(FormField(ref="field", kind="select", label="Land", group=group), "Land")
+
+    assert country("Wohnanschrift").fact_id == "country"
+    assert country("Geburtsort").category == "ambiguous_country"
+    assert capture(FormField(ref="field", kind="text", label="City", group="Place of birth"), "City").fact_id is None
+    for phrase in ("Consent to AI assistance", "J'autorise l'assistance par IA", "KI-Unterstützung zustimmen"):
+        assert decision_key(phrase) == "ai_opt_in"
+    for phrase in ("Opt out of AI assistance", "Je refuse l’assistance par IA", "KI-Unterstützung nicht zulassen"):
+        assert decision_key(phrase) == "ai_opt_out"
+
+
+@pytest.mark.parametrize(("phone", "expected"), [("+33 6 00 00 00 00", "+33"), ("0049 151 00000000", "+49"),
+                                                 ("06 00 00 00 00", None), ("+33 (0)6 00 00 00 00", None)])
+def test_calling_code_does_not_infer_international_number(phone, expected):
+    assert international_calling_code(phone) == expected
