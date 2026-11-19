@@ -39,8 +39,9 @@ from jobhunt.apply.prompt_rules import decision_key, device_type, international_
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
 from jobhunt.apply.store import binding_active
-from jobhunt.apply.types import (Action, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
+from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan)
+from jobhunt.apply.unattended import ClickUncertain as _Dispatched, click_once, handoff_result, trial_click
 from jobhunt.browser import human_pause
 from jobhunt.llm import LLMError
 
@@ -397,10 +398,6 @@ class _Validated:
     upload_refs: set[str] = dc_field(default_factory=set)
 
 
-class _Dispatched(Exception):
-    """The single activation of a click raised: it may have fired. Never retried."""
-
-
 class _Dirty(Exception):
     """An action left the control in a state that may not be the validated one and cannot be undone (a radio): the step stops."""
 
@@ -531,6 +528,7 @@ class _Run:
         self.page, self.url, self.facts, self.planner, self.uploads, self.mode = page, url, facts, planner, uploads, mode
         self.out_dir, self.job_title, self.company, self.password = out_dir, job_title, company, password
         self.before_submit, self.on_submit_click, self.on_nav_click = before_submit, on_submit_click, on_nav_click
+        self.diagnostics = DispatchDiagnostics()
         self.before_field: Callable[[str], None] | None = None
         self.current_step = False
         self.generic_step = False
@@ -644,7 +642,11 @@ class _Run:
             if question.reason is None:
                 question = _question(FormField(ref=question.ref, kind=question.kind, label=question.label))
             bound.append(question)
-        return RunResult(status=status, message=self._r(message), questions=bound, consent_codes=sorted(self.consent_codes))
+        trace = self.diagnostics.model_copy()
+        if status in ("needs_email", "needs_human") and trace.receipt_reason == "before_submit":
+            trace = handoff_result("email" if status == "needs_email" else "human", diagnostics=trace).dispatch_diagnostics
+        return RunResult(status=status, message=self._r(message), questions=bound, consent_codes=sorted(self.consent_codes),
+                         dispatch_diagnostics=trace)
 
     async def _shot(self, log: StepLog) -> None:
         if log.screenshot or os.getenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS") != "1":
@@ -1557,11 +1559,7 @@ class _Run:
     @staticmethod
     async def _trial(el: ElementHandle, timeout: int) -> bool:
         """Is the element clickable? (Playwright's trial: every actionability check, NO event dispatched.)"""
-        try:
-            await el.click(trial=True, timeout=timeout)
-            return True
-        except Exception:
-            return False
+        return await trial_click(el, timeout)
 
     async def _click(self, target: ElementHandle | Locator, *, recheck=None) -> None:
         """Activate the exact element EXACTLY ONCE. Actionability is learnt with non-dispatching trials (retried after scrolling
@@ -1569,23 +1567,11 @@ class _Run:
         A dispatch that raises is never retried: it may have fired -> `_Dispatched`."""
         if isinstance(self, _Run):  # (unit tests call this unbound)
             self.click_window = time.monotonic() + CLICK_ATTRIBUTION_S
-        el = target.first if isinstance(target, Locator) else target
-        ok = await _Run._trial(el, ACTION_TIMEOUT_MS)
-        if not ok:
-            with contextlib.suppress(Exception):
-                await el.scroll_into_view_if_needed(timeout=2000)
-            with contextlib.suppress(Exception):
-                await el.evaluate("e => e.scrollIntoView({block: 'center', inline: 'center'})")
-            ok = await _Run._trial(el, ACTION_TIMEOUT_MS // 2)
-        if recheck is not None:
-            await recheck()
-        try:
-            if ok:
-                await el.click(timeout=ACTION_TIMEOUT_MS)
-            else:  # still covered (a sticky widget / overlay): activate the SAME element directly, once
-                await el.evaluate("e => e.click()")
-        except Exception as e:
-            raise _Dispatched(type(e).__name__) from e
+        async def gate():
+            if recheck is not None:
+                await recheck()
+
+        await click_once(target, recheck=gate, timeout_ms=ACTION_TIMEOUT_MS, trial=_Run._trial)
 
     async def _after_click(self) -> None:
         await asyncio.sleep(CLICK_WAIT_S)
@@ -1779,8 +1765,19 @@ class _Run:
                 await self._shot(log)
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if self.autonomous and self.final_awaiting:
-                if self.autonomous.final_response and not has_form and (
-                        self.autonomous.final_receipt_url or self._confirmed(snap, self.last_sent)):
+                trace = self.diagnostics
+                if not self.autonomous.final_response:
+                    trace.receipt_reason = "no_final_response"
+                elif has_form:
+                    trace.receipt_reason = "form_still_present"
+                elif self.autonomous.final_receipt_url:
+                    trace.receipt_reason = "confirmation_url"
+                elif self._confirmed(snap, self.last_sent):
+                    trace.receipt_reason = "confirmation_text"
+                else:
+                    trace.receipt_reason = "no_confirmation"
+                if trace.receipt_reason in ("confirmation_url", "confirmation_text"):
+                    trace.receipt_kind = "first_party_confirmation"
                     return self._end("submitted", "Candidature envoyée.")
                 return self._unconfirmed()
             # a field error / error banner is NEVER proof that nothing was sent, and takes precedence over "continuation": it only
@@ -1892,6 +1889,9 @@ class _Run:
             await self._settle()
             if self.blocked_requests:  # a page script navigated by itself after the last step
                 return self._auto_submit_result(self.steps[-1] if self.steps else None)
+            if not self.final_awaiting:
+                self.diagnostics.step = n
+                self.diagnostics.control = "scan"
             if self.current_step:
                 await self._supervised_checkpoint()
             snap, resolve = await self._snapshot()
@@ -2023,6 +2023,8 @@ class _Run:
             dirty = False
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
             for it in v.items if not self._inspection_only else ():
+                self.diagnostics.control = ("upload" if it.act.op.startswith("upload_") else
+                                            "choice" if it.field.kind in CHOICE_KINDS else "text")
                 try:
                     if self.generic_step or self.autonomous:
                         target = await self._el(resolve, it.field.ref)
@@ -2306,6 +2308,8 @@ class _Run:
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
                 with contextlib.suppress(Exception):
                     self.login_unknown_try = not self.account_known(self._host())
+            self.diagnostics.control = ("final_submit" if final else "login_otp" if role == "login" else
+                                        "account_creation" if role == "signup" else "navigation")
             try:
                 if self.autonomous:
                     async def dispatch_check():
@@ -2314,6 +2318,7 @@ class _Run:
                             await self.autonomous.target(target, button=True, final=final)
                             if final and self.on_submit_click is not None:
                                 await self.on_submit_click()
+                                self.diagnostics.receipt_reason = "submit_unverified"
                         except (ManualField, ApplyError):
                             raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
                     await self._click(target, recheck=dispatch_check)
@@ -2354,10 +2359,11 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           supervised_attempt: Attempt | None = None,
                           before_field: Callable[[str], None] | None = None, current_step: bool = False, generic_step: bool = False,
                           live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None,
-                          autonomous=None, autonomous_attempt: Attempt | None = None) -> RunResult:
-    """Inspect `url` or fill a reserved, attended form. Never submit it.
+                          autonomous=None, autonomous_attempt: Attempt | None = None,
+                          diagnostics: DispatchDiagnostics | None = None) -> RunResult:
+    """Inspect or fill a form; only a bound, guarded unattended flow can submit.
 
-    Legacy dispatch callbacks do not authorize generic live sends. Dry callers
+    Legacy dispatch callbacks alone do not authorize live sends. Dry callers
     should supply a fresh headless context, as the apply service does.
     """
     url = clean_url(url, navigation=True)
@@ -2395,4 +2401,6 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     flow.generic_step = generic_step
     flow.live_mutation_check = live_mutation_check
     flow.autonomous = autonomous
+    if diagnostics is not None:
+        flow.diagnostics = diagnostics
     return await flow.run()

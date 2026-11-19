@@ -20,7 +20,7 @@ import string
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 from jobhunt.config import get_settings
@@ -411,6 +411,17 @@ def create_password(host: str, email: str) -> str:
         raise ApplyError("Enregistrement dans le trousseau impossible")
     _index_add(host, email, "pending")  # until a run gets past the account pages
     return pw
+
+
+def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool]) -> tuple[Callable[[str], str], Callable[[str], bool]]:
+    """Password and known-account callbacks for a guarded browser's login/signup actions."""
+    def password(host):
+        return create_password(host, email) if accepts_host(host) else ""
+
+    def known(host):
+        return accepts_host(host) and account_known(host, email)
+
+    return password, known
 
 
 def list_accounts() -> list[dict[str, Any]]:

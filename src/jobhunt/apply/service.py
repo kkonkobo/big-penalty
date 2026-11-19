@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from jobhunt import db
 from jobhunt.apply import accounts, policy
-from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Match, Receipt, WriteGate, clean_receipt, origin, registry
+from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Match, Receipt, WriteGate, clean_receipt, origin, registry
 from jobhunt.apply.autonomous import Audience
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
@@ -35,7 +35,8 @@ from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR
 from jobhunt.apply.planner import LLMPlanner
 from jobhunt.apply.store import ApplyRun
 from jobhunt.apply.supervised import FillPreview, Session, UNAVAILABLE, local_bridge
-from jobhunt.apply.types import FilledField, Mode, Question, RunResult
+from jobhunt.apply.types import DispatchDiagnostics, FilledField, Mode, Question, RunResult
+from jobhunt.apply.unattended import handoff_result
 from jobhunt.browser import BrowserPool
 from jobhunt.config import get_settings
 from jobhunt.cv import service as cvs
@@ -368,7 +369,7 @@ def _unattended(job) -> bool:
 
 def _generic_enabled(job, *, check_host: bool = True) -> bool:
     return bool(get_settings().apply_autonomous and job and policy._usable_origin(job)
-                and clean_url(job.origin_url, navigation=True) and not registry.find(job.origin_url, job.origin_ats)
+                and clean_url(job.origin_url, navigation=True) and not _unattended(job)
                 and (not check_host or not apply_store.host_paused(_host(job.origin_url))))
 
 
@@ -417,12 +418,15 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
     identity = resolved or adapter_identity
     canonical = ["req", *identity] if identity else ["job", job.id]
     dedupe_key = hashlib.sha256(json.dumps([app.profile_id, *canonical]).encode()).hexdigest()
+    autonomous = mode == "submit" and (not match or match.capability != "unattended")
+    dispatch_match = None if autonomous else match
+    tenant, requisition_id = ((requisition.tenant, requisition.requisition_id) if requisition and not autonomous
+                              else identity or ("", None))
     attempt = Attempt(run_.id, app.id, run_.rev, digest, url, host, secrets.token_urlsafe(24),
-                      match.adapter.name if match else None, requisition.tenant if requisition else identity[0] if identity else "",
-                      requisition.requisition_id if requisition else identity[1] if identity else None, dedupe_key, app.profile_id,
-                      match.receipt_kind if match else "none", autonomous=mode == "submit" and match is None)
+                      dispatch_match.adapter.name if dispatch_match else None, tenant, requisition_id, dedupe_key, app.profile_id,
+                      dispatch_match.receipt_kind if dispatch_match else "none", autonomous=autonomous)
     facts = tuple(CandidateFact(fact.key, fact.label, fact.value, tuple(fact.variants))
-                  for fact in _candidate_facts(app, job).facts if fact.value and not fact.secret) if match else ()
+                  for fact in _candidate_facts(app, job).facts if fact.value and not fact.secret) if dispatch_match else ()
     apply_store.reserve_send(run_.id, profile_id=app.profile_id, application_id=app.id, trigger=trigger,
                              role_key=policy.normalize_role(job.company, job.title), url_key=apply_store._url_key(url),
                              daily_cap=get_settings().apply_daily_cap, binding=attempt, duplicate_confirmations=duplicate_confirmations)
@@ -430,7 +434,7 @@ def _reserve(run_: ApplyRun, started_job, mode: Mode, trigger: str, match: Match
 
 
 def _write_gate(request: Dispatch, run_: ApplyRun, job, mode: Mode, trigger: str, match: Match, *,
-                confirmed_distinct: frozenset[int] = frozenset()) -> WriteGate:
+                confirmed_distinct: frozenset[int] = frozenset(), diagnostics: DispatchDiagnostics | None = None) -> WriteGate:
     def recheck() -> None:
         _check_boundary(run_, job, mode, trigger, reserved=True, confirmed_distinct=confirmed_distinct)
         if not apply_store.binding_active(request.attempt) or registry.find(job.origin_url, job.origin_ats) != match:
@@ -440,7 +444,7 @@ def _write_gate(request: Dispatch, run_: ApplyRun, job, mode: Mode, trigger: str
     if any(not value or origin(value) != value for value in destinations):
         raise ApplyError("Destination d'adaptateur non vérifiée.")
     return WriteGate(capability=match.capability, policies=match.adapter.boundaries, origins=destinations,
-                     recheck=recheck, dispatch=request, endpoints=match.requisition.endpoints)
+                     recheck=recheck, dispatch=request, endpoints=match.requisition.endpoints, diagnostics=diagnostics)
 
 
 def _candidate_facts(app: Application, job):
@@ -470,18 +474,21 @@ async def fill_step(app_id: int, token: str, *, run_id: int | None = None) -> Ru
     return await _fill_session(app_id, run_id).run(token)
 
 
-async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifier, browser, out):
+async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifier, browser, out, match,
+                         confirmed_distinct, duplicate_confirmations, diagnostics):
     if not _generic_enabled(job):
         return RunResult(status="needs_human", message=SUPERVISED_ONLY)
-    request = _reserve(run_, job, "submit", trigger)
+    request = _reserve(run_, job, "submit", trigger, match, confirmed_distinct=confirmed_distinct,
+                       duplicate_confirmations=duplicate_confirmations)
     attempt = request.attempt
 
     def check():
-        live, _, _, _ = _check_boundary(run_, job, "submit", trigger, reserved=True)
+        live, _, _, _ = _check_boundary(run_, job, "submit", trigger, reserved=True, confirmed_distinct=confirmed_distinct)
         eligible, reasons = cvs.is_eligible(live)
         if not eligible:
             raise ApplyError(" ; ".join(reasons))
-        if not get_settings().apply_autonomous or registry.find(job.origin_url, job.origin_ats) or not apply_store.binding_active(attempt):
+        if (not get_settings().apply_autonomous or registry.find(job.origin_url, job.origin_ats) != match
+                or not apply_store.binding_active(attempt)):
             raise ApplyError(SUPERVISED_ONLY)
 
     async def recheck():
@@ -504,14 +511,16 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     if email and password_fact:
         password_fact.value = "disponible"
 
-    def password(host):
-        return accounts.create_password(host, email) if email and host == _host(audience.document) and audience.write_recipient(audience.document) else ""
+    password, account_known = accounts.guarded_account_callbacks(
+        email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document)
+    ) if email else (None, None)
 
     async def mark_submit():
         apply_store.mark_autonomous_submit(attempt)
         guard.final_started = True
         audience.final_started = True
 
+    diagnostics.control = "navigation"
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
         await guard.install(page)
         try:
@@ -528,17 +537,21 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 uploads=Uploads(cv_pdf=cvs.safe_pdf(app), cv_bytes=request.pdf), mode="submit", current_step=True,
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
-                password=password if email else None, account_known=(lambda host: accounts.account_known(host, email)) if email else None,
+                password=password, account_known=account_known, diagnostics=diagnostics,
                 host_allowed=lambda host: host == _host(audience.document), max_steps=get_settings().apply_max_steps,
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
-            result = RunResult(status="needs_human", message="Un défi anti-robot doit être résolu à la main.")
+            result = handoff_result("human", diagnostics=diagnostics).model_copy(
+                update={"message": "Un défi anti-robot doit être résolu à la main."})
         except Exception:
             if not guard.refused and not page.is_closed():
                 raise
-            result = RunResult(status="needs_human", message=SUPERVISED_ONLY)
+            result = handoff_result("human", diagnostics=diagnostics)
         if guard.refused:
-            result = result.model_copy(update={"status": "needs_human", "message": RECIPIENT_REFUSED + " " + SUPERVISED_ONLY})
+            diagnostics.receipt_kind = "none"
+            diagnostics.receipt_reason = "recipient_refused"
+            result = result.model_copy(update={"status": "needs_human", "message": RECIPIENT_REFUSED + " " + SUPERVISED_ONLY,
+                                               "dispatch_diagnostics": diagnostics})
         if out is not None:
             out.append(result)
     return result
@@ -547,27 +560,44 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
 async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, pool, planner,
                  llm: _Llm, verifier=None, out: list[RunResult] | None = None,
                  receipts: list[Receipt] | None = None, confirmed_distinct: frozenset[int] = frozenset(),
-                 duplicate_confirmations: tuple[str, ...] = (), browser=None) -> RunResult:
+                 duplicate_confirmations: tuple[str, ...] = (), browser=None,
+                 diagnostics: DispatchDiagnostics | None = None) -> RunResult:
     """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
     follows cannot lose it."""
     match = registry.find(job.origin_url, job.origin_ats) if mode != "dry_run" else None
+    if diagnostics is None:
+        diagnostics = DispatchDiagnostics()
     if mode == "submit":
-        if match is None and get_settings().apply_autonomous and browser is not None:
+        if (match is None or match.capability != "unattended") and get_settings().apply_autonomous and browser is not None:
             return await _drive_generic(app, job, run_, trigger=trigger, pool=pool, planner=planner, llm=llm,
-                                        verifier=verifier, browser=browser, out=out)
+                                        verifier=verifier, browser=browser, out=out, match=match,
+                                        confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations,
+                                        diagnostics=diagnostics)
         if match is None or match.capability != "unattended":
             return RunResult(status="blocked", message=UNSUPPORTED_DISPATCH + " " + SUPERVISED_ONLY + ".")
         request = _reserve(run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct,
                            duplicate_confirmations=duplicate_confirmations)
-        gate = _write_gate(request, run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct)
-        evidence = await match.adapter.dispatch(request, gate)
-        receipt = await match.adapter.verify_receipt(request.attempt, evidence=evidence)
+        gate = _write_gate(request, run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct,
+                           diagnostics=diagnostics)
+        try:
+            evidence = await match.adapter.dispatch(request, gate)
+            receipt = await match.adapter.verify_receipt(request.attempt, evidence=evidence)
+        except Handoff as exc:
+            if exc.reason in {"otp", "captcha", "403", "429", "unknown_field", "consent"} and not gate.final_called:
+                return handoff_result("email" if exc.reason == "otp" else "human", diagnostics=diagnostics)
+            if exc.reason == "redirect":
+                diagnostics.receipt_reason = "recipient_refused"
+            raise
         if (gate.final_called and not gate.stopped and isinstance(receipt, Receipt)
                 and clean_receipt(receipt, request.attempt) and receipts is not None):
             receipts.append(receipt)
+            diagnostics.receipt_kind = receipt.kind
+            diagnostics.receipt_reason = "attested"
+        elif gate.final_called:
+            diagnostics.receipt_reason = "receipt_rejected"
         progress = apply_store.get_run(run_.id)
         return RunResult(status="failed", message="Aucun reçu authentifié pour cet essai.",
-                         steps=progress.result.steps if progress and progress.result else [])
+                         steps=progress.result.steps if progress and progress.result else [], dispatch_diagnostics=diagnostics)
     request = _reserve(run_, job, mode, trigger, match, confirmed_distinct=confirmed_distinct,
                        duplicate_confirmations=duplicate_confirmations) if mode == "supervised" else None
     facts = _candidate_facts(app, job)
@@ -761,6 +791,7 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
     shared_llm = _Llm(llm)
     reraise: BaseException | None = None
     crashed = False
+    diagnostics = DispatchDiagnostics()
     returned: list[RunResult] = []  # the engine's own result, as soon as it exists
     receipts: list[Receipt] = []
     browser = []
@@ -770,7 +801,8 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
                 pool = BrowserPool(headless=False if mode == "supervised" else headless)
             result = await _drive(app, job, run_, mode=mode, trigger=trigger, pool=pool, planner=planner,
                                   llm=shared_llm, verifier=verifier, out=returned, receipts=receipts,
-                                  confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations, browser=browser)
+                                  confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations, browser=browser,
+                                  diagnostics=diagnostics)
         except ApplyError as e:
             result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
@@ -779,6 +811,8 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
             result, reraise, crashed = RunResult(status="failed", message="Interrompu."), e, True
         if crashed and returned:  # the engine had finished: cleanup failed or was cancelled afterwards, its result stands
             result, crashed = returned[0], False
+        if result.dispatch_diagnostics == DispatchDiagnostics():
+            result = result.model_copy(update={"dispatch_diagnostics": diagnostics})
         # Settlement is synchronous (no await): a cancellation arriving during the cleanup below cannot strand the run.
         try:
             done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None,

@@ -14,7 +14,7 @@ from cv_fakes import save_confirmed
 from jobhunt import db
 from jobhunt.apply import engine, service, store
 from jobhunt.apply.facts import save_answers
-from jobhunt.apply.adapters import Registry, Requisition
+from jobhunt.apply.adapters import Receipt, Registry, Requisition
 from jobhunt.apply.destination import RecipientGuard, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.supervised import HAS_LOCAL_BRIDGE, call_local
@@ -80,6 +80,62 @@ async def test_production_autonomous_submits_with_receipt_and_scoped_decisions(p
     assert len(server.posts) == 1
     assert b"privacy=on" in server.posts[0]["body"] and b"eeo=private" in server.posts[0]["body"]
     assert b"marketing=" not in server.posts[0]["body"]
+    assert result.result.dispatch_diagnostics.model_dump() == {
+        "step": 1, "control": "final_submit", "receipt_kind": "first_party_confirmation", "receipt_reason": "confirmation_text",
+    }
+
+
+@pytest.mark.parametrize("attested", [False, True])
+async def test_autonomous_routing_uses_supervised_adapter_only_for_identity(
+    attested, production_pool, server, profile, tmp_path, fast, monkeypatch,
+):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    monkeypatch.setattr(service.get_settings(), "apply_auto", True)
+    url = server.url("adapter-contract") if attested else server.url("jobs/100")
+    server.html["/jobs/100"] = posting_form("/jobs/100")
+    job, app = approved_fixture(profile, tmp_path, url)
+    calls = []
+
+    class Adapter:
+        name = "routing-fixture"
+        capability = "unattended" if attested else "supervised"
+        retry_rule = "never"
+        boundaries = {"final_submit": "auto" if attested else "forbidden"}
+
+        def matches(self, target, dom_markers):
+            return float(origin(target) == server.base)
+
+        def resolve(self, target, dom_markers):
+            return Requisition("fixture-tenant", "req-1", endpoints=(
+                ("final_submit", server.url("adapter-contract/{tenant}/{requisition}")),
+            ))
+
+        async def dispatch(self, request, gate):
+            assert attested
+            calls.append("dispatch")
+            return await gate.perform("final_submit", server.url("adapter-contract/fixture-tenant/req-1"), attach_pdf=True)
+
+        async def verify_receipt(self, attempt, *, evidence):
+            return Receipt(attempt, "confirmed", "first_party_confirmation", "fixture",
+                           evidence.headers["X-Fixture-Receipt"], evidence.headers["X-Fixture-Requisition"])
+
+    registry = Registry()
+    registry.register(Adapter(), host="127.0.0.1", unattended_tenants={"fixture-tenant": "first_party_confirmation"} if attested else None)
+    monkeypatch.setattr(service, "registry", registry)
+    result = await service.run(app.id, mode="submit", trigger="auto", pool=production_pool, planner=ScriptedPlanner(form))
+    assert result.status == "submitted", result.message
+    assert calls == (["dispatch"] if attested else [])
+    expected_path = "/adapter-contract/fixture-tenant/req-1" if attested else "/jobs/100"
+    assert [post["path"] for post in server.posts] == [expected_path]
+    assert result.result.dispatch_diagnostics.receipt_reason == ("attested" if attested else "confirmation_text")
+    with db.connect() as conn:
+        binding = json.loads(conn.execute("SELECT binding_json FROM apply_reservations WHERE run_id=?", (result.id,)).fetchone()[0])
+    assert (binding["tenant"], binding["requisition_id"]) == ("fixture-tenant", "req-1")
+    assert binding.get("autonomous", False) is not attested
+    assert binding["adapter"] == ("routing-fixture" if attested else None)
+    _, duplicate = approved_fixture(profile, tmp_path, server.url("jobs/200"), title="Other title", company="Other alias")
+    repeated = await service.run(duplicate.id, mode="submit", trigger="auto", pool=production_pool, planner=ScriptedPlanner(form))
+    assert repeated.status == "blocked" and len(server.posts) == 1
 
 
 @pytest.mark.parametrize(("question", "option_html", "stored", "expected"), [
@@ -195,6 +251,8 @@ async def test_production_autonomous_batch_gates(restriction, production_pool, s
     assert [run.status for run in runs] == expected, [(run.status, run.message) for run in runs]
     assert len(server.posts) == {"cap": 1, "breaker": 2, "kill": 0, "duplicate": 1, "captcha": 2}[restriction]
     if restriction in {"breaker", "duplicate"}:
+        trace = runs[0].result.dispatch_diagnostics
+        assert (trace.step, trace.control, trace.receipt_kind, trace.receipt_reason) == (1, "final_submit", "none", "no_confirmation")
         assert store.outstanding_attempt(apps[0].id).id == runs[0].id
         retried = await service.run(apps[0].id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
         assert retried.status == "blocked"

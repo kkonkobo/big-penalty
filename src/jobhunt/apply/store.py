@@ -94,12 +94,13 @@ def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
     if held and code != "unconfirmed":
         message = UNCONFIRMED_NOTE + ". " + message
     return RunResult(status=result.status, diagnostic_code=code, message=message, final_url=origin(result.final_url),
+                     dispatch_diagnostics=result.dispatch_diagnostics,
                      consent_codes=_safe_consents(result),
                      untrusted_host=result.untrusted_host if code == "untrusted_host" else "",
                      submit_clicked=result.submit_clicked, finished_at=result.finished_at)
 
 
-_RESULT_FIELDS = {"status": True, "message": True, "final_url": True, "submit_clicked": True,
+_RESULT_FIELDS = {"status": True, "message": True, "final_url": True, "submit_clicked": True, "dispatch_diagnostics": True,
                   "untrusted_host": True, "finished_at": True,
                   "steps": {"__all__": {"index", "url", "page_kind", "filled", "clicked", "screenshot", "note"}},
                   "questions": True}
@@ -347,12 +348,14 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
                     c.execute("UPDATE apply_reservations SET released_at=? WHERE id=?", (ts, held["id"]))
                     c.execute("UPDATE application_runs SET operator_not_sent_at=? WHERE id=?", (ts, run_id))
                     cvstore.tx_set_status(c, run["application_id"], "draft")
-                    result = RunResult(status="blocked", message="Non-envoi vérifié. Tout nouvel essai doit être lancé manuellement.")
+                    result = RunResult(status="blocked", message="Non-envoi vérifié. Tout nouvel essai doit être lancé manuellement.",
+                                       dispatch_diagnostics=result.dispatch_diagnostics)
                 verified = True
             elif held and held["binding_json"]:
                 with _suppress(CVError):
                     cvstore.tx_force_failed(c, run["application_id"], UNCONFIRMED_NOTE)
-                status = "needs_input" if run["mode"] == "supervised" and result.status == "needs_input" else "failed"
+                status = result.status if (run["mode"] == "supervised" and result.status == "needs_input"
+                                           or run["mode"] == "submit" and result.status in ("needs_email", "needs_human")) else "failed"
                 awaiting_verification = True
                 result = result.model_copy(update={"status": status, "submit_clicked": False})
                 if status == "needs_input":

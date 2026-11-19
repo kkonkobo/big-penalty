@@ -22,6 +22,18 @@ def _domain(host):
     return _PSL(host or "").top_domain_under_public_suffix
 
 
+def confirmation_url(url: str, posting_url: str) -> bool:
+    """Recognize a same-origin confirmation path for this posting, not receipt correlation."""
+    if not clean_url(url, navigation=True) or origin(url) != origin(posting_url):
+        return False
+    path = urlsplit(url).path.casefold().rstrip("/")
+    ids = _posting_ids(path)
+    expected = _posting_ids(urlsplit(posting_url).path)
+    return (not ids or ids == expected) and path.rsplit("/", 1)[-1] in {
+        "application-submitted", "application-received", "candidature-envoyee", "candidature-recue",
+    }
+
+
 class Audience:
     def __init__(self, reserved_url, verified_urls, recheck, *, pdf_bytes=None):
         self.reserved_url = reserved_url
@@ -118,14 +130,7 @@ class Audience:
         return ""
 
     def receipt_url(self, url):
-        if origin(url) != origin(self.document):
-            return False
-        path = urlsplit(url).path.casefold().rstrip("/")
-        ids = _posting_ids(path)
-        expected = _posting_ids(urlsplit(self.document).path)
-        return (not ids or ids == expected) and path.rsplit("/", 1)[-1] in {
-            "application-submitted", "application-received", "candidature-envoyee", "candidature-recue",
-        }
+        return confirmation_url(url, self.document)
 
     async def bind_document(self, page):
         nonce = secrets.token_urlsafe(24)

@@ -12,7 +12,7 @@ from jobhunt.apply.destination import RecipientGuard, clean_url, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity
 from jobhunt.apply.planner import Planner
-from jobhunt.apply.types import RunResult
+from jobhunt.apply.types import DispatchDiagnostics, RunResult
 
 Capability = Literal["supervised", "unattended"]
 Boundary = Literal["account_creation", "login_otp", "cv_upload_parse", "draft_write", "final_submit"]
@@ -25,7 +25,8 @@ BLOCKERS = frozenset({"captcha", "otp", "403", "429", "unknown_field", "consent"
 
 class Handoff(ApplyError):
     def __init__(self, reason: str):
-        super().__init__("Intervention humaine requise : " + (reason if reason in BLOCKERS else "étape non autorisée"))
+        self.reason = reason if reason in BLOCKERS else "étape non autorisée"
+        super().__init__("Intervention humaine requise : " + self.reason)
 
 
 @dataclass(frozen=True)
@@ -91,16 +92,20 @@ def clean_receipt(receipt: Receipt, attempt: Attempt) -> bool:
 class WriteGate:
     def __init__(self, *, capability: Capability, policies: Mapping[Boundary, BoundaryPolicy], origins: frozenset[str],
                  recheck: Callable[[], None], dispatch: Dispatch | None = None,
-                 endpoints: tuple[tuple[Boundary, str], ...] = ()):
+                 endpoints: tuple[tuple[Boundary, str], ...] = (), diagnostics: DispatchDiagnostics | None = None):
         self.capability, self._policies, self._recheck = capability, dict(policies), recheck
         self._recipient = RecipientGuard(origins)
         self._dispatch = dispatch
         self._endpoints = endpoints
         self.stopped = False
         self.final_called = False
+        self._diagnostics = diagnostics
 
     def stop(self, reason: str) -> None:
         self.stopped = True
+        if self._diagnostics is not None and self._diagnostics.step == 0:
+            self._diagnostics.step = 1
+            self._diagnostics.control = "login_otp" if reason == "otp" else "other"
         raise Handoff(reason)
 
     def _enter(self, boundary: Boundary, target_url: str, *, mark_final: bool = True) -> None:
@@ -120,6 +125,11 @@ class WriteGate:
 
     async def perform(self, boundary: Boundary, target_url: str, *, attach_pdf: bool = False) -> httpx.Response:
         """Send only a vetted, fixed-shape request. No arbitrary transport or unvalidated form values."""
+        if self._diagnostics is not None:
+            self._diagnostics.step = min(self._diagnostics.step + 1, 10000)
+            self._diagnostics.control = boundary if boundary in {
+                "account_creation", "login_otp", "cv_upload_parse", "draft_write", "final_submit",
+            } else "other"
         if self.capability != "unattended" or self._dispatch is None or boundary not in {"cv_upload_parse", "final_submit"}:
             self.stop("étape non autorisée")
         url = clean_url(target_url, navigation=True)
@@ -133,6 +143,8 @@ class WriteGate:
             self.stop("redirect")
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
             self._enter(boundary, url)
+            if self.final_called and self._diagnostics is not None:
+                self._diagnostics.receipt_reason = "submit_unverified"
             try:
                 headers = {"X-Application-Attempt": self._dispatch.attempt.nonce,
                            "X-Application-Requisition": self._dispatch.attempt.requisition_id or ""}
