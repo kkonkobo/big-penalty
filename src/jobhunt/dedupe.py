@@ -251,7 +251,10 @@ class MergedJob:
                 self.posted_at = _utc(b)
         if other.origin_url and not self.origin_url:
             self.origin_url, self.origin_ats, self.origin_confidence = other.origin_url, other.origin_ats, other.origin_confidence
+            self.extra.pop("origin_resolution", None)
         for k, v in other.extra.items():
+            if k == "origin_resolution" and other.origin_url != self.origin_url:
+                continue
             self.extra.setdefault(k, v)
 
     def to_posting(self) -> JobPosting:
@@ -275,9 +278,13 @@ class MergedJob:
 
     def apply_origin(self, p: JobPosting) -> None:
         # posted_at stays the earliest SOURCE date; the origin ATS date lives in extra["origin_posted_at"].
-        if p.origin_url and p.origin_url != self.origin_url and (
+        if p.origin_url and (p.origin_url != self.origin_url or p.origin_resolution) and (
+                p.origin_url == self.origin_url or
                 not self.origin_url or (p.origin_confidence or 0) >= (self.origin_confidence or 0)):
             self.origin_url, self.origin_ats, self.origin_confidence = p.origin_url, p.origin_ats, p.origin_confidence
+            self.changed = True
+        if p.origin_resolution and (p.origin_url == self.origin_url or not self.origin_url):
+            self.extra["origin_resolution"] = p.origin_resolution
             self.changed = True
         if p.origin_posted_at and p.origin_url == self.origin_url:
             iso = _utc(p.origin_posted_at).isoformat()

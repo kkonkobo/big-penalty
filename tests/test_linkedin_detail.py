@@ -186,7 +186,11 @@ async def test_offsite_tracker_is_followed_and_final_url_trusted():
 
 
 async def test_resolve_gives_confidence_09_and_ats_or_site(tmp_path):
-    r = resolver()
+    def handler(request):
+        html = '<main><h1>Stage ingénieur systèmes</h1><a href="/postuler/77">Postuler</a></main>'
+        return httpx.Response(200, text=html if request.url.host == "jobs.randomats.example" else "")
+
+    r = resolver(handler)
     r.cache = origin.DiskCache(tmp_path)
     from unittest.mock import AsyncMock
     r.enrich_from_page = AsyncMock(return_value=None)
@@ -231,6 +235,11 @@ def test_reresolve_uses_linkedin_provider_and_reports(profile, monkeypatch):
 
     for step in ("enrich_from_page", "probe_company", "discover_careers", "web_search"):
         monkeypatch.setattr(origin.Resolver, step, none)
+    async def fetch(self, url, **kwargs):
+        html = '<main><h1>Stage ingénieur 4</h1><a href="/postuler/9">Postuler</a></main>' if url.endswith("/9") else ""
+        return httpx.Response(200, request=httpx.Request("GET", url), text=html)
+
+    monkeypatch.setattr(origin.Resolver, "_get", fetch)
     refetched = []
     monkeypatch.setattr(pipeline, "_refetch_apply_urls", lambda jobs, ctx, report, skip_sources=(): refetched.append(skip_sources) or asyncio.sleep(0))
 

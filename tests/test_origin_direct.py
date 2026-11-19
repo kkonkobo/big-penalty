@@ -80,15 +80,15 @@ async def test_direct_apply_url_on_employer_domain_is_accepted_without_fetching(
         await r.aclose()
 
 
-async def test_resolve_one_gives_confidence_above_threshold_for_host_hit(tmp_path):
+async def test_resolve_one_records_challenge_on_corroborated_host(tmp_path):
     r = resolver_with(lambda request: httpx.Response(403))
     r.cache = origin.DiskCache(tmp_path)
     r.enrich_from_page = AsyncMock(return_value=None)
     try:
         p = posting(company="CEA", apply_url="https://www.emploi.cea.fr/offres/emploi-stage-12.aspx", apply_method="external")
         res = await origin._resolve_traced(r, p)
-        assert res.posting.origin_url == "https://www.emploi.cea.fr/offres/emploi-stage-12.aspx"
-        assert res.posting.origin_confidence >= origin.MIN_CONFIDENCE and res.via == "direct_host"
+        assert res.posting.origin_url is None and res.reason == "challenge"
+        assert res.posting.origin_resolution["posting_url"] == p.apply_url
     finally:
         await r.aclose()
 

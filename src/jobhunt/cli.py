@@ -174,6 +174,19 @@ def rescore(profile_id: int) -> None:
         console.print(f"[yellow]! {e}[/yellow]")
 
 
+@app.command("reresolve")
+def reresolve(
+    profile_id: Annotated[Optional[int], typer.Argument(help="profil (par défaut : tous)")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="compte les transitions sans écrire")] = False,
+) -> None:
+    """Reclasse les ATS des offres enregistrées sans relancer la recherche."""
+    from jobhunt.origin import reresolve_stored
+
+    counts = asyncio.run(reresolve_stored(profile_id, dry_run=dry_run))
+    for (before, after), count in sorted(counts.items()):
+        typer.echo(f"{before} → {after}: {count}")
+
+
 @app.command("origins")
 def origins(
     profile_id: int,
