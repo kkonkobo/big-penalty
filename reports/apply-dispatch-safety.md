@@ -6,7 +6,7 @@
 
 To enable a send for a particular ATS, a vetted adapter must establish which operations can transmit data and reserve the attempt durably before any such operation. It must recheck current approval and policy at that boundary, bind the current revision and exact PDF bytes and verified destination to the reservation, and authenticate and correlate the server receipt to the same attempt. Retry is unsafe without conclusive non-delivery or a verified idempotency mechanism. Page text, form structure, and URL changes are not receipts.
 
-Legacy engine integration tests that require generic dry-run autofill or live generic dispatch assert behavior that is intentionally disabled; they are not evidence of an adapter-backed flow.
+The shared form tests exercise the planner, field guards, and navigation against isolated fixtures. Legacy autofill rehearsals reach the same private page lifecycle but cannot be entered through the public dry-run API. Fixture submissions register an adapter on the exact loopback origin; service tests check the bound PDF bytes and correlate a first-party fixture response to the attempt nonce. The production registry stays empty. Separate boundary tests exercise the public generic refusal and the offline, no-autofill inspection.
 
 ## Supervised sending extension
 

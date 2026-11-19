@@ -187,7 +187,7 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
                     c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (run_id, run["application_id"]))
                     c.execute("UPDATE jobs SET status='applied' WHERE id=(SELECT job_id FROM applications WHERE id=?)",
                               (run["application_id"],))
-                    result = RunResult(status="submitted", message="Candidature envoyée (reçu vérifié).")
+                    result = result.model_copy(update={"status": "submitted", "message": "Candidature envoyée (reçu vérifié)."})
                 else:
                     c.execute("UPDATE apply_reservations SET released_at=? WHERE id=?", (ts, held["id"]))
                     c.execute("UPDATE application_runs SET operator_not_sent_at=? WHERE id=?", (ts, run_id))

@@ -436,7 +436,9 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
         if (gate.final_called and not gate.stopped and isinstance(receipt, Receipt)
                 and clean_receipt(receipt, request.attempt) and receipts is not None):
             receipts.append(receipt)
-        return RunResult(status="failed", message="Aucun reçu authentifié pour cet essai.")
+        progress = apply_store.get_run(run_.id)
+        return RunResult(status="failed", message="Aucun reçu authentifié pour cet essai.",
+                         steps=progress.result.steps if progress and progress.result else [])
     request = _reserve(run_, job, mode, trigger, match) if mode == "supervised" else None
     facts = _candidate_facts(app, job) if not match else None
     cv_pdf = cvs.safe_pdf(app)
@@ -563,7 +565,20 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
         if crashed and returned:  # the engine had finished: cleanup failed or was cancelled afterwards, its result stands
             result, crashed = returned[0], False
         # Settlement is synchronous (no await): a cancellation arriving during the cleanup below cannot strand the run.
-        done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None)
+        try:
+            done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None)
+        except Exception:
+            if not receipts:
+                raise
+            current = apply_store.get_run(run_.id)
+            if current is None:
+                raise
+            if current.status != "running":
+                done = current
+            else:
+                done = _settle(run_, mode, result.model_copy(update={
+                    "message": "Reçu vérifié, mais enregistrement impossible. Ne pas renvoyer cette candidature."
+                }), crashed)
     finally:
         try:
             if own_pool and pool is not None:

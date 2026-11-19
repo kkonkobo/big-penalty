@@ -10,6 +10,7 @@ import pytest
 from jobhunt import db
 from jobhunt.apply import accounts, facts, policy, service
 from jobhunt.apply import store as astore
+from jobhunt.apply.engine import Uploads
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.types import FilledField, Question, RunResult, StepLog, StepPlan
 from jobhunt.config import get_settings
@@ -18,8 +19,8 @@ from jobhunt.cv import store
 from jobhunt.sources.base import ChallengeRequired
 
 from apply_cv_helpers import ERROR, make_app, make_job
-from apply_fakes import CONFIRMED, ScriptedPlanner, act, cv_pdf, fast, page, server  # noqa: F401
-from apply_service_fakes import FakePool, stub_engine
+from apply_fakes import CONFIRMED, LoopbackFlowAdapter, ScriptedPlanner, act, cv_pdf, fast, page, server  # noqa: F401
+from apply_service_fakes import FakePool, register_fixture, stub_adapter, stub_engine
 from cv_fakes import save_confirmed
 
 
@@ -88,30 +89,43 @@ async def test_run_already_in_progress_propagates(profile, master, tmp_path, mon
 
 
 # ------------------------------------------------------------------ dry run / submit with the real engine
-async def test_dry_run_on_a_draft_fills_and_never_changes_status(profile, master, tmp_path, server, page, fast):
+async def loopback_run(app, monkeypatch, server, page, planner):
+    async def allowed():
+        return []
+
+    adapter = LoopbackFlowAdapter(server, page, capture_receipt=True, facts=service._candidate_facts(app, db.get_job(app.job_id)),
+                                  planner=planner, uploads=Uploads(cv_pdf=cvs.safe_pdf(app)), before_submit=allowed,
+                                  out_dir=cvs.safe_pdf(app).parent / "fixture-shots", job_title=app.job_title,
+                                  company=app.company or "", max_steps=6)
+    register_fixture(monkeypatch, adapter, "127.0.0.1")
+    return await service.run(app.id, mode="submit", trigger="user")
+
+
+async def test_dry_run_on_a_draft_inspects_and_never_changes_status(profile, master, tmp_path, server, page, fast):
     job, app = new_app(profile, master, tmp_path, url=server.url("step1"))
     pool = FakePool(page)
     r = await service.run(app.id, mode="dry_run", trigger="user", pool=pool, planner=ScriptedPlanner([step1, step2]))
-    assert r.status == "ready" and not server.posts_to("/apply") and not pool.closed
+    assert r.status == "blocked" and not server.posts_to("/apply") and not pool.closed
     assert pool.opened[0][0] == profile.id and pool.opened[0][1].startswith("applydry-")
     assert (r.out_dir and str(job.id) in r.out_dir and f"runs/{r.id}" in r.out_dir.replace("\\", "/"))
     a = store.get_application(app.id)
     assert a.status == "draft" and a.submitted_at is None and db.get_job(job.id).status != "applied"
     # the engine's dry run stops after the first page of a multi-step form (it never clicks "next" without a real send)
+    assert not server.sent and not r.result.steps[0].filled
     assert [s.page_kind for s in r.result.steps] == ["form"] and r.result.steps[0].screenshot
 
 
-async def test_submit_marks_application_and_job(profile, master, tmp_path, server, page, fast):
+async def test_submit_marks_application_and_job(profile, master, tmp_path, server, page, fast, monkeypatch):
     job, app = new_app(profile, master, tmp_path, url=server.url("step1"), approve=True)
-    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool(page),
-                          planner=ScriptedPlanner([step1, step2, CONFIRMED]))
+    r = await loopback_run(app, monkeypatch, server, page, ScriptedPlanner([step1, step2, CONFIRMED]))
     assert r.status == "submitted" and len(server.posts_to("/apply")) == 1
+    assert cvs.safe_pdf(app).read_bytes() in server.posts_to("/apply")[0]["body"]
     a = store.get_application(app.id)
     assert a.status == "submitted" and a.submitted_at is not None
     assert db.get_job(job.id).status == "applied"
 
 
-async def test_before_submit_rechecks_the_pdf_right_before_the_click(profile, master, tmp_path, server, page, fast):
+async def test_before_submit_rechecks_the_pdf_right_before_the_click(profile, master, tmp_path, server, page, fast, monkeypatch):
     job, app = new_app(profile, master, tmp_path, url=server.url("step1"), approve=True)
     pdf = cvs.safe_pdf(app)
 
@@ -119,16 +133,18 @@ async def test_before_submit_rechecks_the_pdf_right_before_the_click(profile, ma
         pdf.write_bytes(b"%PDF-1.4 tampered")  # between the start of the run and the final click
         return step2(snap)
 
-    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool(page), planner=ScriptedPlanner([step1, tamper]))
-    assert r.status == "blocked" and "PDF" in r.message and not server.posts_to("/apply")
-    assert store.get_application(app.id).status == "approved" and db.get_job(job.id).status != "applied"
+    planner = ScriptedPlanner([step1, tamper])
+    r = await loopback_run(app, monkeypatch, server, page, planner)
+    assert len(planner.calls) == 2 and pdf.read_bytes() == b"%PDF-1.4 tampered"
+    assert r.status == "failed" and astore.outstanding_attempt(app.id).id == r.id and not server.posts_to("/apply")
+    assert store.get_application(app.id).status == "failed" and db.get_job(job.id).status != "applied"
 
 
-async def test_unconfirmed_submit_marks_application_failed(profile, master, tmp_path, server, page, fast):
+async def test_unconfirmed_submit_marks_application_failed(profile, master, tmp_path, server, page, fast, monkeypatch):
     job, app = new_app(profile, master, tmp_path, url=server.url("step1"), approve=True)
-    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool(page),
-                          planner=ScriptedPlanner([step1, step2, StepPlan(page_kind="form")]))
-    assert r.status == "failed" and r.result.submit_clicked and len(server.posts_to("/apply")) == 1
+    server.post_pages["/apply"] = "step2.html"
+    r = await loopback_run(app, monkeypatch, server, page, ScriptedPlanner([step1, step2, StepPlan(page_kind="form")]))
+    assert r.status == "failed" and astore.outstanding_attempt(app.id).id == r.id and len(server.posts_to("/apply")) == 1
     a = store.get_application(app.id)
     assert a.status == "failed" and "Envoi non confirmé" in (a.notes or "")
     assert db.get_job(job.id).status != "applied"
@@ -137,8 +153,9 @@ async def test_unconfirmed_submit_marks_application_failed(profile, master, tmp_
 async def test_challenge_from_goto_ends_as_needs_human(profile, master, tmp_path, server, page, fast):
     _, app = new_app(profile, master, tmp_path, url=server.url("step1"), approve=True)
     pool = FakePool(page, goto_error=ChallengeRequired("bot challenge"))
-    r = await service.run(app.id, mode="submit", trigger="user", pool=pool, planner=ScriptedPlanner([step1]))
-    assert r.status == "needs_human" and store.get_application(app.id).status == "approved"
+    r = await service.run(app.id, mode="supervised", trigger="user", pool=pool, planner=ScriptedPlanner([step1]))
+    assert r.status == "failed" and astore.outstanding_attempt(app.id).id == r.id
+    assert not server.sent and "anti-robot" in r.message
 
 
 # ------------------------------------------------------------------ stubbed engine
@@ -146,32 +163,30 @@ async def test_other_failures_leave_the_application_approved_and_never_raise(pro
     _, app = new_app(profile, master, tmp_path, approve=True)
     stub_engine(monkeypatch, RunResult(status="failed", message="Aucune action possible sur cette page.",
                                        steps=[StepLog(index=1, url="x", page_kind="form", note="rien")]))
-    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
     assert r.status == "failed" and store.get_application(app.id).status == "approved"
     stub_engine(monkeypatch, raises=RuntimeError("secret page content"))
-    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
     assert r.status == "failed" and "RuntimeError" in r.message and "secret" not in r.message
     assert store.get_application(app.id).status == "approved"
 
 
-async def test_engine_receives_hooks_and_password_comes_from_accounts(profile, master, tmp_path, monkeypatch):
+async def test_supervised_engine_receives_bound_pdf_and_policy_but_no_password(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     seen = []
     monkeypatch.setattr(accounts, "create_password", lambda host, email: seen.append((host, email)) or "Pw-Test-1234")
     calls = stub_engine(monkeypatch)
     pool = FakePool()
-    await service.run(app.id, mode="submit", trigger="user", pool=pool, headless=True)
+    refused = await service.run(app.id, mode="supervised", trigger="user", pool=pool, headless=True)
+    assert refused.status == "blocked" and not calls and not pool.opened
+    await service.run(app.id, mode="supervised", trigger="user", pool=pool, headless=False)
     kw = calls[0]
-    assert kw["password"]("careers.exemple.test") == "Pw-Test-1234" and seen == [("careers.exemple.test", "camille@example.test")]
-    assert pool.opened == [(profile.id, "apply-exemple.test", True)] and kw["mode"] == "submit"
+    assert kw.get("password") is None and not seen
+    assert pool.opened == [(profile.id, "apply-supervised-careers.exemple.test", False)] and kw["mode"] == "supervised"
     assert kw["max_steps"] == get_settings().apply_max_steps and kw["uploads"].cv_pdf == cvs.safe_pdf(app)
-    assert await kw["before_submit"]() == []
-    cvs.withdraw(app.id)
-    assert await kw["before_submit"]()  # re-checked against the DB at call time
-    calls = stub_engine(monkeypatch)
-    cvs.restore(app.id)
-    await service.run(app.id, mode="dry_run", trigger="user", pool=pool)
-    assert calls[0]["before_submit"] is None and calls[0]["mode"] == "dry_run"
+    assert kw["uploads"].cv_bytes == cvs.safe_pdf(app).read_bytes()
+    assert kw["supervised_attempt"].rev == app.current_rev
+    assert await kw["before_submit"]()
 
 
 # ------------------------------------------------------------------ queue
@@ -243,11 +258,11 @@ async def test_send_selected_approves_drafts_and_refuses_blocking_errors(profile
     _, draft = new_app(profile, master, tmp_path, 1)
     _, approved = new_app(profile, master, tmp_path, 2, approve=True)
     _, bad = new_app(profile, master, tmp_path, 3, flags=[ERROR])
-    calls = stub_engine(monkeypatch, RunResult(status="submitted", message="Candidature envoyée."))
+    calls = stub_adapter(monkeypatch, RunResult(status="submitted", message="Candidature envoyée."), confirm=True)
     pool, progress = FakePool(), []
     runs = await service.send_selected([draft.id, approved.id, bad.id], pool=pool, on_progress=lambda i, r: progress.append((i, r.status)))
     assert [r.status for r in runs] == ["submitted", "submitted", "blocked"] and "erreur" in runs[2].message.lower()
-    assert [p[0] for p in progress] == [draft.id, approved.id, bad.id] and len(calls) == 2 and len(pool.opened) == 2
+    assert [p[0] for p in progress] == [draft.id, approved.id, bad.id] and len(calls) == 2 and not pool.opened
     d = store.get_application(draft.id)
     assert d.status == "submitted" and d.approved_by == "user" and not d.approval_override
     assert store.get_application(bad.id).status == "draft" and not pool.closed
@@ -288,9 +303,9 @@ def click_hook(**flags):
 
 async def test_the_click_reserves_the_send_and_a_submission_records_where_it_went(profile, master, tmp_path, monkeypatch):
     job, app = new_app(profile, master, tmp_path, approve=True, url="https://careers.exemple.test/jobs/7?utm_source=x")
-    stub_engine(monkeypatch, RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True), hook=click_hook())
+    stub_adapter(monkeypatch, RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True), hook=click_hook(), confirm=True)
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert r.status == "submitted" and r.submit_clicked_at is not None
+    assert r.status == "submitted" and r.submit_clicked_at is None
     a = store.get_application(app.id)
     assert a.status == "submitted" and a.sent_origin_url == "careers.exemple.test/jobs/7"
     res = astore.active_reservations(profile.id)
@@ -302,9 +317,9 @@ async def test_the_click_reserves_the_send_and_a_submission_records_where_it_wen
 @pytest.mark.parametrize("status", ["needs_human", "needs_email", "blocked", "failed"])
 async def test_any_outcome_after_the_click_but_submitted_marks_the_application_unconfirmed(profile, master, tmp_path, monkeypatch, status):
     job, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status=status, message="x", submit_clicked=True), hook=click_hook())
+    stub_adapter(monkeypatch, RunResult(status=status, message="x", submit_clicked=True), hook=click_hook())
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert r.status == status
+    assert r.status == "failed" and not r.result.submit_clicked
     a = store.get_application(app.id)
     assert a.status == "failed" and a.notes == service.UNCONFIRMED_NOTE and a.approved_rev is None
     assert db.get_job(job.id).status != "applied"
@@ -318,14 +333,16 @@ async def test_any_outcome_after_the_click_but_submitted_marks_the_application_u
 async def test_the_submit_clicked_token_in_a_note_is_ignored(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)  # the planner could forge a note: only RunResult.submit_clicked counts
     stub_engine(monkeypatch, RunResult(status="failed", steps=[StepLog(index=1, url="x", page_kind="form", note="submit_clicked")]))
-    await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    run = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
+    assert run.submit_clicked_at is None and run.result.steps[0].note == "submit_clicked"
     assert store.get_application(app.id).status == "approved" and not astore.active_reservations(profile.id)
 
 
 async def test_a_failure_before_the_click_leaves_the_application_approved(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status="needs_human", message="CAPTCHA"))
-    await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    calls = stub_engine(monkeypatch, RunResult(status="needs_human", message="CAPTCHA"))
+    run = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    assert run.status == "blocked" and "aucun adaptateur" in run.message.lower() and not calls
     assert store.get_application(app.id).status == "approved" and not astore.active_reservations(profile.id)
 
 
@@ -335,9 +352,9 @@ async def test_crash_after_the_click_fails_the_application_even_without_a_result
     async def clicks_then_crashes(kw):
         await kw["on_submit_click"]()
 
-    stub_engine(monkeypatch, raises=RuntimeError("browser died"), hook=clicks_then_crashes)
+    stub_adapter(monkeypatch, raises=RuntimeError("browser died"), hook=clicks_then_crashes)
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert r.status == "failed" and r.submit_clicked_at is not None
+    assert r.status == "failed" and astore.outstanding_attempt(app.id).id == r.id
     assert store.get_application(app.id).status == "failed"
 
 
@@ -356,41 +373,19 @@ async def test_a_dead_process_after_the_click_blocks_the_next_run(profile, maste
 
 async def test_bookkeeping_failure_is_reported_and_the_application_is_never_resent(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status="submitted", message="ok", submit_clicked=True), hook=click_hook())
+    stub_adapter(monkeypatch, RunResult(status="submitted", message="ok", submit_clicked=True), hook=click_hook(), confirm=True)
 
     def boom(*a, **kw):
         raise RuntimeError("disk full")
 
     monkeypatch.setattr(store, "tx_mark_submitted", boom)
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert "Envoyée sur le site" in r.message and "ne pas la renvoyer" in r.message
+    assert "Reçu vérifié" in r.message and "Ne pas renvoyer" in r.message
     a = store.get_application(app.id)
-    assert a.status == "failed" and "ne pas la renvoyer" in a.notes
-    assert astore.has_unconfirmed_click(app.id)
-
-
-def barrier_hook(n: int, outcomes: list, order: list[str] | None = None):
-    """Engine stub hook: waits until `n` runs are inside the engine (all passed their gates), then announces the final click
-    (in the order of the job URLs `order`, when given)."""
-    state = {"arrived": 0, "turn": 0}
-    both = asyncio.Event()
-
-    async def hook(kw):
-        state["arrived"] += 1
-        if state["arrived"] == n:
-            both.set()
-        await both.wait()
-        while order and order[state["turn"]] != kw["url"]:
-            await asyncio.sleep(0)
-        try:
-            await kw["on_submit_click"]()
-        except ApplyError as e:
-            outcomes.append(str(e))
-            raise
-        finally:
-            state["turn"] += 1
-        outcomes.append("ok")
-    return hook
+    assert a.status == "failed" and a.notes == service.UNCONFIRMED_NOTE
+    assert astore.outstanding_attempt(app.id).id == r.id
+    again = await service.run(app.id, mode="submit", trigger="user")
+    assert again.id == r.id and again.status == "blocked"
 
 
 async def test_two_concurrent_sends_with_nine_reserved_only_the_first_gets_the_last_slot(profile, master, tmp_path, monkeypatch):
@@ -403,10 +398,10 @@ async def test_two_concurrent_sends_with_nine_reserved_only_the_first_gets_the_l
                       " VALUES (?,?,?,?,?,?,?)", (profile.id, 10_000 + n, 10_000 + n, "auto", f"x{n}", f"y{n}", db._iso(datetime.now(UTC))))
     _, a1 = new_app(profile, master, tmp_path, 1, approve=True)
     _, a2 = new_app(profile, master, tmp_path, 2, approve=True)
-    outcomes: list[str] = []
-    stub_engine(monkeypatch, hook=barrier_hook(2, outcomes))
-    await asyncio.gather(*(service.run(a.id, mode="submit", trigger="auto", pool=FakePool(), _lock_held=True) for a in (a1, a2)))
-    assert sorted(outcomes) == ["Plafond de 10 envois automatiques par jour atteint", "ok"]
+    calls = stub_adapter(monkeypatch)
+    runs = await asyncio.gather(*(service.run(a.id, mode="submit", trigger="auto", pool=FakePool(), _lock_held=True) for a in (a1, a2)))
+    assert len(calls) == 1 and sorted(run.status for run in runs) == ["blocked", "failed"]
+    assert "plafond de 10 envois" in runs[1].message.lower()
     assert astore.count_auto_submitted(profile.id, datetime(2000, 1, 1, tzinfo=UTC)) == 10
 
 
@@ -418,13 +413,13 @@ async def test_a_reservation_blocks_a_second_application_for_the_same_role_or_ur
         (tmp_path / f"d{k}").mkdir()
     apps = [cvs.approve((a := make_app(profile, j, tmp_path / f"d{k}", master_hash=master.content_hash)).id, 1)
             for k, j in enumerate((j1, j2, j3))]
-    outcomes: list[str] = []
-    stub_engine(monkeypatch, hook=barrier_hook(3, outcomes, [j.origin_url for j in (j1, j2, j3)]))
-    await asyncio.gather(*(service.run(a.id, mode="submit", trigger="user", pool=FakePool(), _lock_held=True) for a in apps))
-    assert outcomes[0] == "ok" and all("même offre" in o for o in outcomes[1:]) and len(outcomes) == 3  # same role / same canonical URL
+    calls = stub_adapter(monkeypatch)
+    runs = await asyncio.gather(*(service.run(a.id, mode="submit", trigger="user", pool=FakePool(), _lock_held=True) for a in apps))
+    assert len(calls) == 1 and len(runs) == 3
+    assert all(run.status == "blocked" and "même offre" in run.message for run in runs[1:])
 
 
-async def test_a_navigation_click_reserves_pending_and_a_run_without_final_click_releases_it(profile, master, tmp_path, monkeypatch):
+async def test_draft_write_without_final_submit_keeps_a_reservation(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     seen = []
 
@@ -435,10 +430,10 @@ async def test_a_navigation_click_reserves_pending_and_a_run_without_final_click
         seen.append([r["pending"] for r in astore.active_reservations(profile.id)])
         assert await kw["before_submit"]() == []  # the run's own pending reservation never blocks its next click
 
-    stub_engine(monkeypatch, RunResult(status="needs_input", message="question"), hook=nav)
+    stub_adapter(monkeypatch, RunResult(status="needs_input", message="question"), hook=nav)
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert seen == [[1]] and r.nav_clicked_at is not None and r.submit_clicked_at is None
-    assert astore.active_reservations(profile.id) == [] and store.get_application(app.id).status == "approved"
+    assert seen == [[0]] and r.submit_clicked_at is None
+    assert astore.outstanding_attempt(app.id).id == r.id and store.get_application(app.id).status == "failed"
 
 
 async def test_a_navigation_click_then_a_crash_keeps_the_reservation_and_fails_the_application(profile, master, tmp_path, monkeypatch):
@@ -447,7 +442,7 @@ async def test_a_navigation_click_then_a_crash_keeps_the_reservation_and_fails_t
     async def nav_then_crash(kw):
         await kw["on_nav_click"]()
 
-    stub_engine(monkeypatch, raises=RuntimeError("browser died"), hook=nav_then_crash)
+    stub_adapter(monkeypatch, raises=RuntimeError("browser died"), hook=nav_then_crash)
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     assert r.status == "failed" and store.get_application(app.id).status == "failed"
     assert [x["pending"] for x in astore.active_reservations(profile.id)] == [0]
@@ -474,7 +469,8 @@ async def test_a_held_send_lock_records_a_blocked_run(profile, master, tmp_path,
     finally:
         unlock(fd)
         os.close(fd)
-    assert (await service.run(app.id, mode="submit", trigger="user", pool=FakePool())).status == "ready"  # lock free again
+    after = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    assert after.status == "blocked" and "aucun adaptateur" in after.message.lower()
 
 
 async def test_send_lock_is_not_inherited_by_child_tasks_nor_reentrant():
@@ -503,7 +499,7 @@ async def test_send_selected_takes_the_lock_once_and_runs_inside_it(profile, mas
         except service.SendLocked:
             held.append(True)
 
-    stub_engine(monkeypatch, RunResult(status="submitted", message="ok"), hook=probe)
+    stub_adapter(monkeypatch, RunResult(status="submitted", message="ok"), hook=probe, confirm=True)
     runs = await service.send_selected([app.id], pool=FakePool())
     assert held == [True] and [r.status for r in runs] == ["submitted"]
 
@@ -527,21 +523,21 @@ async def test_origin_link_changed_during_the_run_blocks_the_click(profile, mast
             c.execute("UPDATE jobs SET origin_url=? WHERE id=?", ("https://careers.exemple.test/jobs/other", job.id))
         seen.append(await kw["before_submit"]())
 
-    stub_engine(monkeypatch, hook=hook)
+    stub_adapter(monkeypatch, hook=hook)
     await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert "le lien de l'offre a changé pendant l'envoi" in seen[0]
+    assert any("destination a changé" in reason for reason in seen[0])
 
 
 async def test_the_injected_verifier_and_hooks_reach_the_engine(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     calls = stub_engine(monkeypatch)
     verifier = object()
-    await service.run(app.id, mode="submit", trigger="user", pool=FakePool(), verifier=verifier)
-    assert calls[0]["verifier"] is verifier and callable(calls[0]["on_submit_click"]) and callable(calls[0]["before_submit"])
-    assert callable(calls[0]["on_nav_click"]) and callable(calls[0]["host_allowed"])
+    await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), verifier=verifier)
+    assert calls[0]["verifier"] is verifier and calls[0].get("on_submit_click") is None and callable(calls[0]["before_submit"])
+    assert calls[0].get("on_nav_click") is None and callable(calls[0]["host_allowed"])
     calls = stub_engine(monkeypatch)
     await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
-    assert calls[0]["on_submit_click"] is None and calls[0]["on_nav_click"] is None and calls[0]["before_submit"] is None
+    assert calls[0].get("on_submit_click") is None and calls[0].get("on_nav_click") is None and calls[0]["before_submit"] is None
     assert callable(calls[0]["host_allowed"])  # dry runs are bound to the destination too
 
 
@@ -549,7 +545,7 @@ async def test_send_selected_refuses_a_revision_the_user_was_not_shown(profile, 
     _, shown = new_app(profile, master, tmp_path, 1)
     _, changed = new_app(profile, master, tmp_path, 2)
     _, missing = new_app(profile, master, tmp_path, 3)
-    calls = stub_engine(monkeypatch, RunResult(status="submitted", message="ok"))
+    calls = stub_adapter(monkeypatch, RunResult(status="submitted", message="ok"), confirm=True)
     runs = await service.send_selected([shown.id, changed.id, missing.id], pool=FakePool(),
                                        expected_revs={shown.id: shown.current_rev, changed.id: changed.current_rev + 1})
     assert [r.status for r in runs] == ["submitted", "blocked", "blocked"] and len(calls) == 1
@@ -673,18 +669,18 @@ async def test_run_passes_host_allowed_built_from_the_origin_and_the_trusted_lis
     _, app = new_app(profile, master, tmp_path, approve=True)
     facts.add_trusted_host(profile.id, "recrutement.autre.test")
     calls = stub_engine(monkeypatch)
-    for mode in ("submit", "dry_run"):
+    for mode in ("dry_run", "supervised"):
         await service.run(app.id, mode=mode, trigger="user", pool=FakePool())
-    for kw in calls:
-        ha = kw["host_allowed"]
-        assert ha("careers.exemple.test") and ha("jobs.lever.co") and ha("recrutement.autre.test")
-        assert not ha("pirate.example") and not ha("127.0.0.1")
+    dry, attended = [kw["host_allowed"] for kw in calls]
+    assert dry("careers.exemple.test") and dry("jobs.lever.co") and dry("recrutement.autre.test")
+    assert attended("careers.exemple.test") and not attended("jobs.lever.co") and not attended("recrutement.autre.test")
+    assert not dry("pirate.example") and not attended("127.0.0.1")
 
 
 async def test_a_blocked_run_with_an_untrusted_host_is_recorded_and_shown_as_a_host_pause(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     stub_engine(monkeypatch, RunResult(status="blocked", message="hôte non approuvé", untrusted_host="jobs.autre-site.test"))
-    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
     assert r.result.untrusted_host == "jobs.autre-site.test" and store.get_application(app.id).status == "approved"
     (it,) = [i for i in service.queue(profile.id) if i.app.id == app.id]
     assert (it.bucket, it.pause_reason, it.untrusted_host) == ("paused", "host", "jobs.autre-site.test") and not it.selectable
@@ -769,7 +765,7 @@ def test_cli_prints_deduced_answers_and_the_untrusted_host():
 # ------------------------------------------------------------------ finding round 3
 async def test_a_refused_later_attempt_never_orphans_the_recovery(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status="needs_email", message="x", submit_clicked=True), hook=click_hook())
+    stub_adapter(monkeypatch, RunResult(status="needs_email", message="x", submit_clicked=True), hook=click_hook())
     first = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     # even if a newer row exists (older code, another path), the outstanding attempt is the one with the click
     newer = astore.start_run(app.id, 1, "dry_run", "user", lambda rid: tmp_path / f"d{rid}")
@@ -829,7 +825,7 @@ async def test_manual_sent_confirmation_keeps_the_deduced_answers_of_the_sending
         FilledField(label=label, op="fill", fact="candidate_profile", value="oui", inferred=True, basis="CV")])
     astore.finish_run(older.id, RunResult(status="ready", steps=[step("Du dry run")]))
     res = RunResult(status="needs_email", message="x", submit_clicked=True, steps=[step("De l'envoi")])
-    stub_engine(monkeypatch, res, hook=click_hook())
+    stub_adapter(monkeypatch, res, hook=click_hook())
     sending = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     assert [f.label for f in service.inferred_answers(app.id)] == ["Du dry run"]  # before the confirmation: the ready dry run
     service.resolve_unconfirmed(app.id, sent=True, run_id=sending.id)
@@ -839,28 +835,29 @@ async def test_manual_sent_confirmation_keeps_the_deduced_answers_of_the_sending
 
 async def test_a_confirmed_submission_records_its_run_as_the_sending_attempt(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status="submitted", message="ok", submit_clicked=True), hook=click_hook())
+    stub_adapter(monkeypatch, RunResult(status="submitted", message="ok", steps=[inferred_step()]), hook=click_hook(), confirm=True)
     r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     assert astore.sent_run(app.id).id == r.id
+    assert [answer.label for answer in service.inferred_answers(app.id)] == ["Disponibilité"]
 
 
 async def test_run_binds_the_revision_and_the_destination_the_user_saw(profile, master, tmp_path, monkeypatch):
     job, app = new_app(profile, master, tmp_path, approve=True)
     calls = stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
-    r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool(), expected_rev=app.current_rev + 1)
+    r = await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), expected_rev=app.current_rev + 1)
     assert r.status == "blocked" and "le CV a changé depuis l'affichage" in r.message and not calls
-    r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool(), expected_origin=service.origin_digest("https://x.test/"))
+    r = await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), expected_origin=service.origin_digest("https://x.test/"))
     assert r.status == "blocked" and "le lien de l'offre a changé depuis l'affichage" in r.message and not calls
-    r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool(), expected_rev=app.current_rev,
+    r = await service.run(app.id, mode="supervised", trigger="user", pool=FakePool(), expected_rev=app.current_rev,
                           expected_origin=service.origin_digest(job.origin_url))
-    assert r.status == "ready" and len(calls) == 1
+    assert r.status == "failed" and len(calls) == 1 and astore.outstanding_attempt(app.id).id == r.id
 
 
 async def test_send_selected_refuses_a_destination_that_changed(profile, master, tmp_path, monkeypatch):
     j1, shown = new_app(profile, master, tmp_path, 1)
     j2, changed = new_app(profile, master, tmp_path, 2)
     _, missing = new_app(profile, master, tmp_path, 3)
-    calls = stub_engine(monkeypatch, RunResult(status="submitted", message="ok"))
+    calls = stub_adapter(monkeypatch, RunResult(status="submitted", message="ok"), confirm=True)
     revs = {a.id: a.current_rev for a in (shown, changed, missing)}
     runs = await service.send_selected([shown.id, changed.id, missing.id], pool=FakePool(), expected_revs=revs,
                                        expected_origins={shown.id: service.origin_digest(j1.origin_url),
@@ -872,7 +869,7 @@ async def test_send_selected_refuses_a_destination_that_changed(profile, master,
 
 async def test_send_selected_on_an_unresolved_attempt_creates_no_row(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status="needs_email", submit_clicked=True), hook=click_hook())
+    stub_adapter(monkeypatch, RunResult(status="needs_email", submit_clicked=True), hook=click_hook())
     first = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     n = len(astore.list_runs(app.id))
     runs = await service.send_selected([app.id], pool=FakePool(), expected_revs={app.id: 99})
@@ -888,10 +885,10 @@ class SlowClosePool(FakePool):
 
 async def test_cancellation_during_cleanup_still_settles_the_run(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status="submitted", message="ok", submit_clicked=True), hook=click_hook())
+    stub_engine(monkeypatch, RunResult(status="ready", message="Prêt"))
     pool = SlowClosePool()
     monkeypatch.setattr(service, "BrowserPool", lambda headless=None: pool)
-    task = asyncio.create_task(service.run(app.id, mode="submit", trigger="user"))
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user"))
     for _ in range(200):
         if pool.closed:
             break
@@ -901,7 +898,7 @@ async def test_cancellation_during_cleanup_still_settles_the_run(profile, master
     with pytest.raises(asyncio.CancelledError):
         await task
     run = astore.last_run(app.id)
-    assert run.status == "submitted" and store.get_application(app.id).status == "submitted"
+    assert run.status == "failed" and astore.outstanding_attempt(app.id).id == run.id
 
 
 async def test_cancellation_while_driving_settles_as_unconfirmed_after_a_click(profile, master, tmp_path, monkeypatch):
@@ -911,11 +908,11 @@ async def test_cancellation_while_driving_settles_as_unconfirmed_after_a_click(p
         await click_hook()(kw)
         await asyncio.sleep(10)
 
-    stub_engine(monkeypatch, RunResult(status="submitted"), hook=hook)
+    stub_adapter(monkeypatch, RunResult(status="submitted"), hook=hook)
     task = asyncio.create_task(service.run(app.id, mode="submit", trigger="user", pool=FakePool()))
     for _ in range(200):
         last = astore.last_run(app.id)
-        if last and last.submit_clicked_at:
+        if last and astore.active_reservations(profile.id):
             break
         await asyncio.sleep(0.01)
     task.cancel()
@@ -945,7 +942,7 @@ def progress_hook(*, then_sleep=False, nav=False):
 async def _cancel_when_clicked(task, app_id):
     for _ in range(300):
         last = astore.last_run(app_id)
-        if last and (last.submit_clicked_at or last.nav_clicked_at) and last.result is not None:
+        if last and last.result is not None:
             break
         await asyncio.sleep(0.01)
     task.cancel()
@@ -955,12 +952,12 @@ async def _cancel_when_clicked(task, app_id):
 
 async def test_cancel_between_the_click_and_the_receipt_keeps_the_deductions(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
-    stub_engine(monkeypatch, RunResult(status="submitted"), hook=progress_hook(then_sleep=True))
+    stub_adapter(monkeypatch, RunResult(status="submitted"), hook=progress_hook(then_sleep=True))
     task = asyncio.create_task(service.run(app.id, mode="submit", trigger="user", pool=FakePool()))
     await _cancel_when_clicked(task, app.id)
     run = astore.last_run(app.id)
-    assert run.status == "failed" and run.submit_clicked_at and store.get_application(app.id).status == "failed"
-    assert [f.label for st in run.result.steps for f in st.filled] == ["Disponibilité"] and run.result.submit_clicked
+    assert run.status == "failed" and astore.outstanding_attempt(app.id).id == run.id and store.get_application(app.id).status == "failed"
+    assert [f.label for st in run.result.steps for f in st.filled] == ["Disponibilité"] and not run.result.submit_clicked
     service.resolve_unconfirmed(app.id, sent=True, run_id=astore.outstanding_attempt(app.id).id)
     assert [f.label for f in service.inferred_answers(app.id)] == ["Disponibilité"]
 
@@ -972,7 +969,7 @@ async def test_an_engine_crash_after_the_click_keeps_the_progress(profile, maste
         await progress_hook()(kw)
         raise RuntimeError("boom")
 
-    stub_engine(monkeypatch, RunResult(status="submitted"), hook=hook)
+    stub_adapter(monkeypatch, RunResult(status="submitted"), hook=hook)
     run = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     assert run.status == "failed" and [f.label for st in run.result.steps for f in st.filled] == ["Disponibilité"]
 
@@ -996,9 +993,9 @@ class SlowPagePool(FakePool):
 async def test_cancel_during_page_cleanup_stores_the_result_the_engine_returned(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     final = RunResult(status="submitted", message="Candidature envoyée.", submit_clicked=True, steps=[inferred_step("Niveau")])
-    stub_engine(monkeypatch, final, hook=progress_hook())
+    stub_engine(monkeypatch, final)
     pool = SlowPagePool()
-    task = asyncio.create_task(service.run(app.id, mode="submit", trigger="user", pool=pool))
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=pool))
     for _ in range(300):
         if getattr(pool, "cleaning", False):
             break
@@ -1007,9 +1004,9 @@ async def test_cancel_during_page_cleanup_stores_the_result_the_engine_returned(
     with pytest.raises(asyncio.CancelledError):
         await task
     run = astore.last_run(app.id)
-    assert run.status == "submitted" and run.message == "Candidature envoyée."
+    assert run.status == "failed" and astore.outstanding_attempt(app.id).id == run.id
     assert [f.label for st in run.result.steps for f in st.filled] == ["Niveau"]
-    assert store.get_application(app.id).status == "submitted"
+    assert store.get_application(app.id).status == "failed"
 
 
 def test_save_progress_only_for_the_running_newest_run(profile, master, tmp_path):
@@ -1025,22 +1022,20 @@ def test_save_progress_only_for_the_running_newest_run(profile, master, tmp_path
 
 
 @pytest.mark.parametrize("headless, wait", [(True, 0.0), (False, 180.0), (None, None)])
-async def test_captcha_wait_follows_headful_runs(profile, master, tmp_path, monkeypatch, headless, wait):
+async def test_offline_inspection_does_not_wait_for_captcha(profile, master, tmp_path, monkeypatch, headless, wait):
     _, app = new_app(profile, master, tmp_path, approve=True)
     calls = stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
-    if headless is None:  # the pool's own default decides
-        monkeypatch.setattr(get_settings(), "headless", True)
-        wait = 0.0
-    await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool(), headless=headless)
-    assert calls[0]["captcha_wait_s"] == wait
+    pool = FakePool()
+    await service.run(app.id, mode="dry_run", trigger="user", pool=pool, headless=headless)
+    assert pool.opened[0][2] is True and calls[0].get("captcha_wait_s", 0) == 0
 
 
-async def test_captcha_wait_setting(profile, master, tmp_path, monkeypatch):
+async def test_offline_inspection_ignores_captcha_wait_setting(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     calls = stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
     monkeypatch.setattr(get_settings(), "apply_captcha_wait_s", 42.0)
     await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool(), headless=False)
-    assert calls[0]["captcha_wait_s"] == 42.0
+    assert calls[0].get("captcha_wait_s", 0) == 0
 
 
 def test_captcha_wait_env_default_and_override(monkeypatch):
@@ -1057,7 +1052,7 @@ async def test_progress_is_not_offered_for_dry_runs(profile, master, tmp_path, m
     _, app = new_app(profile, master, tmp_path, approve=True)
     calls = stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
     await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
-    assert calls[0]["on_progress"] is None
+    assert calls[0].get("on_progress") is None
 
 
 async def test_a_prefilled_form_reserves_and_settles_like_a_typed_one(profile, master, tmp_path, monkeypatch):
@@ -1068,10 +1063,10 @@ async def test_a_prefilled_form_reserves_and_settles_like_a_typed_one(profile, m
         assert await kw["before_submit"]() == []
         await kw["on_nav_click"]()
 
-    stub_engine(monkeypatch, RunResult(status="needs_email", message="x", submit_clicked=True, steps=[
+    stub_adapter(monkeypatch, RunResult(status="needs_email", message="x", submit_clicked=True, steps=[
         StepLog(index=1, url="https://x.test", page_kind="form")]), hook=hook)
     run = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert run.nav_clicked_at and store.get_application(app.id).status == "failed"
+    assert astore.outstanding_attempt(app.id).id == run.id and store.get_application(app.id).status == "failed"
     [r] = astore.active_reservations(profile.id)
     assert r["pending"] == 0 and r["run_id"] == run.id
 
@@ -1083,7 +1078,7 @@ async def test_failed_with_submit_clicked_after_only_a_navigation_click_keeps_a_
     async def hook(kw):
         await kw["on_nav_click"]()
 
-    stub_engine(monkeypatch, RunResult(status="failed", message="plan", submit_clicked=True), hook=hook)
+    stub_adapter(monkeypatch, RunResult(status="failed", message="plan", submit_clicked=True), hook=hook)
     run = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
     a = store.get_application(app.id)
     assert run.status == "failed" and a.status == "failed" and a.notes == service.UNCONFIRMED_NOTE
@@ -1091,27 +1086,27 @@ async def test_failed_with_submit_clicked_after_only_a_navigation_click_keeps_a_
     assert r["pending"] == 0 and astore.outstanding_attempt(app.id).id == run.id
 
 
-async def test_only_submit_clicked_false_releases_a_pending_reservation(profile, master, tmp_path, monkeypatch):
+async def test_submit_clicked_false_is_not_proof_of_non_delivery(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
 
     async def hook(kw):
         await kw["on_nav_click"]()
 
-    stub_engine(monkeypatch, RunResult(status="failed", message="plan", submit_clicked=False), hook=hook)
-    await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
-    assert astore.active_reservations(profile.id) == [] and store.get_application(app.id).status == "approved"
+    stub_adapter(monkeypatch, RunResult(status="failed", message="plan", submit_clicked=False), hook=hook)
+    run = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    assert astore.outstanding_attempt(app.id).id == run.id and store.get_application(app.id).status == "failed"
 
 
 # ------------------------------------------------------------------ fix round 6 (service side)
-async def test_dry_runs_and_sends_use_different_browser_profiles(profile, master, tmp_path, monkeypatch):
+async def test_inspection_and_supervised_use_different_browser_profiles(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
     dry = FakePool()
     await service.run(app.id, mode="dry_run", trigger="user", pool=dry)
-    stub_engine(monkeypatch, RunResult(status="submitted", message="ok", submit_clicked=True), hook=click_hook())
+    stub_engine(monkeypatch, RunResult(status="ready"))
     real = FakePool()
-    await service.run(app.id, mode="submit", trigger="user", pool=real)
-    assert dry.opened[0][1] == "applydry-exemple.test" and real.opened[0][1] == "apply-exemple.test"
+    await service.run(app.id, mode="supervised", trigger="user", pool=real)
+    assert dry.opened[0][1] == "applydry-exemple.test" and real.opened[0][1] == "apply-supervised-careers.exemple.test"
     assert dry.opened[0][1] != real.opened[0][1]
 
 
@@ -1163,12 +1158,12 @@ def test_sent_does_not_re_approve(profile, master, tmp_path):
 @pytest.mark.parametrize("trigger, headless, attended, wait", [
     ("auto", True, False, 0.0), ("auto", False, False, 0.0), ("auto", False, True, 180.0), ("user", False, False, 180.0),
     ("user", True, False, 0.0), ("auto", True, True, 0.0)])
-async def test_captcha_wait_for_the_automatic_trigger_needs_an_attended_visible_window(
+async def test_inspection_never_waits_for_captcha_even_if_attended(
         profile, master, tmp_path, monkeypatch, trigger, headless, attended, wait):
     _, app = new_app(profile, master, tmp_path, approve=True)
     calls = stub_engine(monkeypatch, RunResult(status="ready", message="ok"))
     await service.run(app.id, mode="dry_run", trigger=trigger, pool=FakePool(), headless=headless, attended=attended)
-    assert calls[0]["captcha_wait_s"] == wait
+    assert calls[0].get("captcha_wait_s", 0) == 0
 
 
 # ------------------------------------------------------------------ batch fixes: accounts, unusable link, resolve-many
@@ -1210,48 +1205,43 @@ async def _signup_run(profile, master, tmp_path, monkeypatch, result, *, n=1):
     seen = {}
 
     async def hook(kw):
-        seen["known_before"] = kw["account_known"]("jobs.exemple.test")
-        seen["pw"] = kw["password"]("jobs.exemple.test")
-        seen["known_after_create"] = kw["account_known"]("jobs.exemple.test")
+        seen.update(password=kw.get("password"), account_known=kw.get("account_known"))
 
     stub_engine(monkeypatch, result, hook=hook)
     await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
     return seen
 
 
-async def test_a_signup_that_never_got_past_the_account_page_stays_unknown(profile, master, tmp_path, monkeypatch, real_accounts):
+async def test_inspection_of_signup_does_not_create_a_pending_account(profile, master, tmp_path, monkeypatch, real_accounts):
     result = RunResult(status="failed", message="x", steps=_steps("job_page", "account_signup"))
     seen = await _signup_run(profile, master, tmp_path, monkeypatch, result)
-    assert seen["known_before"] is False and seen["pw"] and seen["known_after_create"] is False  # created, but pending
-    [row] = accounts.list_accounts()
-    assert row["host"] == "jobs.exemple.test" and row["state"] == "pending"
+    assert seen == {"password": None, "account_known": None} and not accounts.list_accounts()
     again = await _signup_run(profile, master, tmp_path, monkeypatch, result, n=2)
-    assert again["known_before"] is False  # a failed signup is not mistaken for an existing account
+    assert again == seen and not real_accounts.items
 
 
 @pytest.mark.parametrize("steps, status", [(("job_page", "account_signup", "form"), "ready"),
                                            (("account_login", "confirmation"), "ready"), (("account_signup",), "needs_email")])
-async def test_an_account_becomes_active_once_the_run_got_past_the_account_pages(profile, master, tmp_path, monkeypatch, real_accounts,
+async def test_inspection_does_not_infer_an_active_account_from_page_progress(profile, master, tmp_path, monkeypatch, real_accounts,
                                                                               steps, status):
     await _signup_run(profile, master, tmp_path, monkeypatch, RunResult(status=status, message="x", steps=_steps(*steps)))
-    assert [r["state"] for r in accounts.list_accounts()] == ["active"]
+    assert not accounts.list_accounts()
     again = await _signup_run(profile, master, tmp_path, monkeypatch, RunResult(status="ready", steps=_steps("form")), n=2)
-    assert again["known_before"] is True  # the next run logs in instead of signing up
+    assert again == {"password": None, "account_known": None} and not real_accounts.items
 
 
-async def test_account_known_gets_the_same_account_email_as_the_password(profile, master, tmp_path, monkeypatch):
+async def test_generic_inspection_does_not_access_account_credentials(profile, master, tmp_path, monkeypatch):
     _, app = new_app(profile, master, tmp_path, approve=True)
     asked = []
     monkeypatch.setattr(accounts, "account_known", lambda host, email: asked.append((host, email)) or True)
     monkeypatch.setattr(accounts, "create_password", lambda host, email: asked.append(("pw", host, email)) or "Pw")
 
     async def hook(kw):
-        kw["password"]("a.exemple.test")
-        assert kw["account_known"]("a.exemple.test") is True
+        assert kw.get("password") is None and kw.get("account_known") is None
 
     stub_engine(monkeypatch, RunResult(status="ready"), hook=hook)
     await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
-    assert asked[0][0] == "pw" and asked[0][2] == asked[1][1] and asked[1][0] == "a.exemple.test"
+    assert not asked
 
 
 async def test_an_unusable_link_is_forgotten_and_the_run_is_not_a_failed_attempt(profile, master, tmp_path, monkeypatch):
@@ -1259,7 +1249,7 @@ async def test_an_unusable_link_is_forgotten_and_the_run_is_not_a_failed_attempt
     with db.connect() as c:
         c.execute("UPDATE jobs SET origin_ats='x', origin_confidence=0.9 WHERE id=?", (job.id,))
     stub_engine(monkeypatch, RunResult(status="blocked", message="Lien de l'offre inexploitable : page de redirection"))
-    r = await service.run(app.id, mode="submit", trigger="user", pool=FakePool())
+    r = await service.run(app.id, mode="dry_run", trigger="user", pool=FakePool())
     assert r.status == "blocked"
     live = db.get_job(job.id)
     assert live.origin_url is None and live.origin_ats is None and live.origin_confidence is None
@@ -1306,7 +1296,7 @@ async def test_send_selected_forwards_the_expected_revision_and_destination_to_r
         return await real(app_id, **kw)
 
     monkeypatch.setattr(service, "run", spy)
-    stub_engine(monkeypatch, RunResult(status="submitted", message="ok"))
+    stub_adapter(monkeypatch, RunResult(status="submitted", message="ok"), confirm=True)
     revs = {a1.id: a1.current_rev, a2.id: a2.current_rev}
     origins = {a1.id: service.origin_digest(j1.origin_url), a2.id: service.origin_digest(j2.origin_url)}
     runs = await service.send_selected([a1.id, a2.id], pool=FakePool(), expected_revs=revs, expected_origins=origins)
