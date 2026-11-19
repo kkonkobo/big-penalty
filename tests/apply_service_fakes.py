@@ -14,7 +14,8 @@ from jobhunt.apply.types import RunResult, StepLog
 
 
 async def wait_for_supervised(app_id, task):
-    async with asyncio.timeout(12):
+    # A headful Chrome can take well over 10 s to start on a CI runner.
+    async with asyncio.timeout(60):
         while app_id not in service._SUPERVISED:
             if task.done():
                 raise AssertionError(f"Supervised window did not open: {task.result().message}")

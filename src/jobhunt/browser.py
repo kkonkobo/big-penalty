@@ -195,7 +195,8 @@ class BrowserPool:
             raise ChallengeRequired(f"challenge on {url} not solved within {challenge_timeout_s}s")
 
     async def close(self) -> None:
-        for ctx in self._contexts.values():
+        # Snapshot: a task still opening a window can add a context while we await each close.
+        for ctx in list(self._contexts.values()):
             try:
                 await ctx.close()
             except Exception:
