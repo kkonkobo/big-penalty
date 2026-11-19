@@ -519,7 +519,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         password_fact.value = "disponible"
 
     password, account_known = accounts.guarded_account_callbacks(
-        email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document)
+        email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
+        posting_url=attempt.url,
     ) if email else (None, None)
 
     async def mark_submit():

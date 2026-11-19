@@ -634,7 +634,7 @@ class _Run:
         if self.password is None or not _secure_url(frame_url, self.page.url):
             return None
         try:
-            return self.password(urlparse(frame_url).hostname or "") or None
+            return self.password(self._account_address(frame_url)) or None
         except Exception:
             return None
 
@@ -675,6 +675,12 @@ class _Run:
 
     def _host(self) -> str:
         return urlparse(self.page.url).hostname or ""
+
+    @staticmethod
+    def _account_address(url: str) -> str:
+        from jobhunt.apply.accounts import is_workday_host
+        host = urlparse(url).hostname or ""
+        return url if is_workday_host(host) else host
 
     def _bad_host(self, url: str) -> str:
         """The host (or scheme) of `url` when `host_allowed` refuses it; "" when fine. Loopback always passes."""
@@ -753,7 +759,7 @@ class _Run:
         if self.account_known is None:
             return FactSheet(facts=facts)
         try:
-            known = bool(self.account_known(self._host()))
+            known = bool(self.account_known(self._account_address(self.page.url)))
         except Exception:
             return FactSheet(facts=facts)
         extra = Fact(key="account_exists", label="Un compte existe déjà sur ce site pour le candidat", value="oui" if known else "non")
@@ -2378,7 +2384,7 @@ class _Run:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
                 with contextlib.suppress(Exception):
-                    self.login_unknown_try = not self.account_known(self._host())
+                    self.login_unknown_try = not self.account_known(self._account_address(self.page.url))
             self.diagnostics.control = ("final_submit" if final else "login_otp" if role == "login" else
                                         "account_creation" if role == "signup" else "navigation")
             try:

@@ -42,6 +42,13 @@ The registry is a trusted code boundary, not a sandbox. Reviews must establish t
 
 ## Unattended building blocks
 
+For account login or creation, call `accounts.guarded_account_callbacks(email, accepts_host, posting_url=attempt.url)`
+and pass the returned `password` and `account_known` callbacks into the engine. On Workday, the callbacks need the live
+page or field-frame URL, not just a hostname. They compare its explicit career-site namespace with the reservation's
+namespace before touching the keychain. Legacy host-only entries have no creation-time tenant provenance and are never
+reused by these callbacks. A new scoped entry is pending until the account is independently established. Without a
+usable system keychain, Workday credential creation fails closed rather than falling back to plaintext storage.
+
 Generic autonomy is the fallback whenever `Registry.find()` returns no match or a match without tenant-attested `unattended` capability. For generic sends, a supervised match contributes only the canonical posting identity to the reservation and dedupe. Its fill, dispatch, receipt hooks and write origins are not used. A tenant-attested unattended match takes precedence, even if generic autonomy is enabled.
 
 - **Submit:** `await unattended.click_once(target, *, recheck, timeout_ms)` is the one-click boundary used by the browser engine. Supply the exact `ElementHandle` and an async `recheck()` that validates the live form, posting and recipient, rechecks approval, revision, PDF and reservation, and durably marks the final click. It runs after the actionability reads, immediately before activation. `ClickUncertain` means the click may have fired: hold the attempt and never retry. This helper does not authorize writes or install a route guard; use it only in a service-owned, recipient-guarded browser. The current adapter `WriteGate.perform()` remains the fixed-endpoint HTTP broker and does not grant browser access. Supervised callbacks never get a click primitive.
