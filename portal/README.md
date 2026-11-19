@@ -2,19 +2,35 @@
 
 The portal is an optional web interface for viewing application status, editing answers, and requesting supported actions. The paired local application owns the underlying records and processes requests. The server does not send applications itself.
 
+- With the production ATS registry empty, approving a CV on the portal puts it in **À envoyer en mode supervisé sur le Mac**. The agent does not open a browser or send it. On the Mac, launch one application explicitly, verify the destination, and click Submit yourself. Autofill can transmit data before that click. After checking the result on the employer's site, use **Envoyée** or **Pas envoyée** against the displayed attempt on the Mac or portal. If in doubt, leave it held. A confirmed non-send never retries automatically.
 - Run `uv run big-penalty portal --help` for local commands and setup options.
 - Use a synthetic profile and the offline test suite to validate changes. Never use real credentials, application documents, or event payloads as fixtures.
 - Pairing and access codes are private. Keep credentials, operator logs, production configuration, and recovery procedures outside source control.
 
 See [Portal design](DESIGN.md) for the synchronization and permission model.
 
-## Offline upgrade to protocol v2
+## Upgrade
 
 1. Close user intake (for example, block browser access at the proxy), stop Mac sync and local approval, and take the portal offline. Confirm in-flight work has stopped or record it for reconciliation. Back up the Mac journal and server database as a matched set, including pending SQLite WAL data; protect the backups as sensitive. Do not interchange old and new databases or run v1 against upgraded data.
 2. Upgrade the portal server and all paired Macs while offline. There is no `/api/v1` compatibility route. Migration invalidates the old pending events and local grants and removes previous server snapshots, results and document copies. Keep intake closed while restoring authenticated Mac connectivity and checking device/profile state and the first v2 sync, which rebuilds the snapshot. Keep send execution stopped during verification. Inspect actual local answers and submission outcomes before asking anyone to repeat an interrupted action.
-3. Reopen intake only on matching v2 software after reconciliation, preferably in `review` mode. Have users resubmit still-needed edits or actions and approve the newly displayed requests. In `direct` mode, eligible portal edits can write locally and eligible send intents can queue and execute without individual Mac approval. Use `review` for recovery and rollout; switch to `direct` only if that behavior is intended.
+3. Reopen intake only on matching v2 software after reconciliation, preferably in `review` mode. Have users resubmit still-needed edits or actions and approve the newly displayed requests. In `direct` mode, eligible edits and approvals can apply without individual Mac review, but unattended dispatch still requires a reviewed adapter and an enrolled tenant. The current registry is empty. Switch to `direct` only if automatic processing of edits and approvals is intended.
 
 For rollback, close intake and stop both sides again. Restore matching pre-upgrade binaries and the matched pre-upgrade journal/database backups, not one side alone. Keep user intake, approvals and send execution off while reconciling actual local outcomes since the backup and retiring any restored pending events or grants. Verify both sides before reopening intake; restored pending requests must not replay.
+
+### Offline rehearsal results
+
+1. Archive the v1 source (`3a640bc`) into a temporary directory. Run its `Database` and `Journal` against two explicit temporary paths. Seed a fictional device/profile, queued intent and offered grant, plus placeholder server snapshot, results, manifest, document and event rows. Use SQLite's backup API to make a matching pair before upgrading; do not point the rehearsal at application data paths.
+2. Reopen both files with this branch. The server schema rose from `4` to `5`, fenced the previous event sequence, and removed the snapshot/results, manifest and document rows. The journal schema rose from `7` to `8`, cancelled the queued intent and voided its grant. The synthetic device still authenticated on `/app/api/v2/status`.
+3. Test the other protocol's status route with the same synthetic credential: v1 requests got `404` on v2, and v2 requests got `404` on v1. There is no fallback. The archived v1 constructors refused both upgraded database files. On the matched v1 backups, v1 status worked again and the queued intent and offered grant were present again, demonstrating why work must be retired before restoring intake. No real data or VPS was used.
+
+### Deployment workflow inputs
+
+| Workflow | GitHub secrets | GitHub variables |
+| --- | --- | --- |
+| `deploy-portal.yml` | `DOKPLOY_URL`, `DOKPLOY_PORTAL_API_KEY`, built-in `GITHUB_TOKEN` | `DOKPLOY_PORTAL_APP_ID`, `PORTAL_URL` (origin only, no `/app`), optional `DOKPLOY_ORIGIN_IP` |
+| `deploy-site.yml` | `DOKPLOY_URL`, `DOKPLOY_API_KEY`, built-in `GITHUB_TOKEN` | `DOKPLOY_APP_ID`, `SITE_URL`, optional `DOKPLOY_ORIGIN_IP` |
+
+The portal deploy job uses the `portal` GitHub environment. The server's encryption key and other runtime settings belong in Dokploy, not in the workflow or image. PRs only test and build with read-only permissions. The trusted `main` deploy job publishes the image that passed the smoke test and deploys its digest. Deployments are serialized per application.
 
 ## Recovery and containment
 
