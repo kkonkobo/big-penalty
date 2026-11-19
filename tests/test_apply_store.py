@@ -474,6 +474,22 @@ def test_resolve_attempt_not_sent_releases_and_drafts_in_one_go(profile, app):
     assert store.get_application(a.id).status == "draft" and astore.active_reservations(profile.id) == []
 
 
+def test_confirmed_dead_run_can_be_resolved_without_starting_another(profile, app, monkeypatch):
+    approved = cvs.approve(app.id, 1)
+    attempt = astore.start_run(approved.id, 1, "submit", "user", out_dir)
+    reserve_nav(approved, attempt)
+    assert astore.outstanding_attempt(approved.id) is None
+    with pytest.raises(ApplyError):
+        astore.resolve_attempt(approved.id, sent=False, run_id=attempt.id)
+    monkeypatch.setattr(astore, "_owner_confirmed_dead", lambda pid: pid == attempt.pid)
+    assert astore.queue_attempts(profile.id)[0][approved.id].id == attempt.id
+    assert astore.outstanding_attempt(approved.id).id == attempt.id
+    assert len(astore.active_reservations(profile.id)) == 1
+    astore.resolve_attempt(approved.id, sent=False, run_id=attempt.id)
+    assert [run.status for run in astore.list_runs(approved.id)] == ["failed"]
+    assert astore.active_reservations(profile.id) == []
+
+
 def test_resolve_attempt_sent_marks_submitted_job_applied_and_keeps_the_reservation(profile, app):
     a = cvs.approve(app.id, 1)
     run = failed_after_click(a)

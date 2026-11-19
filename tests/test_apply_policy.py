@@ -249,7 +249,8 @@ def test_an_earlier_unconfirmed_send_blocks_everything(profile, app, job, trigge
     astore.finish_run(run.id, RunResult(status="needs_human", submit_clicked=True))
     assert any("un envoi précédent n'a pas été confirmé" in p for p in problems(app, job, trigger))
     paused = apply_service.queue(profile.id)[0]
-    assert paused.bucket == "paused" and not paused.selectable
+    assert paused.bucket == "needs_verification" and not paused.selectable
+    assert paused.outstanding.id == run.id
     assert paused.problems == problems(app, job, "user")
     astore.release_reservation(app.id)  # a human said "not sent"
     assert not any("envoi précédent" in p for p in problems(app, job, trigger))

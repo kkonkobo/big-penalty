@@ -46,6 +46,18 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def _owner_confirmed_dead(pid: int | None) -> bool:
+    if not pid or pid < 0 or sys.platform == "win32":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
 class ApplyRun(BaseModel):
     id: int
     application_id: int
@@ -194,7 +206,8 @@ _OUTSTANDING_RUNS = """
     ) AS manual_retry FROM applications app
     LEFT JOIN application_runs run ON run.id = COALESCE(
         (SELECT v.run_id FROM apply_reservations v JOIN application_runs held ON held.id = v.run_id
-         WHERE v.application_id = app.id AND held.application_id = app.id AND held.status != 'running'
+         WHERE v.application_id = app.id AND held.application_id = app.id
+         AND (held.status != 'running' OR owner_confirmed_dead(held.pid))
          AND v.released_at IS NULL ORDER BY v.pending, v.id DESC LIMIT 1),
         (SELECT r.id FROM application_runs r WHERE r.application_id = app.id AND app.status = 'failed'
          AND r.mode = 'submit' AND r.status != 'running' AND r.operator_not_sent_at IS NULL
@@ -206,6 +219,7 @@ _OUTSTANDING_RUNS = """
 
 
 def _outstanding_row(c, application_id: int):
+    c.create_function("owner_confirmed_dead", 1, _owner_confirmed_dead)
     return c.execute(_OUTSTANDING_RUNS + " WHERE app.id = ? AND run.id IS NOT NULL", (application_id,)).fetchone()
 
 
@@ -227,6 +241,7 @@ def requires_manual_retry(application_id: int) -> bool:
 def queue_attempts(profile_id: int) -> tuple[dict[int, ApplyRun], set[int]]:
     """Read verification holds and operator-directed manual retries for a queue."""
     with connect() as conn:
+        conn.create_function("owner_confirmed_dead", 1, _owner_confirmed_dead)
         rows = conn.execute(_OUTSTANDING_RUNS + " WHERE app.profile_id = ? AND app.status NOT IN ('submitted','withdrawn')",
                             (profile_id,)).fetchall()
     return ({row["owner_application_id"]: _from_row(row) for row in rows if row["id"] is not None},
@@ -279,9 +294,12 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
             raise ApplyError("Cette candidature n'a jamais atteint le clic d'envoi : rien à confirmer")
         if out["id"] != run_id:
             raise ApplyError("Page périmée : un autre essai a eu lieu depuis, recharger la page")
-        if c.execute("SELECT 1 FROM application_runs WHERE application_id=? AND mode='submit' AND status='running' LIMIT 1",
-                     (application_id,)).fetchone():
-            raise ApplyError("Un envoi est encore en cours : vérifier de nouveau après sa fin")
+        for running in c.execute("SELECT id, pid FROM application_runs WHERE application_id=? AND mode='submit' AND status='running'",
+                                 (application_id,)).fetchall():
+            if running["id"] != run_id or not _owner_confirmed_dead(running["pid"]):
+                raise ApplyError("Un envoi est encore en cours : vérifier de nouveau après sa fin")
+            c.execute("UPDATE application_runs SET status='failed', message='interrompu', finished_at=? WHERE id=?",
+                      (_iso(now()), run_id))
         held = c.execute("SELECT url_key FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (out["id"],)).fetchone()
         if a["status"] != "failed":
             cvstore.tx_force_failed(c, application_id, UNCONFIRMED_NOTE)
