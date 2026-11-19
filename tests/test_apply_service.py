@@ -797,8 +797,11 @@ def test_outstanding_attempt_without_a_reservation_falls_back_to_the_newest_clic
     assert astore.outstanding_attempt(ok.id) is None and astore.outstanding_attempt(9999) is None
 
 
-def test_the_queue_exposes_the_outstanding_attempt(profile, master, tmp_path):
+@pytest.mark.parametrize("released", [False, True])
+def test_the_queue_exposes_the_outstanding_attempt(profile, master, tmp_path, released):
     _, app = failed_after_click(profile, master, tmp_path)
+    if released:
+        astore.release_reservation(app.id)
     later = astore.start_run(app.id, 1, "dry_run", "user", lambda rid: tmp_path / f"d{rid}")
     astore.finish_run(later.id, RunResult(status="ready"))
     it = next(i for i in service.queue(profile.id) if i.app.id == app.id)

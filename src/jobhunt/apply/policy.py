@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from functools import cached_property
 from typing import Literal
 
 from jobhunt import db
@@ -37,9 +39,8 @@ def _canon(url: str | None) -> str:
     return canonical_url(url) if _is_http(url) else ""
 
 
-def _app_keys(other: Application) -> tuple[str, str]:
+def _app_keys(other: Application, other_job: MergedJob | None) -> tuple[str, str]:
     """(role key, canonical URL) of an application, from its job when it still exists, else from what it stored."""
-    other_job = db.get_job(other.job_id)
     company = other.company or (other_job.company if other_job else None)
     title = other.job_title or (other_job.title if other_job else None)
     url = other.sent_origin_url or _canon(other_job.origin_url if other_job else None)
@@ -50,22 +51,63 @@ def duplicate_of(app: Application, job: MergedJob) -> Application | None:
     """Another application of the same profile already SENT (submitted, or a send attempt that reached the final click and
     was not released) for the same job, company + role, or origin URL. Works when the job row of the other application was
     deleted or merged: its reservation and `sent_origin_url` keep the role and the URL."""
+    reserved = apply_store.active_reservations(app.profile_id)
+    reserved_ids = {r["application_id"] for r in reserved}
+    return _find_duplicate(app, job, reserved, store.get_application,
+                           lambda: (other for other in store.list_applications(app.profile_id)
+                                    if other.status == "submitted" or other.id in reserved_ids),
+                           lambda other: _app_keys(other, db.get_job(other.job_id)))
+
+
+def _find_duplicate(app, job, reserved, lookup_app, candidates, keys):
     role = normalize_role(job.company, job.title)
     url = _canon(job.origin_url)
-    reserved = apply_store.active_reservations(app.profile_id)
     for r in reserved:  # role / URL recorded at click time
         if r["application_id"] != app.id and ((role != "|" and r["role_key"] == role) or (url and r["url_key"] == url)):
-            return store.get_application(r["application_id"])
-    reserved_ids = {r["application_id"] for r in reserved}
-    for other in store.list_applications(app.profile_id):
-        if other.id == app.id or (other.status != "submitted" and other.id not in reserved_ids):
+            return lookup_app(r["application_id"])
+    for other in candidates():
+        if other.id == app.id:
             continue
         if other.job_id == job.id:
             return other
-        other_role, other_url = _app_keys(other)
+        other_role, other_url = keys(other)
         if (url and other_url == url) or (role != "|" and other_role == role):
             return other
     return None
+
+
+def _confirmed_master_hash(profile_id: int) -> str | None:
+    try:
+        master = load_master(profile_id)
+    except MasterError:
+        return None
+    return master.content_hash if master is not None and master.is_confirmed else None
+
+
+@dataclass
+class QueuePolicyReads:
+    """Inputs shared only while displaying one profile's queue; never consulted by send or resume gates."""
+
+    profile_id: int
+    apps: dict[int, Application]
+    jobs: dict[int, MergedJob]
+    reservations: list[dict]
+    unconfirmed: set[int]
+
+    @cached_property
+    def master_hash(self) -> str | None:
+        return _confirmed_master_hash(self.profile_id)
+
+    @cached_property
+    def duplicate_keys(self) -> dict[int, tuple[str, str]]:
+        reserved_ids = {row["application_id"] for row in self.reservations}
+        return {app.id: _app_keys(app, self.jobs.get(app.job_id)) for app in self.apps.values()
+                if app.status == "submitted" or app.id in reserved_ids}
+
+    def duplicate(self, app: Application, job: MergedJob) -> Application | None:
+        return _find_duplicate(app, job, self.reservations, self.apps.get,
+                               lambda: (self.apps[app_id] for app_id in self.duplicate_keys),
+                               lambda other: self.duplicate_keys[other.id])
 
 
 def _expired(job: MergedJob, now: datetime | None) -> bool:
@@ -81,6 +123,16 @@ def submit_problems(app: Application, job: MergedJob | None, *, trigger: Literal
     eligible approval, a known age, a trusted origin link, the minimum score and room under the daily cap. Both: age <= 14.0 days
     (strict, no tolerance), job not rejected / applied, no earlier unconfirmed send attempt. `run_id`: the run that is asking (its
     own pending / firm reservation neither counts against the daily cap nor as an unconfirmed earlier attempt)."""
+    return _submit_problems(app, job, trigger=trigger, now=now, run_id=run_id)
+
+
+def queue_problems(app: Application, job: MergedJob | None, reads: QueuePolicyReads) -> list[str]:
+    """Display the manual admission checks using this queue's shared reads."""
+    return _submit_problems(app, job, trigger="user", queue_reads=reads)
+
+
+def _submit_problems(app: Application, job: MergedJob | None, *, trigger: Literal["auto", "user"], now: datetime | None = None,
+                     run_id: int | None = None, queue_reads: QueuePolicyReads | None = None) -> list[str]:
     s = get_settings()
     out: list[str] = []
     if job is None or job.profile_id != app.profile_id or job.id != app.job_id:
@@ -101,22 +153,20 @@ def submit_problems(app: Application, job: MergedJob | None, *, trigger: Literal
             out.append("offre expirée (plus vue depuis plus d'une semaine)")
         if (job.origin_confidence or 0) < MIN_CONFIDENCE:
             out.append("lien de l'offre non vérifié (origine incertaine)")
-    if app.status != "submitted" and apply_store.has_unconfirmed_click(app.id, except_run_id=run_id):
+    if app.status != "submitted" and (app.id in queue_reads.unconfirmed if queue_reads is not None
+                                      else apply_store.has_unconfirmed_click(app.id, except_run_id=run_id)):
         out.append("un envoi précédent n'a pas été confirmé : vérifier sur le site de l'entreprise")
-    dup = duplicate_of(app, job)
+    dup = queue_reads.duplicate(app, job) if queue_reads is not None else duplicate_of(app, job)
     if dup is not None:
         out.append(f"candidature déjà envoyée pour la même offre (n°{dup.id})")
     if app.status != "approved" or app.approved_rev is None:
         out.append("CV non approuvé")
     elif app.approved_rev != app.current_rev:
         out.append("la version approuvée n'est plus la version courante")
-    try:
-        master = load_master(app.profile_id)
-    except MasterError:
-        master = None
-    if master is None or not master.is_confirmed:
+    master_hash = queue_reads.master_hash if queue_reads is not None else _confirmed_master_hash(app.profile_id)
+    if master_hash is None:
         out.append("CV maître non confirmé")
-    elif app.master_hash != master.content_hash:
+    elif app.master_hash != master_hash:
         out.append("CV maître modifié depuis la génération")
     pdf = service.safe_pdf(app)
     if pdf is None or not app.pdf_sha256:

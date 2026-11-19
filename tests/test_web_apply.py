@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 import threading
 import time
+from collections import Counter
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -1413,6 +1416,59 @@ def test_the_answers_page_lists_the_most_frequent_questions_first_with_their_cou
     assert apply_service.question_counts(profile.id) == {"date de naissance": 3, "permis b": 2, "rare": 1}
     apply_facts.save_custom_answers(profile.id, [("Permis B ?", "Oui")])
     assert "permis b" not in apply_service.question_counts(profile.id)
+
+
+def test_answers_page_queue_read_budget(client, profile, master, tmp_path, monkeypatch):
+    from jobhunt.apply import policy
+
+    for n in range(1, 81):
+        app = mk_app(profile, master, tmp_path, n)
+        if n <= 12:
+            questions = [Question(label="Permis B ?"), Question(label="permis b")]
+            if n == 1:
+                questions.extend([Question(label="Salaire ?"), Question(label="Ville ?")])
+            make_run(app, tmp_path, mode="submit", status="needs_input", questions=questions)
+    for n in range(81, 105):
+        sent_app(profile, master, tmp_path, n, when=datetime.now(UTC))
+    for n in range(105, 121):
+        failed_app(profile, master, tmp_path, n)
+    apply_facts.save_custom_answers(profile.id, [("Ville", "Toulouse")])
+
+    counts = Counter()
+    connect = webapp.db.connect
+
+    @contextmanager
+    def traced_connect():
+        counts["connections"] += 1
+        with connect() as conn:
+            conn.set_trace_callback(count_select)
+            yield conn
+
+    def count_select(sql):
+        if sql.lstrip().upper().startswith("SELECT"):
+            counts["selects"] += 1
+
+    def spy(fn, name):
+        def counted(*args, **kwargs):
+            counts[name] += 1
+            return fn(*args, **kwargs)
+        return counted
+
+    for module in (webapp.db, cvstore, apply_store):
+        monkeypatch.setattr(module, "connect", traced_connect)
+    monkeypatch.setattr(apply_service, "queue", spy(apply_service.queue, "queue"))
+    monkeypatch.setattr(policy, "load_master", spy(policy.load_master, "master"))
+
+    start = time.perf_counter()
+    response = client.get(answers_url(profile))
+    print(f"answers page (120 applications): {dict(counts)}, {time.perf_counter() - start:.3f}s")
+    assert response.status_code == 200
+    page = soup(response.text)
+    assert page.select_one("#resumable .count").text == "12"
+    assert [node["value"].casefold() for node in page.select("#pending input[name^=pql_]")] == ["permis b ?", "salaire ?"]
+    assert [tag.text.strip() for tag in page.select("#pending label .tag")] == ["12 candidatures bloquées", "1 candidature bloquée"]
+    assert counts["queue"] == counts["master"] == 1
+    assert counts["connections"] <= 9 and counts["selects"] <= 10, counts
 
 
 def test_the_queue_header_breaks_down_what_blocks_it(client, profile, master, tmp_path, monkeypatch):

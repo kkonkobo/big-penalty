@@ -187,21 +187,26 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
     return get_run(run_id)  # type: ignore[return-value]
 
 
+_OUTSTANDING_RUNS = """
+    SELECT run.*, app.id AS owner_application_id, EXISTS (
+        SELECT 1 FROM application_runs retry WHERE retry.application_id = app.id
+        AND retry.operator_not_sent_at IS NOT NULL
+    ) AS manual_retry FROM applications app
+    LEFT JOIN application_runs run ON run.id = COALESCE(
+        (SELECT v.run_id FROM apply_reservations v JOIN application_runs held ON held.id = v.run_id
+         WHERE v.application_id = app.id AND held.application_id = app.id AND held.status != 'running'
+         AND v.released_at IS NULL ORDER BY v.pending, v.id DESC LIMIT 1),
+        (SELECT r.id FROM application_runs r WHERE r.application_id = app.id AND app.status = 'failed'
+         AND r.mode = 'submit' AND r.status != 'running' AND r.operator_not_sent_at IS NULL
+         AND (r.submit_clicked_at IS NOT NULL OR (r.nav_clicked_at IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM apply_reservations v WHERE v.run_id = r.id AND v.pending = 1 AND v.released_at IS NOT NULL
+         ))) ORDER BY r.id DESC LIMIT 1)
+    )
+"""
+
+
 def _outstanding_row(c, application_id: int):
-    """Prefer the finished run owning the hold; fall back to a click on legacy failed rows."""
-    r = c.execute("SELECT r.* FROM application_runs r JOIN apply_reservations v ON v.run_id=r.id"
-                  " WHERE v.application_id=? AND r.application_id=v.application_id AND r.status!='running'"
-                  " AND v.released_at IS NULL ORDER BY v.pending, v.id DESC LIMIT 1",
-                  (application_id,)).fetchone()
-    if r is not None:
-        return r
-    a = c.execute("SELECT status FROM applications WHERE id=?", (application_id,)).fetchone()
-    if a is None or a["status"] != "failed":
-        return None
-    return c.execute("SELECT * FROM application_runs WHERE application_id=? AND mode='submit' AND status!='running' AND operator_not_sent_at IS NULL"
-                     " AND (submit_clicked_at IS NOT NULL OR (nav_clicked_at IS NOT NULL AND NOT EXISTS"
-                     " (SELECT 1 FROM apply_reservations v WHERE v.run_id=application_runs.id AND v.pending=1 AND v.released_at IS NOT NULL)))"
-                     " ORDER BY id DESC LIMIT 1", (application_id,)).fetchone()
+    return c.execute(_OUTSTANDING_RUNS + " WHERE app.id = ? AND run.id IS NOT NULL", (application_id,)).fetchone()
 
 
 def outstanding_attempt(application_id: int) -> ApplyRun | None:
@@ -217,6 +222,15 @@ def requires_manual_retry(application_id: int) -> bool:
     with connect() as c:
         return c.execute("SELECT 1 FROM application_runs WHERE application_id=? AND operator_not_sent_at IS NOT NULL LIMIT 1",
                          (application_id,)).fetchone() is not None
+
+
+def queue_attempts(profile_id: int) -> tuple[dict[int, ApplyRun], set[int]]:
+    """Read verification holds and operator-directed manual retries for a queue."""
+    with connect() as conn:
+        rows = conn.execute(_OUTSTANDING_RUNS + " WHERE app.profile_id = ? AND app.status NOT IN ('submitted','withdrawn')",
+                            (profile_id,)).fetchall()
+    return ({row["owner_application_id"]: _from_row(row) for row in rows if row["id"] is not None},
+            {row["owner_application_id"] for row in rows if row["manual_retry"]})
 
 
 def auto_regens(application_id: int) -> int:
@@ -380,6 +394,14 @@ def has_unconfirmed_click(application_id: int, *, except_run_id: int | None = No
         r = c.execute("SELECT 1 FROM apply_reservations WHERE application_id=? AND released_at IS NULL AND run_id != ? LIMIT 1",
                       (application_id, except_run_id if except_run_id is not None else -1)).fetchone()
     return r is not None
+
+
+def unconfirmed_application_ids(profile_id: int) -> set[int]:
+    """Queue-display equivalent of has_unconfirmed_click, with no run excluded."""
+    with connect() as conn:
+        rows = conn.execute("SELECT DISTINCT a.id FROM applications a JOIN apply_reservations v ON v.application_id = a.id"
+                            " WHERE a.profile_id = ? AND v.released_at IS NULL AND v.run_id != -1", (profile_id,))
+        return {row["id"] for row in rows}
 
 
 def count_auto_submitted(profile_id: int, day_start: datetime, *, except_run_id: int | None = None) -> int:

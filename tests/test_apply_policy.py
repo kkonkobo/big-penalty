@@ -10,6 +10,7 @@ import pytest
 
 from jobhunt import db
 from jobhunt.apply import policy
+from jobhunt.apply import service as apply_service
 from jobhunt.apply import store as astore
 from jobhunt.apply.types import RunResult
 from jobhunt.config import get_settings
@@ -101,6 +102,8 @@ def test_duplicate_by_origin_url_and_not_across_profiles(profile, master, tmp_pa
     save_confirmed(p2.id)
     a3 = make_app(p2, j3, tmp_path, master_hash=load_master(p2.id).content_hash)
     assert policy.duplicate_of(a3, j3) is None  # another family member may apply to the same company
+    items = {item.app.id: item for item in apply_service.queue()}
+    assert items[a2.id].bucket == "blocked" and items[a3.id].bucket == "to_validate"
 
 
 def test_deleted_job_row_is_still_a_duplicate_through_sent_origin_url(profile, master, tmp_path):
@@ -114,6 +117,8 @@ def test_deleted_job_row_is_still_a_duplicate_through_sent_origin_url(profile, m
     assert db.get_job(first.id) is None
     assert policy.duplicate_of(a2, second).id == a1.id
     assert any("déjà envoyée" in p for p in problems(a2, second, "user"))
+    item = next(item for item in apply_service.queue(profile.id) if item.app.id == a2.id)
+    assert item.problems == problems(cvs.auto_approve(a2.id), second, "user")
 
 
 def test_deleted_job_row_is_still_a_duplicate_through_the_stored_role(profile, master, tmp_path):
@@ -139,8 +144,12 @@ def test_a_possibly_sent_application_is_a_duplicate_through_its_reservation(prof
     with db.connect() as c:
         c.execute("DELETE FROM jobs WHERE id=?", (first.id,))
     assert policy.duplicate_of(a2, second).id == a1.id
+    blocked = next(item for item in apply_service.queue(profile.id) if item.app.id == a2.id)
+    assert blocked.bucket == "blocked" and not blocked.selectable
     astore.release_reservation(a1.id)
     assert policy.duplicate_of(a2, second) is None
+    ready = next(item for item in apply_service.queue(profile.id) if item.app.id == a2.id)
+    assert ready.bucket == "to_validate" and ready.selectable
 
 
 def test_a_failed_or_draft_application_is_not_a_duplicate(profile, master, tmp_path):
@@ -239,8 +248,12 @@ def test_an_earlier_unconfirmed_send_blocks_everything(profile, app, job, trigge
     astore.reserve_send(run.id, profile_id=app.profile_id, application_id=app.id, trigger="user", role_key="r", url_key="u", daily_cap=9)
     astore.finish_run(run.id, RunResult(status="needs_human", submit_clicked=True))
     assert any("un envoi précédent n'a pas été confirmé" in p for p in problems(app, job, trigger))
+    paused = apply_service.queue(profile.id)[0]
+    assert paused.bucket == "paused" and not paused.selectable
+    assert paused.problems == problems(app, job, "user")
     astore.release_reservation(app.id)  # a human said "not sent"
     assert not any("envoi précédent" in p for p in problems(app, job, trigger))
+    assert apply_service.queue(profile.id)[0].selectable
 
 
 def test_unapproved_or_stale_approval(profile, job, master, tmp_path):

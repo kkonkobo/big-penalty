@@ -165,7 +165,7 @@ def _host_pause(app: Application, job, run_: ApplyRun | None) -> str:
     return "" if make_host_allowed(job.origin_url if job else None, trusted)(host) else host
 
 
-def _draft_problems(app: Application, job) -> list[str]:
+def _draft_problems(app: Application, job, reads: policy.QueuePolicyReads) -> list[str]:
     """Why the application could not be sent even once the user approves it (a draft is judged as if approved)."""
     out: list[str] = []
     probe = app
@@ -173,16 +173,15 @@ def _draft_problems(app: Application, job) -> list[str]:
         probe = app.model_copy(update={"status": "approved", "approved_rev": app.current_rev, "approved_sha256": app.pdf_sha256})
         if app.errors:
             out.append(f"{len(app.errors)} erreur(s) bloquante(s) dans le CV")
-    out += policy.submit_problems(probe, job, trigger="user")
-    if cvs.safe_pdf(app) is None and "PDF absent" not in out:
+    out += policy.queue_problems(probe, job, reads)
+    if (job is None or job.profile_id != app.profile_id or job.id != app.job_id) and cvs.safe_pdf(app) is None:
         out.append("PDF absent")
     return list(dict.fromkeys(out))
 
 
-def _item(app: Application, job, run_: ApplyRun | None, settings) -> QueueItem:
-    outstanding = apply_store.outstanding_attempt(app.id) if app.status != "submitted" else None
-    manual_retry = app.status in ("draft", "approved") and apply_store.requires_manual_retry(app.id)
-    problems = [] if app.status in ("submitted", "failed") else _draft_problems(app, job)
+def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.QueuePolicyReads,
+          outstanding: ApplyRun | None, manual_retry: bool) -> QueueItem:
+    problems = [] if app.status in ("submitted", "failed") else _draft_problems(app, job, reads)
     pause = ""
     questions: list[Question] = []
     untrusted = "" if app.status in ("submitted", "failed") else _host_pause(app, job, run_)
@@ -218,11 +217,23 @@ def _item(app: Application, job, run_: ApplyRun | None, settings) -> QueueItem:
 def queue(profile_id: int | None = None) -> list[QueueItem]:
     """Every non-withdrawn application (of the profile, or of all profiles) with its bucket; best score first inside a bucket."""
     settings = get_settings()
-    apps = [a for a in cvstore.list_applications(profile_id) if a.status != "withdrawn"]
-    runs: dict[int, ApplyRun] = {}
-    for pid in {a.profile_id for a in apps}:
-        runs.update(apply_store.latest_runs(pid))
-    items = [_item(a, db.get_job(a.job_id), runs.get(a.id), settings) for a in apps]
+    apps = cvstore.list_applications(profile_id)
+    apps_by_profile: dict[int, dict[int, Application]] = {}
+    for app in apps:
+        apps_by_profile.setdefault(app.profile_id, {})[app.id] = app
+    jobs = db.get_jobs(app.job_id for app in apps)
+    items = []
+    for pid, profile_apps in apps_by_profile.items():
+        visible = [app for app in profile_apps.values() if app.status != "withdrawn"]
+        if not visible:
+            continue
+        runs = apply_store.latest_runs(pid)
+        outstanding, manual_retry = apply_store.queue_attempts(pid)
+        reads = policy.QueuePolicyReads(pid, profile_apps, jobs, apply_store.active_reservations(pid),
+                                        apply_store.unconfirmed_application_ids(pid))
+        items.extend(_item(app, jobs.get(app.job_id), runs.get(app.id), settings, reads, outstanding.get(app.id),
+                           app.id in manual_retry)
+                     for app in visible)
     items.sort(key=lambda i: (BUCKET_ORDER.index(i.bucket), -(i.score if i.score is not None else -1.0), -i.app.id))
     return items
 
@@ -677,28 +688,33 @@ def resumable(profile_id: int) -> list[QueueItem]:
 
 def question_counts(profile_id: int) -> dict[str, int]:
     """Normalized question label -> how many paused applications (current revision) are waiting for it, answered ones left out."""
-    answered = {norm_question(c["question"]) for c in custom_answers(profile_id)}
-    counts: dict[str, int] = {}
-    for it in resumable(profile_id):
-        for key in dict.fromkeys(norm_question(q.label) for q in it.questions):
-            if key and key not in answered:
-                counts[key] = counts.get(key, 0) + 1
-    return counts
+    return answer_queue(profile_id)[0]
 
 
 def pending_questions(profile_id: int) -> list[tuple[Application, ApplyRun, Question]]:
     """Questions of the paused `needs_input` runs of the profile (current revision), one per normalized label (the first
     application that asked it), MOST FREQUENT FIRST (ties keep the queue order), leaving out those already answered in `custom`."""
-    counts = question_counts(profile_id)
-    seen: set[str] = set()
-    out: list[tuple[Application, ApplyRun, Question]] = []
-    for it in resumable(profile_id):
-        for q in it.questions:
-            key = norm_question(q.label)
-            if key in counts and key not in seen:
+    return answer_queue(profile_id)[1]
+
+
+def answer_queue(profile_id: int) -> tuple[dict[str, int], list[tuple[Application, ApplyRun, Question]], list[QueueItem]]:
+    """Build counts, representative questions and resumable items from one queue read."""
+    answered = {norm_question(entry["question"]) for entry in custom_answers(profile_id)}
+    items = resumable(profile_id)
+    counts: dict[str, int] = {}
+    first: dict[str, tuple[Application, ApplyRun, Question]] = {}
+    for item in items:
+        if item.last_run is None:
+            continue
+        seen: set[str] = set()
+        for question in item.questions:
+            key = norm_question(question.label)
+            if key and key not in answered and key not in seen:
                 seen.add(key)
-                out.append((it.app, it.last_run, q))  # type: ignore[arg-type]
-    return sorted(out, key=lambda t: -counts[norm_question(t[2].label)])
+                counts[key] = counts.get(key, 0) + 1
+                first.setdefault(key, (item.app, item.last_run, question))
+    pending = [first[key] for key in sorted(first, key=counts.__getitem__, reverse=True)]
+    return counts, pending, items
 
 
 

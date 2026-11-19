@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from jobhunt.config import get_settings
 from jobhunt.freshness import (EXPIRY_RUN_WINDOW_DAYS, MAX_JOB_AGE_DAYS, effective_posted_at, expired_by_runs, is_new, is_stale,
@@ -438,6 +438,22 @@ def get_job(job_id: int) -> MergedJob | None:
             return None
         sg = _sightings_by_job(c, [job_id])
     return _job_from_row(r, sg[job_id])
+
+
+def get_jobs(job_ids: Iterable[int]) -> dict[int, MergedJob]:
+    """Load jobs and their sightings by ID, omitting IDs that no longer exist."""
+    ids = list(dict.fromkeys(job_ids))
+    if not ids:
+        return {}
+    jobs = {}
+    with connect() as conn:
+        for offset in range(0, len(ids), 500):
+            chunk = ids[offset:offset + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(f"SELECT * FROM jobs WHERE id IN ({placeholders})", chunk).fetchall()
+            sightings = _sightings_by_job(conn, [row["id"] for row in rows])
+            jobs.update((row["id"], _job_from_row(row, sightings[row["id"]])) for row in rows)
+    return jobs
 
 
 def save_jobs(profile_id: int, jobs: list[MergedJob], *, removed: list[MergedJob] = ()) -> None:
