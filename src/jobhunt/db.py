@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -280,9 +281,9 @@ def connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=30000")
+        _enable_wal(conn)
+        conn.execute("PRAGMA foreign_keys=ON")
         if str(path) not in _migrated:
             _migrate(conn)
             _migrated.add(str(path))
@@ -290,6 +291,21 @@ def connect() -> Iterator[sqlite3.Connection]:
             yield conn
     finally:
         conn.close()
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    for delay in (0.01, 0.05, 0.15, 0.5, 1.0, None):
+        try:
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if mode.lower() != "wal":
+                raise sqlite3.OperationalError("SQLite could not enable WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if delay is None or (getattr(exc, "sqlite_errorcode", 0) & 255) not in (
+                sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+            ):
+                raise
+            time.sleep(delay)
 
 
 # ---------------------------------------------------------------- profiles

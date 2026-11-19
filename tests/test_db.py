@@ -7,6 +7,33 @@ from jobhunt.dedupe import MergedJob, merge_postings
 from jobhunt.models import ContractType, JobPosting, Profile
 
 
+def test_wal_initialization_retries_concurrent_rollback_journal_readers(tmp_path, monkeypatch):
+    import sqlite3
+
+    path = tmp_path / "wal-race.db"
+    monkeypatch.setattr(db, "DB_PATH_OVERRIDE", path)
+    reader = sqlite3.connect(path)
+    try:
+        reader.execute("CREATE TABLE fixture (id INTEGER)")
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM fixture").fetchall()
+        retries = []
+
+        def release_reader(delay):
+            retries.append(delay)
+            reader.rollback()
+
+        writer = sqlite3.connect(path, timeout=0)
+        try:
+            monkeypatch.setattr(db.time, "sleep", release_reader)
+            db._enable_wal(writer)
+            assert retries == [0.01] and writer.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        finally:
+            writer.close()
+    finally:
+        reader.close()
+
+
 def test_oversized_raw_stays_valid_and_corrupt_rows_load(profile):
     job = MergedJob.from_posting(post(raw={"huge": "é\\\"" * 30000}))
     db.save_jobs(profile.id, [job])
