@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import asdict
 from unittest.mock import AsyncMock
 
@@ -7,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from jobhunt import cli, db, origin, pipeline
-from jobhunt.dedupe import MergedJob
+from jobhunt.dedupe import MergedJob, Sighting
 from test_origin_direct import posting, resolver_with
 
 
@@ -194,10 +195,8 @@ async def test_redirect_cannot_switch_tenant_via_generic_same_host_hop():
 
 def test_successfactors_shared_host_never_invents_tenant_key():
     shared = "https://career5.successfactors.eu/career?jobReqId=123"
-    alias = "https://career5.successfactors.eu/career?company=Orbitex&jobReqId=123"
-    for url in (shared, alias):
-        observed = origin._page_evidence(url, "", posting=posting())
-        assert (observed.ats, observed.tenant, observed.requisition_id) == ("successfactors", None, "123")
+    observed = origin._page_evidence(shared, "", posting=posting())
+    assert (observed.ats, observed.tenant, observed.requisition_id) == ("successfactors", None, "123")
 
 
 def test_explain_and_fallback_to_equest_sighting(profile, monkeypatch):
@@ -219,8 +218,10 @@ def test_explain_and_fallback_to_equest_sighting(profile, monkeypatch):
     mock_resolver(monkeypatch, handler)
     result = CliRunner().invoke(cli.app, ["reresolve", str(profile.id), "--dry-run", "--explain", "1"])
     assert result.exit_code == 0, result.exception
-    assert result.output.splitlines() == ["careers_site → workday: 1",
-        "  jobs.orbitex.example: no_vendor_evidence; linkedin.com: intermediate_board"]
+    reason = "  jobs.orbitex.example: no_vendor_evidence; linkedin.com: intermediate_board"
+    assert result.output.splitlines() == ["OBSERVED", "careers_site → workday: 1", reason,
+                                         "STORED origin_ats", "careers_site → workday: 1", reason,
+                                         "downgrades of a known vendor: 0"]
     assert SHORT in seen and BRANDED in seen and title not in result.output and "?" not in result.output
     assert db.get_job(job.id).origin_url == job.origin_url
 
@@ -298,3 +299,227 @@ async def test_blocked_linkedin_offsite_keeps_unverified_lead_and_tries_discover
         assert job.extra["origin_lead"] == result.origin_lead
     finally:
         await resolver.aclose()
+
+
+def test_ancestor_id_does_not_authorize_unrelated_smartrecruiters_publication():
+    post = posting()
+    url = "https://jobs.orbitex.example/jobs/284"
+    target = "https://jobs.smartrecruiters.com/oneclick-ui/company/OrbitexFrance/publication/999"
+    html = f'<main data-job-id="284"><h1>{post.title}</h1><a href="{target}">Apply</a></main>'
+    evidence = origin._page_evidence(url, html, posting=post)
+    assert evidence.ats != "smartrecruiters" and evidence.apply_url is None and evidence.confidence < 0.98
+
+
+@pytest.mark.parametrize("command", ["origins", "reresolve"])
+async def test_challenge_observation_does_not_revert_concurrent_origin(profile, monkeypatch, command):
+    job = stored_job(profile, confidence=0.58)
+    newer_url = WORKDAY.replace("Stage_", "Stage-aeronautique_")
+
+    def concurrent_update():
+        current = db.get_job(job.id)
+        current.origin_url, current.origin_confidence = newer_url, 0.99
+        current.extra["origin_resolution"] = {**current.extra["origin_resolution"], "posting_url": newer_url,
+                                              "confidence": 0.99, "apply_url": newer_url + "/apply"}
+        current.extra["concurrent"] = "keep"
+        current.changed = True
+        db.save_jobs(profile.id, [current])
+
+    if command == "origins":
+        async def resolve(postings, ctx, **kwargs):
+            concurrent_update()
+            evidence = asdict(origin.OriginEvidence(state="challenge", posting_url=WORKDAY))
+            return [origin.Resolution(postings[0].model_copy(update={"origin_resolution": evidence}), reason="challenge")]
+
+        monkeypatch.setattr(origin, "resolve_origins_detailed", resolve)
+        await pipeline.reresolve_origins(profile.id, force=True, refetch=False)
+    else:
+        def handler(request):
+            concurrent_update()
+            return httpx.Response(403)
+
+        mock_resolver(monkeypatch, handler)
+        await origin.reresolve_stored(profile.id)
+    current = db.get_job(job.id)
+    assert (current.origin_url, current.origin_ats, current.origin_confidence) == (newer_url, "workday", 0.99)
+    assert current.extra["origin_resolution"]["apply_url"] == newer_url + "/apply"
+    assert current.extra["concurrent"] == "keep"
+    assert current.extra["origin_observation"]["state"] == "challenge"
+    assert current.extra["origin_observation"]["write_reason"] == "snapshot_conflict"
+
+
+@pytest.mark.parametrize("command", ["origins", "reresolve"])
+async def test_200_without_apply_preserves_verified_apply_and_frontend(profile, monkeypatch, command):
+    job = stored_job(profile, confidence=0.58, apply_url=WORKDAY)
+    job.extra["origin_resolution"].update(apply_url=WORKDAY + "/apply", frontend="phenom")
+    job.changed = True
+    db.save_jobs(profile.id, [job])
+    mock_resolver(monkeypatch, lambda request: httpx.Response(200, text=f"<main><h1>{job.title}</h1></main>"))
+    if command == "origins":
+        await pipeline.reresolve_origins(profile.id, force=True, refetch=False)
+    else:
+        await origin.reresolve_stored(profile.id)
+    current = db.get_job(job.id)
+    assert current.origin_confidence == 0.98
+    assert current.extra["origin_resolution"]["apply_url"] == WORKDAY + "/apply"
+    assert current.extra["origin_resolution"]["frontend"] == "phenom"
+
+
+def test_successfactors_company_key_requires_corroborated_routing_id():
+    post = posting()
+    routed = "https://career5.successfactors.eu/career?company=Orbitex&jobReqId=123"
+    shared = routed.replace("company=Orbitex&", "")
+    branded = "https://jobs.orbitex.example/job/stage/123/"
+    assets = '<script src="https://rmkcdn.successfactors.com/j2w/site.js"></script>'
+    html = f'<main><h1>{post.title}</h1>{assets}<a href="{routed}">Apply</a></main>'
+    for url, content in [(routed, ""), (branded, html)]:
+        evidence = origin._resolution_data(origin._page_evidence(url, content, posting=post))
+        assert (evidence["tenant"], evidence["requisition_id"], evidence["canonical_ok"]) == ("orbitex", "123", True)
+    for url, content in [(shared, ""), (branded, f"<main><h1>{post.title}</h1>{assets}</main>"),
+                         (routed.replace("Orbitex", "Other"), "")]:
+        evidence = origin._resolution_data(origin._page_evidence(url, content, posting=post))
+        assert (evidence["ats"], evidence["tenant"], evidence["requisition_id"], evidence["canonical_ok"]) == (
+            "successfactors", None, "123", False)
+
+
+@pytest.mark.parametrize("suffix,expected", [("opaque/jobs/123", None), ("opaque/jobs/999", "requisition_mismatch"),
+                                             ("other/jobs/123", "tenant_mismatch"), ("embed/job_app?token=123", "unverified_redirect_tenant")])
+async def test_greenhouse_alias_redirect_requires_complete_matching_identity(suffix, expected):
+    initial = "https://boards.greenhouse.io/opaque/jobs/123"
+    target = f"https://job-boards.greenhouse.io/{suffix}"
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if str(request.url) == initial:
+            return httpx.Response(302, headers={"location": target})
+        assert expected is None
+        return httpx.Response(200)
+
+    resolver = resolver_with(handler)
+    try:
+        evidence = (await resolver.inspect_posting(posting(), initial)).evidence
+        assert evidence.reason == expected
+        assert seen == ([initial, target] if expected is None else [initial])
+        if expected is None:
+            assert (evidence.ats, evidence.tenant, evidence.requisition_id) == ("greenhouse", "opaque", "123")
+    finally:
+        await resolver.aclose()
+
+
+async def test_malformed_jsonld_and_candidate_exception_do_not_abort_batch(profile, monkeypatch):
+    malformed = stored_job(profile, url=WORKDAY, ats=None)
+    parse_error = stored_job(profile, url=WORKDAY.replace("JR284", "JR285"), ats=None)
+    valid = stored_job(profile, url=WORKDAY.replace("JR284", "JR286"), ats=None)
+
+    def handler(request):
+        ld = {"@type": "JobPosting", "title": {"secret": "fixture"}, "description": [], "datePosted": 4,
+              "jobLocation": {"address": {"addressLocality": {"invalid": True}}}}
+        html = f'<script type="application/ld+json">{json.dumps(ld)}</script>' if str(request.url) == WORKDAY else ""
+        return httpx.Response(200, text=f"<main><h1>{valid.title}</h1>{html}</main>")
+
+    mock_resolver(monkeypatch, handler)
+    original = origin.Resolver._inspect_posting
+
+    async def inspect(self, posting, url):
+        if url == parse_error.origin_url:
+            raise ValueError("fixture-secret full URL")
+        return await original(self, posting, url)
+
+    monkeypatch.setattr(origin.Resolver, "_inspect_posting", inspect)
+    await origin.reresolve_stored(profile.id)
+    assert db.get_job(malformed.id).origin_ats == db.get_job(valid.id).origin_ats == "workday"
+    observation = db.get_job(parse_error.id).extra["origin_observation"]
+    assert observation["reason"] == "candidate_error" and "fixture-secret" not in str(observation)
+
+
+async def test_linkedin_equest_403_keeps_original_lead_and_runs_discovery():
+    resolver = resolver_with(lambda request: httpx.Response(403))
+    resolver.probe_company = AsyncMock(return_value=None)
+    resolver.discover_careers = AsyncMock(return_value=None)
+    resolver.web_search = AsyncMock(return_value=None)
+    try:
+        post = posting(apply_url=SHORT, raw={"apply_source": "linkedin_offsite"})
+        result = (await origin._resolve_traced(resolver, post, use_cache=False)).posting
+        assert (result.origin_url, result.origin_ats) == (None, None)
+        assert result.origin_lead == {"url": SHORT, "state": "unverified", "reason": "challenge"}
+        resolver.discover_careers.assert_awaited_once()
+    finally:
+        await resolver.aclose()
+
+
+async def test_retry_after_expires_under_lock():
+    responses = iter([httpx.Response(429, headers={"Retry-After": "120"}), httpx.Response(200)])
+    resolver = resolver_with(lambda request: next(responses))
+    try:
+        host = origin._host(WORKDAY)
+        assert (await resolver._get(WORKDAY)).status_code == 429
+        assert resolver._deferred_until[host] - origin.time.monotonic() > 119
+        assert await resolver._get(WORKDAY) is None
+        resolver._deferred_until[host] = origin.time.monotonic() - 1
+        assert (await resolver._get(WORKDAY)).status_code == 200
+        assert host not in resolver._deferred_until
+    finally:
+        await resolver.aclose()
+
+
+async def test_streaming_body_deadline_releases_host_lock(monkeypatch):
+    monkeypatch.setattr(origin, "REQUEST_DEADLINE", 0.05)
+    closed = asyncio.Event()
+
+    class SlowBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"start"
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            closed.set()
+
+    responses = iter([httpx.Response(200, stream=SlowBody()), httpx.Response(200)])
+    resolver = resolver_with(lambda request: next(responses))
+    try:
+        assert await resolver._get(WORKDAY) is None
+        assert origin._FETCH_ISSUE.get() == ("timeout", origin._host(WORKDAY))
+        assert closed.is_set() and (await resolver._get(WORKDAY)).status_code == 200
+    finally:
+        await resolver.aclose()
+
+
+async def test_reresolve_bounds_and_deduplicates_attempt_history(profile, monkeypatch):
+    job = stored_job(profile, url="https://linkedin.com/jobs/view/88", ats=None)
+    for index in range(14):
+        job.sightings.append(Sighting("fixture", str(index), f"https://board{index // 2 if index < 4 else index}.linkedin.com/jobs/view/{index}"))
+    job.changed = True
+    db.save_jobs(profile.id, [job])
+    mock_resolver(monkeypatch, lambda request: pytest.fail("boards must not be fetched"))
+    await origin.reresolve_stored(profile.id)
+    observation = db.get_job(job.id).extra["origin_observation"]
+    pairs = {(entry["host"], entry["reason"]) for entry in observation["attempts"]}
+    assert len(pairs) == len(observation["attempts"]) == 10
+    assert observation["attempts_omitted"] == 6
+
+
+def test_reresolve_reports_stored_vendor_not_challenge_in_dry_run(profile, monkeypatch):
+    job = stored_job(profile)
+    mock_resolver(monkeypatch, lambda request: httpx.Response(403))
+    result = CliRunner().invoke(cli.app, ["reresolve", str(profile.id), "--dry-run", "--explain", "1"])
+    assert result.exit_code == 0, result.exception
+    observed, stored = result.output.split("STORED origin_ats\n")
+    assert "workday → challenge: 1" in observed
+    assert "workday → workday: 1" in stored
+    assert "orbitex.wd3.myworkdayjobs.com: challenge" in observed and "orbitex.wd3.myworkdayjobs.com: challenge" in stored
+    assert "downgrades of a known vendor: 0" in stored
+    assert "origin_observation" not in db.get_job(job.id).extra
+
+
+def test_reresolve_downgrade_guard_aborts_before_any_write(profile):
+    from copy import deepcopy
+
+    job = stored_job(profile)
+    before = db.get_job(job.id)
+    after = deepcopy(before)
+    after.origin_ats = None
+    after.extra["origin_observation"] = {"state": "unresolved"}
+    with pytest.raises(ValueError, match="downgrades of a known vendor: 1"):
+        db.save_origin_updates([(before, after)], max_downgrades=0)
+    assert db.get_job(job.id).extra == before.extra
+    assert db.get_job(job.id).origin_ats == "workday"

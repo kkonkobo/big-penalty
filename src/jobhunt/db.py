@@ -551,6 +551,75 @@ def save_jobs(profile_id: int, jobs: list[MergedJob], *, removed: list[MergedJob
                 c.execute("DELETE FROM jobs WHERE id=? AND profile_id=?", (j.id, profile_id))
 
 
+def origin_snapshot(job: MergedJob) -> tuple:
+    return job.origin_url, job.origin_ats, job.origin_confidence, job.extra.get("origin_resolution"), job.apply_url
+
+
+def _origin_job_from_row(row: sqlite3.Row) -> MergedJob:
+    return MergedJob(id=row["id"], profile_id=row["profile_id"], title=row["title"], description=row["description"],
+                     origin_url=row["origin_url"], origin_ats=row["origin_ats"], origin_confidence=row["origin_confidence"],
+                     apply_url=row["apply_url"], extra=_json_object(row["extra"]))
+
+
+def origin_downgrade(before: str | None, after: str | None) -> bool:
+    return before not in (None, "careers_site", "phenom") and before != after
+
+
+def save_origin_updates(updates: list[tuple[MergedJob, MergedJob]], *, max_downgrades: int | None = None) -> list[tuple]:
+    """Commit origin changes against the original snapshot, without rewriting unrelated job fields."""
+    if not updates:
+        return []
+    transitions = []
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        pending = []
+        for before, after in updates:
+            row = conn.execute("SELECT * FROM jobs WHERE id=? AND profile_id=?", (before.id, before.profile_id)).fetchone()
+            if row is None:
+                transitions.append((None, None, "row_missing"))
+                continue
+            current = _origin_job_from_row(row)
+            conflict = origin_snapshot(current) != origin_snapshot(before)
+            next_origin = current if conflict else after
+            transitions.append((current.origin_ats, next_origin.origin_ats, "snapshot_conflict" if conflict else None))
+            pending.append((before, after, current, row["posted_at"], conflict))
+        downgrades = sum(origin_downgrade(before, after) for before, after, _ in transitions)
+        if max_downgrades is not None and downgrades > max_downgrades:
+            raise ValueError(f"downgrades of a known vendor: {downgrades} (maximum {max_downgrades}); no jobs written")
+        for before, after, current, current_posted_at, conflict in pending:
+            extra = current.extra
+            if conflict:
+                if observation := after.extra.get("origin_observation"):
+                    extra["origin_observation"] = {**observation, "write_reason": "snapshot_conflict"}
+                conn.execute("UPDATE jobs SET extra=? WHERE id=?", (json.dumps(extra, ensure_ascii=False, default=str), current.id))
+                continue
+            for key in before.extra.keys() | after.extra.keys():
+                if (key in before.extra, before.extra.get(key)) == (key in after.extra, after.extra.get(key)):
+                    continue
+                if not key.startswith("origin_") and extra.get(key) != before.extra.get(key):
+                    continue
+                if key in after.extra:
+                    extra[key] = after.extra[key]
+                else:
+                    extra.pop(key, None)
+            description = after.description if current.description == before.description else current.description
+            posted_at = current_posted_at
+            if before.posted_at != after.posted_at and _iso(before.posted_at) == current_posted_at:
+                posted_at = _iso(after.posted_at)
+            conn.execute("UPDATE jobs SET origin_url=?, origin_ats=?, origin_confidence=?, extra=?, apply_url=?,"
+                         " description=?, posted_at=? WHERE id=?",
+                         (after.origin_url, after.origin_ats, after.origin_confidence,
+                          json.dumps(extra, ensure_ascii=False, default=str), after.apply_url,
+                          description, posted_at, current.id))
+            old_links = {(item.source, item.source_id): item.apply_url for item in before.sightings}
+            for item in after.sightings:
+                key = (item.source, item.source_id)
+                if key in old_links and item.apply_url != old_links[key]:
+                    conn.execute("UPDATE sightings SET apply_url=? WHERE job_id=? AND source=? AND source_id=? AND apply_url IS ?",
+                                 (item.apply_url, current.id, *key, old_links[key]))
+    return transitions
+
+
 def set_status(job_ids: list[int], status: str, profile_id: int | None = None) -> int:
     if status not in STATUSES:
         raise ValueError(f"invalid status {status!r}")

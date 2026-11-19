@@ -8,6 +8,7 @@ import importlib
 import inspect
 import json
 import logging
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
@@ -557,6 +558,7 @@ async def reresolve_origins(
         report.with_origin_after = report.with_origin_before
         return report
     before = {id(j): origin_status(j, force) or "missing" for j in todo}
+    snapshots = [deepcopy(job) for job in todo] if not dry_run else []
     for job in todo:
         if before[id(job)] == "aggregator":
             job.origin_url, job.origin_ats, job.origin_confidence = None, None, None
@@ -630,8 +632,7 @@ async def reresolve_origins(
     report.found = sum(1 for r in report.rows if r.found)
     report.with_origin_after = sum(1 for j in eligible if origin_status(j) is None)
     if not dry_run:
-        merged, removed = consolidate(jobs)
-        db.save_jobs(profile_id, merged, removed=removed)
+        db.save_origin_updates(list(zip(snapshots, todo)))
     return report
 
 

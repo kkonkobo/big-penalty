@@ -45,6 +45,7 @@ async def test_equest_phenom_workday(tmp_path):
     assert result.origin_resolution == {
         "state": "resolved", "confidence": 0.98, "ats": "workday", "frontend": "phenom",
         "posting_url": front, "apply_url": apply_url, "tenant": "orbitex", "requisition_id": "JR284", "site": "External",
+        "canonical_ok": True,
     }
 
 
@@ -75,7 +76,7 @@ async def test_branded_vacancy(url, html, ats, req, tmp_path):
     result = await resolve(handler, tmp_path, apply_url=url)
     assert (result.origin_url, result.origin_ats) == (url, ats)
     assert result.origin_resolution["requisition_id"] == req
-    assert result.origin_resolution["tenant"]
+    assert result.origin_resolution["canonical_ok"] is (ats != "successfactors")
 
 
 @pytest.mark.parametrize("branded", [False, True])
@@ -151,7 +152,8 @@ def test_reresolve_dry_run_and_write(profile, monkeypatch):
     runner = CliRunner()
     dry = runner.invoke(cli.app, ["reresolve", str(profile.id), "--dry-run"])
     assert dry.exit_code == 0, dry.exception
-    assert dry.output == "careers_site → teamtailor: 1\n"
+    assert dry.output == ("OBSERVED\ncareers_site → teamtailor: 1\nSTORED origin_ats\ncareers_site → teamtailor: 1\n"
+                          "downgrades of a known vendor: 0\n")
     before = db.load_jobs(profile.id)[0]
     assert before.origin_ats == "careers_site" and "origin_resolution" not in before.extra
     write = runner.invoke(cli.app, ["reresolve"])
