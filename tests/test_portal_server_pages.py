@@ -363,7 +363,7 @@ def test_inbox_full_notice(h, user, prof, monkeypatch):
 def test_answers_form_is_schema_driven(h, user, prof):
     t = user.get("/app/reponses").text
     for needle in ("Téléphone", "Ville", "Disponible dès le", "Contrat", "Remarques", "Situation de handicap", 'type="date"', "<textarea",
-                   'value="Toulouse"', 'value="06 12 34 56 78"', 'value="2027-09-01"', "Non renseigné", "Prétentions salariales",
+                   'value="Toulouse"', 'value="06 00 00 00 00"', 'value="2027-09-01"', "Non renseigné", "Prétentions salariales",
                    'value="Selon grille"', "Avez-vous un handicap ?", "Retirer"):
         assert needle in t, needle
     assert re.search(r'<option value="Alternance" selected>', t) and t.count('name="ans_') == 6
@@ -388,7 +388,7 @@ def test_answers_form_is_schema_driven(h, user, prof):
 
 def test_saving_answers_creates_the_right_events(h, user, prof):
     html = user.get("/app/reponses").text
-    data = {ans(p): v for p, v in [("identity.phone", "06 12 34 56 78"), ("identity.city", "Lyon"), ("situation.start", "2027-09-01"),
+    data = {ans(p): v for p, v in [("identity.phone", "06 00 00 00 00"), ("identity.city", "Lyon"), ("situation.start", "2027-09-01"),
                                     ("situation.contract", "Stage"), ("misc.notes", "ligne1\r\nligne2"), ("misc.health", "")]}
     data.update({"tok_" + p.replace(".", "__"): token_of(html, p) for p in ("identity.phone", "identity.city", "situation.start",
                                                                             "situation.contract", "misc.notes", "misc.health")})

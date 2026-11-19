@@ -108,7 +108,7 @@ def make_snapshot(**overrides) -> Snapshot:
     data = dict(
         display_name="Léa", synced_at=SYNCED_AT, auto_send_on=True, answer_schema=make_schema(),
         answers={
-            "identity.phone": AnswerValue(value="06 12 34 56 78", is_set=True, ver=ver(1)),
+            "identity.phone": AnswerValue(value="06 00 00 00 00", is_set=True, ver=ver(1)),
             "identity.city": AnswerValue(value="Toulouse", is_set=True, ver=ver(2)),
             "situation.start": AnswerValue(value="2027-09-01", is_set=True, ver=ver(3)),
             "situation.contract": AnswerValue(value="Alternance", is_set=True, ver=ver(4)),

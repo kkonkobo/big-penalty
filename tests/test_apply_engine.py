@@ -360,7 +360,7 @@ def test_pick_variant():
     fact = Fact(key="phone", label="Tél", value="+33 6 00 00 00 00", exact=True, variants=["0600000000", "06 00 00 00 00"])
     f = lambda **k: FormField(ref="f1", kind="tel", **k)  # noqa: E731
     assert pick_variant(fact, f()) == "+33 6 00 00 00 00"
-    assert pick_variant(fact, f(placeholder="06 12 34 56 78")) == "06 00 00 00 00"
+    assert pick_variant(fact, f(placeholder="06 00 00 00 00")) == "06 00 00 00 00"
     assert pick_variant(fact, f(placeholder="0612345678")) == "0600000000"
     assert pick_variant(fact, f(), maxlength=10) == "0600000000"
     assert pick_variant(fact, f(), pattern=r"0\d{9}") == "0600000000"

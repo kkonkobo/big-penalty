@@ -353,7 +353,7 @@ def test_snapshot_is_stored_encrypted(h, tmp_path):
     ops.answer_questions(h.portal, prof.row_id, [(QID, "Oui")], h.clock())
     h.portal.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     raw = b"".join(p.read_bytes() for p in (tmp_path / "data").iterdir() if p.is_file())
-    for needle in ("Toulouse", "Société Exemple", "06 12 34 56 78", "Léa", "Permis de conduire"):
+    for needle in ("Toulouse", "Société Exemple", "06 00 00 00 00", "Léa", "Permis de conduire"):
         assert needle.encode() not in raw
     assert PDF_A not in raw and b"%PDF-" not in raw
     assert (tmp_path / "data" / "portal.sqlite3").stat().st_mode & 0o777 == 0o600
