@@ -15,6 +15,7 @@ from jobhunt import db
 from jobhunt.apply import engine, service, store
 from jobhunt.apply.facts import save_answers
 from jobhunt.apply.adapters import Receipt, Registry, Requisition
+from jobhunt.apply.autonomous import Audience
 from jobhunt.apply.destination import RecipientGuard, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.supervised import HAS_LOCAL_BRIDGE, call_local
@@ -226,6 +227,48 @@ async def test_production_race_ethnicity_revalidates_exact_options_at_write(
         assert any(b"eeo=listed" in post["body"] for post in server.posts)
 
 
+@pytest.mark.parametrize("scenario", ["wrong_query", "other_base", "formaction", "external_image", "late_formaction", "same_posting"])
+async def test_production_autonomous_checks_browser_resolved_submission_target(
+    scenario, production_pool, server, profile, tmp_path, fast, monkeypatch,
+):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    path = "/jobs/100"
+    page_html = posting_form({"wrong_query": path + "?jobId=200", "other_base": "#"}.get(scenario, path))
+    if scenario == "other_base":
+        page_html = '<base href="/jobs/200">' + page_html
+    if scenario in {"formaction", "same_posting"}:
+        endpoint = "/jobs/200" if scenario == "formaction" else path + "/send?jobId=100"
+        page_html = page_html.replace("<button>", f'<button formaction="{endpoint}">')
+    if scenario == "external_image":
+        page_html = page_html.replace("<form ", '<form id="application" ') + (
+            '<input type="image" form="application" formaction="/jobs/200" alt="Autre envoi">'
+        )
+    server.html[path] = page_html
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    original = Audience.target
+    final_checks = []
+
+    async def target(audience, control, *, button=False, final=False):
+        if final:
+            final_checks.append(True)
+            if scenario == "late_formaction":
+                await control.evaluate("node => node.setAttribute('formaction', '/jobs/100?jobId=200')")
+        return await original(audience, control, button=button, final=final)
+
+    monkeypatch.setattr(Audience, "target", target)
+    result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
+    if scenario == "same_posting":
+        assert result.status == "submitted", result.message
+        assert [post["path"] for post in server.posts] == [path + "/send?jobId=100"]
+    else:
+        assert result.status in {"needs_input", "needs_human", "blocked"}, result.message
+        assert not server.sent and result.submit_clicked_at is None
+        if scenario == "late_formaction":
+            assert final_checks == [True]
+        else:
+            assert not any(step.filled for step in result.result.steps)
+
+
 @pytest.mark.parametrize("restriction", ["cap", "breaker", "kill", "duplicate", "captcha"])
 async def test_production_autonomous_batch_gates(restriction, production_pool, server, profile, tmp_path, fast, monkeypatch):
     monkeypatch.setattr(service.get_settings(), "apply_autonomous", restriction != "kill")
@@ -325,7 +368,6 @@ async def test_production_autonomous_wrong_posting_redirect_is_not_followed(prod
     assert result.status == "needs_human" and "/jobs/200" not in server.requests and not server.posts
 
 
-@pytest.mark.parametrize("target", ["iframe", "action", "changed_action", "missing_id", "other_id", "other_origin", "other_base"])
 @pytest.mark.parametrize("target", ["iframe", "action", "changed_action", "missing_id", "other_id", "other_origin", "other_base",
                                     "query_other", "formaction"])
 async def test_production_generic_skips_unbound_targets(target, production_pool, server, profile, tmp_path, fast, monkeypatch):

@@ -10,7 +10,7 @@ import tldextract
 
 from jobhunt.apply.destination import clean_url, origin
 from jobhunt.apply.errors import ApplyError, ManualField
-from jobhunt.apply.supervised import _generic_action_allowed, _posting_ids
+from jobhunt.apply.supervised import _FORM_TARGETS_JS, _generic_action_allowed, _posting_ids, _target_allowed
 from jobhunt.origin import ats_of_host
 
 
@@ -88,7 +88,8 @@ class Audience:
             return False
         if request.is_navigation_request() and request.frame == page.main_frame:
             if (not self.clicking or self.next_document or request.method != self.method or request.url != self.endpoint
-                    or clean_url(request.frame.url, navigation=True) != self.document):
+                    or clean_url(request.frame.url, navigation=True) != self.document
+                    or not _target_allowed(request.frame.url, request.url)):
                 return False
             self.next_document = clean_url(request.url, navigation=True)
             return True
@@ -150,38 +151,36 @@ class Audience:
         if target is None:
             raise ManualField()
         try:
-            value = await target.evaluate("""(node, button) => {
+            value = await target.evaluate(f"""(node, button) => {{
                 const doc = node.ownerDocument, win = doc.defaultView;
                 if (!node.isConnected || !win || win !== win.top || doc !== document) return null;
                 if (button && node.matches('a[href]') && (!node.target || node.target === '_self'))
-                    return [win.location.href, node.getAttribute('href'), node.href, doc.__bp_autonomous_document, 'GET'];
+                    return [win.location.href, [node.getAttribute('href'), node.href, []],
+                            node.href, doc.__bp_autonomous_document, 'GET'];
                 if (button && (!node.form || !['submit', 'image'].includes(node.type))) return null;
                 const form = node.form;
                 if (button && ((node.getAttribute('formmethod') || form.getAttribute('method') || 'get').toLowerCase() !== 'post'
                     || !['', '_self'].includes((node.getAttribute('formtarget') || form.getAttribute('target') || '').toLowerCase()))) return null;
-                const override = button && node.hasAttribute('formaction');
-                const raw = override ? node.getAttribute('formaction') : form?.getAttribute('action');
-                const action = override ? node.formAction : (form && Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action').get.call(form));
-                return [win.location.href, raw ?? null, action, doc.__bp_autonomous_document, 'POST'];
-            }""", button, isolated_context=True)
+                const targets = ({_FORM_TARGETS_JS})(node);
+                const override = button ? node.getAttribute('formaction') : null;
+                const action = override !== null ? (override === '' ? doc.URL : node.formAction) : (targets[1] ?? doc.URL);
+                return [win.location.href, targets, action, doc.__bp_autonomous_document, 'POST'];
+            }}""", button, isolated_context=True)
         except Exception:
             raise ManualField() from None
-        if not value or not _generic_action_allowed(*value[:3]):
+        if not value or not _generic_action_allowed(value[0], *value[1]):
             raise ManualField()
         live = clean_url(value[0], navigation=True)
         if not live or live != self.document or value[3] != self.document_nonce or not self.write_recipient(live):
             raise ApplyError(SUPERVISED_REQUIRED)
         if not button:
-            action = value[2] or live
-            self.final_actions.add((origin(action), urlsplit(action).path))
+            for action in (value[2], *value[1][2]):
+                self.final_actions.add((origin(action), urlsplit(action).path))
         if button:
             if final and value[4] != "POST":
                 raise ApplyError(SUPERVISED_REQUIRED)
             endpoint = urlsplit(value[2] or live)._replace(fragment="").geturl()
-            if not clean_url(endpoint, navigation=True) or origin(endpoint) != origin(live):
-                raise ApplyError(SUPERVISED_REQUIRED)
-            ids = _posting_ids(urlsplit(clean_url(endpoint)).query)
-            if ids and ids != _posting_ids(urlsplit(live).path + "?" + urlsplit(live).query):
+            if not clean_url(endpoint, navigation=True) or not _target_allowed(value[0], endpoint):
                 raise ApplyError(SUPERVISED_REQUIRED)
             self.endpoint = endpoint
             self.method = value[4]
