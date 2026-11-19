@@ -11,7 +11,7 @@
     <p class="lead-line">{{ e.title }}</p>
     {% if e.host %}<p class="muted small">Site de destination : {{ e.host }}</p>{% endif %}
     {% if e.kind == 'send' %}
-    <p>La candidature sera mise en attente pour le mode supervisé sur le Mac. Aucun formulaire ne sera rempli ni envoyé.</p>
+    <p>Vous autorisez le Mac à envoyer cette version du CV lors d’un prochain passage, si l’envoi automatique est autorisé. Aucun formulaire n’est rempli ni envoyé depuis le portail.</p>
     <div class="links">{{ cv_link(e.doc_id, docs) }}{{ ext_link(e.job_url, "Voir l'annonce") }}</div>
     {% elif e.kind == 'sent' %}
     <p>Elle sera marquée comme envoyée et ne sera pas renvoyée.</p>

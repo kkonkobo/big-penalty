@@ -40,7 +40,7 @@ from zoneinfo import ZoneInfo
 from jobhunt.config import get_settings
 from jobhunt.portal import protocol
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 PARIS = ZoneInfo("Europe/Paris")
 INTERRUPTED_MESSAGE = "Résultat inconnu : vérifiez avant de réessayer."
 LOST_MESSAGE = "À refaire : la synchronisation a été réinitialisée."
@@ -233,7 +233,8 @@ CREATE TABLE budget(profile_id INTEGER NOT NULL, day TEXT NOT NULL, count INTEGE
     6: "ALTER TABLE events ADD COLUMN before_hash TEXT;\nALTER TABLE events ADD COLUMN planned_hash TEXT;",
     7: "ALTER TABLE profiles ADD COLUMN revoked_through_seq INTEGER NOT NULL DEFAULT 0;",
     8: """CREATE TABLE pending_verifiers (
-    profile_id INTEGER PRIMARY KEY, salt TEXT NOT NULL, hash TEXT NOT NULL);"""}
+    profile_id INTEGER PRIMARY KEY, salt TEXT NOT NULL, hash TEXT NOT NULL);""",
+    9: ""}
 
 
 class Journal:
@@ -297,7 +298,7 @@ class Journal:
                 for stmt in _MIGRATIONS[n].split(";\n"):
                     if stmt.strip():
                         c.execute(stmt)
-                if n in (7, 8):
+                if n in (7, 8, 9):
                     now = datetime.now(UTC)
                     for row in c.execute("SELECT profile_id FROM profiles").fetchall():
                         self._retire_epoch_work(c, row[0], now, reconcile=False)

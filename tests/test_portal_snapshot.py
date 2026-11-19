@@ -108,7 +108,7 @@ def test_queue_buckets(jp, profile, master, tmp_path):
     assert [a.company for a in snap.awaiting] == ["Société 1"] and snap.awaiting[0].host == "careers.exemple.test"
     assert snap.awaiting[0].job_url == "https://careers.exemple.test/jobs/1" and snap.awaiting[0].doc_id in docs
     assert not snap.email_pauses
-    assert sorted(i.kind for i in snap.info) == ["captcha", "dry_run", "supervised"]
+    assert sorted(i.kind for i in snap.info) == ["dry_run", "email", "human"]
     u = snap.unconfirmed[0]
     assert u.company == "Société 5" and u.grant_sent != u.grant_not_sent
     g1, g2 = jp.get_grant(u.grant_sent), jp.get_grant(u.grant_not_sent)

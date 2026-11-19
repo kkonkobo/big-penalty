@@ -30,7 +30,7 @@ def test_pair_stores_pairing_and_a_token_the_server_only_knows_by_hash(journal, 
     assert token and protocol.sha256_hex(token) in server.devices and token not in str(server.devices)
     assert journal.get_setting("device_id") == info.device_id
     assert token.encode() not in journal.path.read_bytes()
-    assert server.requests == [("POST", "/app/api/v2/pair")]
+    assert server.requests == [("POST", "/app/api/v3/pair")]
 
 
 def test_pair_twice_is_refused_until_unpair(journal, server):

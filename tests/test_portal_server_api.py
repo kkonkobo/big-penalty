@@ -534,7 +534,7 @@ def test_unexpected_exception_is_generic_and_leaks_nothing(h, caplog):
     assert_headers(page)
     ours = "\n".join(r.getMessage() for r in caplog.records if r.name == "bigpenalty.portal")
     assert secret not in ours and "RuntimeError" in ours
-    assert "GET /app/api/v2/boom 500" in ours  # the route template, never the raw path / query
+    assert "GET /app/api/v3/boom 500" in ours  # the route template, never the raw path / query
 
 
 def test_validation_errors_never_echo_input(h):

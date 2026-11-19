@@ -15,11 +15,11 @@ from jobhunt.cv import store as cvstore
 from jobhunt.cv.errors import CVError
 from jobhunt.portal.journal import GrantRow, Journal, ProfileRow
 from jobhunt.portal.settings import MAX_SEND_MINUTES
-from jobhunt.portal.snapshot import interrupted_after_click
+from jobhunt.portal.snapshot import APPROVAL_MODE, interrupted_after_click
 
 CHANGED = "La candidature a changé depuis votre accord : rechargez la page."
 APPROVAL_REFUSED = "CV à corriger : cette candidature ne peut pas être envoyée telle quelle."
-SUPERVISED = "À envoyer en mode supervisé sur le Mac."
+APPROVED = "Accord enregistré. La candidature est prête pour le prochain passage sur le Mac."
 LOCAL_ONLY = "Reprise sur le Mac uniquement."
 
 _monotonic = time.monotonic
@@ -110,7 +110,7 @@ def _approve_one(journal, profile, event, report):
     try:
         claim = journal.claim_send(profile_id, event.event_id, grant_id, db.now, 0, expected=profile,
                                    approval_only=True, refusal=refusal,
-                                   validate=lambda: bool(grant and grant.action == "send" and grant.mode == "supervised"
+                                   validate=lambda: bool(grant and grant.action == "send" and grant.mode == APPROVAL_MODE
                                                          and _matches(profile, grant)))
     except Exception:
         report.skipped[profile_id] = "Erreur technique."
@@ -128,6 +128,6 @@ def _approve_one(journal, profile, event, report):
         except Exception:
             state, message = "failed", "Erreur technique."
         else:
-            state, message = "done", SUPERVISED
+            state, message = "done", APPROVED
         journal.update_event(event.event_id, db.now(), only_from=("running",), state=state, message=message)
     report.outcomes.append(Outcome(profile_id, grant.app_id if grant else 0, event.event_id, state, message))

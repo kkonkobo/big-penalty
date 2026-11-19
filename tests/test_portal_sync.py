@@ -314,7 +314,7 @@ def test_server_hold_is_remembered(portal):
 
 
 def test_interrupted_intent_is_swept_at_pass_start(portal, profile, master, tmp_path):
-    _, app = new_app(profile, master, tmp_path, 1, approve=True)
+    new_app(profile, master, tmp_path, 1)
     go(portal)
     g = srv(portal).snapshot.awaiting[0].grant
     e = portal.fake.add_event(portal.key, "intent", grant=g)
@@ -446,10 +446,10 @@ async def test_send_intent_end_to_end(portal, profile, master, tmp_path, engine)
     e = portal.fake.add_event(portal.key, "intent", grant=g)
     (rep,) = await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(minutes=5))
     assert rep.ok and rep.executed == 1 and not engine
-    assert [(r.event_id, r.status, r.message) for r in srv(portal).results] == [(e, "done", executor.SUPERVISED)]
+    assert [(r.event_id, r.status, r.message) for r in srv(portal).results] == [(e, "done", executor.APPROVED)]
     snap = srv(portal).snapshot  # pushed again after the batch
     assert not snap.awaiting and not snap.sent
-    assert cvstore.get_application(app.id).approved_by == "portal"
+    assert cvstore.get_application(app.id).approved_by == "user"
     await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW + timedelta(hours=1))
     assert not engine and not apply_store.list_runs(app.id)
 

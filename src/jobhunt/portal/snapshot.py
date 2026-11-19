@@ -151,6 +151,9 @@ def _custom(journal: Journal, profile_id: int) -> list[protocol.CustomAnswer]:
     return out
 
 
+APPROVAL_MODE = "approve_for_mac"
+
+
 def question_id(label: str) -> str:
     return facts.custom_id(label)
 
@@ -198,9 +201,9 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
         if it.bucket != "sent" and it.outstanding is None and interrupted_after_click(it.last_run):
             info.append(protocol.InfoItem(kind="interrupted", company=_t(a.company, 300), title=_t(a.job_title, 300),
                                           host=_t(it.origin_host, 255)))
-        elif a.status == "approved" and (it.bucket == "to_validate" and a.approved_by == "portal"
-                                          or it.supervised and a.approved_by in ("user", "portal")):
-            info.append(protocol.InfoItem(kind="supervised", company=_t(a.company, 300), title=_t(a.job_title, 300),
+        elif it.bucket == "to_validate" and a.status == "approved" and a.approved_by == "user":
+            kind = "approved" if it.selectable or service._generic_enabled(db.get_job(a.job_id), check_host=False) else "supervised"
+            info.append(protocol.InfoItem(kind=kind, company=_t(a.company, 300), title=_t(a.job_title, 300),
                                           host=_t(it.origin_host, 255)))
         elif it.bucket == "to_validate" and (it.selectable or it.supervised):
             if apply_store.requires_manual_retry(a.id) or apply_store.has_site_handoff(a.id):
@@ -209,14 +212,14 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
             if pdf is None:
                 continue
             awaiting_src.append((it, grant("send", app_id=a.id, rev=a.current_rev, pdf_sha256=pdf[1], origin_sha=it.origin_sha,
-                                          mode="supervised"), pdf[1]))
+                                          mode=APPROVAL_MODE), pdf[1]))
         elif it.bucket == "paused":
             last = it.last_run
             if it.pause_reason == "email":
-                info.append(protocol.InfoItem(kind="supervised", company=_t(a.company, 300), title=_t(a.job_title, 300),
+                info.append(protocol.InfoItem(kind="email", company=_t(a.company, 300), title=_t(a.job_title, 300),
                                               host=_t(it.origin_host, 255)))
             elif it.pause_reason == "human":
-                info.append(protocol.InfoItem(kind="captcha", company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255)))
+                info.append(protocol.InfoItem(kind="human", company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255)))
             elif it.pause_reason == "host":
                 info.append(protocol.InfoItem(kind="host", company=_t(a.company, 300), title=_t(a.job_title, 300),
                                               host=_t(it.untrusted_host or it.origin_host, 255)))
@@ -224,6 +227,8 @@ def build_snapshot(journal: Journal, profile_id: int, now: datetime) -> tuple[pr
                 info.append(protocol.InfoItem(kind="dry_run", company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255)))
         elif it.bucket == "sending":
             info.append(protocol.InfoItem(kind="sending", company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255)))
+        elif it.bucket == "blocked" and apply_store.has_site_handoff(a.id):
+            info.append(protocol.InfoItem(kind="human", company=_t(a.company, 300), title=_t(a.job_title, 300), host=_t(it.origin_host, 255)))
         elif it.bucket == "needs_verification" and it.outstanding is not None:
             o = it.outstanding
             held = apply_store.held_binding(o.id)

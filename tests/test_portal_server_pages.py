@@ -281,9 +281,9 @@ def test_pages_render_from_a_rich_snapshot(h, user, prof):
     r = user.get("/app/a-faire")
     assert r.status_code == 200
     t = r.text
-    for needle in ("Questions en attente", "Permis de conduire ?", "Votre mobilité", "Choisir…", "Vos réponses sont gardées pour tous les prochains formulaires.",
-                   "Enregistrer mes réponses", "E-mails à confirmer", "Atelier Martin", "ats.example", "Lien reçu",
-                   "Reprenez ensuite sur le Mac uniquement.", "Envois à vérifier", "Maison Dupont", "9 janvier 2027",
+    for needle in ("Il manque une réponse", "Permis de conduire ?", "Votre mobilité", "Choisir…", "Vos réponses sont gardées pour tous les prochains formulaires.",
+                   "Enregistrer mes réponses", "Code par e-mail", "Atelier Martin", "ats.example", "Lien reçu",
+                   "Reprenez ensuite sur le Mac uniquement.", "À vérifier", "Maison Dupont", "9 janvier 2027",
                    "Vérifiez sur le site de l'entreprise (ou dans vos e-mails) si la candidature est bien partie.",
                    "Elle a bien été envoyée", "Elle n'a pas été envoyée", "À régler sur le Mac", "CAPTCHA à résoudre",
                    "Site à approuver", "Essai à blanc en pause", "Envoi en cours", "Mes dernières actions",
@@ -303,7 +303,7 @@ def test_pages_render_from_a_rich_snapshot(h, user, prof):
     t = user.get("/app/accord").text
     for needle in ("En attente de mon accord", "Adéquation 81 %", "publiée il y a 3 jours", "Voir l'annonce", "Voir le CV",
                    f"/app/documents/{DOC_A}", "CV non disponible sur le portail", "Approuver celle-ci", "Approuver la sélection",
-                   "Tout approuver (2)", "Le Mac traite votre accord", f'name="g" value="{GRANT_SEND_1}"'):
+                   "Tout approuver (2)", "Le Mac enregistre votre accord", f'name="g" value="{GRANT_SEND_1}"'):
         assert needle in t, needle
     assert 'rel="noopener noreferrer"' in t and f'href="{JOB_URL}"' in t
 

@@ -242,11 +242,11 @@ def set_status(app_id: int, new: str, *, base_rev: int | None = None) -> Applica
 
 
 def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_errors: bool = False,
-                     approved_by: str = "user", confirm_auto: bool = False) -> Application:
+                     approved_by: str = "user", confirm_auto: bool = False, confirm_portal: bool = False) -> Application:
     """Approve EXACTLY `rev`: it must be the current revision, its PDF must exist and hash to the stored sha256."""
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        a = c.execute("SELECT status, current_rev, approved_by FROM applications WHERE id=?", (app_id,)).fetchone()
+        a = c.execute("SELECT * FROM applications WHERE id=?", (app_id,)).fetchone()
         if a is None:
             raise CVError("Candidature introuvable")
         if rev != a["current_rev"]:
@@ -254,7 +254,7 @@ def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_e
         if "approved" not in TRANSITIONS[a["status"]] and not (
             a["status"] == "approved" and (
                 (confirm_auto and approved_by == "user" and a["approved_by"] == "auto")
-                or (approved_by == "portal" and a["approved_by"] in ("auto", "user"))
+                or (confirm_portal and approved_by == "user" and a["approved_by"] in ("portal", "user"))
             )
         ):
             raise TransitionError("Seul un brouillon peut être approuvé")
@@ -265,6 +265,10 @@ def approve_revision(app_id: int, rev: int, *, file_sha256: str | None, ignore_e
         errors = [f for f in json.loads(r["flags_json"] or "[]") if f.get("level") == "error"]
         if errors and not ignore_errors:
             raise ApprovalError(f"{len(errors)} erreur(s) à corriger avant d'approuver (ou cocher « Ignorer et approuver »)")
+        if confirm_portal and a["status"] == "approved" and a["approved_by"] == "user":
+            if a["approved_rev"] != rev or a["approved_sha256"] != file_sha256 or a["approval_override"]:
+                raise ApprovalError("L’approbation locale ne correspond plus au CV présenté.")
+            return _from_row(c.execute(_SELECT + " WHERE a.id=?", (app_id,)).fetchone())
         note = None
         if errors:
             note = f"Approuvé à la main malgré {len(errors)} erreur(s) de vérification (jamais éligible à l'envoi automatique)."

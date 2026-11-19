@@ -90,6 +90,11 @@ UPDATE profiles SET revoked_through_seq=last_seq, snapshot_digest=NULL, snapshot
 DELETE FROM snapshots;
 DELETE FROM manifest;
 DELETE FROM documents;
+""", """
+UPDATE profiles SET revoked_through_seq=last_seq, snapshot_digest=NULL, snapshot_at=NULL;
+DELETE FROM snapshots;
+DELETE FROM manifest;
+DELETE FROM documents;
 """]
 
 

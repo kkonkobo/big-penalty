@@ -279,7 +279,7 @@ def portal_sync(
     profile_ids: Annotated[Optional[list[int]], typer.Argument(help="Profils à synchroniser (défaut : tous les profils activés)")] = None,
     no_execute: Annotated[bool, typer.Option("--no-execute", help="Laisser les demandes d’approbation en attente")] = False,
 ) -> None:
-    """Récupère les demandes, traite les accords pour le mode supervisé, puis publie l’état. Aucun envoi de candidature."""
+    """Récupère les demandes, enregistre les accords, puis publie l’état. Aucun envoi pendant la synchronisation."""
     reports = _call(sync.sync_all, list(profile_ids) if profile_ids else None, not no_execute)
     if not reports:
         _p("Aucun profil activé à synchroniser.")

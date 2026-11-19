@@ -13,7 +13,7 @@ from typing import Annotated, Literal, Union
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 API_PREFIX = f"/api/v{PROTOCOL_VERSION}"
 
 # ---------------------------------------------------------------- limits (enforced by both sides)
@@ -209,7 +209,7 @@ class Unconfirmed(Wire):
 
 
 class InfoItem(Wire):
-    kind: Literal["captcha", "host", "dry_run", "sending", "interrupted", "supervised"]
+    kind: Literal["captcha", "host", "dry_run", "sending", "interrupted", "supervised", "approved", "email", "human"]
     company: Name = ""
     title: Name = ""
     host: Host = ""
@@ -257,7 +257,7 @@ class Counts(Wire):
 
 
 class Snapshot(Wire):
-    protocol: Literal[2] = PROTOCOL_VERSION
+    protocol: Literal[3] = PROTOCOL_VERSION
     display_name: Annotated[str, StringConstraints(max_length=80)] = ""
     synced_at: Timestamp
     auto_send_on: bool = False
@@ -385,7 +385,7 @@ class ProfileStatus(Wire):
 
 
 class ServerStatus(Wire):
-    protocol: Literal[2]
+    protocol: Literal[3]
     version: Annotated[str, StringConstraints(max_length=80)] = ""
     profiles: list[ProfileStatus] = Field(default_factory=list, max_length=MAX_PROFILES_PER_DEVICE)
 

@@ -63,7 +63,8 @@ def test_custom_base_path(tmp_path):
     assert harness.client.get("/app/healthz").status_code == 404
     assert harness.client.get("/portail", follow_redirects=False).headers["location"] == "/portail/"
     dev = harness.pair()
-    assert harness.client.get("/portail/api/v2/status", headers=dev.headers).status_code == 200
+    assert harness.client.get("/portail/api/v3/status", headers=dev.headers).status_code == 200
+    assert harness.client.get("/portail/api/v2/status", headers=dev.headers).status_code == 404
     assert harness.client.get("/portail/api/v1/status", headers=dev.headers).status_code == 404
     harness.portal.db.close()
 

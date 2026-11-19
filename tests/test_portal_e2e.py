@@ -4,6 +4,7 @@ Every scenario asserts on BOTH sides. Fictional data only; no sleeping (both sid
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import timedelta
 
@@ -11,6 +12,7 @@ import httpx
 import pytest
 
 from jobhunt import db, schedule
+from jobhunt.config import get_settings
 from jobhunt.apply import accounts, facts, service
 from jobhunt.apply import store as apply_store
 from jobhunt.apply.adapters import Registry
@@ -491,10 +493,10 @@ def test_supervised_approval_and_exact_attempt_settlement(w, profile, master, tm
     event = w.seeker.request(approval.grant).event_ids[0]
     assert w.mac.sync_one(profile.id).ok
     app = cvstore.get_application(draft.id)
-    assert app.approved_rev == draft.current_rev and app.approved_by == "portal"
+    assert app.approved_rev == draft.current_rev and app.approved_by == "user"
     assert not run_spy and not engine and not apply_store.list_runs(app.id)
     assert w.mac.journal.sends_today(profile.id, w.mac.now) == 0
-    assert w.seeker.statuses()[event] == "done" and "mode supervisé" in w.seeker.messages()[event]
+    assert w.seeker.statuses()[event] == "done" and "Accord enregistré" in w.seeker.messages()[event]
     assert [item.kind for item in srv_snap(w).info] == ["supervised"]
 
     def reserve_without_click():
@@ -525,7 +527,7 @@ def test_supervised_approval_and_exact_attempt_settlement(w, profile, master, tm
     assert not run_spy and not engine
 
 
-def test_supervised_grant_cannot_be_promoted_to_unattended(w, profile, master, tmp_path, monkeypatch, engine):
+def test_registry_change_does_not_dispatch_during_sync(w, profile, master, tmp_path, monkeypatch, engine):
     registry = service.registry
     monkeypatch.setattr(service, "registry", Registry())
     _, app = new_app(profile, master, tmp_path)
@@ -535,10 +537,10 @@ def test_supervised_grant_cannot_be_promoted_to_unattended(w, profile, master, t
     monkeypatch.setattr(service, "registry", registry)
     assert w.mac.sync_one(profile.id).ok
     assert w.seeker.statuses()[event] == "done"
-    assert cvstore.get_application(app.id).approved_by == "portal" and not engine and not apply_store.list_runs(app.id)
+    assert cvstore.get_application(app.id).approved_by == "user" and not engine and not apply_store.list_runs(app.id)
 
 
-def test_08_send_approval_end_to_end(w, profile, master, tmp_path, engine, run_spy):
+def test_08_send_approval_end_to_end(w, profile, master, tmp_path, engine, run_spy, monkeypatch):
     live, mac, pid, seeker = w.live, w.mac, w.profile_id, w.seeker
     job, app = new_app(profile, master, tmp_path, 1)  # a draft: bucket to_validate
     rep = mac.sync_one(pid, execute=False)
@@ -560,8 +562,8 @@ def test_08_send_approval_end_to_end(w, profile, master, tmp_path, engine, run_s
     rep = mac.sync_one(pid)
     assert rep.ok and rep.executed == 1 and not engine and not run_spy
     approved = cvstore.get_application(app.id)
-    assert approved.approved_by == "portal" and approved.approved_rev == app.current_rev
-    assert seeker.statuses()[ev] == "done" and "mode supervisé" in seeker.messages()[ev]
+    assert approved.approved_by == "user" and approved.approved_rev == app.current_rev
+    assert seeker.statuses()[ev] == "done" and "Accord enregistré" in seeker.messages()[ev]
     snap = srv_snap(w)
     assert not snap.awaiting and not snap.sent and live.pending(w.key) == []
     assert mac.journal.get_grant(aw.grant).state == "used" and mac.journal.sends_today(pid, mac.now) == 0
@@ -571,6 +573,13 @@ def test_08_send_approval_end_to_end(w, profile, master, tmp_path, engine, run_s
     assert mac.sync_one(pid).ok
     assert seeker.statuses()[forged.event_id] == "refused" and not apply_store.list_runs(app.id)
     assert not engine and not run_spy
+
+    monkeypatch.setattr(get_settings(), "apply_auto", True)
+    monkeypatch.setattr(get_settings(), "apply_auto_min_score", 60)
+    summary = asyncio.run(service.daily_apply(pid, emit=lambda _: None))
+    assert summary.sent == 1 and len(engine) == len(run_spy) == 1
+    assert run_spy[0]["trigger"] == "auto" and run_spy[0]["approved_rev"] == app.current_rev
+    assert mac.sync_one(pid).ok and len(srv_snap(w).sent) == 1
 
 
 @pytest.mark.parametrize("change", ["rev", "pdf", "origin"])
@@ -1356,7 +1365,7 @@ def test_21_two_profiles_one_pass_data_never_crosses(w, profile, master, tmp_pat
     assert sa.statuses()[ia.event_ids[0]] == "done" and sb.statuses()[ib.event_ids[0]] == "done"
     assert sb.statuses()[forged.event_id] == "refused"
     assert not (set(sa.statuses()) & set(sb.statuses()))
-    assert cvstore.get_application(app_a.id).approved_by == cvstore.get_application(app_b.id).approved_by == "portal"
+    assert cvstore.get_application(app_a.id).approved_by == cvstore.get_application(app_b.id).approved_by == "user"
     assert not srv_snap(w).sent and not live.snapshot(key_b).sent
     assert srv_snap(w).answers["city"].value == "Lyon" and live.snapshot(key_b).answers["city"].value == "Nice"
     assert sa.view().fields["city"].value == "Lyon" and sb.view().fields["city"].value == "Nice"

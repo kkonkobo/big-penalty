@@ -69,7 +69,8 @@ STATUS_CLASSES = {"applied": "ok", "done": "ok", "conflict": "warn", "awaiting_r
                   "rejected": "bad", "refused": "bad", "failed": "bad", "interrupted": "bad", "lost": "bad", "cancelled": ""}
 INFO_LABELS = {"captcha": "CAPTCHA à résoudre", "host": "Site à approuver", "dry_run": "Essai à blanc en pause",
                "sending": "Envoi en cours", "interrupted": "Envoi interrompu : à vérifier",
-               "supervised": "À envoyer en mode supervisé sur le Mac"}
+               "supervised": "Action humaine requise", "human": "Action humaine requise",
+               "email": "Code par e-mail", "approved": "Accord enregistré, en attente du Mac"}
 GRANT_VERBS = {"send": "Approbation de la candidature", "resume": "Reprise de la candidature", "sent": "Marquée comme envoyée",
                "not_sent": "Remise dans la file"}
 EVENT_VERBS = {"answer": "Réponse enregistrée", "question_answer": "Réponse à une question", "custom_edit": "Réponse modifiée",

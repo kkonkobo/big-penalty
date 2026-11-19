@@ -18,6 +18,7 @@ from jobhunt.portal import executor
 from jobhunt.portal.apply_events import apply_pending
 from jobhunt.portal.executor import APPROVAL_REFUSED, CHANGED
 from jobhunt.portal.journal import NewEvent
+from jobhunt.portal.snapshot import APPROVAL_MODE
 
 from portal_fakes import NOW, fixture_ats, journal, make_run, master, new_app, set_pdf  # noqa: F401
 
@@ -47,7 +48,7 @@ def queue_intent(jp, profile, app, action="send", *, run_id=0, mode="", now=NOW,
     item = next(i for i in service.queue() if i.app.id == app.id)
     g = jp.find_or_create_grant(jp.get_profile(profile.id), action, now, app_id=app.id, rev=app.current_rev,
                                 pdf_sha256=sha or cvstore.sha256_file(cvs.safe_pdf(app)), origin_sha=origin if origin is not None else item.origin_sha,
-                                run_id=run_id, mode=mode or ("supervised" if action == "send" else ""))
+                                run_id=run_id, mode=mode or (APPROVAL_MODE if action == "send" else ""))
     p = jp.get_profile(profile.id)
     seq = p.cursor_seq + 1
     eid = f"{profile.id:08x}{seq:024x}"
@@ -257,22 +258,39 @@ async def test_legacy_resume_work_cannot_start_an_attempt(jp, profile, master, t
     assert [item.id for item in runs_of(app)] == [run.id] and jp.sends_today(profile.id, NOW) == 0
 
 
-async def test_approval_is_not_a_dispatch_authorization(jp, profile, master, tmp_path, fixture_ats):
+async def test_approval_only_records_the_exact_revision(jp, profile, master, tmp_path, fixture_ats):
     _, draft = new_app(profile, master, tmp_path)
     event, grant = queue_intent(jp, profile, draft)
     report = await run_batch(jp, [profile.id], NOW)
     assert report.did_anything and jp.get_event(event).state == "done" and jp.get_grant(grant).state == "used"
     approved = cvstore.get_application(draft.id)
-    assert (approved.approved_rev, approved.approved_sha256, approved.approved_by) == (draft.current_rev, draft.pdf_sha256, "portal")
+    assert (approved.approved_rev, approved.approved_sha256, approved.approved_by) == (draft.current_rev, draft.pdf_sha256, "user")
     assert not runs_of(draft) and not fixture_ats and jp.sends_today(profile.id, NOW) == 0
-    assert (await service.run(draft.id, mode="submit", trigger="user")).status == "blocked"
-    assert (await service.run(draft.id, mode="submit", trigger="auto")).status == "blocked"
-    assert not fixture_ats
 
 
-async def test_legacy_submit_grant_is_refused(jp, profile, master, tmp_path):
+@pytest.mark.parametrize("mode", ["submit", "supervised"])
+async def test_legacy_approval_grant_is_refused(jp, profile, master, tmp_path, mode):
     _, draft = new_app(profile, master, tmp_path)
-    event, grant = queue_intent(jp, profile, draft, mode="submit")
+    event, grant = queue_intent(jp, profile, draft, mode=mode)
     await run_batch(jp, [profile.id], NOW)
     assert jp.get_event(event).state == "refused" and jp.get_grant(grant).state == "void"
     assert cvstore.get_application(draft.id).status == "draft" and not runs_of(draft)
+
+
+async def test_legacy_supervised_consent_requires_a_fresh_approval(jp, profile, master, tmp_path):
+    job, draft = new_app(profile, master, tmp_path)
+    old = cvstore.approve_revision(draft.id, draft.current_rev, file_sha256=draft.pdf_sha256, approved_by="portal")
+    assert any("ancien accord" in reason for reason in service.policy.submit_problems(old, job, trigger="auto"))
+    event, _ = queue_intent(jp, profile, old)
+    await run_batch(jp, [profile.id], NOW)
+    assert jp.get_event(event).state == "done"
+    assert cvstore.get_application(old.id).approved_by == "user" and not runs_of(old)
+
+
+async def test_portal_confirming_a_local_approval_does_not_rewrite_it(jp, profile, master, tmp_path):
+    _, draft = new_app(profile, master, tmp_path)
+    event, _ = queue_intent(jp, profile, draft)
+    approved = cvs.approve(draft.id, draft.current_rev)
+    await run_batch(jp, [profile.id], NOW)
+    assert jp.get_event(event).state == "done"
+    assert cvstore.get_application(draft.id) == approved and not runs_of(draft)

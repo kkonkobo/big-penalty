@@ -42,10 +42,15 @@ class FixtureATS:
         return 1.0
 
     def resolve(self, url, dom_markers):
-        return Requisition(self.name, urlsplit(url).path.strip("/").replace("/", "-"))
+        host = urlsplit(url).hostname
+        return Requisition(self.name, urlsplit(url).path.strip("/").replace("/", "-"), endpoints=(
+            ("final_submit", f"https://{host}/fixture/{{tenant}}/{{requisition}}"),
+        ))
 
     async def dispatch(self, request, gate):
-        return await gate.perform("final_submit", request.attempt.url, attach_pdf=True)
+        attempt = request.attempt
+        target = f"https://{urlsplit(attempt.url).hostname}/fixture/{attempt.tenant}/{attempt.requisition_id}"
+        return await gate.perform("final_submit", target, attach_pdf=True)
 
     async def verify_receipt(self, attempt, *, evidence=None):
         return Receipt(attempt, "confirmed", "first_party_confirmation", reference="fixture-receipt",

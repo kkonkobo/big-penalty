@@ -136,7 +136,8 @@ jobs:
           [[ "$code" =~ ^30[1278]$ ]] || { echo "/app answered $code, expected a redirect" >&2; exit 1; }
           grep -i '^location:' redirect.txt | tr -d '\r' | grep -qE '/app/$'
           [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/")" == 404 ]]
-          [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/app/api/v2/status")" == 401 ]]
+          [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/app/api/v3/status")" == 401 ]]
+          [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/app/api/v2/status")" == 404 ]]
           [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$base/app/api/v1/status")" == 404 ]]
 
           [[ "$(docker exec portal id -u)" == 10001 ]]

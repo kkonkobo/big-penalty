@@ -37,10 +37,10 @@ def test_sends_bearer_and_json_headers_to_the_versioned_path():
 
     def handler(req):
         seen.update(path=req.url.path, auth=req.headers["authorization"], ct=req.headers.get("content-type"))
-        return httpx.Response(200, json={"protocol": 2, "version": "x", "profiles": []})
+        return httpx.Response(200, json={"protocol": 3, "version": "x", "profiles": []})
 
     client_for(handler).status()
-    assert seen["path"] == "/app/api/v2/status" and seen["auth"] == f"Bearer {TOKEN}"
+    assert seen["path"] == "/app/api/v3/status" and seen["auth"] == f"Bearer {TOKEN}"
 
 
 def test_pair_sends_no_bearer():

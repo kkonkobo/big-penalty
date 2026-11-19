@@ -181,8 +181,8 @@ def approve(app_id: int, rev: int, *, ignore_errors: bool = False, expected_sha2
     if expected_sha256 is not None and digest != expected_sha256:
         raise CVError("Le PDF a changé depuis l'approbation.")
     return store.approve_revision(app_id, rev, file_sha256=digest, ignore_errors=ignore_errors,
-                                  approved_by="portal" if portal else "user",
-                                  confirm_auto=expected_sha256 is not None)
+                                  confirm_auto=expected_sha256 is not None,
+                                  confirm_portal=portal and expected_sha256 is not None and not ignore_errors)
 
 
 def withdraw(app_id: int) -> Application:

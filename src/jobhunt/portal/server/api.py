@@ -1,4 +1,4 @@
-"""The Mac API under `<base>/api/v2` (DESIGN §4). Bodies are the models of `jobhunt.portal.protocol`.
+"""The versioned Mac API (DESIGN §4). Bodies are the models of `jobhunt.portal.protocol`.
 
 Every route authenticates first (bearer token, sha256 lookup, 120 requests per minute per device), then resolves
 `(device_id, profile_key)`: another device's profile is a plain 404. Errors are `{"error": code, "current": n?}` and never
