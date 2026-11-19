@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Retirer une réponse{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Retirer cette réponse ?</h1>
+<p class="muted">Rien n'est fait tant que vous n'avez pas confirmé.</p></div></div>
+<section class="panel"><h3>{{ question }}</h3>
+<p>Le Mac supprimera cette réponse enregistrée à sa prochaine synchronisation. Il vous la redemandera si un formulaire en a besoin.</p></section>
+<form class="stack" method="post" action="{{ base }}/reponses/retirer/confirmer">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="custom_id" value="{{ custom_id }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <button class="btn primary block" type="submit">Retirer cette réponse</button>
+  <a class="btn block" href="{{ base }}/reponses">Annuler</a>
+</form>
+{% endblock %}

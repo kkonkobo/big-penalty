@@ -517,6 +517,8 @@ def cv_list(profile: Annotated[Optional[int], typer.Option("--profile", "-p")] =
 apply_app = typer.Typer(help="Candidature sur le site de l'entreprise : file d'envoi, simulation, envoi, réponses aux questions.",
                         no_args_is_help=True)
 app.add_typer(apply_app, name="apply")
+from jobhunt.portal.cli import portal_app  # noqa: E402
+app.add_typer(portal_app, name="portal")
 HeadlessOpt = Annotated[Optional[bool], typer.Option("--headless/--headful", help="défaut : visible, sauf JOBHUNT_HEADLESS=1")]
 BUCKET_FR = {"to_validate": "à valider", "paused": "en pause", "sending": "en cours", "failed": "échec", "blocked": "bloquée",
              "sent": "envoyée", "needs_verification": "à vérifier"}

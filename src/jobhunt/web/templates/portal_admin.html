@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Portail{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Portail</h1>
+    <p class="muted">Le portail est une page web où {{ profile.name }} complète ses réponses aux formulaires et approuve ses candidatures depuis un téléphone.
+      Ce Mac synchronise toutes les 5 minutes. En mode direct, ses réponses et ses approbations s'appliquent sans vous ; en mode validation, vous validez chaque action.</p>
+    <p class="muted">Les accords du portail rejoignent les accords locaux. La synchronisation n’ouvre aucun navigateur, ne remplit aucun formulaire et n’envoie aucune candidature ; le Mac peut envoyer lors d’un prochain passage autorisé.</p>
+  </div>
+  <div class="row">
+    <a class="btn" href="/profiles/{{ profile.id }}">Retour au profil</a>
+    <a class="btn" href="/profiles/{{ profile.id }}/answers">Réponses aux formulaires</a>
+  </div>
+</div>
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+
+{% if creds %}
+<section class="panel" id="credentials">
+  <div class="panel-head plain"><h2>Accès de {{ profile.name }}</h2></div>
+  <p class="notice">Cette information n'est affichée qu'une fois.</p>
+  <p class="lead">Adresse : <strong class="mono">{{ creds.address }}</strong></p>
+  <p class="lead">Identifiant : <strong class="mono">{{ creds.handle_shown }}</strong></p>
+  <p class="lead">Code : <strong class="mono">{{ creds.passcode_shown }}</strong></p>
+  <p>Transmettez l'identifiant et le code par deux canaux différents. Le code n'est pas enregistré : notez-le maintenant.</p>
+</section>
+{% endif %}
+
+<section class="panel" id="state">
+  <div class="panel-head plain">
+    <h2>État</h2>
+    <p class="row">
+      {% if not st.paired %}<span class="tag warn">non appairé</span>
+      {% else %}<span class="tag ok">appairé</span>
+        {% if st.paused %}<span class="tag bad">en pause</span>{% endif %}
+        {% if ps and ps.enabled %}<span class="tag ok">activé</span>{% else %}<span class="tag warn">non activé</span>{% endif %}
+        {% if ps and ps.held %}<span class="tag bad">suspendu par l'administrateur du serveur</span>{% endif %}
+      {% endif %}
+    </p>
+  </div>
+  {% if not st.paired %}
+    <p>Ce Mac n'est pas appairé au portail. L'appairage se fait une seule fois, depuis le terminal :</p>
+    <pre class="log">big-penalty portal pair &lt;adresse&gt;</pre>
+    <p class="muted small">Il n'y a pas de formulaire d'appairage ici : le code d'appairage ne doit pas passer par un navigateur.</p>
+  {% else %}
+    <table class="tbl">
+      <tbody>
+        <tr><th>Portail</th><td>{{ st.origin }}{{ st.base_path }}{% if st.device_name %} <span class="muted small">(appareil « {{ st.device_name }} »)</span>{% endif %}</td></tr>
+        <tr><th>Pause générale</th><td>{% if st.paused %}oui : rien n'est appliqué ni envoyé depuis le portail{% else %}non{% endif %}</td></tr>
+        {% if ps and ps.enabled %}
+        <tr><th>Mode</th><td>{% if ps.mode == 'review' %}validation (vous validez chaque action){% else %}direct{% endif %}</td></tr>
+        <tr><th>Identifiant</th><td class="mono">{{ handle_shown }}</td></tr>
+        <tr><th>Dernière synchronisation</th><td>{% if ps.last_sync_at %}{{ ps.last_sync_at | ago }}{% else %}jamais{% endif %}</td></tr>
+        <tr><th>Dernière erreur</th><td>{% if ps.last_error %}<span class="tag bad">{{ ps.last_error }}</span>{% else %}aucune{% endif %}</td></tr>
+        <tr><th>Actions</th><td>{{ ps.pending }} reçue(s), {{ ps.awaiting_review }} à valider, {{ ps.queued }} en file d'envoi</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+    {% if ps and not ps.enabled %}<p class="muted">Le portail est désactivé pour ce profil.</p>{% endif %}
+    {% if not ps %}<p class="muted">Le portail n'a jamais été activé pour ce profil.</p>{% endif %}
+  {% endif %}
+  {% if syncing %}<p><span class="spinner sm" aria-hidden="true"></span> Synchronisation en cours… <a href="/profiles/{{ profile.id }}/portal">Actualiser</a></p>{% endif %}
+  {% if not syncing and (sync_lines or sync_error) %}
+    <h3>Dernière synchronisation lancée d'ici</h3>
+    {% if sync_error %}<p class="error-box">{{ sync_error }}</p>{% endif %}
+    {% for line in sync_lines %}<p class="small">{{ line }}</p>{% endfor %}
+  {% endif %}
+</section>
+
+{% if st.paired %}
+<section class="panel" id="actions">
+  <div class="panel-head plain"><h2>Actions</h2></div>
+  {% if not (ps and ps.enabled) %}
+    <form method="post" action="/profiles/{{ profile.id }}/portal/enable" class="form">
+      <label class="row"><input type="checkbox" name="review" value="1"> Valider moi-même chaque action (mode validation)</label>
+      <div class="row"><button class="btn primary" type="submit">Activer le portail pour ce profil</button></div>
+    </form>
+  {% else %}
+    <div class="row actions-row">
+      <form method="post" action="/profiles/{{ profile.id }}/portal/sync"><button class="btn primary" type="submit">Synchroniser maintenant</button></form>
+      <form method="post" action="/profiles/{{ profile.id }}/portal/passcode" onsubmit="return confirm('Créer un nouveau code ? Les appareils connectés seront déconnectés et les approbations en attente annulées.')"><button class="btn" type="submit">Nouveau code</button></form>
+      <form method="post" action="/profiles/{{ profile.id }}/portal/revoke"><button class="btn" type="submit">Déconnecter ses appareils</button></form>
+      <form method="post" action="/profiles/{{ profile.id }}/portal/mode">
+        {% if ps.mode == 'review' %}<input type="hidden" name="mode" value="direct"><button class="btn" type="submit">Passer en mode direct</button>
+        {% else %}<input type="hidden" name="mode" value="review"><button class="btn" type="submit">Passer en mode validation</button>{% endif %}
+      </form>
+      <form method="post" action="/profiles/{{ profile.id }}/portal/resync" onsubmit="return confirm('Un nouveau flux abandonne les actions du portail encore en attente. Continuer ?')"><button class="btn quiet-bad" type="submit">Nouveau flux (resync)</button></form>
+    </div>
+    <form method="post" action="/profiles/{{ profile.id }}/portal/disable" class="form" onsubmit="return confirm('Désactiver le portail pour ce profil ?')">
+      <label class="row"><input type="checkbox" name="purge" value="1"> et effacer ses données du serveur</label>
+      <div class="row"><button class="btn quiet-bad" type="submit">Désactiver</button></div>
+    </form>
+  {% endif %}
+  <div class="row actions-row">
+    {% if st.paused %}
+      <form method="post" action="/profiles/{{ profile.id }}/portal/resume"><button class="btn" type="submit">Reprendre</button></form>
+    {% else %}
+      <form method="post" action="/profiles/{{ profile.id }}/portal/pause"><button class="btn" type="submit">Mettre en pause</button></form>
+    {% endif %}
+    <span class="muted small">La pause concerne tous les profils.</span>
+  </div>
+</section>
+{% endif %}
+
+{% if ps and ps.enabled and (ps.mode == 'review' or review) %}
+<section class="panel" id="review">
+  <div class="panel-head plain"><h2>À valider <span class="count">{{ review|length }}</span></h2></div>
+  {% if review %}
+  <div class="row">
+    <form method="post" action="/profiles/{{ profile.id }}/portal/review/apply-all">
+      <input type="hidden" name="review_batch" value="{{ review_batch }}">
+      <button class="btn primary small" type="submit">Appliquer les actions affichées</button>
+    </form>
+    <form method="post" action="/profiles/{{ profile.id }}/portal/review/reject-all"><button class="btn quiet-bad small" type="submit">Tout refuser</button></form>
+  </div>
+  <table class="tbl">
+    <thead><tr><th>Type</th><th>Sujet</th><th>Changement</th><th></th></tr></thead>
+    <tbody>
+    {% for it in review %}
+      <tr>
+        <td>{{ it.kind }}</td><td>{{ it.label }}</td><td>{{ it.change }}</td>
+        <td><div class="row">
+          <form method="post" action="/profiles/{{ profile.id }}/portal/review/{{ it.id }}/apply"><button class="btn small" type="submit">Appliquer</button></form>
+          <form method="post" action="/profiles/{{ profile.id }}/portal/review/{{ it.id }}/reject"><button class="btn quiet-bad small" type="submit">Refuser</button></form>
+        </div></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">Rien à valider pour l'instant.</p>{% endif %}
+</section>
+{% endif %}
+
+{% if ps %}
+<section class="panel" id="journal">
+  <div class="panel-head plain"><h2>Journal</h2></div>
+  {% if journal_rows %}
+  <table class="tbl">
+    <thead><tr><th>Quand</th><th>Type</th><th>Sujet</th><th>Changement</th><th>Statut</th><th>Message</th></tr></thead>
+    <tbody>
+    {% for r in journal_rows %}
+      <tr>
+        <td class="small">{{ r.at.astimezone().strftime('%d/%m %H:%M') }}</td><td>{{ r.kind }}</td><td>{{ r.label }}</td><td>{{ r.change }}</td>
+        <td><span class="tag {{ r.state_class }}">{{ r.state }}</span></td><td class="muted small">{{ r.message }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">Rien ne vient encore du portail.</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

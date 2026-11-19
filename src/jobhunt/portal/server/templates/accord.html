@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ext_link, cv_link, intent_status with context %}
+{% block title %}Mon accord{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>En attente de mon accord</h1>
+<p class="muted">Le Mac enregistre votre accord à la prochaine synchronisation et pourra envoyer la candidature lors d’un prochain passage, si l’envoi automatique est autorisé. Le portail ne remplit ni n’envoie de formulaire.</p></div></div>
+{% if not snap.awaiting %}
+<p class="panel">Aucune candidature n'attend votre accord.</p>
+{% else %}
+<form id="accord-confirm" method="post" action="{{ base }}/confirmer">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="retour" value="accord">
+</form>
+  <section class="panel">
+    {% for a in snap.awaiting %}
+    <div class="item">
+      {% set live = a.grant in view.intent_events %}
+      <div class="pick">
+        {% if not live %}<input type="checkbox" form="accord-confirm" id="g-{{ loop.index }}" name="g" value="{{ a.grant }}" aria-label="Sélectionner {{ a.company }} {{ a.title }}">{% endif %}
+        <div>
+          <h3>{{ a.company or 'Entreprise non précisée' }}</h3>
+          <p class="lead-line">{{ a.title }}</p>
+        </div>
+      </div>
+      <p class="muted small">{% if a.score is not none %}Adéquation {{ a.score|round|int }} %{% endif %}{% if a.age_days is not none %}{% if a.score is not none %} · {% endif %}{{ a.age_days|age_days_fr }}{% endif %}{% if a.host %} · Site : {{ a.host }}{% endif %}</p>
+      <div class="links">{{ ext_link(a.job_url, "Voir l'annonce") }}{{ cv_link(a.doc_id, docs) }}</div>
+      {% if live %}{{ intent_status(view.intent_events[a.grant], view) }}
+      {% else %}<div class="row"><button class="btn primary" form="accord-confirm" type="submit" name="un" value="{{ a.grant }}">Approuver celle-ci</button></div>{% endif %}
+    </div>
+    {% endfor %}
+  </section>
+  {% if free_count %}
+  <div class="sticky-actions">
+    <button class="btn" form="accord-confirm" type="submit">Approuver la sélection</button>
+    {% if bulk_count %}<button class="btn primary" form="accord-confirm" type="submit" name="tout" value="1">Tout approuver ({{ bulk_count }})</button>{% endif %}
+  </div>
+  {% endif %}
+{% endif %}
+{% endblock %}

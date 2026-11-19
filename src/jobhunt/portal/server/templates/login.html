@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Connexion{% endblock %}
+{% block content %}
+<div class="login">
+  <h1>Connexion</h1>
+  <p class="muted">Entrez l'identifiant et le code que vous avez reçus.</p>
+  {% if error %}<div class="error-box" role="alert">{{ error }}</div>{% endif %}
+  <form class="form" method="post" action="{{ base }}/connexion">
+    <input type="hidden" name="nonce" value="{{ nonce }}">
+    <label>Identifiant
+      <input name="identifiant" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="128" required>
+    </label>
+    <label>Code
+      <input name="code" type="password" autocomplete="current-password" maxlength="128" required>
+    </label>
+    <button class="btn primary block" type="submit">Se connecter</button>
+  </form>
+</div>
+{% endblock %}

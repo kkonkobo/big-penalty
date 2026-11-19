@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  {% block head %}{% endblock %}
+  <title>{% block title %}Big Penalty{% endblock %} · Big Penalty</title>
+  <link rel="stylesheet" href="{{ base }}/static/style.css?v={{ version }}">
+  <link rel="stylesheet" href="{{ base }}/static/portal.css?v={{ version }}">
+</head>
+<body>
+<svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-out" viewBox="0 0 16 16"><path d="M9 2.75h4.25V7M13 3L7.5 8.5M11.5 9.5v3.25a.75.75 0 01-.75.75h-7.5a.75.75 0 01-.75-.75v-7.5a.75.75 0 01.75-.75H6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 16 16"><path d="M9.25 1.75H4.5a1 1 0 00-1 1v10.5a1 1 0 001 1h7a1 1 0 001-1V5L9.25 1.75zM9 2v3.25h3.25M5.75 8.5h4.5M5.75 11h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+{% if layout %}
+<header class="top">
+  <a class="brand" href="{{ base }}/a-faire">Big Penalty</a>
+  <span class="who">{{ layout.name }}</span>
+</header>
+<nav class="pnav" aria-label="Navigation principale">
+  <a href="{{ base }}/a-faire"{% if active == 'a-faire' %} aria-current="page"{% endif %}>À faire{% if layout.counts.a_faire %} <span class="count hot">{{ layout.counts.a_faire }}</span>{% endif %}</a>
+  <a href="{{ base }}/reponses"{% if active == 'reponses' %} aria-current="page"{% endif %}>Mes réponses</a>
+  <a href="{{ base }}/accord"{% if active == 'accord' %} aria-current="page"{% endif %}>Mon accord{% if layout.counts.accord %} <span class="count hot">{{ layout.counts.accord }}</span>{% endif %}</a>
+  <a href="{{ base }}/candidatures"{% if active == 'candidatures' %} aria-current="page"{% endif %}>Envoyées{% if layout.counts.envoyees %} <span class="count">{{ layout.counts.envoyees }}</span>{% endif %}</a>
+</nav>
+{% else %}
+<header class="top"><span class="brand">Big Penalty</span></header>
+{% endif %}
+<main>
+{% if layout %}
+  {% if layout.waiting %}
+  <div class="notice warn">En attente de la première synchronisation du Mac.</div>
+  {% else %}
+  <p class="syncline muted">Mac synchronisé {{ layout.synced_line }}</p>
+  {% if layout.stale %}<div class="notice warn">Le Mac n'a pas synchronisé depuis {{ layout.stale }} : vos réponses et vos accords sont enregistrés et partiront dès qu'il se réveille.</div>{% endif %}
+  {% if layout.inbox_full %}<div class="notice warn">Trop d'actions en attente du Mac : attendez sa prochaine synchronisation.</div>{% endif %}
+  {% if layout.paused %}<div class="notice warn">Le portail est en pause côté Mac : rien n'est appliqué pour l'instant.</div>{% endif %}
+  {% if layout.review_mode %}<div class="notice">Vos réponses et accords sont validés sur le Mac avant d'être appliqués.</div>{% endif %}
+  {% endif %}
+  {% for m in flash.ok %}<div class="notice" role="status">{{ m }}</div>{% endfor %}
+  {% for m in flash.err %}<div class="error-box" role="alert">{{ m }}</div>{% endfor %}
+{% endif %}
+{% block content %}{% endblock %}
+{% if layout %}
+<form class="quiet" method="post" action="{{ base }}/deconnexion">
+  {% include "_csrf.html" %}
+  <button class="btn block" type="submit">Se déconnecter</button>
+</form>
+{% endif %}
+</main>
+</body>
+</html>
