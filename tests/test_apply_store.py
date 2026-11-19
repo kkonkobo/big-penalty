@@ -280,7 +280,7 @@ def only_reservation(profile_id):
     return rows[0]
 
 
-def test_pending_reservation_is_released_when_the_run_ends_without_submit_clicked(profile, app):
+def test_pending_reservation_survives_a_run_that_reports_only_missing_input(profile, app):
     a = cvs.approve(app.id, 1)
     run = astore.start_run(a.id, 1, "submit", "user", out_dir)
     reserve_nav(a, run)
@@ -288,9 +288,10 @@ def test_pending_reservation_is_released_when_the_run_ends_without_submit_clicke
     assert got.nav_clicked_at is not None and got.submit_clicked_at is None
     assert astore.has_unconfirmed_click(a.id) and len(astore.active_reservations(profile.id)) == 1
     done = astore.finish_and_settle(run.id, RunResult(status="needs_input", message="question"))
-    assert done.status == "needs_input" and only_reservation(profile.id)["released_at"] is not None
-    assert astore.active_reservations(profile.id) == [] and not astore.has_unconfirmed_click(a.id)
-    assert store.get_application(a.id).status == "approved"  # nothing was sent: the application is untouched
+    assert done.status == "failed" and done.result.submit_clicked
+    assert only_reservation(profile.id)["released_at"] is None
+    assert astore.outstanding_attempt(a.id).id == run.id
+    assert store.get_application(a.id).status == "failed"
 
 
 def test_pending_reservation_is_kept_and_firm_when_submit_clicked_is_true(profile, app):
@@ -313,15 +314,16 @@ def test_a_final_click_reservation_is_firm_even_if_the_result_says_not_clicked(p
     assert only_reservation(profile.id)["released_at"] is None and store.get_application(a.id).status == "failed"
 
 
-def test_submitted_run_marks_application_and_job_and_keeps_the_reservation(profile, app):
+def test_claimed_submission_with_reservation_is_not_an_attempt_bound_receipt(profile, app):
     a = cvs.approve(app.id, 1)
     run = astore.start_run(a.id, 1, "submit", "user", out_dir)
     reserve_nav(a, run)
     reserve(a, run, trigger="user")
     astore.finish_and_settle(run.id, RunResult(status="submitted", message="ok"), sent_origin_url="https://careers.exemple.test/jobs/42")
     cur = store.get_application(a.id)
-    assert cur.status == "submitted" and cur.sent_origin_url == "https://careers.exemple.test/jobs/42"
-    assert db.get_job(a.job_id).status == "applied"
+    assert cur.status == "failed" and cur.sent_origin_url is None
+    assert db.get_job(a.job_id).status != "applied"
+    assert astore.outstanding_attempt(a.id).id == run.id
     assert only_reservation(profile.id)["released_at"] is None
 
 
@@ -331,7 +333,7 @@ def test_submitted_run_whose_application_changed_is_flagged_not_resendable(profi
     reserve(a, run, trigger="user")
     store.set_status(a.id, "draft")  # edited meanwhile: cannot become submitted
     done = astore.finish_and_settle(run.id, RunResult(status="submitted", message="ok"))
-    assert "ne pas la renvoyer" in done.message and done.status == "submitted"
+    assert "Envoi non confirmé" in done.message and done.status == "failed"
     assert store.get_application(a.id).status == "failed"
 
 
@@ -362,7 +364,10 @@ def test_a_pending_reservation_blocks_a_second_application_with_the_same_role_or
     with pytest.raises(ApplyError, match="même offre"):
         reserve(other, r2, trigger="user", role="y", url="same-url")
     assert astore.get_run(r2.id).nav_clicked_at is None
-    astore.finish_and_settle(r1.id, RunResult(status="needs_input"))  # released: the role is free again
+    astore.finish_and_settle(r1.id, RunResult(status="needs_input"))
+    with pytest.raises(ApplyError, match="même offre"):
+        reserve_nav(other, r2, role="same-role", url="same-url")
+    astore.resolve_attempt(app.id, sent=False, run_id=r1.id)
     reserve_nav(other, r2, role="same-role", url="same-url")
 
 

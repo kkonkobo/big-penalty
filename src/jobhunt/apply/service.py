@@ -13,7 +13,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Literal
+from typing import Callable, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -21,13 +21,12 @@ from pydantic import BaseModel, Field
 from jobhunt import db
 from jobhunt.apply import accounts, policy
 from jobhunt.apply import scoped_choices, store as apply_store
-from jobhunt.apply.engine import Letter, Uploads, run_application
+from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.facts import answers_path as facts_answers_path
 from jobhunt.apply.facts import build_facts, custom_answers, load_answers, norm_question, save_custom_answers, trusted_hosts
 from jobhunt.apply.missing_answers import editable_custom
 from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR
-from jobhunt.apply.letter import ensure_letter
 from jobhunt.apply.planner import LLMPlanner
 from jobhunt.apply.store import ApplyRun
 from jobhunt.apply.types import FilledField, Mode, Question, RunResult
@@ -39,7 +38,6 @@ from jobhunt.cv.errors import CVError
 from jobhunt.cv.master import MasterError, load_master
 from jobhunt.cv.store import Application
 from jobhunt.db import now
-from jobhunt.dedupe import canonical_url
 from jobhunt.filelock import try_lock, unlock
 from jobhunt.freshness import age_days
 from jobhunt.llm import LLMError, get_llm
@@ -339,24 +337,12 @@ def _default_verifier(llm: _Llm):
     return LLMAnswerVerifier(llm.get())
 
 
-def _confirm_accounts(res: RunResult, hosts: set[str], email: str) -> None:
-    """A password created for a signup is `pending` until the run got past the account pages: a later `form` / `confirmation`
-    step, or the site now waiting for the e-mail link (`needs_email`). Only then is the account `active` (known to the engine)."""
-    if not hosts or not email:
-        return
-    kinds = [st.page_kind for st in res.steps]
-    last_account = max((i for i, k in enumerate(kinds) if k in ("account_login", "account_signup")), default=-1)
-    past = last_account >= 0 and any(k in ("form", "confirmation") for k in kinds[last_account + 1:])
-    if past or res.status in ("needs_email", "submitted"):
-        for h in hosts:
-            with contextlib.suppress(ApplyError):
-                accounts.set_state(h, email, "active")
-
-
-async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, headless: bool | None, pool, planner,
-                 llm: _Llm, verifier=None, out: list[RunResult] | None = None, attended: bool = False) -> RunResult:
+async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: str, pool, planner,
+                 llm: _Llm, verifier=None, out: list[RunResult] | None = None) -> RunResult:
     """`out` receives the engine's result the moment it returns, so a cancellation / error during the page cleanup that
     follows cannot lose it."""
+    if mode == "submit":
+        return RunResult(status="blocked", message=UNSUPPORTED_DISPATCH)
     profile = db.get_profile(app.profile_id)
     try:
         master = load_master(app.profile_id)
@@ -365,20 +351,9 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
     facts = build_facts(profile, master if master and master.is_confirmed else None, load_answers(app.profile_id), job)  # type: ignore[arg-type]
     cv_pdf = cvs.safe_pdf(app)
     assert cv_pdf is not None and job.origin_url
-    started_origin = job.origin_url  # the link this run was started with: it must still be the job's link at the final click
+    started_origin = job.origin_url
     host = _host(started_origin)
-    account_email = (facts.get("account_email").value if facts.get("account_email") else None) or ""
     challenge: list[bool] = []
-
-    pw_hosts: set[str] = set()  # hosts a password was asked for during this run (account pages)
-
-    def password(h: str) -> str:
-        pw_hosts.add(h)
-        return accounts.create_password(h, account_email)  # creates (state `pending`) when there is none: a signup needs it
-
-    def account_known(h: str) -> bool:
-        """Does an account REALLY exist on that host (stored password and state `active`)? Errors -> False."""
-        return accounts.account_known(h, account_email)
 
     async def goto(page, url: str) -> None:
         try:
@@ -393,59 +368,20 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
         trusted = []
     host_allowed = make_host_allowed(started_origin, trusted)
 
-    async def before_submit() -> list[str]:
-        cur, cur_job = cvstore.get_application(app.id), db.get_job(app.job_id)
-        if cur is None:
-            return ["candidature introuvable"]
-        if cur.current_rev != app.current_rev:
-            return ["le CV a changé pendant l'envoi"]
-        out = policy.submit_problems(cur, cur_job, trigger=trigger, run_id=run_.id)  # type: ignore[arg-type]
-        if cur_job is not None and cur_job.origin_url != started_origin:
-            out.append("le lien de l'offre a changé pendant l'envoi")
-        return out
-
-    def reserve(pending: bool) -> Callable[[], Awaitable[None]]:
-        """Hook awaited right before a click that may send the form: atomically re-check the daily cap and the duplicates and
-        reserve this send (pending for a navigation click, firm for the final one). Idempotent per run."""
-        async def hook() -> None:
-            cur_job = db.get_job(app.job_id) or job
-            apply_store.reserve_send(
-                run_.id, profile_id=app.profile_id, application_id=app.id, trigger=trigger,
-                role_key=policy.normalize_role(cur_job.company, cur_job.title), url_key=canonical_url(started_origin),
-                daily_cap=get_settings().apply_daily_cap, pending=pending)
-        return hook
-
-    async def letter() -> Letter | None:
-        return await ensure_letter(app, job, master, llm.get()) if master is not None else None
-
     if planner is None:
         planner = LLMPlanner(llm.get())
         if verifier is None:
             verifier = _default_verifier(llm)
-    submit = mode == "submit"
-    # A dry run never types a password nor creates an account: it gets its OWN browser profile, so it never meets an
-    # authenticated session or an account's saved draft (those belong to real sends).
-    site = ("apply-" if submit else "applydry-") + accounts.registrable_host(host)
-
-    async def progress(partial: RunResult) -> None:
-        apply_store.save_progress(run_.id, partial)  # ApplyError (run no longer active): the engine does not click
-
-    effective_headless = headless if headless is not None else getattr(pool, "headless", get_settings().headless)
-    # A visible window waits for the user to solve a CAPTCHA, except in an unattended automatic pass (nobody is there)
-    captcha_wait_s = 0.0 if effective_headless or (trigger == "auto" and not attended) else get_settings().apply_captcha_wait_s
-    async with pool.page(app.profile_id, site, headless) as page:
+    site = "applydry-" + accounts.registrable_host(host)
+    async with pool.page(app.profile_id, site, True) as page:
         res = await run_application(
-            page, url=started_origin, facts=facts, planner=planner, uploads=Uploads(cv_pdf=cv_pdf, letter=letter), mode=mode,
+            page, url=started_origin, facts=facts, planner=planner, uploads=Uploads(cv_pdf=cv_pdf), mode="dry_run",
             out_dir=Path(run_.out_dir or _run_dir(job.id, run_.id)), job_title=job.title, company=job.company or "",
-            password=password, account_known=account_known, before_submit=before_submit if submit else None,
-            on_submit_click=reserve(False) if submit else None, on_nav_click=reserve(True) if submit else None,
             host_allowed=host_allowed, verifier=verifier,
-            max_steps=get_settings().apply_max_steps, goto=goto, on_progress=progress if submit else None,
-            captcha_wait_s=captcha_wait_s,
+            max_steps=get_settings().apply_max_steps, goto=goto,
             choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(started_origin)) if trigger == "user" else None)
         if out is not None:
             out.append(res)
-        _confirm_accounts(res, pw_hosts, account_email)
     if challenge and res.status == "failed":
         res = res.model_copy(update={"status": "needs_human", "message": "Un défi anti-robot doit être résolu à la main."})
     return res
@@ -493,8 +429,8 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
         try:
             if own_pool:
                 pool = BrowserPool(headless=headless)
-            result = await _drive(app, job, run_, mode=mode, trigger=trigger, headless=headless, pool=pool, planner=planner,
-                                  llm=shared_llm, verifier=verifier, out=returned, attended=attended)
+            result = await _drive(app, job, run_, mode=mode, trigger=trigger, pool=pool, planner=planner,
+                                  llm=shared_llm, verifier=verifier, out=returned)
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
             result, crashed = RunResult(status="failed", message=f"Erreur technique ({type(e).__name__})."), True
         except asyncio.CancelledError as e:  # the row must not stay `running`: settle it, then let the cancellation through
@@ -502,7 +438,7 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
         if crashed and returned:  # the engine had finished: cleanup failed or was cancelled afterwards, its result stands
             result, crashed = returned[0], False
         # Settlement is synchronous (no await): a cancellation arriving during the cleanup below cannot strand the run.
-        done = _settle(run_, job, mode, result, crashed)
+        done = _settle(run_, mode, result, crashed)
     finally:
         try:
             if own_pool and pool is not None:
@@ -535,24 +471,14 @@ def _drop_bad_origin(job) -> None:
                   (json.dumps(extra, ensure_ascii=False), job.id, job.profile_id))
 
 
-def _settle(run_: ApplyRun, job, mode: Mode, result: RunResult, crashed: bool) -> ApplyRun:
+def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool) -> ApplyRun:
     if mode != "submit":
         return apply_store.finish_run(run_.id, result)
-    # Only `result.submit_clicked` (the engine's report) decides, plus, when the engine gave no answer (crash / cancellation),
-    # a click recorded in the database by the reservation hooks.
     row = apply_store.get_run(run_.id) if crashed else None
     if row is not None and row.result is not None:  # the engine gave no result: keep what it reported before (steps, deductions)
         result = result.model_copy(update={"steps": row.result.steps, "final_url": row.result.final_url,
                                            "submit_clicked": row.result.submit_clicked})
-    if row and (row.submit_clicked_at or row.nav_clicked_at):
-        result = result.model_copy(update={"submit_clicked": True})
-    sent_url = canonical_url(job.origin_url) if job.origin_url else None
-    try:
-        return apply_store.finish_and_settle(run_.id, result, sent_origin_url=sent_url)
-    except ApplyError:
-        raise
-    except Exception:  # noqa: BLE001 - the first attempt rolled back as a whole: record the safe version (never resendable)
-        return apply_store.finish_and_settle(run_.id, result, sent_origin_url=sent_url, record_sent=False)
+    return apply_store.finish_and_settle(run_.id, result)
 
 
 # ---------------------------------------------------------------- batches

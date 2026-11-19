@@ -128,7 +128,7 @@ class BrowserPool:
                 self._pw = await async_playwright().start()
             headless = self.headless if headless is None else headless
             kwargs = dict(
-                user_data_dir=str(self.profile_dir(profile_id, site)),
+                user_data_dir="" if site.startswith("applydry-") else str(self.profile_dir(profile_id, site)),
                 headless=headless,
                 no_viewport=True,  # real window size, like a human
                 locale="fr-FR",

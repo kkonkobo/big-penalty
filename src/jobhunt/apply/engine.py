@@ -1,66 +1,10 @@
-"""Apply engine: drives ONE application in an open browser page, step by step.
+"""Read-only browser inspection for generic ATS pages.
 
-loop { settle -> snapshot -> captcha? -> planner -> VALIDATE -> verify -> execute -> screenshot -> click }.
-The planner is untrusted; everything it proposes is checked here against the FactSheet, the page snapshot and the cited fact
-(`answer_check`): an exact identity fact is typed by code (and only in a field whose VISIBLE label its `label_re` accepts);
-every other answer (free text, choice, tick, upload) goes to ONE independent verifier call per step which says `supported` /
-`plausible` (a reasonable deduction: filled, logged as `inferred` with its basis) / `contradiction` / `hard_fact` (dropped, a
-question when the field is required). Hard facts (birth, nationality, address, IDs, work permit...) are never deduced, in code
-too. With no verifier, only answers that code can back (verbatim fact, strict date re-formatting, option equal to the fact)
-go through.
-
-Destination binding (both modes): before data is entered or a file uploaded on a step, and again before every click made after
-data entry, the top-level page host, the host of the frame holding each field / button and the host of the form's action
-(`action` / `formaction`, or a link's href) must satisfy `host_allowed` (loopback always passes; None = no restriction).
-Otherwise nothing is typed / clicked, the run is `blocked` and `RunResult.untrusted_host` names the host.
-
-`dry_run` is STRUCTURALLY unable to send, whatever the button labels say:
-- once ANY candidate data was entered (`touched`) no click is performed at all (cookie banners are dismissed before data entry:
-  if one still covers the form the run just ends `ready`); the run ends `ready` (first form page filled, later steps untested);
-- before data, only `cookies` and `open_form` clicks (and `next` on a page without any fillable field); `signup` / `login` are
-  never clicked, nothing at all is entered on an account page, no password is typed;
-- a route handler on the browser context (installed before the first navigation, kept for the whole run) aborts EVERY
-  `document` request (any method, main frame, iframes, popups) once data was entered: the engine itself never navigates after
-  that, so any navigation is page-initiated (native form.submit() GET or POST, location change). The run ends `ready`;
-- popups opened after data entry are closed, never followed. It never presses Enter;
-- at the end of the run every page of the run is sent to `about:blank` (kills pending timers such as a delayed form.submit()),
-  then the guard is removed after a short wait.
-RESIDUAL LIMIT: a page script that sends the data by XHR / fetch / beacon from a change handler cannot be told apart from the
-uploads and validation calls of a normal form (all are non-document requests): it is NOT blocked.
-
-Page-decided "post-data" (dry run): a click on a submit control (button without type=button, input submit / image) of a `<form>`
-(the live element's `.form`, closest form only when null) that already holds a value or a selected file is refused whatever the
-planner called it (run ends `ready`). If a page cannot be sent to about:blank at the end, the request guard stays installed.
-
-The destination is read from the live control at click time (`.form` owner, `formaction`, link href); a control of a form whose
-destination cannot be resolved is `blocked` ("destination du formulaire illisible"). In submit mode `before_submit()` runs ONCE per
-step, before the first field interaction (a refusal = nothing entered), and is not repeated for a click of the same step. The
-unanswered-required-question check precedes every click that is final or post-data (only a pre-data cookies / open_form click and
-a real cookie-banner button are exempt), whatever role the planner gave it. `nav_pending`: from a recorded post-data navigation
-click until a snapshot shows a continuing form, every result carries `submit_clicked`.
-`inferred` is False only for answers code establishes (verbatim fact, strict date, option equal to the fact, code-accepted CV,
-or an exact user-confirmed choice) or a `custom_*` fact confirmed by the verifier; other accepted answers carry an inference basis.
-
-RESIDUAL LIMIT (accepted by the owner): the real network egress of a trusted page (third-party scripts, redirects of the employer's
-own endpoint) is not enforced: legitimate ATS post to other domains. At most ONE final dispatch per run; a field error after a
-post-data click never re-opens clicking (the owner checks on the company's site).
-
-`submit` mode fails closed: no `before_submit` guard -> blocked. `before_submit()` is awaited before EVERY click made after any
-candidate data was entered in the run (account pages and cookie banners included); only clicks before any data entry skip it.
-The click is then announced: `on_submit_click` for a final click (sets `RunResult.submit_clicked`), `on_nav_click` for any other
-post-data click (navigation label, signup / login, cookie button): awaited right before the click, if it raises there is no
-click (`blocked`). Both may be called several times per run (the service makes them idempotent). The live element is re-read
-right before every click and must still be the exact element tagged in the snapshot. After a non-final click made with
-application data entered, the engine decides STRUCTURALLY whether the application may have been sent: when the next page no
-longer holds a form (no file input and fewer than 3 fillable fields) `submit_clicked` is set; when a form is still there the
-flow continues. RESIDUAL LIMIT: a navigation-labelled button that sends AND is followed by another real form (or a page with 3+
-fillable fields) is not detected as a send; a review page without fields after a "Suivant" is treated as possibly sent.
-`submitted` needs ALL of: a (possibly) sending click, none of the fields filled on that page (nor the clicked button) present
-any more, no validation error, a confirmation phrase in the visible text (`CONFIRM_RE`) and the planner saying `confirmation`;
-anything less after such a click is `failed` "Envoi non confirmé" with `submit_clicked`. Data and passwords are never typed on
-a non-https page (loopback excepted). Secrets typed in the run are masked ("•••", also URL-encoded) in everything that leaves
-the engine, and no screenshot is taken any more once a secret was typed. The token `submit_clicked` is stripped from every
-string of the result: `RunResult.submit_clicked` is the only signal.
+Load the page without candidate data, take the browser offline, then inspect and
+validate a proposed plan without dispatching browser actions. Offline routing is
+defence in depth, not a reason to put candidate data in an executable document.
+Generic live dispatch remains disabled until an ATS-specific adapter can bind both
+the candidate-data operation and its receipt to this attempt.
 """
 
 from __future__ import annotations
@@ -166,6 +110,8 @@ TOKEN_RE = re.compile(r"submit_clicked", re.I)   # bookkeeping token of the serv
 FIELD_ERROR_MSG = ("Le site signale une erreur de saisie après le clic : vérifier sur le site de l'entreprise si la candidature "
                    "est partie")
 UNCONFIRMED_MSG = "Envoi non confirmé : vérifier sur le site de l'entreprise"
+UNSUPPORTED_DISPATCH = "Envoi bloqué : aucun adaptateur d'envoi et de reçu vérifié pour ce site."
+DRY_UNTESTED = "Simulation non testée : inspection hors ligne, sans saisie, fichier ni clic sur le site."
 # What the live control is, read at click time: its destination (the form it OWNS - `.form`, so an explicit form="id" wins over
 # the closest ancestor, which is used only when `.form` is null - or a link's href), whether it is a submit control and whether
 # its form already holds data (a text-like value or a selected file; hidden inputs, boxes and radios do not count).
@@ -1574,11 +1520,12 @@ class _Run:
         return request.url.split("#")[0].split("?")[0] == fi.get("action")
 
     async def run(self) -> RunResult:
-        if self.mode == "submit" and self.before_submit is None:
-            res = self._end("blocked", "Envoi bloqué : garde-fou d'envoi absent.")
+        if self.mode == "submit":
+            res = self._end("blocked", UNSUPPORTED_DISPATCH)
             res.finished_at = datetime.now()
             return res
         ctx = self.page.context
+        offline = False
 
         def on_page(p: Page) -> None:  # (a bound builtin is not accepted as a Playwright handler)
             self.all_pages.append(p)
@@ -1593,8 +1540,9 @@ class _Run:
             try:
                 # any document request once data was entered; before that, any NON-GET one (a dry run never needs one: its pre-data
                 # clicks are cookie banners and "Postuler" links)
-                if request.resource_type == "document" and (self.touched or (request.method != "GET" and self._guarded_frame(request))
-                                                           or self._is_form_get_submission(request)):
+                if offline or request.method not in {"GET", "HEAD"}:
+                    await route.abort()
+                elif request.resource_type == "document" and (self.touched or self._is_form_get_submission(request)):
                     # Aborted in every case. It ENDS the run only when it can be our doing: after data entry, or right after
                     # a click of ours (a saved draft being posted). A widget that posts while the page loads (e.g. an
                     # "apply with LinkedIn" iframe) is just not loaded.
@@ -1614,6 +1562,8 @@ class _Run:
         try:
             try:
                 await (self.goto or _default_goto)(self.page, self.url)
+                offline = True
+                await ctx.set_offline(True)
                 res = await self._loop()
             except LLMError as e:
                 res = self._end("failed", f"Planificateur indisponible ({e.code}).")
@@ -1633,6 +1583,7 @@ class _Run:
                 if released:  # a page that could not be sent to about:blank keeps the guard: the caller closes it
                     with contextlib.suppress(Exception):
                         await ctx.unroute("**/*", guard)
+                        await ctx.set_offline(False)
         res.steps = self.steps
         res.final_url = self.final_url
         res.submit_clicked = self.final_clicked or self.nav_pending
@@ -1867,7 +1818,7 @@ class _Run:
                 return self._unconfirmed()
             if self.mode == "dry_run" and kind in ACCOUNT_KINDS:  # nothing at all is entered on an account page
                 await self._shot(log)
-                return self._end("ready", "Le site demande un compte, créé uniquement pour un vrai envoi : rien n'a été envoyé (simulation).")
+                return self._end("blocked", DRY_UNTESTED)
 
             v = self._validate(plan, snap, resolve)
             await self._verify(v)
@@ -1886,18 +1837,20 @@ class _Run:
             # page URL, so a form that keeps asking for the file cannot loop.
             page_key = urldefrag(self.page.url).url
             uploads_first = [it for it in v.items if it.act.op in ("upload_cv", "upload_letter")]
-            split = (SPLIT_UPLOADS and bool(uploads_first) and len(uploads_first) < len(v.items)
+            split = (self.mode == "submit" and SPLIT_UPLOADS and bool(uploads_first) and len(uploads_first) < len(v.items)
                      and page_key not in self.upload_split)
             if split:
                 self.upload_split.add(page_key)
                 v.items = uploads_first
+            if self.mode == "dry_run":
+                handled.update(it.field.ref for it in v.items)
             if self.mode == "submit" and v.items:  # policy gate BEFORE the first field interaction of the step (a tick / choice can
                 bad = await self._gate(n)           # trigger page behaviour): nothing is entered when it says no
                 if bad is not None:
                     return bad
             dirty = False
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
-            for it in v.items:
+            for it in v.items if self.mode == "submit" else ():
                 try:
                     await self._live_decisions(snap, it.field, approved_choices, pending=pending_choices, applying=it)
                 except _DecisionHold as hold:
@@ -2034,9 +1987,11 @@ class _Run:
             if v.notes:
                 log.note = self._r("; ".join(([log.note] if log.note else []) + v.notes))[:900]
             await self._shot(log)
-            if v.questions and guarded:
+            if v.questions and (guarded or self.mode == "dry_run"):
                 return self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
                                  v.questions)
+            if self.mode == "dry_run":
+                return self._end("blocked", DRY_UNTESTED)
 
             if v.click is None:
                 idle = 0 if handled else idle + 1
@@ -2170,14 +2125,11 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           max_steps: int = 12, goto: Callable[[Page, str], Awaitable[None]] | None = None,
                           on_progress: Callable[[RunResult], Awaitable[None]] | None = None, captcha_wait_s: float = 0.0,
                           account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None) -> RunResult:
-    """Fill (dry_run) or fill and send (submit) the application at `url` on the caller's open `page`.
-    Guarantees: dry_run never sends; submit without `before_submit` is blocked; every filled value traces to a known fact or is
-    a recorded deduction; data is only entered / sent on hosts accepted by `host_allowed` (or `allowed_hosts`, the legacy set;
-    both None = unrestricted, loopback always passes); secrets never reach logs or results. `on_submit_click` is awaited right
-    before a final click, `on_nav_click` right before any other click made after data entry (submit mode). `on_progress(result)` is
-    awaited after those hooks and right before the dispatch of every potentially sending click, with a redacted `status="running"`
-    result (steps so far); if it raises the click is not made (`blocked`). `captcha_wait_s` > 0: a visible CAPTCHA is waited for
-    (polling, no interaction) before the run gives up with `needs_human`."""
+    """Inspect `url` on the caller's open page without submitting or interacting.
+
+    Legacy dispatch callbacks do not authorize generic live sends. Dry callers
+    should supply a fresh headless context, as the apply service does.
+    """
     if host_allowed is None and allowed_hosts:
         hosts = {h.lower() for h in allowed_hosts}
         host_allowed = lambda h: h.lower() in hosts  # noqa: E731

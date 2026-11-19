@@ -152,17 +152,13 @@ def save_progress(run_id: int, result: RunResult) -> None:
             raise ApplyError(NOT_ACTIVE)
 
 
-def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | None = None, record_sent: bool = True) -> ApplyRun:
-    """End of a SUBMIT run, in ONE transaction: the run row, its reservation and the application / job status.
-    clicked = the engine reported `submit_clicked`, or the run is `submitted`, or the final-click reservation was made.
-    - not clicked: the run's PENDING reservation is released (the engine saw the form continue after each navigation click);
-    - clicked: the reservation is made firm and kept (possibly sent or sent);
-    - `submitted`: application -> submitted (+ the URL it went to) and job -> applied; if the application can no longer
-      take that status it is marked failed with SENT_NOT_RECORDED_NOTE and the message says so;
-    - any other status once clicked: application -> failed "envoi non confirmé".
-    `record_sent=False` (fallback after an unexpected error of the first attempt): a `submitted` result is NOT recorded as
-    submitted but flagged SENT_NOT_RECORDED_NOTE. Raises ApplyError (nothing written) when the row is not the application's newest run or is not `running`.
-    A recorded submission also stores the run as `applications.sent_run_id`."""
+def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | None = None) -> ApplyRun:
+    """Preserve any possible send atomically; no generic engine result is an attempt-bound receipt.
+
+    The legacy URL argument is not receipt evidence. Only operator settlement currently confirms
+    a send or releases its hold. A new adapter must authenticate and correlate its receipt before
+    automatic settlement can be introduced here.
+    """
     from jobhunt.cv import store as cvstore  # noqa: PLC0415 - cv.store does not import this module; kept lazy anyway
     from jobhunt.cv.errors import CVError  # noqa: PLC0415
 
@@ -175,31 +171,16 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
                 or c.execute("SELECT MAX(id) FROM application_runs WHERE application_id=?", (run["application_id"],)).fetchone()[0] != run_id):
             raise ApplyError(NOT_ACTIVE)
         if run["mode"] == "submit":
-            clicked = bool(result.submit_clicked or result.status == "submitted" or run["submit_clicked_at"])
+            held = c.execute("SELECT 1 FROM apply_reservations WHERE run_id=? AND released_at IS NULL", (run_id,)).fetchone()
+            clicked = bool(held or result.submit_clicked or result.status == "submitted"
+                           or run["submit_clicked_at"] or run["nav_clicked_at"])
             if clicked:
                 c.execute("UPDATE apply_reservations SET pending=0 WHERE run_id=? AND released_at IS NULL", (run_id,))
                 if not run["submit_clicked_at"]:
                     c.execute("UPDATE application_runs SET submit_clicked_at=? WHERE id=?", (ts, run_id))
-            else:
-                c.execute("UPDATE apply_reservations SET released_at=? WHERE run_id=? AND pending=1 AND released_at IS NULL",
-                          (ts, run_id))
-            app_id = run["application_id"]
-            if result.status == "submitted":
-                try:
-                    if not record_sent:
-                        raise CVError("statut non enregistré")
-                    cvstore.tx_mark_submitted(c, app_id, run["rev"], sent_origin_url=sent_origin_url)
-                    c.execute("UPDATE applications SET sent_run_id=? WHERE id=?", (run_id, app_id))
-                    c.execute("UPDATE jobs SET status='applied' WHERE id=(SELECT job_id FROM applications WHERE id=?)"
-                              " AND profile_id=(SELECT profile_id FROM applications WHERE id=?)", (app_id, app_id))
-                except CVError as e:  # it WAS sent: record that and keep it from being resent
-                    with _suppress(CVError):
-                        cvstore.tx_force_failed(c, app_id, SENT_NOT_RECORDED_NOTE)
-                    result = result.model_copy(update={
-                        "message": f"{SENT_NOT_RECORDED_NOTE} ({type(e).__name__}). {result.message}".strip()})
-            elif clicked:
                 with _suppress(CVError):  # already submitted / withdrawn: nothing to flag
-                    cvstore.tx_force_failed(c, app_id, UNCONFIRMED_NOTE)
+                    cvstore.tx_force_failed(c, run["application_id"], UNCONFIRMED_NOTE)
+                result = result.model_copy(update={"status": "failed", "submit_clicked": True, "message": UNCONFIRMED_NOTE})
         c.execute("UPDATE application_runs SET status=?, message=?, result_json=?, finished_at=? WHERE id=?",
                   (result.status, result.message, result.model_copy(update={"finished_at": finished}).model_dump_json(), ts, run_id))
     return get_run(run_id)  # type: ignore[return-value]
