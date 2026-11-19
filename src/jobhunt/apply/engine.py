@@ -541,6 +541,7 @@ class _Run:
         self.autonomous = None
         self.consent_codes = set()
         self.live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None
+        self.attended_accounts = False
         self.verifier, self.host_allowed = verifier, host_allowed
         self.max_steps, self.goto = max_steps, goto
         self.on_progress, self.captcha_wait_s = on_progress, captcha_wait_s
@@ -985,7 +986,8 @@ class _Run:
         if (fresh.url != snap.url or fresh.has_captcha or current is None or current.form != target.form
                 or current.kind != target.kind or current.destination != target.destination or current.native_submit != target.native_submit
                 or current.name != target.name or current.label != target.label or current.wording != target.wording
-                or current.group != target.group or current.autocomplete != target.autocomplete):
+                or current.group != target.group or current.autocomplete != target.autocomplete
+                or current.automation_id != target.automation_id):
             raise _DecisionHold(self._end("blocked", "Le formulaire a changé depuis la lecture : action annulée."))
         if applying and applying.used == "confirmed_form_choice":
             entry = self.choice_fields.get(target.ref)
@@ -1655,6 +1657,8 @@ class _Run:
         return self.mode == "dry_run"
 
     def _account_handoff(self) -> RunResult:
+        if self.mode == "supervised" and self.attended_accounts:
+            return self._end("needs_human", "Connectez-vous ou créez le compte vous-même.")
         return self._end("blocked", DRY_UNTESTED)
 
     async def _run_page(self) -> RunResult:
@@ -2388,6 +2392,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           account_known: Callable[[str], bool] | None = None, choices: dict[str, int] | None = None,
                           supervised_attempt: Attempt | None = None,
                           before_field: Callable[[str], None] | None = None, current_step: bool = False, generic_step: bool = False,
+                          attended_accounts: bool = False,
                           live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None,
                           autonomous=None, autonomous_attempt: Attempt | None = None,
                           diagnostics: DispatchDiagnostics | None = None) -> RunResult:
@@ -2433,4 +2438,5 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     flow.autonomous = autonomous
     if diagnostics is not None:
         flow.diagnostics = diagnostics
+    flow.attended_accounts = attended_accounts
     return await flow.run()

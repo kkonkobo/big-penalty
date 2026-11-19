@@ -246,6 +246,7 @@ _JS = r"""
       catch (_) { destination = null; }
     }
     return {ref, kind, label: '', name: el.getAttribute('name') || '', placeholder: el.getAttribute('placeholder') || '',
+      automation_id: (el.getAttribute('data-automation-id') || '').slice(0, 120),
       required: false, options: [], value: '', accept: '', group: '', error: '', prio: false, form: formKey(el),
       autocomplete: el.getAttribute('autocomplete') || '', destination, native_submit: !!el.form && isSubmitter(el),
       choice_destination: ['select', 'radio', 'checkbox', 'combobox'].includes(kind) ? choiceDestination(el.form) : null,

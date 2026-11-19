@@ -1,4 +1,4 @@
-"""Trusted, code-registered ATS adapters. No production adapters are installed."""
+"""Trusted, code-registered ATS adapters."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from jobhunt.apply.planner import Planner
 from jobhunt.apply.types import DispatchDiagnostics, RunResult
 
 Capability = Literal["supervised", "unattended"]
-Boundary = Literal["account_creation", "login_otp", "cv_upload_parse", "draft_write", "final_submit"]
+Boundary = Literal["account_creation", "login_otp", "field_entry", "cv_upload_parse", "draft_write", "final_submit"]
 BoundaryPolicy = Literal["auto", "pause_for_human", "forbidden"]
 ReceiptType = Literal["first_party_confirmation", "candidate_home_listing", "correlated_email", "none"]
 Outcome = Literal["confirmed", "not_sent", "uncertain"]
@@ -182,19 +182,32 @@ class Match:
 
 class Registry:
     def __init__(self) -> None:
-        self._adapters: dict[tuple[str, str], tuple[Adapter, dict[str, ReceiptType]]] = {}
+        self._adapters: dict[tuple[str, str], tuple[Adapter, dict[str, ReceiptType], ReceiptType]] = {}
+        self._supervised_domains: dict[str, tuple[Adapter, ReceiptType]] = {}
+
+    def register_supervised_domain(self, adapter: Adapter, *, domain: str, receipt_kind: ReceiptType) -> None:
+        """Recognize only subdomains; domain entries cannot enroll unattended tenants."""
+        domain = domain.lower()
+        if (not domain or domain in self._supervised_domains or adapter.capability != "supervised"
+                or not adapter.name or not adapter.boundaries or adapter.retry_rule != "never"
+                or receipt_kind not in RECEIPT_TYPES):
+            raise ValueError("Invalid supervised ATS domain registration")
+        self._supervised_domains[domain] = (adapter, receipt_kind)
 
     def register(self, adapter: Adapter, *, host: str, origin_ats: str = "",
-                 unattended_tenants: Mapping[str, ReceiptType] | None = None) -> None:
+                 unattended_tenants: Mapping[str, ReceiptType] | None = None,
+                 supervised_receipt_kind: ReceiptType = "none") -> None:
         key = (host.lower(), origin_ats)
         evidence = unattended_tenants or {}
         if (not host or not adapter.name or not adapter.boundaries or adapter.retry_rule != "never"
                 or getattr(adapter, "capability", "supervised") not in ("supervised", "unattended")
                 or (evidence and getattr(adapter, "capability", "supervised") != "unattended")
+                or (supervised_receipt_kind != "none" and (supervised_receipt_kind not in RECEIPT_TYPES
+                    or adapter.capability != "supervised"))
                 or any(not tenant or kind not in RECEIPT_TYPES for tenant, kind in evidence.items())
                 or key in self._adapters):
             raise ValueError("Invalid or duplicate ATS adapter registration")
-        self._adapters[key] = (adapter, dict(evidence))
+        self._adapters[key] = (adapter, dict(evidence), supervised_receipt_kind)
 
     def find(self, url: str | None, origin_ats: str | None, dom_markers: frozenset[str] = frozenset()) -> Match | None:
         url = clean_url(url, navigation=True)
@@ -203,9 +216,17 @@ class Registry:
         except ValueError:
             return None
         entry = self._adapters.get((host, origin_ats or "")) or self._adapters.get((host, ""))
-        if not url or not entry:
+        if not url:
             return None
-        adapter, allowed = entry
+        if entry:
+            adapter, allowed, supervised_kind = entry
+        else:
+            domain_entry = next((item for domain, item in self._supervised_domains.items()
+                                 if host.endswith("." + domain)), None)
+            if domain_entry is None:
+                return None
+            adapter, supervised_kind = domain_entry
+            allowed = {}
         if not 0.9 <= adapter.matches(url, dom_markers) <= 1:
             return None
         requisition = adapter.resolve(url, dom_markers)
@@ -215,7 +236,18 @@ class Registry:
         if any(not value or origin(value) != value for value in requisition.write_origins):
             return None
         capability = "unattended" if attested != "none" and canonical_identity(requisition.tenant, requisition.requisition_id) else "supervised"
-        return Match(adapter, requisition, capability, attested if capability == "unattended" else "none")
+        return Match(adapter, requisition, capability, attested if capability == "unattended" else supervised_kind)
 
 
 registry = Registry()
+
+
+def _register_production_adapters() -> None:
+    from jobhunt.apply.workday import DOMAINS, WorkdayAdapter
+
+    adapter = WorkdayAdapter()
+    for domain in DOMAINS:
+        registry.register_supervised_domain(adapter, domain=domain, receipt_kind="candidate_home_listing")
+
+
+_register_production_adapters()

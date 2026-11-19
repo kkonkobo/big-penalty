@@ -699,13 +699,21 @@ def apply_send(app_ids: Annotated[list[int], typer.Argument(help="numéros de ca
 
 @apply_app.command("resolve")
 def apply_resolve(app_id: int, run_id: Annotated[int, typer.Option("--run-id", min=1)],
-                  sent: Annotated[bool, typer.Option("--sent/--not-sent", help="résultat vérifié : envoyée / non envoyée")]) -> None:
+                  sent: Annotated[bool, typer.Option("--sent/--not-sent", help="résultat vérifié : envoyée / non envoyée")],
+                  workday_posting: Annotated[str, typer.Option("--workday-posting", help=(
+                      "URL de l’offre vérifiée dans Candidate Home, uniquement si la candidature est envoyée (pas un brouillon)."))] = "") -> None:
     """Confirme le résultat de l'essai indiqué, uniquement après avoir vérifié sa réception ou sa non-réception."""
     from jobhunt.apply.errors import ApplyError
-    from jobhunt.apply.service import resolve_unconfirmed
+    from jobhunt.apply.service import reconcile_workday_submission, resolve_unconfirmed
     from jobhunt.cv.errors import CVError
 
     try:
+        if workday_posting:
+            if not sent:
+                raise ApplyError("--workday-posting exige --sent et une candidature envoyée dans Candidate Home.")
+            receipt = asyncio.run(reconcile_workday_submission(app_id, run_id, workday_posting))
+            console.print(f"Candidature Workday confirmée dans Candidate Home : {receipt.reference}.", markup=False)
+            return
         out = resolve_unconfirmed(app_id, sent=sent, run_id=run_id)
     except (ApplyError, CVError) as e:
         console.print(f"Erreur : {e}", markup=False)

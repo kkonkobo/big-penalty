@@ -25,7 +25,7 @@ from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Ma
 from jobhunt.apply.autonomous import Audience
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
-from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url
+from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url, is_bound_pdf
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, resolved_identity
 from jobhunt.apply.facts import answers_path as facts_answers_path
@@ -640,8 +640,26 @@ async def _drive(app: Application, job, run_: ApplyRun, *, mode: Mode, trigger: 
     site = f"apply-supervised-{host}" if request else "applydry-" + accounts.registrable_host(host)
     async with pool.page(app.profile_id, site, not request) as page:
         browser_guard = None
+        read_only_fill = bool(request and match and match.adapter.boundaries.get("field_entry") == "auto")
+        upload_pending = False
+        handed_off = False
+
+        def allow_fill_write(network_request) -> bool:
+            nonlocal upload_pending
+            if handed_off:
+                return True
+            if (not upload_pending or network_request.method != "POST" or network_request.is_navigation_request()
+                    or origin(network_request.url) not in match.requisition.write_origins
+                    or not is_bound_pdf(network_request.headers.get("content-type", ""), network_request.post_data_buffer,
+                                        request.pdf)):
+                return False
+            gate._enter("cv_upload_parse", network_request.url)
+            upload_pending = False
+            return True
+
         if request and not page.is_closed():
-            browser_guard = RecipientGuard(frozenset({origin(started_origin), *(match.requisition.write_origins if match else ())}))
+            browser_guard = RecipientGuard(frozenset({origin(started_origin), *(match.requisition.write_origins if match else ())}),
+                                           allow_write=allow_fill_write if read_only_fill else None)
             await browser_guard.install(page)
 
         if not request:
@@ -1003,11 +1021,11 @@ def resolve_unconfirmed(app_id: int, *, sent: bool, run_id: int | None = None) -
     return cvstore.get_application(app_id)  # type: ignore[return-value]
 
 
-async def reconcile_attempt(run_id: int) -> Receipt | None:
+async def reconcile_attempt(run_id: int, *, evidence: object = None) -> Receipt | None:
     """Check a held adapter attempt without dispatching or opening a new write boundary."""
     with send_lock():
         attempt = apply_store.held_binding(run_id)
-        if not attempt or not attempt.adapter:
+        if not attempt or not attempt.adapter or (evidence is not None and attempt.adapter != "workday"):
             return None
         outstanding = apply_store.outstanding_attempt(attempt.application_id)
         app = cvstore.get_application(attempt.application_id)
@@ -1019,11 +1037,24 @@ async def reconcile_attempt(run_id: int) -> Receipt | None:
                 or match.requisition.tenant != attempt.tenant
                 or match.requisition.requisition_id != attempt.requisition_id):
             return None
-        receipt = await match.adapter.verify_receipt(attempt)
+        receipt = await match.adapter.verify_receipt(attempt, evidence=evidence)
         if not isinstance(receipt, Receipt) or not clean_receipt(receipt, attempt):
             return None
         apply_store.resolve_attempt(attempt.application_id, run_id=run_id, sent=receipt.outcome == "confirmed", receipt=receipt)
         return receipt
+
+
+async def reconcile_workday_submission(app_id: int, run_id: int, posting_url: str) -> Receipt:
+    """Record the operator's explicit confirmation of a submitted Candidate Home listing."""
+    from jobhunt.apply.workday import CandidateHomeEvidence
+
+    attempt = apply_store.held_binding(run_id)
+    if not attempt or attempt.application_id != app_id or attempt.adapter != "workday":
+        raise ApplyError("Essai Workday introuvable.")
+    receipt = await reconcile_attempt(run_id, evidence=CandidateHomeEvidence(attempt.nonce, posting_url, "submitted"))
+    if receipt is None:
+        raise ApplyError("Le poste Workday confirmé ne correspond pas à l'essai en attente.")
+    return receipt
 
 
 def inferred_answers(app_id: int) -> list[FilledField]:

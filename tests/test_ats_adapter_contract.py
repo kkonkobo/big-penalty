@@ -10,13 +10,15 @@ from urllib.parse import urlsplit
 import pytest
 
 from apply_cv_helpers import make_app, make_job
-from apply_fakes import FixtureServer, ScriptedPlanner, act, fast, page, server  # noqa: F401
+from apply_fakes import FixtureServer, ScriptedPlanner, act, fast, page, sample_facts, server  # noqa: F401
 from apply_service_fakes import FakePool
 from cv_fakes import save_confirmed
 from jobhunt import db
 from jobhunt.apply import service, store
-from jobhunt.apply.adapters import Dispatch, Receipt, Registry, Requisition
-from jobhunt.apply.types import StepPlan
+from jobhunt.apply.adapters import Dispatch, Receipt, Registry, Requisition, clean_receipt, registry as production_registry
+from jobhunt.apply.snapshot import take_snapshot
+from jobhunt.apply.types import Fact, StepPlan
+from jobhunt.apply.workday import CandidateHomeEvidence, WorkdayAdapter, WorkdayPlanner
 from jobhunt.config import get_settings
 from jobhunt.cv import service as cvs
 
@@ -242,3 +244,149 @@ async def test_supervised_adapter_fill_uses_live_consent_guard(server, page, pro
         await page.close()
         result = await asyncio.wait_for(task, timeout=6)
     assert result.status == "needs_input" and store.outstanding_attempt(app.id).id == result.id
+
+
+WORKDAY_POSTING = "https://demo.wd3.myworkdayjobs.com/en-US/External/job/Paris/Engineer_JR123"
+
+
+@pytest.fixture
+def workday_registry(server, monkeypatch):
+    class LoopbackWorkday(WorkdayAdapter):
+        def resolve(self, url, markers):
+            if urlsplit(url).netloc != urlsplit(server.base).netloc or not urlsplit(url).path.startswith("/workday-"):
+                return None
+            return replace(super().resolve(WORKDAY_POSTING, markers), write_origins=(server.base,))
+
+        def matches(self, url, markers):
+            return float(self.resolve(url, markers) is not None)
+
+    registry = Registry()
+    registry.register(LoopbackWorkday(), host="127.0.0.1", supervised_receipt_kind="candidate_home_listing")
+    monkeypatch.setattr(service, "registry", registry)
+    return registry
+
+
+def test_workday_production_registry_is_supervised():
+    match = production_registry.find(WORKDAY_POSTING, "careers_site")
+    assert match.capability == "supervised" and match.receipt_kind == "candidate_home_listing"
+    assert match.requisition == Requisition("demo.wd3.myworkdayjobs.com/external", "JR123",
+                                            ("https://demo.wd3.myworkdayjobs.com",))
+    assert production_registry.find("https://wd5.myworkdaysite.com/recruiting/example/External/job/Stage_R12/apply", None)
+    assert production_registry.find(WORKDAY_POSTING.replace("en-US", "fr-FR") + "/apply?utm_source=fixture", None) == match
+    for url in (WORKDAY_POSTING.replace(".com/", ".com.fixture.test/"), WORKDAY_POSTING.replace("demo.wd3.", ""),
+                WORKDAY_POSTING.replace("/Paris/", "/%2E%2E/"), WORKDAY_POSTING.rsplit("/job", 1)[0],
+                WORKDAY_POSTING.replace("JR123", "unknown") + "?reqId=JR123",
+                "https://careers.example.test/job/JR123?applyUrl=" + WORKDAY_POSTING):
+        assert production_registry.find(url, "workday") is None
+
+
+async def test_workday_planner_maps_synthetic_steps(server, page):
+    planner = WorkdayPlanner()
+    facts = sample_facts()
+    facts.facts.extend([Fact(key="country", label="Country", value="France"),
+                        Fact(key="job_source", label="Job source", value="University"),
+                        Fact(key="graduation_date", label="Graduation date", value="2027-09-01"),
+                        Fact(key="available_from", label="Start date", value="September 2027"),
+                        Fact(key="custom_1", label="Have you built a robot?", value="Yes")])
+
+    async def plan():
+        snapshot, _ = await take_snapshot(page)
+        return await planner.plan(snapshot, facts)
+
+    await page.goto(server.url("workday-information"))
+    result = await plan()
+    assert [(action.fact, action.op) for action in result.actions] == [("first_name", "fill"), ("country", "select")]
+    assert any(q.kind == "combobox" and q.options == ["University", "Referral"] for q in result.unknown)
+    await page.locator("#country option[value=FR]").evaluate("option => option.disabled = true")
+    await page.locator("#options li").first.evaluate("option => option.textContent = 'Other'")
+    result = await plan()
+    assert all(action.fact != "country" for action in result.actions)
+    assert any(q.kind == "combobox" and q.options == ["Other", "Referral"] for q in result.unknown)
+
+    await page.get_by_text("Save and Continue").click()
+    assert [action.op for action in (await plan()).actions] == ["upload_cv"]
+    await page.get_by_text("Save and Continue").click()
+    result = await plan()
+    assert [(action.fact, action.value) for action in result.actions] == [("graduation_date", "2027-09-01"), ("custom_1", "Yes")]
+    assert any("Start Date" in q.label for q in result.unknown)
+    for _ in range(2):
+        await page.get_by_text("Save and Continue").click()
+        assert not (await plan()).actions
+    await page.goto(server.url("workday-auth"))
+    assert (await plan()).page_kind == "account_login" and not (await plan()).actions
+    await page.get_by_text("Continue to verification").click()
+    assert (await plan()).page_kind == "email_verification" and not (await plan()).actions
+    assert not server.posts
+
+
+@pytest.mark.parametrize("step", ["experience", "autosave", "auth", "otp", "foreign-upload"])
+async def test_workday_supervised_contract(step, workday_registry, server, page, profile, tmp_path, fast, monkeypatch):
+    master = save_confirmed(profile.id)
+    job = make_job(profile, url=server.url("workday-experience" if step == "foreign-upload" else "workday-" + step))
+    app = make_app(profile, job, tmp_path, master_hash=master.content_hash)
+    cvs.approve(app.id, app.current_rev)
+    if step == "experience":
+        check_pdf = service.is_bound_pdf
+
+        def verify_reservation_at_upload(content_type, body, pdf):
+            attempt = store.held_binding(store.last_run(app.id).id)
+            assert attempt and store.binding_active(attempt) and attempt.nonce
+            assert (attempt.rev, attempt.url, attempt.pdf_sha256) == (
+                app.current_rev, job.origin_url, hashlib.sha256(pdf).hexdigest())
+            return check_pdf(content_type, body, pdf)
+
+        monkeypatch.setattr(service, "is_bound_pdf", verify_reservation_at_upload)
+
+    class Pool(FakePool):
+        async def goto(self, page, url):
+            await super().goto(page, url)
+            if step == "foreign-upload":
+                await page.evaluate("""() => {
+                    const field = document.querySelector('#resume');
+                    field.addEventListener('change', event => {
+                        event.stopImmediatePropagation();
+                        fetch('http://localhost:' + location.port + '/workday-upload', {method: 'POST', body: field.files[0]});
+                    }, true);
+                }""")
+
+    assert (await service.run(app.id, mode="submit", trigger="auto")).status == "blocked"
+    task = asyncio.create_task(service.run(app.id, mode="supervised", trigger="user", pool=Pool(page)))
+    if step in {"autosave", "foreign-upload"}:
+        result = await asyncio.wait_for(task, timeout=10)
+        assert service.RECIPIENT_REFUSED in result.message and page.is_closed() and not server.posts
+        return
+    try:
+        await page.locator("aside").wait_for(timeout=8000)
+        if step == "experience":
+            assert await page.locator("#resume").evaluate("field => field.files[0].name") == "CV.pdf"
+            assert len(server.posts) == 1 and cvs.safe_pdf(app).read_bytes() in server.posts[0]["body"]
+        else:
+            assert not server.posts
+            assert await page.locator("input").first.input_value() == ""
+    finally:
+        await page.close()
+        result = await asyncio.wait_for(task, timeout=8)
+    attempt = store.held_binding(result.id)
+    assert attempt and store.outstanding_attempt(app.id).id == result.id
+    assert attempt.pdf_sha256 == hashlib.sha256(cvs.safe_pdf(app).read_bytes()).hexdigest()
+    if step != "experience":
+        assert result.result.steps[-1].page_kind == ("email_verification" if step == "otp" else "account_login")
+        return
+
+    duplicate = make_job(profile, url=server.url("workday-information"), title="Different title", company="Different company")
+    second = make_app(profile, duplicate, tmp_path, master_hash=master.content_hash)
+    cvs.approve(second.id, second.current_rev)
+    assert (await service.run(second.id, mode="supervised", trigger="user")).status == "blocked"
+
+    for evidence in (None, "Next worked", CandidateHomeEvidence(attempt.nonce, WORKDAY_POSTING, "draft"),
+                     CandidateHomeEvidence("wrong-nonce", WORKDAY_POSTING, "submitted"),
+                     CandidateHomeEvidence(attempt.nonce, WORKDAY_POSTING.replace("JR123", "JR124"), "submitted"),
+                     CandidateHomeEvidence(attempt.nonce, WORKDAY_POSTING.replace("demo", "other"), "submitted")):
+        assert await service.reconcile_attempt(result.id, evidence=evidence) is None
+    receipt = await service.reconcile_workday_submission(app.id, result.id, WORKDAY_POSTING)
+    assert clean_receipt(receipt, attempt) and receipt.kind == "candidate_home_listing" and receipt.reference == "JR123"
+    assert store.outstanding_attempt(app.id) is None and db.get_job(job.id).status == "applied"
+    with db.connect() as conn:
+        record = dict(conn.execute("SELECT * FROM apply_reservations WHERE run_id=?", (result.id,)).fetchone())
+    assert record["receipt_kind"] == "candidate_home_listing" and record["receipt_outcome"] == "confirmed"
+    assert json.loads(record["binding_json"])["requisition_id"] == "JR123" and WORKDAY_POSTING not in str(record)
