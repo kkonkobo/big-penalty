@@ -7,6 +7,20 @@ Created in [T3 Code](https://t3.codes).
 **Desktop app:** Big Penalty also ships as a double-click app for macOS and Windows. See
 [packaging/README.md](packaging/README.md) for installing, where keys and data live, and building.
 
+## Auto-apply diagnostics
+
+`uv run big-penalty apply diagnostics --days 30` reports completed apply runs from the local SQLite database.
+Use `--db PATH` to inspect a separate database, such as a fictional test database. The command opens the database
+read-only, does not migrate it, and does not read logs, run payloads, CVs or screenshots, open a browser, or make network calls.
+
+Rows show fixed ATS and reason codes with distinct application and run counts. Simulations and submit attempts are
+counted separately. Only engine symptoms attributed to a known ATS on at least two distinct applications receive a rank;
+application count sorts first, then run count. The ATS is the application's saved label, not a verified failure-page vendor.
+Unknown labels and unmatched historical reasons stay in `unknown` and `unclassified_failure` rather than exposing raw text.
+Missing input, CAPTCHA and email verification appear as handoffs, not ranked failures. A later auto pass does not reopen
+a CAPTCHA or email pause; use an explicit resume after checking the handoff. A ranked symptom is a lead for a fixture, not
+proof of an ATS bug or permission to retry an application.
+
 ## LLM providers
 
 Always start with `cd /Volumes/SSD/Dev/big-penalty && . ./env.sh`.
@@ -42,6 +56,21 @@ Measured defaults keep Anthropic first: `claude-opus-5-5` with medium effort
 for both tasks. OpenAI fallback uses `gpt-6-luna` for planning and `gpt-6.1-sol`
 for scoring, both at low effort. The benchmark favors Opus medium for avoiding
 high-ranked bad jobs, not for raw accuracy on the imbalanced dataset.
+
+## Verify an uncertain send
+
+In the local **Envois → À vérifier** queue, open the listed attempt to see its
+recorded click times, status and any local captures. A click or a technical failure
+is not a receipt. Confirm **sent** only when the company's application history or
+a matching confirmation email shows receipt; confirm **not sent** only when you
+can verify no submission occurred. If unsure, leave the attempt unresolved.
+The reservation stays in place until verification. A confirmed non-send returns
+the application to draft (unless another attempt still needs verification); only
+a manual send can retry it. No evidence is uploaded.
+
+For CLI use, `big-penalty apply list` shows the exact attempt ID.
+Use `big-penalty apply resolve APP_ID --run-id RUN_ID --sent` or `--not-sent`
+only after verifying that attempt. Bulk resolution requires verified `APP_ID:RUN_ID` pairs.
 
 ## Reproducible LLM benchmark
 

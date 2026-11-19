@@ -153,6 +153,10 @@ class JobTeaserSource(Source):
             label = ((h.get("contract") or {}).get("type") or {}).get("original_label") or ""
             company = h.get("company") or {}
             external = h.get("candidacy_type") == "EXTERNAL"
+            # some hits carry the employer's apply link; use it when it really leaves JobTeaser
+            direct = next((v for k in ("apply_url", "external_url", "candidacy_url", "application_url", "company_apply_url")
+                           if isinstance(v := h.get(k), str) and v.startswith(("http://", "https://"))
+                           and "jobteaser.com" not in v), None)
             posted = h.get("activated_at")
             return JobPosting(
                 source=self.name,
@@ -167,7 +171,7 @@ class JobTeaserSource(Source):
                 description=html_to_text(h.get("description")),
                 posted_at=datetime.fromtimestamp(posted, tz=timezone.utc) if posted else None,
                 apply_method="external" if external else "platform",
-                apply_url=None if external else f"{SITE}/fr/job-offers/{slug}",
+                apply_url=direct or (None if external else f"{SITE}/fr/job-offers/{slug}"),
                 experience_level=EXPERIENCE.get(h.get("work_experience_code") or ""),
                 raw=h,
             )

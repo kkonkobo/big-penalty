@@ -1,0 +1,12 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Postuler</title></head>
+<body><h1>Votre candidature</h1>
+<form method="post" action="/apply">
+ <label for="fn">Prénom *</label><input id="fn" name="first_name" required>
+ <h2>Contrôle de sécurité</h2>
+ <div class="iconcaptcha-widget iconcaptcha-success" style="width:320px;border:1px solid #888;padding:6px">
+  <div class="iconcaptcha-checkbox" style="padding:8px">Vérification réussie</div>
+  <div style="font-size:9px">IconCaptcha ©</div>
+  <input type="hidden" name="_iconcaptcha-token" value="abc">
+ </div>
+ <button type="submit">Valider ma candidature</button>
+</form></body></html>

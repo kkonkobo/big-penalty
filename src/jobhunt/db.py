@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from jobhunt.config import get_settings
 from jobhunt.freshness import (EXPIRY_RUN_WINDOW_DAYS, MAX_JOB_AGE_DAYS, effective_posted_at, expired_by_runs, is_new, is_stale,
@@ -131,6 +132,79 @@ MIGRATIONS: list[str] = [
             SELECT MAX(id) FROM applications WHERE status != 'withdrawn' GROUP BY profile_id, job_id);
     CREATE UNIQUE INDEX idx_applications_active ON applications(profile_id, job_id) WHERE status != 'withdrawn';
     """,
+    # 4: milestone 2b (apply on the origin ATS): who approved, when it was sent, and one row per dry-run / submit run.
+    """
+    ALTER TABLE applications ADD COLUMN approved_by TEXT;
+    ALTER TABLE applications ADD COLUMN submitted_at TEXT;
+    CREATE TABLE application_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+        rev INTEGER NOT NULL,
+        mode TEXT NOT NULL,
+        trigger TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        result_json TEXT,
+        out_dir TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+    );
+    CREATE INDEX idx_runs_app ON application_runs(application_id, id);
+    """,
+    # 5: crash-safe "possibly sent" bookkeeping: click time of a run, the URL an application was sent to, and one
+    # reservation per attempted send (consumes the daily cap and blocks duplicates until a human releases it).
+    """
+    ALTER TABLE application_runs ADD COLUMN submit_clicked_at TEXT;
+    ALTER TABLE applications ADD COLUMN sent_origin_url TEXT;
+    CREATE TABLE apply_reservations (
+        id INTEGER PRIMARY KEY,
+        profile_id INTEGER NOT NULL,
+        application_id INTEGER NOT NULL,
+        run_id INTEGER NOT NULL,
+        trigger TEXT NOT NULL,
+        role_key TEXT NOT NULL,
+        url_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        released_at TEXT
+    );
+    CREATE INDEX idx_reservations_profile ON apply_reservations(profile_id, released_at);
+    CREATE INDEX idx_reservations_app ON apply_reservations(application_id);
+    """,
+    # 6: durable record of navigation clicks (a pending reservation exists from the first click that follows entered data),
+    # and the pid of the process driving a run (a live owner is never taken over).
+    """
+    ALTER TABLE application_runs ADD COLUMN nav_clicked_at TEXT;
+    ALTER TABLE application_runs ADD COLUMN pid INTEGER;
+    ALTER TABLE apply_reservations ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+    """,
+    # 7: which run was the sending attempt of an application (set when it is recorded as submitted, also by a manual
+    # confirmation): the answers deduced in THAT run are the ones to prepare for the interview.
+    """
+    ALTER TABLE applications ADD COLUMN sent_run_id INTEGER;
+    """,
+    # 8: who approved the application when a run started ("auto" / "user").
+    """
+    ALTER TABLE application_runs ADD COLUMN approved_by TEXT;
+    """,
+    # 9: how many times the automatic pass regenerated the application's CV because its revision had blocking errors.
+    """
+    ALTER TABLE applications ADD COLUMN auto_regens INTEGER NOT NULL DEFAULT 0;
+    """,
+    """
+    ALTER TABLE application_runs ADD COLUMN operator_not_sent_at TEXT;
+    """,
+    """
+    ALTER TABLE application_runs ADD COLUMN origin_sha TEXT;
+    ALTER TABLE application_runs ADD COLUMN application_version TEXT;
+    """,
+    """
+    ALTER TABLE apply_reservations ADD COLUMN binding_json TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN dedupe_key TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN receipt_kind TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN receipt_outcome TEXT;
+    ALTER TABLE apply_reservations ADD COLUMN receipt_at TEXT;
+    CREATE UNIQUE INDEX idx_active_requisition ON apply_reservations(dedupe_key) WHERE released_at IS NULL;
+    """,
 ]
 
 
@@ -207,9 +281,9 @@ def connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=30000")
+        _enable_wal(conn)
+        conn.execute("PRAGMA foreign_keys=ON")
         if str(path) not in _migrated:
             _migrate(conn)
             _migrated.add(str(path))
@@ -217,6 +291,21 @@ def connect() -> Iterator[sqlite3.Connection]:
             yield conn
     finally:
         conn.close()
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    for delay in (0.01, 0.05, 0.15, 0.5, 1.0, None):
+        try:
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if mode.lower() != "wal":
+                raise sqlite3.OperationalError("SQLite could not enable WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if delay is None or (getattr(exc, "sqlite_errorcode", 0) & 255) not in (
+                sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+            ):
+                raise
+            time.sleep(delay)
 
 
 # ---------------------------------------------------------------- profiles
@@ -377,6 +466,22 @@ def get_job(job_id: int) -> MergedJob | None:
             return None
         sg = _sightings_by_job(c, [job_id])
     return _job_from_row(r, sg[job_id])
+
+
+def get_jobs(job_ids: Iterable[int]) -> dict[int, MergedJob]:
+    """Load jobs and their sightings by ID, omitting IDs that no longer exist."""
+    ids = list(dict.fromkeys(job_ids))
+    if not ids:
+        return {}
+    jobs = {}
+    with connect() as conn:
+        for offset in range(0, len(ids), 500):
+            chunk = ids[offset:offset + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(f"SELECT * FROM jobs WHERE id IN ({placeholders})", chunk).fetchall()
+            sightings = _sightings_by_job(conn, [row["id"] for row in rows])
+            jobs.update((row["id"], _job_from_row(row, sightings[row["id"]])) for row in rows)
+    return jobs
 
 
 def save_jobs(profile_id: int, jobs: list[MergedJob], *, removed: list[MergedJob] = ()) -> None:

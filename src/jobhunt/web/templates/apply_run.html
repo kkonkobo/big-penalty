@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% from "_apply_verification.html" import click_evidence, resolve_form %}
+{% block htmx %}{% endblock %}
+{% block title %}Envoi · {{ a.company if a else 'Exécution' }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ APPLY_MODE_LABELS.get(run.mode, run.mode) }}{% if a %} · {{ a.company or 'Entreprise non précisée' }}{% endif %}</h1>
+    <p class="muted">{% if a %}{{ a.job_title or '' }} · {% endif %}
+      {% if verification %}<span class="tag warn">À vérifier</span>
+      {% elif run.operator_not_sent_at %}<span class="tag">Vérifié : non envoyée</span>
+      {% else %}<span class="tag {{ APPLY_RUN_CLASS.get(run.status, '') }}">{{ APPLY_RUN_LABELS.get(run.status, run.status) }}</span>{% endif %}</p>
+  </div>
+  <div class="row">
+    <a class="btn" href="/apply">Retour aux envois</a>
+    {% if a %}<a class="btn" href="/applications/{{ a.id }}">Voir la candidature</a>{% endif %}
+    {% if can_send %}
+    <form method="post" action="/apply/send" onsubmit="return confirm('Envoyer 1 candidature sur le site de l\'entreprise ?')">
+      <input type="hidden" name="app_id" value="{{ a.id }}"><input type="hidden" name="rev_{{ a.id }}" value="{{ run.rev }}"><input type="hidden" name="origin_{{ a.id }}" value="{{ origin_sha }}">
+      <button class="btn primary">Envoyer cette candidature</button></form>
+    {% endif %}
+  </div>
+</div>
+{% if run.mode == 'dry_run' %}<div class="notice">Inspection seule : aucun champ rempli, aucun document joint, aucun clic.</div>{% endif %}
+{% if verification %}
+<section class="card" id="verification">
+  <h2>À vérifier · Essai n°{{ run.id }}</h2>
+  <p>Le statut technique ne dit pas si la candidature a été reçue. Les heures indiquent un clic prévu ou tenté, pas une réception.</p>
+  {{ click_evidence(run) }}
+  {% if run.result and run.result.final_url|http_url %}<p>Dernier site observé : {{ run.result.final_url|host }}</p>{% endif %}
+  <p>Vérifiez l’historique de vos candidatures sur le site de l’entreprise ou cherchez un e-mail de confirmation correspondant à cette offre.
+    L’absence d’e-mail ne prouve pas que rien n’a été envoyé. En cas de doute, ne choisissez aucun résultat.</p>
+  <p class="muted small">Les captures ci-dessous, si disponibles, restent locales et peuvent montrer le formulaire avant le clic.</p>
+  {{ resolve_form(a.id, run) }}
+</section>
+{% endif %}
+
+<dl class="facts wide">
+  <div><dt>Mode</dt><dd>{{ APPLY_MODE_LABELS.get(run.mode, run.mode) }}</dd></div>
+  <div><dt>Déclenchement</dt><dd>{{ triggers.get(run.trigger, run.trigger) }}</dd></div>
+  <div><dt>Début</dt><dd>{{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</dd></div>
+  <div><dt>Fin</dt><dd>{% if run.finished_at %}{{ run.finished_at.strftime('%d/%m/%Y %H:%M') }}{% else %}en cours{% endif %}</dd></div>
+  <div><dt>Version du CV</dt><dd>{{ run.rev }}</dd></div>
+  {% if verification or run.operator_not_sent_at %}<div><dt>Statut technique</dt><dd>{{ APPLY_RUN_LABELS.get(run.status, run.status) }}</dd></div>{% endif %}
+  {% if run.result and run.result.untrusted_host %}<div class="span"><dt>Site non approuvé</dt><dd>{{ run.result.untrusted_host }}</dd></div>{% endif %}
+  {% if run.message %}<div class="span"><dt>Message</dt><dd>{{ run.message }}</dd></div>{% endif %}
+</dl>
+
+{% if run.mode == 'supervised' and run.status == 'running' %}
+<form method="post" action="/apply/runs/{{ run.id }}/fill-step"><button class="btn">Remplir cette étape</button></form>
+{% endif %}
+
+{% for s in steps %}
+<section class="panel flush" id="step-{{ loop.index0 }}">
+  <div class="panel-head">
+    <h3>Étape {{ loop.index }} · {{ kinds.get(s.page_kind, s.page_kind) }}</h3>
+    {% if s.url|http_url %}<span class="muted small">{{ s.url|host }}</span>{% endif %}
+  </div>
+  {% if s.filled %}
+  <table class="tbl">
+    <thead><tr><th>Champ</th><th>Valeur saisie</th><th>Source</th></tr></thead>
+    <tbody>{% for f in s.filled %}
+      <tr><td>{{ f.label }}</td><td>{{ f.value }}{% if f.inferred %} <span class="tag warn">déduite</span>{% endif %}</td>
+        <td class="muted small">{{ f.fact or '—' }}{% if f.inferred and f.basis %}<div>{{ f.basis }}</div>{% endif %}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="panel-empty muted">Aucun champ rempli sur cette page.</p>{% endif %}
+  <div class="panel-foot">
+    {% if s.clicked %}<p class="small">Bouton cliqué : <strong>{{ s.clicked }}</strong></p>{% endif %}
+    {% if s.note %}<p class="muted small">{{ s.note }}</p>{% endif %}
+    {% if s.screenshot %}
+    <a href="/apply/runs/{{ run.id }}/shots/{{ loop.index0 }}" target="_blank" rel="noopener"><img class="shot" loading="lazy"
+       src="/apply/runs/{{ run.id }}/shots/{{ loop.index0 }}" alt="Capture de l'étape {{ loop.index }}"></a>
+    {% endif %}
+  </div>
+</section>
+{% else %}
+<p class="muted">Aucune étape enregistrée pour cette exécution.</p>
+{% endfor %}
+<style>
+  .panel.flush + .panel.flush{margin-top:1rem}
+  .shot{display:block;max-width:100%;max-height:22rem;border:1px solid var(--line);border-radius:var(--r)}
+</style>
+{% endblock %}

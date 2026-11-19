@@ -1,0 +1,10 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Candidature</title></head>
+<body><h1>Votre candidature</h1>
+<form method="post" action="/apply">
+ <label for="fn">Prénom *</label><input id="fn" name="first_name" required>
+ <label for="ct">Type de contrat *</label>
+ <select id="ct" name="contrat" required><option value="">Choisir...</option><option value="cdi" selected>CDI</option><option value="alt">Alternance</option></select>
+ <label for="pf">Indicatif téléphonique *</label>
+ <select id="pf" name="prefix" required><option value="33" selected>+33</option><option value="32">+32</option></select>
+ <button type="submit">Envoyer ma candidature</button>
+</form></body></html>

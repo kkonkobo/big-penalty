@@ -52,6 +52,8 @@
       </form>
     </div>
 
+    {% with item=apply_item %}{% include "_apply_card.html" %}{% endwith %}
+
     <div class="card">
       <h2>Adéquation avec l'annonce</h2>
       <p><strong>Mots-clés couverts :</strong> {% for k in a.tailored.matched_keywords %}<span class="tag ok">{{ k }}</span>{% else %}—{% endfor %}</p>

@@ -1,0 +1,15 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Offre - Exemple SA</title></head>
+<body><header id="sticky" style="position:sticky;top:0;background:#eee;min-height:20px"></header>
+<h1>Technicien mécatronique en alternance</h1><p>Exemple SA recrute.</p>
+<button id="apply" class="cta" type="button" onclick="location.href='/form'">Postulez maintenant</button>
+<script>
+// a sticky header keeps a HIDDEN duplicate of the call to action: a clone made right after the engine tagged the button, so it
+// carries the very same data-bp-ref attribute (and sits BEFORE the real button in the document)
+const sticky = document.getElementById('sticky');
+new MutationObserver(() => {
+  const b = document.getElementById('apply');
+  if (!b || !b.hasAttribute('data-bp-ref')) return;
+  const old = document.getElementById('dup'); if (old) old.remove();
+  const c = b.cloneNode(true); c.id = 'dup'; c.style.display = 'none'; sticky.appendChild(c);
+}).observe(document.body, {attributes: true, subtree: true, attributeFilter: ['data-bp-ref']});
+</script></body></html>

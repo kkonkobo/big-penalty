@@ -199,9 +199,10 @@ def safe_pdf(app: Application) -> Path | None:
     return real if real.is_file() and real.suffix.lower() == ".pdf" else None
 
 
-def is_eligible(app: Application) -> tuple[bool, list[str]]:
-    """Automatic submission gate. ALL must hold: no blocking error, verifier ran and passed, master confirmed and unchanged
-    since the CV was tailored, exactly this revision approved by hand without override, one-page PDF intact on disk."""
+def _revision_problems(app: Application, approval: list[str] | None = None, *, check_approved_sha: bool = False) -> list[str]:
+    """Reasons why the current revision cannot be sent without a human: blocking error, verifier not run / failed, master
+    unconfirmed or changed, PDF missing or tampered. `approval` = reasons about the approval itself (inserted before the PDF
+    check, keeps the historic order); `check_approved_sha` also compares the PDF with the hash recorded at approval."""
     reasons: list[str] = []
     if blocking(app.flags):
         reasons.append(f"{len(blocking(app.flags))} erreur(s) bloquante(s)")
@@ -217,18 +218,46 @@ def is_eligible(app: Application) -> tuple[bool, list[str]]:
         reasons.append("CV maître non confirmé")
     elif app.master_hash != master.content_hash:
         reasons.append("CV maître modifié depuis la génération")
-    if app.status != "approved" or app.approved_rev is None:
-        reasons.append("CV non approuvé")
-    elif app.approved_rev != app.current_rev:
-        reasons.append("la version approuvée n'est plus la version courante")
-    if app.approval_override:
-        reasons.append("approbation manuelle malgré des erreurs")
+    reasons += approval or []
     pdf = safe_pdf(app)
     if pdf is None or not app.pdf_sha256:
         reasons.append("PDF absent")
-    elif store.sha256_file(pdf) != app.pdf_sha256 or (app.status == "approved" and app.approved_sha256 != app.pdf_sha256):
+    elif store.sha256_file(pdf) != app.pdf_sha256 or (check_approved_sha and app.approved_sha256 != app.pdf_sha256):
         reasons.append("PDF modifié ou différent de celui approuvé")
+    return reasons
+
+
+def is_eligible(app: Application) -> tuple[bool, list[str]]:
+    """Automatic submission gate. ALL must hold: no blocking error, verifier ran and passed, master confirmed and unchanged
+    since the CV was tailored, exactly this revision approved (by hand without override, or automatically), one-page PDF
+    intact on disk."""
+    approval: list[str] = []
+    if app.status != "approved" or app.approved_rev is None:
+        approval.append("CV non approuvé")
+    elif app.approved_rev != app.current_rev:
+        approval.append("la version approuvée n'est plus la version courante")
+    if app.approval_override:
+        approval.append("approbation manuelle malgré des erreurs")
+    reasons = _revision_problems(app, approval, check_approved_sha=app.status == "approved")
     return not reasons, reasons
+
+
+def auto_approve(app_id: int, *, expected_rev: int | None = None) -> Application:
+    """Approve the CURRENT revision on behalf of the user (approved_by="auto"), only when it is a draft that would be eligible
+    for automatic sending. Never overrides errors. `expected_rev`: refused (StaleRevision) when the current revision differs.
+    Raises ApprovalError (French reasons joined) otherwise."""
+    app = store.get_application(app_id)
+    if app is None:
+        raise CVError("Candidature introuvable")
+    if expected_rev is not None and app.current_rev != expected_rev:
+        raise StaleRevision("Le CV a changé entre-temps : la version à approuver n'est plus la version courante")
+    approval = [] if app.status == "draft" else ["seul un brouillon peut être approuvé automatiquement"]
+    if app.current_rev < 1:
+        approval.append("aucune version du CV")
+    reasons = _revision_problems(app, approval)
+    if reasons:
+        raise ApprovalError("Approbation automatique refusée : " + " ; ".join(reasons))
+    return store.approve_revision(app_id, app.current_rev, file_sha256=store.sha256_file(safe_pdf(app)), approved_by="auto")
 
 
 def preview_html(app: Application) -> str:

@@ -1,0 +1,58 @@
+{% from "_apply_supervised.html" import launch_supervised %}
+{% macro status_box(st) -%}
+{% if st.running %}
+<div id="apply-status" class="notice" role="status" hx-get="/apply/status" hx-trigger="every 3s" hx-swap="outerHTML">
+  {% if st.batch %}Envoi en cours : {{ st.done }} sur {{ st.total }} terminée{{ 's' if st.done > 1 }}.{% else %}Un essai est en cours.{% endif %}
+  {% if st.batch and st.single %}{{ st.single }} essai{{ 's' if st.single > 1 }} en parallèle.{% endif %}
+  Cette page se met à jour toute seule.
+</div>
+{% endif %}
+{%- endmacro %}
+{#- Included by application.html: variable `item` (QueueItem or None). -#}
+{% if item is defined %}
+<div class="card" id="apply-state">
+  <h2>Envoi sur le site de l'entreprise</h2>
+  {% if item %}
+    {% set lr = item.last_run %}
+    <p><span class="tag {{ APPLY_BUCKET_CLASS.get(item.bucket, '') }}">{{ APPLY_BUCKET_LABELS.get(item.bucket, item.bucket) }}</span>
+      {% if item.auto %}<span class="tag">automatique</span>{% endif %}
+      {% if item.origin_host %}<span class="muted small">{{ item.origin_host }}</span>{% endif %}</p>
+    {% if item.bucket == 'needs_verification' %}
+    <p class="alert"><svg class="ic"><use href="#i-alert"/></svg><span>Envoi non confirmé : ne pas renvoyer.</span></p>
+    <p><a class="btn small" href="/apply/runs/{{ item.outstanding.id }}">Vérifier l’essai n°{{ item.outstanding.id }}</a></p>
+    {% elif lr %}
+    <p class="small"><a href="/apply/runs/{{ lr.id }}">Dernier essai</a> : {{ APPLY_MODE_LABELS.get(lr.mode, lr.mode) }},
+      <span class="tag {{ APPLY_RUN_CLASS.get(lr.status, '') }}">{{ APPLY_RUN_LABELS.get(lr.status, lr.status) }}</span>
+      <span class="muted">{{ lr.started_at|ago }}</span></p>
+    {% if lr.message %}<p class="muted small">{{ lr.message }}</p>{% endif %}
+    {% else %}<p class="muted small">Aucun essai pour l'instant.</p>{% endif %}
+    {% if item.bucket == 'paused' and item.pause_reason == 'input' %}
+    <p><a class="btn small" href="/profiles/{{ item.app.profile_id }}/answers">Compléter mes réponses</a></p>
+    {% endif %}
+    {% if apply_inferred %}
+    <h3>Réponses déduites (à connaître avant l'entretien)</h3>
+    <ul class="plain-list">{% for f in apply_inferred %}
+      <li><span><strong>{{ f.label }}</strong> : {{ f.value }}{% if f.basis %} <span class="muted small">({{ f.basis }})</span>{% endif %}</span></li>{% endfor %}</ul>
+    {% endif %}
+    {% if item.problems %}
+    <ul class="plain-list">{% for p in item.problems %}<li><span>{{ p }}</span></li>{% endfor %}</ul>
+    {% endif %}
+    <div class="row">
+      {% if item.bucket == 'paused' %}<a class="btn" href="/apply">Répondre dans la file d'envoi</a>{% endif %}
+      {% if (item.supervised or apply_duplicates) and item.app.status == 'approved' and not item.outstanding %}
+      {{ launch_supervised(item.app.id, item.app.current_rev, item.origin_sha, apply_duplicates|default({})) }}
+      {% elif item.supervised %}<span class="muted small">Approuvez le CV pour envoyer en mode supervisé.</span>{% endif %}
+      {% if (item.selectable or item.supervised) and item.app.status != 'failed' and item.bucket in ('to_validate', 'failed') %}
+      <form method="post" action="/applications/{{ item.app.id }}/apply/dry-run"><button class="btn">Essai à blanc</button></form>
+      {% endif %}
+      {% if item.selectable and item.app.status != 'failed' and item.bucket in ('to_validate', 'failed') %}
+      <form method="post" action="/apply/send" onsubmit="return confirm('Envoyer cette candidature sur le site de l\'entreprise ?')">
+        <input type="hidden" name="app_id" value="{{ item.app.id }}"><input type="hidden" name="rev_{{ item.app.id }}" value="{{ item.app.current_rev }}"><input type="hidden" name="origin_{{ item.app.id }}" value="{{ item.origin_sha }}">
+        <button class="btn">Envoyer cette candidature</button></form>
+      {% endif %}
+    </div>
+  {% else %}
+    <p class="muted small">Pas d'état d'envoi pour cette candidature (retirée ou non disponible).</p>
+  {% endif %}
+</div>
+{% endif %}

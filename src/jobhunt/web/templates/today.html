@@ -73,6 +73,38 @@
 
     <div class="stack">
       <div class="panel flush">
+        {% set sd = b.sends %}
+        <div class="panel-head"><h3>Envois</h3><a href="/apply?profile={{ p.id }}">Voir la file d'envoi</a></div>
+        {% if sd.to_validate or sd.paused or sd.failed or sd.sent_today %}
+        <ul class="plain-list">
+          {% for i in sd.paused[:3] %}
+          <li><a href="/apply?profile={{ p.id }}"><svg class="ic"><use href="#i-alert"/></svg>
+            <span><span class="pick-title">{{ i.app.job_title or 'Offre ' ~ i.app.job_id }}</span>
+            <span class="muted small">{{ i.app.company or 'Entreprise non précisée' }} ·
+              <span class="t-warn">{{ {'input': 'une réponse est attendue', 'email': 'e-mail à confirmer', 'human': 'CAPTCHA à résoudre'}.get(i.pause_reason, 'en pause') }}</span></span></span></a></li>
+          {% endfor %}
+          {% if sd.to_validate %}
+          <li><a href="/apply?profile={{ p.id }}"><svg class="ic"><use href="#i-doc"/></svg>
+            <span><span class="pick-title">{{ sd.to_validate|length }} candidature{{ 's' if sd.to_validate|length > 1 }} en attente de votre accord</span>
+            <span class="muted small">Cochez celles à envoyer sur les sites des entreprises</span></span></a></li>
+          {% endif %}
+          {% if sd.failed %}
+          <li><a href="/apply?profile={{ p.id }}"><svg class="ic"><use href="#i-x"/></svg>
+            <span><span class="pick-title">{{ sd.failed|length }} envoi{{ 's' if sd.failed|length > 1 }} en échec</span>
+            <span class="muted small t-bad">À vérifier</span></span></a></li>
+          {% endif %}
+          {% if sd.sent_today %}
+          <li><a href="/apply?profile={{ p.id }}"><svg class="ic"><use href="#i-check"/></svg>
+            <span><span class="pick-title">{{ sd.sent_today|length }} candidature{{ 's' if sd.sent_today|length > 1 }} envoyée{{ 's' if sd.sent_today|length > 1 }} aujourd'hui</span>
+            <span class="muted small">{{ sd.sent_today[:3]|map(attribute='app.company')|select|join(', ') }}</span></span></a></li>
+          {% endif %}
+        </ul>
+        {% else %}
+        <p class="panel-empty muted">Rien à envoyer pour l'instant. Une candidature apparaît ici dès que son CV est prêt.</p>
+        {% endif %}
+      </div>
+
+      <div class="panel flush">
         <div class="panel-head"><h3>CV à valider</h3>{% if b.drafts %}<a href="/applications">Toutes les candidatures</a>{% endif %}</div>
         {% if b.drafts %}
         <ul class="plain-list">

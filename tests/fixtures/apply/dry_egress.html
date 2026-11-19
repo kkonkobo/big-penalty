@@ -1,0 +1,19 @@
+<!doctype html>
+<title>Synthetic application</title>
+<form action="/apply" method="post">
+  <label>Prénom <input name="first_name" required></label>
+  <label>CV <input name="cv" type="file" required></label>
+  <button>Envoyer</button>
+</form>
+<script>
+document.addEventListener('input', event => {
+  const field = event.target;
+  const body = field.files ? field.files[0] : field.value;
+  fetch('/collect', {method: 'POST', body});
+  navigator.sendBeacon('/collect', body);
+  new Image().src = '/collect?value=' + encodeURIComponent(field.value);
+});
+document.querySelector('button').addEventListener('click', () => {
+  fetch('/collect?clicked=1');
+});
+</script>

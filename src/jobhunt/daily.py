@@ -26,6 +26,7 @@ HIGH_SCORE = 70
 TOP_N = 5
 
 SearchFn = Callable[..., Awaitable[Any]]
+ApplyFn = Callable[[int], Awaitable[Any]]  # profile_id -> ApplySummary (jobhunt.apply.service.daily_apply)
 
 
 class DailyLocked(Exception):
@@ -76,6 +77,7 @@ class ProfileSummary:
     raw_postings: int = 0
     run_id: int | None = None
     error: str | None = None  # real failure of the run (not a single source failing)
+    apply: Any = None  # ApplySummary of the automatic applications step (None = not run / failed)
 
 
 @dataclass
@@ -94,6 +96,14 @@ class DailyReport:
     @property
     def failed(self) -> bool:
         return any(p.error for p in self.profiles)
+
+    @property
+    def sent(self) -> int:
+        return sum(p.apply.sent for p in self.profiles if p.apply)
+
+    @property
+    def waiting(self) -> int:
+        return sum(p.apply.waiting for p in self.profiles if p.apply)
 
 
 def summarize_profile(profile_id: int, name: str, *, as_of: datetime | None = None) -> ProfileSummary:
@@ -118,12 +128,20 @@ def _plural(n: int, one: str, many: str) -> str:
 def format_summary(s: ProfileSummary) -> list[str]:
     """Lines (plain text, no markup) for one profile."""
     if s.error:
-        return [f"Profil {s.profile_id} ({s.name}) : ERREUR — {s.error}"]
+        return [f"Profil {s.profile_id} ({s.name}) : ERREUR — {s.error}"] + ([apply_line(s.apply)] if s.apply is not None else [])
     lines = [f"Profil {s.profile_id} ({s.name}) : {_plural(s.new, 'nouvelle offre', 'nouvelles offres')} aujourd'hui, "
              f"{s.high} ≥ {HIGH_SCORE}"]
     for i, t in enumerate(s.top, 1):
         lines.append(f"  {i}. {t.title} — {t.company} · fit {t.fit} · {_age_label(t.age)}")
+    if s.apply is not None:
+        lines.append(apply_line(s.apply))
     return lines
+
+
+def apply_line(a: Any) -> str:
+    """"Candidatures : 2 envoyées, 3 en attente de validation, 1 en pause, 0 échec"."""
+    return (f"Candidatures : {_plural(a.sent, 'envoyée', 'envoyées')}, {a.waiting} en attente de validation, "
+            f"{a.paused} en pause, {_plural(a.failed, 'échec', 'échecs')}")
 
 
 def log_line(when: datetime, s: ProfileSummary | None, message: str = "") -> str:
@@ -131,8 +149,12 @@ def log_line(when: datetime, s: ProfileSummary | None, message: str = "") -> str
     if s is None:
         return f"{ts} {message}"
     status = f"ERREUR {s.error}" if s.error else "ok"
-    return (f"{ts} profil={s.profile_id} run={s.run_id} statut={status} brutes={s.raw_postings} "
+    line = (f"{ts} profil={s.profile_id} run={s.run_id} statut={status} brutes={s.raw_postings} "
             f"nouvelles={s.new} >=70={s.high}")
+    if s.apply is not None:
+        a = s.apply
+        line += f" cv={a.prepared} envoyees={a.sent} attente={a.waiting} pause={a.paused} echecs={a.failed}"
+    return line
 
 
 def append_log(line: str, when: datetime, log_dir: Path | None = None) -> Path:
@@ -149,8 +171,12 @@ def _applescript_quote(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def notification_body(new: int, high: int, failed: bool = False) -> str:
+def notification_body(new: int, high: int, failed: bool = False, sent: int = 0, waiting: int = 0) -> str:
     body = f"{_plural(new, 'nouvelle offre', 'nouvelles offres')}, {high} ≥{HIGH_SCORE}"
+    if sent:
+        body += f", {_plural(sent, 'candidature envoyée', 'candidatures envoyées')}"
+    if waiting:
+        body += f", {waiting} à valider"
     return body + " (erreur)" if failed else body
 
 
@@ -170,7 +196,7 @@ def notify(title: str, body: str, *, platform: str | None = None, env: Mapping[s
 # ---------------------------------------------------------------- orchestration
 def run_daily(
     profile_ids: list[int] | None = None, *, search: SearchFn | None = None,
-    notify_fn: Callable[[str, str], Any] = notify, emit: Callable[[str], None] = print,
+    apply: ApplyFn | None = None, notify_fn: Callable[[str, str], Any] = notify, emit: Callable[[str], None] = print,
     now: Callable[[], datetime] | None = None, data_dir: Path | None = None,
 ) -> DailyReport:
     """Search every profile (or `profile_ids`) one after the other, headless, and report what is new today.
@@ -195,8 +221,17 @@ def run_daily(
         with daily_lock(data_dir, clock()):
             if search is None:
                 from jobhunt.pipeline import run_search as search  # noqa: PLC0415 - heavy imports only when needed
+                # The real apply step only goes with the real search (injected fakes never open a browser), and only once
+                # switched on (JOBHUNT_APPLY_DAILY=1): it spends LLM calls on CVs and may send applications.
+                if apply is None and get_settings().apply_daily:
+                    from jobhunt.apply.service import daily_apply  # noqa: PLC0415
+
+                    async def apply(pid: int) -> Any:
+                        return await daily_apply(pid, emit=emit)
             for p in profiles:
                 summary = _search_profile(p.id, p.name, search)
+                if apply is not None:
+                    summary.apply = _apply_profile(p.id, apply, emit)
                 report.profiles.append(summary)
                 append_log(log_line(clock(), summary), clock(), log_dir)
                 for line in format_summary(summary):
@@ -206,8 +241,17 @@ def run_daily(
         append_log(log_line(clock(), None, f"ignoré : {e}"), clock(), log_dir)
         emit(f"Déjà en cours, rien à faire : {e}")
         return report
-    notify_fn("Big Penalty", notification_body(report.new, report.high, report.failed))
+    notify_fn("Big Penalty", notification_body(report.new, report.high, report.failed, report.sent, report.waiting))
     return report
+
+
+def _apply_profile(profile_id: int, apply: ApplyFn, emit: Callable[[str], None]) -> Any:
+    """Prepare / send the applications of one profile. Never raises: the daily run must not fail because of it."""
+    try:
+        return asyncio.run(apply(profile_id))
+    except Exception as e:  # noqa: BLE001
+        emit(f"Candidatures : étape ignorée ({type(e).__name__})")
+        return None
 
 
 def _search_profile(profile_id: int, name: str, search: SearchFn) -> ProfileSummary:

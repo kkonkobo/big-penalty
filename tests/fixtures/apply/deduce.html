@@ -1,0 +1,14 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Candidature</title></head>
+<body><h1>Votre candidature</h1>
+<form method="post" action="/apply">
+ <label for="fn">Prénom *</label><input id="fn" name="first_name" required>
+ <label for="eng">Niveau d'anglais *</label>
+ <select id="eng" name="eng" required><option value="">Choisir...</option><option value="a">I can manage</option><option value="b">Fluent</option><option value="c">Beginner</option></select>
+ <label for="team">Avez-vous déjà travaillé en équipe ? (facultatif)</label>
+ <select id="team" name="team"><option value="">Choisir...</option><option value="o">Oui</option><option value="n">Non</option></select>
+ <label for="bd">Date de naissance *</label><input id="bd" name="birth" placeholder="JJ/MM/AAAA">
+ <label for="ad">Adresse postale *</label><input id="ad" name="addr">
+ <label for="nt">Nationalité *</label>
+ <select id="nt" name="nat" required><option value="">Choisir...</option><option value="fr">Française</option><option value="o">Autre</option></select>
+ <button type="submit">Envoyer ma candidature</button>
+</form></body></html>

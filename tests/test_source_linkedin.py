@@ -113,3 +113,63 @@ async def test_external_apply_missing_url_falls_through_to_existing_browser(sess
     result = await source.fetch_details(posting, SourceContext(profile_id=1, browser=browser))
     assert bool(result.apply_url) == bool(session)
     assert source._browser_detail.await_count == int(bool(session))
+
+
+# ------------------------------------------------------------------ external apply URL (guest page variants)
+
+from jobhunt.sources.linkedin import extract_external_apply_url  # noqa: E402
+
+_DETAIL_BODY = """<section class="top-card-layout"><h2 class="top-card-layout__title">Stage ingénieur systèmes</h2>
+<a class="topcard__org-name-link" href="https://fr.linkedin.com/company/orbitex">Orbitex Aerospace</a>
+{apply}</section>
+<div class="show-more-less-html__markup"><p>Mission de stage chez Orbitex.</p></div>"""
+
+
+@pytest.mark.parametrize("apply,expected", [
+    # 1. <code id="applyUrl"> comment block with a quoted externalApply redirect
+    ('<code id="applyUrl" style="display: none"><!--"https://www.linkedin.com/jobs/view/externalApply/4111?url=https%3A%2F%2Fcareers.orbitex.example%2Fjobs%2F42%3Futm_source%3Dli&urlHash=ab12&trk=public_jobs_apply-link-offsite"--></code>',
+     "https://careers.orbitex.example/jobs/42?utm_source=li"),
+    # 2. same block, HTML-escaped ampersands
+    ('<code id="applyUrl"><!--"https://www.linkedin.com/jobs/view/externalApply/4111?url=https%3A%2F%2Fcareers.orbitex.example%2Fjobs%2F42&amp;urlHash=ab12"--></code>',
+     "https://careers.orbitex.example/jobs/42"),
+    # 3. block already holding the employer URL
+    ('<code id="applyUrl"><!--"https://careers.orbitex.example/apply?jobId=42"--></code>', "https://careers.orbitex.example/apply?jobId=42"),
+    # 4. anchor with the offsite tracking name
+    ('<a class="apply-button" data-tracking-control-name="public_jobs_apply-link-offsite_sign-up-modal" href="https://www.linkedin.com/jobs/view/externalApply/4111?url=https%3A%2F%2Forbitex.example%2Fcareers%2F42&amp;refId=x">Postuler</a>',
+     "https://orbitex.example/careers/42"),
+    # 5. anchor straight to the employer
+    ('<a data-tracking-control-name="public_jobs_apply-link-offsite" href="https://orbitex.example/careers/42">Postuler</a>',
+     "https://orbitex.example/careers/42"),
+    # 6. /safety/go wrapper
+    ('<a class="apply-button" href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Forbitex.example%2Fj%2F42&trk=x">Apply</a>',
+     "https://orbitex.example/j/42"),
+])
+def test_external_apply_url_variants(apply, expected):
+    html = _DETAIL_BODY.format(apply=apply)
+    assert extract_external_apply_url(html) == expected
+    d = parse_detail(html)
+    assert d["external_url"] == expected and d["apply_kind"] == "external"
+    card = parse_search_cards((FX / "linkedin_search.html").read_text())[0]
+    p = apply_detail(card_to_posting(card), d)
+    assert p.apply_url == expected and p.apply_method == "external"
+
+
+def test_easy_apply_and_unserved_apply_url_leave_apply_url_empty():
+    easy = _DETAIL_BODY.format(apply='<a class="apply-button" data-tracking-control-name="public_jobs_apply-link-onsite" '
+                                     'href="https://www.linkedin.com/signup/cold-join?session_redirect=https%3A%2F%2Fwww.linkedin.com%2Fjobs%2Fview%2F4111">Candidature simplifiée</a>')
+    d = parse_detail(easy)
+    assert d["apply_kind"] == "easy_apply" and d["external_url"] is None
+    card = parse_search_cards((FX / "linkedin_search.html").read_text())[0]
+    p = apply_detail(card_to_posting(card), d)
+    assert p.apply_url is None and p.apply_method == "easy_apply"
+    # off-site job whose page does not serve the target: still "external", no url
+    bare = _DETAIL_BODY.format(apply='<a class="apply-button" data-tracking-control-name="public_jobs_apply-link-offsite_sign-up-modal" href="https://www.linkedin.com/signup/cold-join?trk=x">Postuler</a>')
+    d = parse_detail(bare)
+    assert d["apply_kind"] == "external" and d["external_url"] is None
+    # a target that is itself LinkedIn is never an employer URL
+    assert extract_external_apply_url('<code id="applyUrl"><!--"https://www.linkedin.com/jobs/view/externalApply/1?url=https%3A%2F%2Fwww.linkedin.com%2Fjobs%2Fview%2F2"--></code>') is None
+
+
+def test_redirect_unwrap_keeps_encoded_query_of_target():
+    u = "https://www.linkedin.com/jobs/view/externalApply/1?url=https%3A%2F%2Fx.fr%2Fj%3Fnext%3Dhttps%253A%252F%252Fy.fr&trk=a"
+    assert external_url_from_linkedin_redirect(u) == "https://x.fr/j?next=https%3A%2F%2Fy.fr"

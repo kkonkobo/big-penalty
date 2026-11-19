@@ -1,10 +1,12 @@
-"""Command line: `jobhunt serve | sources | profile-add | search | daily | schedule | shortlist | new | login`."""
+"""Command line: `jobhunt serve | sources | profile-add | search | daily | schedule | shortlist | new | login`,
+plus the sub-apps `cv` (tailored CVs) and `apply` (milestone 2b: list | dry-run | send | resolve | trust | answer | auto)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
+import sqlite3
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -169,6 +171,65 @@ def rescore(profile_id: int) -> None:
     res = asyncio.run(_rescore(profile_id, progress=progress))
     console.print(f"Offres : {res.unique_jobs} · réévaluées : {res.scored} · écartées d'avance : {res.prefiltered}")
     for e in res.errors:
+        console.print(f"[yellow]! {e}[/yellow]")
+
+
+@app.command("origins")
+def origins(
+    profile_id: int,
+    min_score: Annotated[float, typer.Option("--min-score", help="score minimal des offres à traiter")] = 50.0,
+    limit: Annotated[Optional[int], typer.Option("--limit", "-n", help="nombre maximal d'offres (meilleur score d'abord)")] = None,
+    force: Annotated[bool, typer.Option("--force", help="reprend aussi les origines sous le seuil de confiance")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="rapport seulement : rien n'est enregistré")] = False,
+    refetch: Annotated[bool, typer.Option("--refetch/--no-refetch", help="relit la page des annonces sans lien de candidature (LinkedIn...)")] = True,
+    details: Annotated[int, typer.Option("--details", help="nombre de lignes détaillées pour les échecs")] = 40,
+    trace: Annotated[int, typer.Option("--trace", help="affiche la trace complète (étapes, requêtes, candidats) des N premiers échecs")] = 0,
+) -> None:
+    """Retrouve le lien de l'entreprise (site carrières / ATS) des offres déjà enregistrées.
+
+    Reprend les offres au score voulu dont l'origine manque ou est un lien de site d'annonces (effacé s'il ne peut pas être
+    remplacé), en ignorant le cache d'échecs. Navigateur sans fenêtre. Le rapport ne contient que entreprises, titres et hôtes."""
+    from jobhunt import origin as origin_mod
+    from jobhunt.pipeline import reresolve_origins
+
+    if db.get_profile(profile_id) is None:
+        raise typer.BadParameter(f"profil {profile_id} introuvable")
+
+    def progress(done: int, total: int) -> None:
+        if done == total or done % 10 == 0:
+            console.print(f"  {done}/{total}")
+
+    rep = asyncio.run(reresolve_origins(profile_id, min_score=min_score, limit=limit, force=force, dry_run=dry_run,
+                                        refetch=refetch, headless=True, progress=progress))
+    mode = " [yellow](simulation : rien d'enregistré)[/yellow]" if dry_run else ""
+    console.print(f"\nOffres au score ≥ {min_score:g} : {rep.total} · avec lien entreprise avant : {rep.with_origin_before} · "
+                  f"après : {rep.with_origin_after}{mode}")
+    console.print(f"Reprises : {rep.tried} · liens entreprise trouvés : {rep.found} · liens d'annonces effacés : {rep.cleared} · "
+                  f"pages relues : {rep.refetched} (liens de candidature récupérés : {rep.apply_urls_found})")
+    if rep.li_calls:
+        console.print(f"Détails LinkedIn : {rep.li_calls} appel(s) · liens entreprise récupérés : {rep.li_links} · Easy Apply : {rep.li_easy} · "
+                      f"fermées : {rep.li_closed} · échecs : {rep.li_failures} · coût : {rep.li_cost:.4f} $")
+    if rep.by_via():
+        t = Table("étape", "trouvés", title="Liens trouvés par étape")
+        for via, n in rep.by_via().items():
+            t.add_row(via, str(n))
+        console.print(t)
+    if rep.by_reason():
+        t = Table("raison", "offres", title="Échecs par raison")
+        for code, n in rep.by_reason().items():
+            t.add_row(origin_mod.REASON_LABELS.get(code, code), str(n))
+        console.print(t)
+        misses = [r for r in rep.rows if not r.found]
+        t = Table("score", "entreprise", "poste", "raison", "détail", title=f"Échecs (meilleurs scores, {min(details, len(misses))}/{len(misses)})")
+        for r in misses[:details]:
+            t.add_row(str(int(r.score)), r.company[:28], r.title[:48], origin_mod.REASON_LABELS.get(r.reason, r.reason),
+                      r.detail + ("" if r.has_apply_url else " (sans lien de candidature)"))
+        console.print(t)
+        for r in misses[:trace]:
+            console.print(f"\n[bold]Trace — {r.company} | {r.title[:60]} (score {int(r.score)})[/bold]", markup=True)
+            for line in r.trace or ["(aucune trace : résultat issu du cache)"]:
+                console.print("  " + line, markup=False, highlight=False)
+    for e in sorted(set(rep.errors))[:5]:
         console.print(f"[yellow]! {e}[/yellow]")
 
 
@@ -421,6 +482,363 @@ def cv_list(profile: Annotated[Optional[int], typer.Option("--profile", "-p")] =
         t.add_row(str(a.id), str(a.job_id), (a.job_title or "")[:45], (a.company or "")[:25], a.status,
                   str(len(a.errors)), str(len(a.warnings)), a.cv_path or "")
     console.print(t)
+
+
+apply_app = typer.Typer(help="Candidature sur le site de l'entreprise : file d'envoi, simulation, envoi, réponses aux questions.",
+                        no_args_is_help=True)
+app.add_typer(apply_app, name="apply")
+HeadlessOpt = Annotated[Optional[bool], typer.Option("--headless/--headful", help="défaut : visible, sauf JOBHUNT_HEADLESS=1")]
+BUCKET_FR = {"to_validate": "à valider", "paused": "en pause", "sending": "en cours", "failed": "échec", "blocked": "bloquée",
+             "sent": "envoyée", "needs_verification": "à vérifier"}
+
+
+def _print_run(run) -> None:
+    console.print(f"Statut : {run.status} — {run.message}", markup=False, highlight=False)
+    if run.result and run.result.untrusted_host:
+        console.print(f"Site non approuvé : {run.result.untrusted_host} — `big-penalty apply trust PROFIL {run.result.untrusted_host}` "
+                      "pour lui faire confiance, puis relancer.", markup=False, highlight=False)
+    for st in (run.result.steps if run.result else []):
+        console.print(f"  étape {st.index} · {st.page_kind} · {st.url}", markup=False, highlight=False)
+        for f in st.filled:
+            note = f" (déduite : {f.basis})" if getattr(f, "inferred", False) else ""
+            console.print(f"    {f.label} ← {f.fact or f.op}{note}", markup=False, highlight=False)
+        if st.clicked:
+            console.print(f"    clic : {st.clicked}", markup=False, highlight=False)
+        if st.screenshot:
+            console.print(f"    capture : {st.screenshot}", markup=False, highlight=False)
+    if run.result and run.result.questions:
+        console.print("Questions : " + " ; ".join(q.label for q in run.result.questions), markup=False, highlight=False)
+
+
+@apply_app.command("list")
+def apply_list(profile: Annotated[Optional[int], typer.Option("--profile", "-p")] = None) -> None:
+    """File d'envoi : chaque candidature avec son état, son dernier essai et ce qui la bloque."""
+    from jobhunt.apply.service import queue
+
+    t = Table("id", "score", "entreprise", "poste", "état", "essai", "problèmes")
+    for i in queue(profile):
+        shown = i.outstanding or i.last_run
+        last = (f"n°{shown.id} · /apply/runs/{shown.id}" if i.outstanding else
+                f"{shown.status} — {shown.message}"[:60] if shown else "")
+        t.add_row(str(i.app.id), "" if i.score is None else f"{i.score:.0f}", (i.app.company or "")[:25], (i.app.job_title or "")[:40],
+                  BUCKET_FR[i.bucket], last,
+                  " ; ".join(([f"formulaire hébergé sur {i.untrusted_host} (apply trust)"] if i.untrusted_host else []) + i.problems)[:70])
+    console.print(t)
+
+
+@apply_app.command("diagnostics")
+def apply_diagnostics(
+    days: Annotated[int, typer.Option("--days", min=1, max=3650, help="nombre de jours à examiner")] = 30,
+    database: Annotated[Optional[Path], typer.Option("--db", help="autre base locale (ex. base de test)")] = None,
+) -> None:
+    """Bilan local agrégé des échecs et pauses, sans ouvrir de site ni envoyer de données."""
+    from jobhunt.apply.diagnostics import failure_breakdown
+
+    try:
+        groups = failure_breakdown(days=days, path=database)
+    except sqlite3.Error:
+        console.print("Diagnostic indisponible : base locale absente, illisible ou sans historique compatible.")
+        raise typer.Exit(1) from None
+    if not groups:
+        console.print(f"Aucun échec ni pause enregistré sur les {days} derniers jours.")
+        return
+    table = Table(padding=(0, 0))
+    for label in ("rang", "mode", "ATS", "catégorie", "motif", "dossiers", "essais"):
+        table.add_column(label, overflow="fold")
+    rank = 0
+    for group in groups:
+        if group.rankable:
+            rank += 1
+        table.add_row(str(rank) if group.rankable else "—", group.mode, group.ats, group.category, group.reason,
+                      str(group.applications), str(group.runs))
+    console.print(table)
+    if not rank:
+        console.print("Aucun échec moteur récurrent attribué à un ATS connu.")
+
+
+@apply_app.command("dry-run")
+def apply_dry_run(app_id: int, headless: HeadlessOpt = None) -> None:
+    """Inspecte le formulaire sans saisir de données, joindre de document ni cliquer."""
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.service import run
+
+    try:
+        res = asyncio.run(run(app_id, mode="dry_run", trigger="user", headless=headless))
+    except ApplyError as e:
+        console.print(f"Erreur : {e}", markup=False)
+        raise typer.Exit(1) from None
+    _print_run(res)
+    if res.status not in ("ready", "needs_input", "needs_email", "needs_human"):
+        raise typer.Exit(1)
+
+
+@apply_app.command("supervised")
+def apply_supervised(app_id: int) -> None:
+    """Ouvre une candidature approuvée dans un navigateur visible. Vous cliquez sur Envoyer."""
+    from jobhunt import db
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.service import SUPERVISED_HANDOFF, origin_digest, run
+    from jobhunt.apply.destination import audit_url, clean_url
+    from jobhunt.apply.store import confirmation_tokens, potential_duplicates
+    from jobhunt.cv.store import get_application
+
+    app = get_application(app_id)
+    if app is None:
+        raise typer.BadParameter("candidature introuvable")
+    job = db.get_job(app.job_id)
+    destination = audit_url(clean_url(job.origin_url, navigation=True)) if job else ""
+    console.print(f"Candidature {app.id} · CV révision {app.current_rev} · {destination or 'destination inconnue'}", markup=False)
+    console.print(SUPERVISED_HANDOFF, markup=False)
+    console.print(f"Pour la saisie, utilisez « Remplir cette étape » ou lancez big-penalty apply fill-step {app_id} dans un autre terminal.")
+    if not typer.confirm("La saisie et le dépôt du CV peuvent transmettre des données avant le clic final. Continuer ?"):
+        raise typer.Exit(1)
+    confirmations = []
+    tokens = confirmation_tokens(app.profile_id, app.id)
+    for other, exact in sorted(potential_duplicates(app.profile_id, app.id).items()):
+        if exact or other not in tokens or not typer.confirm(f"Confirmez : la candidature n°{app.id} n'est pas un doublon de la candidature n°{other} ?"):
+            raise typer.Exit(1)
+        confirmations.append(tokens[other])
+    try:
+        result = asyncio.run(run(app_id, mode="supervised", trigger="user", headless=False, expected_rev=app.current_rev,
+                                 expected_origin=origin_digest(job.origin_url if job else None),
+                                 duplicate_confirmations=tuple(confirmations)))
+    except ApplyError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(1) from None
+    _print_run(result)
+    if result.status == "blocked":
+        raise typer.Exit(1)
+
+
+@apply_app.command("fill-step")
+def apply_fill_step(app_id: Annotated[int, typer.Argument(help="numéro de candidature", min=1)]) -> None:
+    """Remplit la page affichée dans la fenêtre supervisée, sans cliquer."""
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.supervised import call_local
+
+    try:
+        preview = asyncio.run(call_local(app_id, "preview"))
+        console.print(f"Offre réservée : {preview['company']} · {preview['title']} · {preview['reserved_url']}", markup=False)
+        console.print(f"Page ouverte : {preview['page_url']}", markup=False)
+        if preview["warning"]:
+            console.print("ATTENTION : le titre de la page ne ressemble ni au poste ni à l’entreprise réservés.", style="bold yellow")
+        if not typer.confirm("Confirmez-vous que la page ouverte concerne cette offre et autorisez-vous la saisie de cette étape ?"):
+            raise typer.Exit(1)
+        result = asyncio.run(call_local(app_id, "fill", preview["token"]))
+    except ApplyError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(1) from None
+    if result["status"] in ("blocked", "failed", "needs_human"):
+        console.print("Saisie interrompue. Consultez l’essai ; si la fenêtre est ouverte, vérifiez le poste avant de reconfirmer.")
+        raise typer.Exit(1)
+    console.print("Étape vérifiée. Poursuivez dans la fenêtre supervisée ; aucun bouton n’a été cliqué.")
+
+
+@apply_app.command("send")
+def apply_send(app_ids: Annotated[list[int], typer.Argument(help="numéros de candidature")], headless: HeadlessOpt = None,
+               yes: Annotated[bool, typer.Option("--yes", "-y", help="ne pas demander confirmation")] = False) -> None:
+    """Envoie les candidatures choisies via un adaptateur. Sans adaptateur, utilisez supervised."""
+    from jobhunt.apply.service import send_selected
+    from jobhunt.cv.store import get_application
+
+    apps = [get_application(i) for i in app_ids]
+    missing = [i for i, a in zip(app_ids, apps) if a is None]
+    if missing:
+        raise typer.BadParameter("candidature(s) introuvable(s) : " + ", ".join(map(str, missing)))
+    if not yes:
+        console.print("Envoyer réellement ces candidatures (CV approuvé par vous) :", markup=False)
+        for a in apps:
+            console.print(f"  {a.id} · {a.company or '?'} · {a.job_title or '?'}", markup=False, highlight=False)  # type: ignore[union-attr]
+        if not typer.confirm("Confirmer l'envoi ?"):
+            raise typer.Exit(1)
+    from jobhunt.apply.errors import ApplyError
+
+    def progress(app_id: int, run) -> None:
+        console.print(f"Candidature {app_id}", markup=False)
+        _print_run(run)
+
+    try:
+        runs = asyncio.run(send_selected(app_ids, headless=headless, on_progress=progress,
+                                         expected_revs={a.id: a.current_rev for a in apps}))  # type: ignore[union-attr]
+    except ApplyError as e:
+        console.print(f"Erreur : {e}", markup=False)
+        raise typer.Exit(1) from None
+    if any(r.status != "submitted" for r in runs) or len(runs) < len(set(app_ids)):
+        raise typer.Exit(1)
+
+
+@apply_app.command("resolve")
+def apply_resolve(app_id: int, run_id: Annotated[int, typer.Option("--run-id", min=1)],
+                  sent: Annotated[bool, typer.Option("--sent/--not-sent", help="résultat vérifié : envoyée / non envoyée")]) -> None:
+    """Confirme le résultat de l'essai indiqué, uniquement après avoir vérifié sa réception ou sa non-réception."""
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.service import resolve_unconfirmed
+    from jobhunt.cv.errors import CVError
+
+    try:
+        out = resolve_unconfirmed(app_id, sent=sent, run_id=run_id)
+    except (ApplyError, CVError) as e:
+        console.print(f"Erreur : {e}", markup=False)
+        raise typer.Exit(1) from None
+    console.print("Candidature marquée comme envoyée." if sent else
+                  "Essai marqué non envoyé : un autre essai reste à vérifier." if out.status == "failed" else
+                  "Candidature remise en brouillon : tout nouvel envoi doit être lancé manuellement.", markup=False)
+
+
+@apply_app.command("resolve-many")
+def apply_resolve_many(
+    attempts: Annotated[list[str], typer.Argument(help="paires CANDIDATURE:ESSAI déjà vérifiées")],
+    sent: Annotated[bool, typer.Option("--sent/--not-sent", help="elles ont bien / n'ont pas été envoyées")],
+) -> None:
+    """Règle d'un coup plusieurs envois non confirmés (mêmes règles que `resolve`, une par une) puis résume."""
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.service import resolve_unconfirmed
+    from jobhunt.cv.errors import CVError
+
+    pairs = []
+    for attempt in attempts:
+        parts = attempt.split(":")
+        if len(parts) != 2 or not all(p.isascii() and p.isdecimal() and len(p) <= 12 and int(p) > 0 for p in parts):
+            raise typer.BadParameter("Indiquer chaque essai sous la forme CANDIDATURE:ESSAI")
+        pairs.append(tuple(map(int, parts)))
+    ok, failed = 0, []
+    for app_id, run_id in dict.fromkeys(pairs):
+        try:
+            resolve_unconfirmed(app_id, sent=sent, run_id=run_id)
+        except (ApplyError, CVError) as e:
+            failed.append(f"{app_id}:{run_id}")
+            console.print(f"  n°{app_id}:{run_id} : {e}", markup=False, highlight=False)
+        else:
+            ok += 1
+    what = "confirmé(s) envoyé(s)" if sent else "confirmé(s) non envoyé(s)"
+    console.print(f"{ok} essai(s) {what}" + (f", {len(failed)} refusé(s) : {', '.join(failed)}." if failed else "."),
+                  markup=False, highlight=False)
+    if failed:
+        raise typer.Exit(1)
+
+
+@apply_app.command("trust")
+def apply_trust(profile_id: int, host: Annotated[str, typer.Argument(help="nom d'hôte, par exemple jobs.exemple.fr")]) -> None:
+    """Faire confiance à un site d'hébergement de formulaires (sinon l'outil refuse d'y saisir ou d'y envoyer quoi que ce soit)."""
+    from jobhunt.apply.errors import ApplyError
+    from jobhunt.apply.facts import add_trusted_host
+
+    if db.get_profile(profile_id) is None:
+        raise typer.BadParameter(f"profil {profile_id} introuvable")
+    try:
+        h = add_trusted_host(profile_id, host)
+    except ApplyError as e:
+        console.print(f"Erreur : {e}", markup=False)
+        raise typer.Exit(1) from None
+    console.print(f"{h} ajouté aux sites de confiance du profil {profile_id} (answers.yaml). Relancer l'essai ou l'envoi.", markup=False)
+
+
+@apply_app.command("answer")
+def apply_answer(app_id: int) -> None:
+    """Répond aux questions du dernier essai en pause ; les réponses servent pour tous les formulaires suivants."""
+    from jobhunt.apply.missing_answers import editable_custom
+    from jobhunt.apply.service import answer_questions
+    from jobhunt.apply.store import last_run
+
+    run = last_run(app_id)
+    qs = [question for question in run.result.questions if editable_custom(question)] if run and run.result else []
+    if not qs:
+        console.print("Aucune question en attente pour cette candidature.", markup=False)
+        raise typer.Exit(1)
+    answers = []
+    for q in qs:
+        hint = f" [{' / '.join(q.options)}]" if q.options else ""
+        answers.append((q.label, typer.prompt(q.label + hint, default="", show_default=False)))
+    answer_questions(app_id, answers)
+    console.print(f"{sum(1 for _, a in answers if a.strip())} réponse(s) enregistrée(s) : relancer avec `apply send {app_id}`.",
+                  markup=False)
+
+
+@apply_app.command("auto")
+def apply_auto(
+    profile_id: int,
+    headful: Annotated[bool, typer.Option("--headful/--headless", help="fenêtres visibles (beaucoup de sites bloquent le mode invisible)")] = False,
+    limit: Annotated[Optional[int], typer.Option("--limit", min=1, help="arrêter après N candidatures envoyées")] = None,
+    min_score: Annotated[Optional[float], typer.Option("--min-score", help="ne traiter que les offres de fit >= S (relève les seuils, jamais ne les abaisse)")] = None,
+    attended: Annotated[bool, typer.Option("--attended", help="quelqu'un surveille la fenêtre : elle attend la résolution d'un CAPTCHA")] = False,
+) -> None:
+    """Passe automatique : prépare les CV, approuve (score suffisant) et envoie si l'envoi automatique est activé (comme le run quotidien)."""
+    from jobhunt.apply.service import daily_apply
+    from jobhunt.daily import apply_line
+
+    if db.get_profile(profile_id) is None:
+        raise typer.BadParameter(f"profil {profile_id} introuvable")
+    if attended and not headful:
+        raise typer.BadParameter("--attended demande des fenêtres visibles (--headful)")
+    summary = asyncio.run(daily_apply(profile_id, emit=lambda line: console.print(line, markup=False, highlight=False),
+                                      headless=not headful, limit=limit, min_score=min_score, attended=attended))
+    console.print(apply_line(summary) + f" ({summary.prepared} CV préparé(s))", markup=False)
+    for e in summary.errors:
+        console.print("  erreur : " + e, markup=False, highlight=False)
+
+
+def _mask_email(email: str) -> str:
+    local, at, domain = email.partition("@")
+    return (local[:1] + "\u2026" + at + domain) if at else (email[:1] + "\u2026")
+
+
+def _accounts_call(fn, *args, **kw):
+    from jobhunt.apply.errors import ApplyError
+
+    try:
+        return fn(*args, **kw)
+    except ApplyError as e:
+        console.print(f"Erreur : {e}", markup=False, highlight=False)
+        raise typer.Exit(1) from None
+
+
+@apply_app.command("accounts")
+def apply_accounts() -> None:
+    """Liste les comptes créés sur les sites d'entreprises (jamais les mots de passe)."""
+    from jobhunt.apply import accounts
+
+    rows = _accounts_call(accounts.list_accounts)
+    t = Table("site", "e-mail", "créé le", "état", "enregistré")
+    for r in rows:
+        t.add_row(r.get("host", ""), _mask_email(r["account"]), str(r.get("created_at", ""))[:10],
+                  "en attente (inscription non confirmée)" if r.get("state") == "pending" else "actif", "oui" if r["stored"] else "non")
+    console.print(t)
+    console.print(f"Stockage : {_accounts_call(accounts.backend_name)}", markup=False, highlight=False)
+
+
+@apply_app.command("accounts-export")
+def apply_accounts_export(file: Annotated[Path, typer.Argument(help="fichier JSON à écrire")],
+                          overwrite: Annotated[bool, typer.Option("--overwrite", help="écraser le fichier s'il existe")] = False) -> None:
+    """Exporte les comptes (avec mots de passe) vers un fichier, pour les importer sur une autre machine."""
+    from jobhunt.apply import accounts
+
+    n = _accounts_call(accounts.export_accounts, file, overwrite=overwrite)
+    console.print(f"{n} compte(s) exporté(s) dans {file}.", markup=False, highlight=False)
+    console.print("ATTENTION : ce fichier contient les mots de passe en clair. Le supprimer dès l'import terminé.",
+                  markup=False, highlight=False)
+
+
+@apply_app.command("accounts-import")
+def apply_accounts_import(file: Annotated[Path, typer.Argument(help="fichier JSON produit par accounts-export")],
+                          overwrite: Annotated[bool, typer.Option("--overwrite", help="remplacer les mots de passe différents")] = False) -> None:
+    """Importe les comptes d'un fichier d'export (les comptes existants avec un autre mot de passe sont ignorés)."""
+    from jobhunt.apply import accounts
+
+    imported, skipped = _accounts_call(accounts.import_accounts, file, overwrite=overwrite)
+    console.print(f"{imported} compte(s) importé(s), {skipped} ignoré(s) (déjà présents avec un autre mot de passe)."
+                  if skipped else f"{imported} compte(s) importé(s).", markup=False, highlight=False)
+
+
+@apply_app.command("accounts-delete")
+def apply_accounts_delete(host: Annotated[str, typer.Argument(help="site, par exemple jobs.exemple.fr")], email: str,
+                          yes: Annotated[bool, typer.Option("--yes", "-y", help="sans confirmation")] = False) -> None:
+    """Supprime un compte (mot de passe et entrée de la liste)."""
+    from jobhunt.apply import accounts
+
+    if not yes and not typer.confirm(f"Supprimer le compte {_mask_email(email)} sur {host} ?"):
+        raise typer.Abort()
+    _accounts_call(accounts.delete_account, host, email)
+    console.print("Compte supprimé.", markup=False)
 
 
 @app.command()

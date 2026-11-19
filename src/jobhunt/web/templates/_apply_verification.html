@@ -1,0 +1,16 @@
+{% macro click_evidence(run) -%}
+  {% if run.nav_clicked_at %}<div>Navigation : {{ run.nav_clicked_at.strftime('%d/%m/%Y %H:%M:%S %Z') }}</div>{% endif %}
+  {% if run.submit_clicked_at %}<div>Envoi possible : {{ run.submit_clicked_at.strftime('%d/%m/%Y %H:%M:%S %Z') }}</div>{% endif %}
+  {% if not run.nav_clicked_at and not run.submit_clicked_at %}<div>Heure du clic non enregistrée.</div>{% endif %}
+{%- endmacro %}
+
+{% macro resolve_form(app_id, run) -%}
+<form method="post" action="/applications/{{ app_id }}/apply/resolve" class="stack">
+  <input type="hidden" name="run_id" value="{{ run.id }}">
+  <label><input type="checkbox" name="verified" value="1" required> J’ai vérifié le résultat de cet essai.</label>
+  <div class="row">
+    <button class="btn small" name="sent" value="1">Confirmer : envoyée</button>
+    <button class="btn small" name="sent" value="0">Confirmer : non envoyée</button>
+  </div>
+</form>
+{%- endmacro %}

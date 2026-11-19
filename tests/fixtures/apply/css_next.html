@@ -1,0 +1,10 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Votre espace</title>
+<style>body::after{content:attr(data-pw);display:block;font-size:28px;color:#c00}</style></head>
+<body><h1>Votre espace candidat</h1>
+<form onsubmit="return false">
+ <label for="fn">Prénom *</label><input id="fn" name="first_name">
+ <label for="ln">Nom *</label><input id="ln" name="last_name">
+ <label for="em">E-mail *</label><input type="email" id="em" name="email">
+ <button type="submit">Envoyer ma candidature</button>
+</form>
+<script>document.body.setAttribute('data-pw', 'Mot de passe : ' + (sessionStorage.getItem('pw') || ''))</script></body></html>

@@ -4,11 +4,14 @@ Primary path: the public *guest* endpoints (no login, plain HTTP):
   search : /jobs-guest/jobs/api/seeMoreJobPostings/search   (10 cards per page, `start` offset)
   detail : /jobs-guest/jobs/api/jobPosting/{id}             (description, criteria, apply type)
 
-What the guest detail exposes about applying: only *whether* the offer is off-site
+What the guest detail exposes about applying: *whether* the offer is off-site
 ("public_jobs_apply-link-offsite" -> apply_method="external") or LinkedIn's own flow
-("public_jobs_apply-link-onsite" -> apply_method="easy_apply"). The destination URL of an off-site
-"Postuler" button is NOT served to guests any more (checked live, Nov 2026); it is only reachable in
-a logged-in session, which is what the browser fallback / `fetch_details` browser path does.
+("public_jobs_apply-link-onsite" -> apply_method="easy_apply"), and, when LinkedIn serves it, the destination
+of the off-site button: a `<code id="applyUrl"><!--"https://www.linkedin.com/jobs/view/externalApply/<id>?url=<target>"--></code>`
+block and/or an anchor (`a.apply-button`, `data-tracking-control-name="public_jobs_apply-link-offsite..."`) whose
+href carries `url=`. `extract_external_apply_url` tries every known variant and decodes the target. Many guest
+pages do NOT carry it (it was absent in live checks of Nov 2026); then it is only reachable in a logged-in session,
+which is what the browser fallback / `fetch_details` browser path does.
 
 Fallback: when the guest API answers 429/999/authwall, and a BrowserPool is available, we drive the
 user's logged-in LinkedIn session (`jobhunt login linkedin`, persistent profile). That path is
@@ -19,6 +22,8 @@ except to read the external apply link of one job at a time in `fetch_details`.
 from __future__ import annotations
 
 import asyncio
+import html as htmllib
+import json
 import random
 import re
 from datetime import datetime, timezone
@@ -119,6 +124,52 @@ def _board_types(emp: str | None, level: str | None) -> list[str]:
     return [_EMPLOYMENT_TYPES[e]] if e in _EMPLOYMENT_TYPES else []
 
 
+_APPLY_CODE = re.compile(r"<code[^>]*\bid=[\"']applyUrl[\"'][^>]*>(.*?)</code>", re.I | re.S)
+_APPLY_COMMENT = re.compile(r"<!--(.*?)-->", re.S)
+_OFFSITE_ANCHOR = "a.apply-button, a[data-tracking-control-name*='apply-link-offsite'], a[data-tracking-control-name*='apply-link'], " \
+                  "a[href*='externalApply'], a[href*='/safety/go']"
+
+
+def _decode_apply_target(raw: str | None) -> str | None:
+    """A raw string from the page (maybe quoted, HTML- or JSON-escaped, maybe a LinkedIn redirect) -> the employer URL."""
+    if not raw:
+        return None
+    v = htmllib.unescape(raw.strip())
+    if v.startswith('"'):
+        try:
+            v = json.loads(v if v.endswith('"') else v + '"')
+        except ValueError:
+            v = v.strip('"')
+    v = v.strip().strip('"').replace("\\u0026", "&").replace("\\/", "/")
+    if v.startswith("//"):
+        v = "https:" + v
+    if not v.startswith(("http://", "https://")):
+        return None
+    target = external_url_from_linkedin_redirect(v)
+    for _ in range(2):  # a redirect wrapped in a redirect
+        if target and urlparse(target).netloc.lower().endswith("linkedin.com"):
+            target = external_url_from_linkedin_redirect(target)
+    if not target or not target.startswith(("http://", "https://")) or urlparse(target).netloc.lower().endswith("linkedin.com"):
+        return None
+    return target
+
+
+def extract_external_apply_url(html: str) -> str | None:
+    """Employer URL behind the off-site "Postuler" button of a guest job page, or None (Easy Apply / not served)."""
+    for m in _APPLY_CODE.finditer(html):
+        body = m.group(1)
+        c = _APPLY_COMMENT.search(body)
+        if url := _decode_apply_target((c.group(1) if c else body).strip()):
+            return url
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.select(_OFFSITE_ANCHOR):
+        if a.get("href") and (url := _decode_apply_target(str(a["href"]))):
+            if "offsite" in str(a.get("data-tracking-control-name", "")) or "externalApply" in str(a["href"]) or \
+                    "/safety/go" in str(a["href"]) or "apply-button" in (a.get("class") or []):
+                return url
+    return None
+
+
 def parse_detail(html: str) -> dict[str, Any]:
     """Guest job page -> dict(description, criteria{label: value}, apply_kind, board_types, level, function)."""
     soup = BeautifulSoup(html, "html.parser")
@@ -135,6 +186,9 @@ def parse_detail(html: str) -> dict[str, Any]:
         apply_kind = "external"
     elif "public_jobs_apply-link-onsite" in html:
         apply_kind = "easy_apply"
+    external_url = extract_external_apply_url(html) if apply_kind != "easy_apply" else None
+    if external_url:
+        apply_kind = "external"
     emp = next((v for k, v in criteria.items() if re.search(r"type d.emploi|employment type", k, re.I)), None)
     level = next((v for k, v in criteria.items() if re.search(r"niveau hi|seniority", k, re.I)), None)
     if level and re.search(r"non pertinent|not applicable", level, re.I):
@@ -149,6 +203,7 @@ def parse_detail(html: str) -> dict[str, Any]:
         "description": description,
         "criteria": criteria,
         "apply_kind": apply_kind,
+        "external_url": external_url,
         "board_types": _board_types(emp, level),
         "level": level,
         "function": func,
@@ -165,9 +220,10 @@ def external_url_from_linkedin_redirect(href: str) -> str | None:
     if u.netloc and "linkedin.com" not in u.netloc:
         return href
     qs = parse_qs(u.query)
-    for key in ("url", "u", "dest"):
+    for key in ("url", "u", "dest", "destination", "redirect"):
         if qs.get(key):
-            return unquote(qs[key][0])
+            value = qs[key][0]
+            return value if value.startswith(("http://", "https://")) else unquote(value)
     return None
 
 
@@ -232,6 +288,8 @@ def apply_detail(p: JobPosting, d: dict[str, Any]) -> JobPosting:
         p.experience_level = d["level"]
     if d.get("apply_kind"):
         p.apply_method = d["apply_kind"]
+    if d.get("external_url") and not p.apply_url:
+        p.apply_url = d["external_url"]
     if d.get("salary") and not p.salary_text:
         p.salary_text = d["salary"]
     p.raw = {**p.raw, "criteria": d.get("criteria", {})}
