@@ -280,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         return (self_test if argv[0] == "--self-test" else self_test_window)(report)
 
     if argv:  # behave like the jobhunt CLI
+        if argv[0] == "daily" and sys.stdout is None:
+            sys.stdout = sys.stderr = open(os.devnull, "w", encoding="utf-8")
         from jobhunt.cli import app
 
         app(args=argv, prog_name="jobhunt")

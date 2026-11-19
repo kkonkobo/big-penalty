@@ -1,6 +1,6 @@
 """Daily run: search every profile headless, print a short French summary, log it, notify (macOS).
 
-`jobhunt daily` is what the launchd agent (see schedule.py) runs once a day. Everything with side effects
+`jobhunt daily` is what the in-app scheduler (see schedule.py) launches. Everything with side effects
 (search, notification, clock) is injectable so tests never touch the network, the LLM or the desktop.
 """
 

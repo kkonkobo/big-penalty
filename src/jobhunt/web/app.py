@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,20 @@ from jobhunt.sources import registry
 log = logging.getLogger("jobhunt.web")
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
-app = FastAPI(title="Big Penalty")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stopped = asyncio.Event()
+    task = asyncio.create_task(sched.Scheduler().run(stopped))
+    try:
+        yield
+    finally:
+        stopped.set()
+        await task
+
+
+app = FastAPI(title="Big Penalty", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 # ---- CSRF / DNS-rebinding guard. EVERY request (GET too: CV PDFs and screenshots are served) must carry a loopback Host (or one
@@ -232,7 +246,7 @@ def index(request: Request):
             "sends": _send_board(p.id),
         })
     try:
-        st = sched.status(tail=1, **SCHEDULE_KW)
+        st = sched.status(tail=0)
     except sched.ScheduleError:
         st = None
     return render(request, "today.html", boards=boards, st=st, nav_profiles=profiles,
@@ -410,10 +424,6 @@ def sources_page(request: Request):
 
 
 # ------------------------------------------------------------ planification
-# Module-level indirection: tests set SCHEDULE_KW (runner, home, repo, uid, check_platform) to avoid real launchctl.
-SCHEDULE_KW: dict[str, Any] = {}
-
-
 def _schedule_redirect(notice: str | None = None, error: str | None = None) -> RedirectResponse:
     q = f"?notice={quote(notice)}" if notice else f"?error={quote(error or '')}"
     return RedirectResponse("/schedule" + q, status_code=303)
@@ -430,36 +440,31 @@ def _schedule_action(fn, ok: str) -> RedirectResponse:
 @app.get("/schedule", response_class=HTMLResponse)
 def schedule_page(request: Request, notice: str | None = None, error: str | None = None):
     try:
-        st, err = sched.status(tail=10, **SCHEDULE_KW), error
+        st, err = sched.status(tail=10), error
     except sched.ScheduleError as e:
         st, err = None, error or str(e)
-    return render(request, "schedule.html", st=st, notice=notice, error=err, default_time=sched.DEFAULT_TIME)
+    return render(request, "schedule.html", st=st, notice=notice, error=err)
 
 
-@app.post("/schedule/install")
-def schedule_install():
-    return _schedule_action(lambda: sched.install(sched.DEFAULT_TIME, **SCHEDULE_KW),
-                            f"Planification activée ({sched.DEFAULT_TIME}).")
+@app.post("/schedule/enabled")
+def schedule_enabled(enabled: bool = Form(...)):
+    return _schedule_action(lambda: sched.set_enabled(enabled),
+                            "Planification activée." if enabled else "Planification désactivée.")
 
 
 @app.post("/schedule/add")
 def schedule_add(time: str = Form(...)):
-    return _schedule_action(lambda: sched.add_time(time, **SCHEDULE_KW), f"Heure {time} ajoutée.")
+    return _schedule_action(lambda: sched.add_time(time), f"Heure {time} ajoutée.")
 
 
 @app.post("/schedule/remove")
 def schedule_remove(time: str = Form(...)):
-    return _schedule_action(lambda: sched.remove_time(time, **SCHEDULE_KW), f"Heure {time} retirée.")
-
-
-@app.post("/schedule/uninstall")
-def schedule_uninstall():
-    return _schedule_action(lambda: sched.uninstall(**SCHEDULE_KW), "Planification désactivée.")
+    return _schedule_action(lambda: sched.remove_time(time), f"Heure {time} retirée.")
 
 
 @app.post("/schedule/run")
 def schedule_run():
-    return _schedule_action(lambda: sched.run_now(**SCHEDULE_KW), "Recherche lancée, résultats dans ~25 min.")
+    return _schedule_action(sched.run_now, "Recherche lancée (~25 min par profil).")
 
 
 # ------------------------------------------------------------ CV sur mesure (candidatures)

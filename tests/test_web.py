@@ -86,45 +86,55 @@ def test_profile_edit_invalidates_scores_without_losing_decisions(client, profil
 
 # ---------------------------------------------------------------- planification
 @pytest.fixture
-def sched_client(client, monkeypatch, tmp_path):
-    from jobhunt.web import app as webapp
-    from test_schedule import Runner
+def sched_client(monkeypatch):
+    from datetime import datetime
 
-    runner = Runner()
-    monkeypatch.setattr(webapp, "SCHEDULE_KW", dict(repo=tmp_path, home=tmp_path, runner=runner, uid=501,
-                                                      check_platform=False))
-    client.runner = runner
-    return client
+    from jobhunt import schedule
+
+    launches = []
+    monkeypatch.setattr(schedule, "_launch_daily", launches.append)
+    scheduler = schedule.Scheduler
+    monkeypatch.setattr(schedule, "Scheduler", lambda: scheduler(clock=lambda: datetime(2026, 11, 19, 12).timestamp()))
+    with TestClient(app) as client:
+        client.launches = launches
+        yield client
 
 
-def test_schedule_page_not_installed(sched_client):
+def test_schedule_page_defaults(sched_client):
     html = sched_client.get("/schedule").text
-    assert "Activer (07:30)" in html and "Planification" in html
-    assert "/schedule" in sched_client.get("/sources").text  # nav link
-    r = sched_client.post("/schedule/install", follow_redirects=True)
-    assert "Planification activée" in r.text and "07:30" in r.text and "Lancer maintenant" in r.text
+    assert "Planification activée" in html and "07:30" in html and "Lancer maintenant" in html
+    assert "Prochain lancement" in html
+    assert "Le lancement automatique n’a lieu que si l’application est ouverte à l’heure prévue." in html
+    assert "/schedule" in sched_client.get("/sources").text
 
 
 def test_schedule_add_remove_run(sched_client):
-    sched_client.post("/schedule/install")
     r = sched_client.post("/schedule/add", data={"time": "19:00"}, follow_redirects=True)
     assert "19:00" in r.text and "Heure 19:00 ajoutée" in r.text
     r = sched_client.post("/schedule/remove", data={"time": "07:30"}, follow_redirects=True)
     assert "retirée" in r.text
     r = sched_client.post("/schedule/remove", data={"time": "19:00"}, follow_redirects=True)
-    assert "uninstall" in r.text  # last time refused
+    assert "Aucune heure prévue" in r.text
     r = sched_client.post("/schedule/add", data={"time": "99:99"}, follow_redirects=True)
     assert "heure invalide" in r.text
+    sched_client.post("/schedule/add", data={"time": "19:00"})
+    r = sched_client.post("/schedule/enabled", data={"enabled": "false"}, follow_redirects=True)
+    assert "Planification désactivée" in r.text and "Prochain lancement : aucun" in r.text and "19:00" in r.text
     r = sched_client.post("/schedule/run", follow_redirects=True)
-    assert "Recherche lancée, résultats dans ~25 min." in r.text
-    assert any(c[1] == "kickstart" for c in sched_client.runner.calls)
-    r = sched_client.post("/schedule/uninstall", follow_redirects=True)
-    assert "Activer (07:30)" in r.text
+    assert "Recherche lancée" in r.text and len(sched_client.launches) == 1
+    r = sched_client.post("/schedule/enabled", data={"enabled": "true"}, follow_redirects=True)
+    assert "Planification activée" in r.text and "19:00" in r.text
 
 
-def test_schedule_run_when_not_installed_shows_error(sched_client):
-    r = sched_client.post("/schedule/run", follow_redirects=True)
-    assert "big-penalty daily" in r.text
+def test_schedule_writes_require_same_origin(sched_client, monkeypatch):
+    from jobhunt.web import app as webapp
+
+    monkeypatch.setattr(webapp, "REQUIRE_ORIGIN_EVIDENCE", True)
+    for action in ("add", "remove", "enabled", "run"):
+        assert sched_client.post(f"/schedule/{action}").status_code == 403
+        assert sched_client.post(f"/schedule/{action}", headers={"Origin": "https://example.test"}).status_code == 403
+    assert not sched_client.launches
+    assert sched_client.post("/schedule/run", headers={"Origin": "http://testserver"}, follow_redirects=False).status_code == 303
 
 
 def test_single_row_triage_returns_only_that_row(client):

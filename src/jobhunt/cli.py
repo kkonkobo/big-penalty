@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 from collections import Counter
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -296,17 +297,27 @@ def daily(profile_ids: Annotated[Optional[list[int]], typer.Argument(help="défa
     Un verrou (data/daily.lock) empêche deux exécutions simultanées ; journal dans data/logs/daily-AAAA-MM-JJ.log ;
     notification macOS à la fin (désactivable avec JOBHUNT_NO_NOTIFY=1). Code de sortie ≠ 0 seulement en cas d'erreur réelle.
     """
-    from jobhunt.daily import run_daily
+    from jobhunt.daily import append_log, log_line, run_daily
+
+    def record(result: str) -> None:
+        when = datetime.now().astimezone()
+        append_log(log_line(when, None, result), when)
 
     try:
         report = run_daily(profile_ids or None, emit=lambda line: console.print(line, markup=False, highlight=False))
     except ValueError as e:
         raise typer.BadParameter(str(e)) from None
+    except Exception:
+        record("Résultat : échec de la recherche quotidienne")
+        raise
+    if not report.locked:
+        record("Résultat : échec" if report.failed else
+               "Résultat : terminé" if report.profiles else "Résultat : aucun profil")
     if report.failed:
         raise typer.Exit(1)
 
 
-schedule_app = typer.Typer(help="Planification quotidienne via launchd (macOS), plusieurs heures par jour possibles.",
+schedule_app = typer.Typer(help="Planification quotidienne pendant l’ouverture de Big Penalty.",
                            no_args_is_help=True)
 app.add_typer(schedule_app, name="schedule")
 
@@ -322,30 +333,28 @@ def _sched_call(fn, *args, **kw):
 
 
 def _print_times(times: list[str]) -> None:
-    console.print("Heures : " + ", ".join(times) + " (rattrapage au réveil si le Mac dormait).", markup=False)
+    console.print("Heures : " + (", ".join(times) or "aucune"), markup=False)
 
 
 @schedule_app.command("install")
 def schedule_install(
-    time: Annotated[Optional[list[str]], typer.Option("--time", help="HH:MM, répétable (défaut 07:30)")] = None,
+    time: Annotated[Optional[list[str]], typer.Option("--time", help="Remplace les heures (HH:MM, répétable)")] = None,
 ) -> None:
-    """Installe l'agent launchd (remplace l'existant)."""
+    """La planification est intégrée ; aucun agent launchd n’est installé."""
     from jobhunt import schedule as sched
 
-    times = _sched_call(sched.normalize_times, time or [sched.DEFAULT_TIME])
-    path = _sched_call(sched.install, times)
-    console.print(f"Installé : {path}", markup=False)
-    _print_times(times)
+    if time:
+        _print_times(_sched_call(sched.set_times, time))
+    _sched_call(sched.set_enabled, True)
+    console.print("La planification intégrée fonctionne uniquement quand Big Penalty est ouvert. Aucun agent installé.")
 
 
 @schedule_app.command("set")
 def schedule_set(times: Annotated[list[str], typer.Argument(help="HH:MM [HH:MM ...]")]) -> None:
-    """Remplace toutes les heures (installe si besoin)."""
+    """Remplace toutes les heures."""
     from jobhunt import schedule as sched
 
-    norm = _sched_call(sched.normalize_times, times)
-    _sched_call(sched.set_times, norm)
-    _print_times(norm)
+    _print_times(_sched_call(sched.set_times, times))
 
 
 @schedule_app.command("add")
@@ -358,7 +367,7 @@ def schedule_add(time: str) -> None:
 
 @schedule_app.command("remove")
 def schedule_remove(time: str) -> None:
-    """Retire une heure (la dernière : utiliser uninstall)."""
+    """Retire une heure."""
     from jobhunt import schedule as sched
 
     _print_times(_sched_call(sched.remove_time, time))
@@ -366,7 +375,7 @@ def schedule_remove(time: str) -> None:
 
 @schedule_app.command("run")
 def schedule_run() -> None:
-    """Lance une recherche maintenant via launchd (retourne immédiatement)."""
+    """Lance la recherche dans un autre processus et retourne immédiatement."""
     from jobhunt import schedule as sched
 
     _sched_call(sched.run_now)
@@ -375,23 +384,31 @@ def schedule_run() -> None:
 
 @schedule_app.command("uninstall")
 def schedule_uninstall() -> None:
-    """Désinstalle l'agent et supprime le plist."""
+    """Désactive la planification intégrée sans effacer les heures."""
     from jobhunt import schedule as sched
 
-    console.print("Désinstallé." if _sched_call(sched.uninstall) else "Rien à désinstaller.", markup=False)
+    _sched_call(sched.set_enabled, False)
+    console.print("Planification désactivée.")
+
+
+@schedule_app.command("uninstall-launchd")
+def schedule_uninstall_launchd() -> None:
+    """Désinstalle l’ancien agent launchd et supprime son plist."""
+    from jobhunt import schedule as sched
+
+    console.print("Désinstallé." if _sched_call(sched.uninstall_launchd) else "Rien à désinstaller.", markup=False)
 
 
 @schedule_app.command("status")
 def schedule_status() -> None:
-    """État : chargé, heures, prochain passage, exécution en cours, dernier journal."""
+    """État : heures, prochain passage, exécution en cours, dernier journal."""
     from jobhunt import schedule as sched
 
     st = _sched_call(sched.status)
-    console.print(f"Fichier plist : {'présent' if st.installed else 'absent'} · agent : {'chargé' if st.loaded else 'non chargé'}",
-                  markup=False)
-    if st.times:
-        nxt = f" · prochain passage : {st.next_run:%Y-%m-%d %H:%M}" if st.loaded and st.next_run else ""
-        console.print(f"Heures : {', '.join(st.times)}{nxt}", markup=False)
+    console.print(f"Planification : {'activée' if st.enabled else 'désactivée'} (application ouverte uniquement)")
+    _print_times(st.times)
+    if st.next_run:
+        console.print(f"Prochain passage : {st.next_run:%Y-%m-%d %H:%M}")
     console.print("Exécution : " + ("en cours" if st.running else "aucune en cours"), markup=False)
     if st.last_log:
         console.print(f"Dernier journal ({st.last_log.name}) :", markup=False)

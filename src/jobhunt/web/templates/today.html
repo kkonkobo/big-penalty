@@ -7,8 +7,8 @@
   <div>
     <h1>Aujourd'hui</h1>
     <p class="muted">{{ DAYS[today.weekday()]|capitalize }} {{ today.day }} {{ MONTHS[today.month - 1] }}
-      {%- if st and st.installed and st.next_run %} · prochaine recherche automatique le {{ st.next_run.strftime('%d/%m à %H:%M') }}
-      {%- elif st and st.running %} · recherche automatique en cours
+      {%- if st and st.running %} · recherche quotidienne en cours
+      {%- elif st and st.next_run %} · prochaine recherche automatique le {{ st.next_run.strftime('%d/%m à %H:%M') }} si l’application est ouverte
       {%- else %} · <a href="/schedule">recherche automatique désactivée</a>{% endif %}</p>
   </div>
 </div>

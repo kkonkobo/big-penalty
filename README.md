@@ -7,6 +7,22 @@ Created in [T3 Code](https://t3.codes).
 **Desktop app:** Big Penalty also ships as a double-click app for macOS and Windows. See
 [packaging/README.md](packaging/README.md) for installing, where keys and data live, and building.
 
+## Daily schedule
+
+Open **Planification** (`/schedule`) to add or remove local times, switch automatic runs on or off, or
+choose **Lancer maintenant**. Automatic runs start only while the desktop app or `big-penalty serve`
+is open at the scheduled time. Opening the app later does not replay missed runs. If the Mac sleeps
+with the app open, a slot is still eligible on wake for up to ten minutes. A run already in progress
+blocks the scheduled run; the skipped slot is not retried.
+
+The app stores settings in `schedule.json` in its data directory (`JOBHUNT_DATA_DIR`). On first use it
+imports times from the old launchd plist if present; otherwise it uses `07:30`. To remove the old agent,
+open Planification once to migrate the times, then run `uv run jobhunt schedule uninstall-launchd`.
+Migration does not change the old agent, and `schedule install` no longer installs it.
+
+The CLI also supports `jobhunt schedule set 07:30 19:00`, `add HH:MM`, `remove HH:MM`, `status`, and `run`.
+The last result and profile details appear in Planification and in `logs/daily-YYYY-MM-DD.log`.
+
 ## Auto-apply diagnostics
 
 `uv run big-penalty apply diagnostics --days 30` reports completed apply runs from the local SQLite database.
