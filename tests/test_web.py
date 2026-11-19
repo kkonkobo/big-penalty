@@ -1,5 +1,6 @@
 import asyncio
 import time
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -106,6 +107,43 @@ def test_schedule_page_defaults(sched_client):
     assert "Prochain lancement" in html
     assert "Le lancement automatique n’a lieu que si l’application est ouverte à l’heure prévue." in html
     assert "/schedule" in sched_client.get("/sources").text
+
+
+@pytest.mark.parametrize("has_snapshot", [False, True], ids=["first-use", "existing-schedule"])
+def test_schedule_page_renders_while_scheduler_holds_lock(monkeypatch, lock_backend, has_snapshot):
+    from datetime import datetime
+
+    from jobhunt import schedule
+    from jobhunt.config import get_settings
+
+    try_lock, unlock = lock_backend
+    monkeypatch.setattr(schedule, "try_lock", try_lock)
+    monkeypatch.setattr(schedule, "unlock", unlock)
+    monkeypatch.setattr(schedule, "LOCK_TIMEOUT", 0.05)
+    path = get_settings().data_dir / "schedule.json"
+    if has_snapshot:
+        schedule.set_times(["08:15"])
+    held, release = Event(), Event()
+    read_schedule = schedule._read_schedule
+
+    def delayed_read(*args):
+        held.set()
+        assert release.wait(5)
+        return read_schedule(*args)
+
+    monkeypatch.setattr(schedule, "_read_schedule", delayed_read)
+    scheduler = schedule.Scheduler
+    monkeypatch.setattr(schedule, "Scheduler", lambda: scheduler(clock=lambda: datetime(2026, 11, 19, 12).timestamp()))
+    with TestClient(app) as client:
+        try:
+            assert held.wait(2)
+            html = client.get("/schedule").text
+            assert "Planification activée" in html and "Prochain lancement" in html
+            assert ("08:15" if has_snapshot else "07:30") in html
+            assert path.exists() is has_snapshot
+        finally:
+            release.set()
+    assert path.exists()
 
 
 def test_schedule_add_remove_run(sched_client):

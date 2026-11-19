@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Iterator, Mapping
 
 from jobhunt import db
 from jobhunt.config import get_settings
-from jobhunt.filelock import try_lock, unlock
+from jobhunt.filelock import local_file_lock, try_lock, unlock
 from jobhunt.freshness import age_days
 
 LOCK_NAME = "daily.lock"
@@ -42,20 +42,25 @@ def daily_lock(data_dir: Path | None = None, now: datetime | None = None) -> Ite
     content (pid, start time) is for diagnostics only. Raises DailyLocked if another process holds it.
     """
     path = (data_dir or get_settings().data_dir) / LOCK_NAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-    locked = False
-    try:
-        if not try_lock(fd):
+    with local_file_lock(path) as acquired:
+        if not acquired:
             raise DailyLocked(f"un autre `jobhunt daily` est déjà en cours ({path})")
-        locked = True
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()} {(now or datetime.now().astimezone()).isoformat()}\n".encode())
-        yield path
-    finally:
-        if locked:
-            unlock(fd)
-        os.close(fd)  # the file stays
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        locked = False
+        try:
+            if not try_lock(fd):
+                raise DailyLocked(f"un autre `jobhunt daily` est déjà en cours ({path})")
+            locked = True
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()} {(now or datetime.now().astimezone()).isoformat()}\n".encode())
+            yield path
+        finally:
+            try:
+                if locked:
+                    unlock(fd)
+            finally:
+                os.close(fd)
 
 
 # ---------------------------------------------------------------- summary

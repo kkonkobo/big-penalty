@@ -3,7 +3,9 @@
 import json
 import plistlib
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +26,51 @@ class Clock:
 
     def advance(self, seconds):
         self.now += seconds
+
+
+def test_schedule_lock_serializes_threads(tmp_path, monkeypatch, lock_backend):
+    try_lock, unlock = lock_backend
+    monkeypatch.setattr(schedule, "try_lock", try_lock)
+    monkeypatch.setattr(schedule, "unlock", unlock)
+    started, entered = Event(), Event()
+
+    def second_writer():
+        started.set()
+        with schedule._schedule_lock(tmp_path):
+            entered.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with schedule._schedule_lock(tmp_path):
+            second = pool.submit(second_writer)
+            assert started.wait(2)
+            assert not entered.wait(0.1)
+        second.result(timeout=2)
+    assert entered.is_set()
+
+
+def test_file_lock_retries_cross_process_contention(tmp_path, monkeypatch):
+    attempts = iter([False, False, True])
+    pauses, releases = [], []
+    monkeypatch.setattr(schedule, "try_lock", lambda handle: next(attempts))
+    monkeypatch.setattr(schedule, "unlock", releases.append)
+    monkeypatch.setattr(schedule, "sleep", pauses.append)
+    with schedule._schedule_lock(tmp_path):
+        assert len(pauses) == 2
+        assert not releases
+    assert len(releases) == 1
+
+
+def test_daily_probe_respects_in_process_claim(tmp_path, monkeypatch, lock_backend):
+    from jobhunt import daily
+
+    try_lock, unlock = lock_backend
+    for module in (daily, schedule):
+        monkeypatch.setattr(module, "try_lock", try_lock)
+        monkeypatch.setattr(module, "unlock", unlock)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with daily_lock(tmp_path):
+            assert pool.submit(schedule.is_running, tmp_path).result(timeout=2)
+        assert not pool.submit(schedule.is_running, tmp_path).result(timeout=2)
 
 
 @pytest.mark.parametrize(("delay", "runs"), [(4, 0), (5, 1), (30, 1), (604, 1), (606, 0)])

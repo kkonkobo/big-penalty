@@ -1,11 +1,13 @@
 """Periodic portal sync uses only fake runners and temporary journals."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Event
 
 import pytest
 
+from jobhunt import filelock
 from jobhunt.portal.periodic import INTERVAL_SECONDS, PeriodicSync, SyncOutcome, last_outcome, run_pass
 from jobhunt.portal.journal import Journal, pass_lock
 from jobhunt.portal.sync import ProfileSyncReport
@@ -38,18 +40,22 @@ def test_ineligible_pass_does_not_call_runner(settings):
         assert last_outcome(journal) is None
 
 
-def test_portal_lock_skips_external_sync_without_overwriting_result():
+def test_portal_lock_skips_concurrent_sync_without_overwriting_result(monkeypatch, lock_backend):
     journal = configure()
     journal.set_setting("automatic_sync_outcome", f"ok {NOW.isoformat()}")
+    try_lock, unlock = lock_backend
+    monkeypatch.setattr(filelock, "try_lock", try_lock)
+    monkeypatch.setattr(filelock, "unlock", unlock)
     calls = []
 
     async def runner(*args):
         calls.append(args)
         return []
 
-    with pass_lock() as acquired:
-        assert acquired
-        run_pass(runner=runner, clock=lambda: NOW)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pass_lock() as acquired:
+            assert acquired
+            pool.submit(run_pass, runner=runner, clock=lambda: NOW).result(timeout=2)
     assert not calls
     assert last_outcome(journal) == SyncOutcome(NOW, "Réussie")
 

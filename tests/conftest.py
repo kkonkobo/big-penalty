@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 import socket
+from threading import Lock
 
 from jobhunt import db
 from jobhunt.config import Settings, get_settings
@@ -9,6 +10,25 @@ from jobhunt.models import ContractType, Profile
 
 _REAL_CONNECT = socket.socket.connect
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+@pytest.fixture(params=[False, True], ids=["process-scoped", "per-handle"])
+def lock_backend(request):
+    """Model a file lock that allows or rejects a second handle in this process."""
+    mutex, handles = Lock(), set()
+
+    def try_lock(handle, shared=False):
+        with mutex:
+            if request.param and handles:
+                return False
+            handles.add(handle)
+            return True
+
+    def unlock(handle):
+        with mutex:
+            handles.remove(handle)
+
+    return try_lock, unlock
 
 
 @pytest.fixture(autouse=True)

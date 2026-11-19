@@ -15,18 +15,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Thread
-from time import time
+from threading import Lock, Thread
+from time import monotonic, sleep, time
 from typing import Callable, Iterable
 
 from jobhunt.config import get_settings
 from jobhunt.daily import LOCK_NAME, append_log, log_line
-from jobhunt.filelock import try_lock, unlock
+from jobhunt.filelock import local_file_lock, try_lock, unlock
 
 LABEL = "com.bigpenalty.daily"
 DEFAULT_TIME = "07:30"
 POLL_SECONDS = 30
 GRACE_SECONDS = 10 * 60
+LOCK_TIMEOUT = 2.0
+_SCHEDULE_MUTEX = Lock()
 log = logging.getLogger(__name__)
 
 
@@ -89,31 +91,49 @@ def _write_json(path: Path, value) -> None:
 @contextmanager
 def _schedule_lock(data_dir: Path):
     """Serialize migration, edits and slot claims across the CLI and server processes."""
-    data_dir.mkdir(parents=True, exist_ok=True)
-    with (data_dir / "schedule.lock").open("a+b") as stream:
-        fd = stream.fileno()
-        if not try_lock(fd):
-            raise ScheduleBusy("planification occupée, réessayez")
-        try:
-            yield
-        finally:
-            unlock(fd)
+    deadline = monotonic() + LOCK_TIMEOUT
+    if not _SCHEDULE_MUTEX.acquire(timeout=LOCK_TIMEOUT):
+        raise ScheduleBusy("planification occupée, réessayez")
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        with (data_dir / "schedule.lock").open("a+b") as stream:
+            fd = stream.fileno()
+            while not try_lock(fd):
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise ScheduleBusy("planification occupée, réessayez")
+                sleep(min(remaining, 0.025))
+            try:
+                yield
+            finally:
+                unlock(fd)
+    finally:
+        _SCHEDULE_MUTEX.release()
 
 
-def _read_schedule(data_dir: Path, home: Path | None) -> Schedule:
-    path = data_dir / "schedule.json"
+def _read_snapshot(path: Path) -> Schedule:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        settings = Schedule(_legacy_times(home) or [DEFAULT_TIME], True)
-        _write_json(path, vars(settings))
-        return settings
     except ValueError:
         raise ScheduleError("schedule.json invalide") from None
     if (not isinstance(value, dict) or type(value.get("enabled")) is not bool
             or not isinstance(value.get("times"), list) or not all(isinstance(item, str) for item in value["times"])):
         raise ScheduleError("schedule.json invalide")
     return Schedule(normalize_times(value["times"]), value["enabled"])
+
+
+def _initial_schedule(home: Path | None) -> Schedule:
+    return Schedule(_legacy_times(home) or [DEFAULT_TIME], True)
+
+
+def _read_schedule(data_dir: Path, home: Path | None) -> Schedule:
+    path = data_dir / "schedule.json"
+    try:
+        return _read_snapshot(path)
+    except FileNotFoundError:
+        settings = _initial_schedule(home)
+        _write_json(path, vars(settings))
+        return settings
 
 
 def _edit(change, *, data_dir: Path | None = None, home: Path | None = None) -> Schedule:
@@ -156,15 +176,19 @@ def set_enabled(enabled: bool, **kwargs) -> None:
 
 def is_running(data_dir: Path) -> bool:
     """Probe, but never create or unlink, the persistent daily lock."""
-    try:
-        with (data_dir / LOCK_NAME).open("r+b") as stream:
-            fd = stream.fileno()
-            if not try_lock(fd, shared=True):
-                return True
-            unlock(fd)
+    path = data_dir / LOCK_NAME
+    with local_file_lock(path) as acquired:
+        if not acquired:
+            return True
+        try:
+            with path.open("r+b") as stream:
+                fd = stream.fileno()
+                if not try_lock(fd, shared=True):
+                    return True
+                unlock(fd)
+                return False
+        except FileNotFoundError:
             return False
-    except FileNotFoundError:
-        return False
 
 
 def daily_command(*, executable: str | None = None, frozen: bool | None = None) -> list[str]:
@@ -300,9 +324,10 @@ def status(*, data_dir: Path | None = None, home: Path | None = None,
             with _schedule_lock(directory):
                 settings = _read_schedule(directory, home)
         except ScheduleBusy:
-            if not (directory / "schedule.json").exists():
-                raise
-            settings = _read_schedule(directory, home)
+            try:
+                settings = _read_snapshot(directory / "schedule.json")
+            except FileNotFoundError:
+                settings = _initial_schedule(home)
         last_log = max((directory / "logs").glob("daily-*.log"), default=None, key=lambda path: path.name)
         lines = last_log.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:] if last_log and tail else []
         return Status(settings.times, settings.enabled, is_running(directory),

@@ -10,6 +10,29 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
+from pathlib import Path
+from threading import Lock
+from typing import Iterator
+
+_active_paths: set[Path] = set()
+_active_mutex = Lock()
+
+
+@contextmanager
+def local_file_lock(path: Path) -> Iterator[bool]:
+    """Nonblocking thread guard for callers that share a persistent file lock."""
+    key = path.resolve()
+    with _active_mutex:
+        acquired = key not in _active_paths
+        if acquired:
+            _active_paths.add(key)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            with _active_mutex:
+                _active_paths.remove(key)
 
 if sys.platform == "win32":
     import msvcrt
