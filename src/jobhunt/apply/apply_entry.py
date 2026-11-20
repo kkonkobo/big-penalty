@@ -114,6 +114,8 @@ class Probe:
         self.source_identity = identity
         url_ids = _url_posting_ids(source)
         self.ids = {requisition.casefold()} if requisition else ({identity[1]} if identity else (url_ids or _identifiers(ids)))
+        # Numbers in a career-site URL are the site's own references, not an ATS requisition: not evidence on an ATS.
+        self.site_ids = not requisition and not identity and bool(url_ids)
         self.next_url = ""
         self.visited = set()
         self.hops = 0
@@ -123,6 +125,23 @@ class Probe:
         self.clicked = False
         self.chain = ""
         self.tab = None
+        # Autonomous submit (not dry inspection): a recognized ATS reached from the verified posting is accepted unless a
+        # requisition contradicts it, and a landing whose URL moved within an admitted origin is still continuous.
+        self.lenient = False
+
+    def expected(self, target, ats):
+        """Identifiers a target must match: none for an ATS on another site when only career-site URL numbers are known."""
+        if self.lenient and self.site_ids and ats and not self.same_site(target):
+            return set()
+        return {workday_requisition(item) for item in self.ids} if ats == "workday" else set(self.ids)
+
+    def landing_ids(self, target, ids):
+        """The posting identifiers the bound landing must keep: the ATS requisition itself when the posting only had
+        career-site URL numbers to offer (they are not that ATS's requisition)."""
+        ats, identity = ats_target(target)
+        if self.ids and not self.expected(target, ats):
+            return {identity[1]} if identity else _url_posting_ids(target) | _identifiers(ids)
+        return set(self.ids)
 
     def continuity_site(self, target):
         return self.clicked and (origin(target) == self.control_origin or bool(ats_target(target)[0]))
@@ -165,7 +184,7 @@ class Probe:
         ats, identity = ats_target(target)
         if self.alias and identity == self.alias and ats == "smartrecruiters":
             return True
-        expected = {workday_requisition(item) for item in self.ids} if ats == "workday" else self.ids
+        expected = self.expected(target, ats)
         if identity and expected and identity[1] not in expected:
             return False
         if identity and self.source_identity and ats == self.source_ats and identity != self.source_identity:
@@ -173,9 +192,10 @@ class Probe:
         target_ids = _url_posting_ids(target) | _url_posting_ids(login_return(target))
         if ats == "workday":
             target_ids = {workday_requisition(item) for item in target_ids}
-        if target_ids and not target_ids <= expected:
+        if target_ids and not target_ids <= expected and (expected or not self.lenient or not ats):
             return False
-        return self.same_site(target) or self.continuity_site(target) or bool(len(self.ids) == 1 and ats)
+        # A recognized ATS host is the employer's application system: reachable when nothing contradicts the posting.
+        return self.same_site(target) or self.continuity_site(target) or bool(ats and (len(self.ids) == 1 or self.lenient))
 
     def admit_navigation(self, request):
         if self.hops >= 6 or not self.navigation(request.url) or (self.hops and request.url != self.chain):
@@ -212,16 +232,16 @@ class Probe:
         if self.alias and ats == "smartrecruiters" and identity == self.alias:
             return "requisition" if ready or _ENTRY.search(urlsplit(target).path) else ""
         declared = _identifiers(ids)
-        expected = self.ids
+        expected = self.expected(target, ats)
         if ats == "workday":
-            expected = {workday_requisition(item) for item in expected}
             declared = {workday_requisition(item) for item in declared}
-        if declared and not declared <= expected:
+        if declared and not declared <= expected and (expected or not self.lenient):
             return False
         if (ready or _ENTRY.search(urlsplit(target).path)) and len(expected) == 1 and (
                 (identity and identity[1] in expected) or declared == expected or _url_posting_ids(target) == expected):
             return "requisition"
-        if self.clicked and target in self.visited and (self.same_site(target) or self.continuity_site(target)):
+        if self.clicked and (self.same_site(target) or self.continuity_site(target)) and (
+                target in self.visited or (self.lenient and any(origin(url) == origin(target) for url in self.visited))):
             return "continuity"
         return ""
 
@@ -312,7 +332,9 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
 
     context = page.context
     context.on("page", on_page)
+    lenient = bool(getattr(guard, "lenient", False))
     probe = Probe(audience.live_url, requisition, [], platform=platform)
+    probe.lenient = lenient
     guard.probe = probe
     accepted = False
     workday = probe.source_ats == "workday"
@@ -335,6 +357,7 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
                     or await data["nonce"].json_value() != audience.document_nonce or probe.visited):
                 return None, "apply_target_unverified"
         probe = Probe(audience.live_url, requisition, await data["ids"].json_value(), platform=platform)
+        probe.lenient = lenient
         guard.probe = probe
         was_ready = await data["ready"].json_value()
         controls = await data["controls"].get_properties()
@@ -434,7 +457,7 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
                         audience.recheck()
                         audience.entry_nonce = nonce
                         audience.entry_binding = binding
-                        audience.entry_ids = frozenset(probe.ids)
+                        audience.entry_ids = frozenset(probe.landing_ids(target, ids))
                         accepted = True
                         return tab, clean_url(target, navigation=True)
             await asyncio.sleep(0.1)

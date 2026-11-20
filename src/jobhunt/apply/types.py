@@ -9,9 +9,9 @@ agrees, then waits for a confirmation page.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 # ---------------------------------------------------------------- facts
 class Fact(BaseModel):
@@ -159,6 +159,10 @@ class DispatchDiagnostics(BaseModel, validate_assignment=True):
     receipt_reason: Literal["before_submit", "submit_unverified", "no_final_response", "form_still_present",
                             "no_confirmation", "confirmation_text", "confirmation_url", "confirmation_json", "attested", "receipt_rejected",
                             "recipient_refused", "verification_required", "human_required"] = "before_submit"
+    # Unauthorized requests aborted while the run continued (hosts only, most frequent first; never paths or bodies).
+    aborted_hosts: list[Annotated[str, StringConstraints(max_length=253, pattern=r"^[a-z0-9.\-\[\]:]+$")]] = Field(
+        default_factory=list, max_length=20)
+    aborted_requests: int = Field(default=0, ge=0, le=100000)
 
     def exception_code(self, error: Exception) -> str:
         return f"exception:{type(error).__name__[:64]}@{self.step}/{self.control}"

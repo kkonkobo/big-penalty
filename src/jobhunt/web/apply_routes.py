@@ -37,7 +37,7 @@ BUCKET_LABELS = {"to_validate": "À valider", "paused": "En pause", "sending": "
 BUCKET_CLASS = {"to_validate": "src", "paused": "warn", "sending": "src", "sent": "ok", "failed": "bad", "blocked": "bad",
                 "needs_verification": "warn"}
 RUN_STATUS_LABELS = {"running": "En cours", "ready": "Prêt (rien envoyé)", "submitted": "Envoyée", "needs_input": "Question en attente",
-                     "needs_email": "E-mail à confirmer", "needs_human": "CAPTCHA à résoudre", "blocked": "Bloquée", "failed": "Échec"}
+                     "needs_email": "E-mail à confirmer", "needs_human": "Intervention requise", "blocked": "Bloquée", "failed": "Échec"}
 RUN_STATUS_CLASS = {"running": "src", "ready": "ok", "submitted": "ok", "needs_input": "warn", "needs_email": "warn",
                     "needs_human": "warn", "blocked": "bad", "failed": "bad"}
 MODE_LABELS = {"dry_run": "Essai à blanc", "submit": "Envoi autonome", "supervised": "Envoi supervisé"}
@@ -100,7 +100,7 @@ def _msg(e: Exception) -> str:
 
 
 SENT_ROWS_MAX = 200
-PAUSE_LABELS = {"input": "question", "email": "e-mail", "human": "CAPTCHA", "host": "site non approuvé"}
+PAUSE_LABELS = {"input": "question", "email": "e-mail", "human": "intervention", "host": "site non approuvé"}
 
 
 def _breakdown(groups: dict[str, list[QueueItem]]) -> list[str]:

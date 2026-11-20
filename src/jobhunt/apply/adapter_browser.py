@@ -26,6 +26,15 @@ class AdapterAudience(Audience):
     def write_recipient(self, url):
         return bool(url and origin(url) == origin(self.reserved_url))
 
+    def navigation_verdict(self, url, *, write=False):
+        return "refuse"  # the adapter's declared flow decides every top-level navigation; subresources are only aborted
+
+    def pre_data_write(self, url):
+        return False
+
+    def landing_allowed(self, target):
+        return False
+
     def initial_redirect(self, source, destination):
         return self.write_recipient(destination) and self.posting(destination)
 

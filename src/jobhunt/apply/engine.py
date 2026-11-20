@@ -2200,6 +2200,14 @@ class _Run:
                 self.diagnostics.control = "scan"
             if self.current_step:
                 await self._supervised_checkpoint()
+            follow = getattr(self.autonomous, "follow_landing", None)
+            if (follow and not self.final_awaiting and not self.autonomous.data_entered and not self.page.is_closed()
+                    and clean_url(self.page.url, navigation=True) != self.autonomous.document):
+                # The page moved before any input (redirect, script, pre-data click): bind the landing or stop here.
+                if not await follow(self.page):
+                    result = self._end("needs_human", SUPERVISED_REQUIRED)
+                    result.diagnostic_code = "apply_target_unverified"
+                    return result
             snap, resolve = await self._snapshot()
             if self.autonomous and self.autonomous.entry_binding and not self.final_awaiting:
                 from jobhunt.apply.autonomous import POSTING_IDS_JS
