@@ -16,7 +16,8 @@ _REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid", "jobreqid
 # Query keys a job link may carry that only attribute the visit or pick a display mode: dropped from a navigation URL
 # (the posting is still reached from its path or requisition key). Any other key fails the link closed.
 _TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid", "lcid", "partner", "trid", "rs", "feedid",
-             "jobpipeline", "idorigine", "id_origin", "applicant_source_welcome", "in_iframe", "mode", "apply", "mapping"}
+             "jobpipeline", "idorigine", "id_origin", "applicant_source_welcome", "in_iframe", "mode", "apply", "mapping",
+             "step", "stepname"}  # step/stepname: Phenom's apply wizard writes them into the URL as it advances
 _TRACKING_PREFIXES = ("utm_", "rx_", "__cf_chl")  # rx_*: Radancy job-ad attribution on Workday links; __cf_chl*: Cloudflare check tokens
 _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
