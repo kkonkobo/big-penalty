@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -87,7 +88,28 @@ OUTLINE_JS = r"""([textMax, listMax]) => {
     const frames = [...document.querySelectorAll('iframe')].map(node => {
         try { return new URL(node.src, location.href).origin; } catch (e) { return ''; }
     }).filter(origin => origin && origin !== 'null').slice(0, 20);
+    const OVERLAY = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"], '
+        + ['cookie', 'consent', 'gdpr', 'onetrust', 'didomi', 'cmp', 'privacy', 'chat', 'intercom', 'drift', 'zendesk', 'modal', 'popup', 'overlay', 'banner']
+            .map(word => `[id*="${word}" i], [class*="${word}" i]`).join(', ');
+    const centre = document.elementFromPoint(Math.floor(innerWidth / 2), Math.floor(innerHeight / 2));
+    const overlays = [];
+    for (const node of document.querySelectorAll(OVERLAY)) {
+        if (overlays.length >= 8) break;
+        if (!visible(node) || node === document.body || node === document.documentElement) continue;
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 40 || rect.height < 20) continue;
+        const pos = getComputedStyle(node).position;
+        const dialog = node.matches('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+        if (!dialog && pos !== 'fixed' && pos !== 'sticky') continue;
+        if (overlays.some(item => item.node.contains(node))) continue;
+        overlays.push({node, tag: node.tagName.toLowerCase(), id: clip(node.id || '').slice(0, 60),
+                       class: clip(typeof node.className === 'string' ? node.className : '').slice(0, 80),
+                       role: node.getAttribute('role') || (node.matches('dialog') ? 'dialog' : ''),
+                       text: clip(text(node)).slice(0, 80),
+                       covers_center: !!centre && (node === centre || node.contains(centre))});
+    }
     return {title: clip(document.title), headings, controls, fields, frames,
+            overlays: overlays.map(({node, ...rest}) => rest),
             forms: document.forms.length, password_fields: document.querySelectorAll('input[type="password"]').length};
 }"""
 
@@ -121,7 +143,7 @@ async def page_outline(page) -> dict[str, Any]:
 
 
 async def save_failure_diagnostics(page, out_dir: Path, *, status: str, diagnostic_code: str = "",
-                                   step: int = 0, screenshot: bool = True,
+                                   step: int = 0, screenshot: bool = True, reason: str = "",
                                    redact: Callable[[str], str] = lambda text: text) -> list[str]:
     """Write `failure-page.json` (+ `failure.png`) into `out_dir`; best effort, never raises. Returns the files written."""
     written: list[str] = []
@@ -137,6 +159,9 @@ async def save_failure_diagnostics(page, out_dir: Path, *, status: str, diagnost
         outline = {"url": bare_url(page.url), "error": f"outline unavailable ({type(exc).__name__})"}
     # (the run's message stays in the database only: it may quote a field label that shows the chosen answer)
     record = _redact({"status": status, "diagnostic_code": diagnostic_code, "step": step, **outline}, redact)
+    with contextlib.suppress(Exception):  # (written first: it must exist even if the page is gone for the rest)
+        save_run_record(out_dir, status=status, diagnostic_code=diagnostic_code, step=step, reason=reason,
+                        final_url=page.url, redact=redact)
     with contextlib.suppress(Exception):
         path = out_dir / OUTLINE_FILE
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -150,11 +175,51 @@ async def save_failure_diagnostics(page, out_dir: Path, *, status: str, diagnost
     return written
 
 
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_LONG_DIGITS = re.compile(r"\d{4,}")
+_TOKEN = re.compile(r"\b(?=[\w-]*\d)[\w-]{24,}\b")
+_URL = re.compile(r"https?://[^\s'\"<>)]+")
+_NOTES: dict[str, list[str]] = {}
+
+
+def safe_reason(text: str, redact: Callable[[str], str] = lambda t: t, limit: int = 240) -> str:
+    """A short non-secret stop reason: redacted, e-mail addresses / long digit runs (codes, phones) / tokens masked, URLs without query."""
+    try:
+        text = redact(text or "")
+    except Exception:
+        text = ""
+    text = _URL.sub(lambda m: bare_url(m.group(0)), " ".join(text.split()))
+    text = _EMAIL.sub("<email>", text)
+    text = _TOKEN.sub("<token>", text)
+    return _LONG_DIGITS.sub("#", text)[:limit]
+
+
+def note_stop_reason(out_dir: Path | str | None, reason: str) -> None:
+    """Remember a cause for this run's `failure-run.json` (used only if the run ends without a send)."""
+    if out_dir and reason:
+        notes = _NOTES.setdefault(str(out_dir), [])
+        if len(notes) < 6:
+            notes.append(safe_reason(reason))
+
+
 def save_run_record(out_dir: Path, *, status: str, diagnostic_code: str = "", final_url: str = "",
-                    step: int = 0, control: str = "", receipt_reason: str = "", refused_request: str = "") -> str:
-    """`failure-run.json`: how the run ended, written even when no page was left to outline (e.g. a refused request closed it)."""
-    record = {"status": status, "diagnostic_code": diagnostic_code, "final_url": bare_url(final_url),
-              "step": step, "control": control, "receipt_reason": receipt_reason, "refused_request": refused_request,
+                    step: int = 0, control: str = "", receipt_reason: str = "", refused_request: str = "",
+                    reason: str = "", redact: Callable[[str], str] = lambda text: text) -> str:
+    """`failure-run.json`: how the run ended, written even when no page was left to outline (e.g. a refused request closed it).
+    Merges with an earlier record of the same run, so the engine's own `reason` (written before its message is scrubbed) survives."""
+    notes = _NOTES.pop(str(out_dir), [])
+    try:
+        previous = json.loads((out_dir / RUN_FILE).read_text(encoding="utf-8"))
+        if not isinstance(previous, dict):
+            previous = {}
+    except Exception:
+        previous = {}
+    reasons = [r for r in (previous.get("reason", ""), *notes, safe_reason(reason, redact)) if r]
+    record = {"status": status, "diagnostic_code": diagnostic_code or previous.get("diagnostic_code", ""),
+              "final_url": bare_url(final_url) or previous.get("final_url", ""),
+              "step": step or previous.get("step", 0), "control": control or previous.get("control", ""),
+              "receipt_reason": receipt_reason, "refused_request": refused_request or previous.get("refused_request", ""),
+              "reason": " | ".join(dict.fromkeys(reasons))[:480],
               "page_outline": OUTLINE_FILE if (out_dir / OUTLINE_FILE).is_file() else ""}
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
