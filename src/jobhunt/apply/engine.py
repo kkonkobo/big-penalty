@@ -575,6 +575,8 @@ class _Run:
         self.signup_scope: set[str] | None = None   # refs of the account-creation form when it shares its <form> with the login box
         self.signup_link_clicks = 0          # signup LINK clicks of this run (a link that only reloads the login page must not loop)
         self.login_unknown_try = False       # a login was attempted on a host without a known account
+        self.known_login_try = False         # a login was attempted with the stored credential of a host believed to hold the account
+        self.login_failed: set[str] = set()  # hosts where that login led back to a password page: the account is not confirmed there
         self.uploaded = False                # a file was set by the engine in this run
         self.uploaded_files: list[tuple[str, str, str]] = []  # (host, normalized label, file name stem in lowercase) of every upload done
         self.attach_done = False             # an upload-confirm click was made
@@ -785,11 +787,16 @@ class _Run:
         if self.account_known is None:
             return FactSheet(facts=facts)
         try:
-            known = bool(self.account_known(self._account_address(self.page.url)))
+            known = self._account_exists()
         except Exception:
             return FactSheet(facts=facts)
         extra = Fact(key="account_exists", label="Un compte existe déjà sur ce site pour le candidat", value="oui" if known else "non")
         return FactSheet(facts=[*facts, extra])
+
+    def _account_exists(self) -> bool:
+        """Does the candidate have an account on the CURRENT page host: the store says so and no login with it failed in this run."""
+        address = self._account_address(self.page.url)
+        return bool(self.account_known and self.account_known(address) and address not in self.login_failed)
 
     def _autonomous_decision(self, field: FormField):
         fact = self.facts.get("race_ethnicity")
@@ -2437,7 +2444,15 @@ class _Run:
             if bound_account:
                 if self.app_touched or any(field.kind == "file" for field in snap.fields):
                     return self._end("needs_human", SUPERVISED_REQUIRED)
-                known_account = self.account_known and self.account_known(self._account_address(self.page.url))
+                if self.known_login_try:  # the stored credential was just tried and the site shows a password page again: no such account
+                    self.known_login_try = False
+                    if any(field.kind == "password" for field in snap.fields):
+                        address = self._account_address(self.page.url)
+                        self.login_failed.add(address)
+                        with contextlib.suppress(Exception):
+                            if unconfirm := getattr(self.account_known, "unconfirm", None):
+                                unconfirm(address)
+                known_account = self._account_exists()
                 inline = None if known_account else self._inline_signup(plan, snap)
                 if kind not in ACCOUNT_KINDS:  # the planner called it otherwise: the page itself says what it is
                     login_form = any(f.kind == "button" and LOGIN_BUTTON_RE.search(fold(f.label)) for f in snap.fields)
@@ -2830,7 +2845,9 @@ class _Run:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
                 with contextlib.suppress(Exception):
-                    self.login_unknown_try = not self.account_known(self._account_address(self.page.url))
+                    known = self._account_exists()
+                    self.login_unknown_try = not known
+                    self.known_login_try = known and bool(self.autonomous and self.autonomous.entry_binding)
             self.diagnostics.control = ("final_submit" if final else "login_otp" if role == "login" else
                                         "account_creation" if role == "signup" else "navigation")
             try:

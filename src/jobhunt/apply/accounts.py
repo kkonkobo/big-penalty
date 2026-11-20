@@ -495,6 +495,14 @@ def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *
         host, site = target
         return account_known(host, email, site=site) if site else account_known(host, email)
 
+    def unconfirm(url):
+        """A login with the stored credential did not get in: the account is not confirmed on that site (its signup never completed)."""
+        target = scope(url)
+        if target:
+            host, site = target
+            set_state(host, email, "pending", site=site)
+
+    known.unconfirm = unconfirm  # type: ignore[attr-defined]
     return password, known
 
 

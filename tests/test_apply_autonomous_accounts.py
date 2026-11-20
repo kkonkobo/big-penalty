@@ -149,3 +149,54 @@ async def test_signup_with_an_unfillable_required_field_names_the_reason(server,
     assert result.status == "needs_input"
     assert result.result.diagnostic_code == "account_signup_field_unfilled"
     assert not server.posts
+
+
+TALENTSOFT_HEADER = ('<header><form method="post" action="/my-account/log-in.aspx"><label>Identifiant (email)<input type="text" name="Login"></label>'
+                     '<label>Mot de passe<input type="password" name="Password"></label><label>Rester connecté<input type="checkbox" name="StayConnected"></label>'
+                     '<button type="submit">Se connecter</button></form></header>')
+TALENTSOFT_REAL = (TALENTSOFT_HEADER + TALENTSOFT.replace('name="Login"', 'name="ctl00$corps$tbxIdentifiant"')
+                   .replace('name="Password"', 'name="ctl00$corps$tbxPassword"')
+                   .replace("CreationControl$", "ctl00$corps$CreationControl$"))
+
+
+def two_step_site(server, state):
+    """The site rejects a login (the page comes back) and accepts the creation box."""
+    server.html["/my-account/log-in.aspx"] = TALENTSOFT_REAL
+    server.post_redirects["/my-account/log-in.aspx"] = "/my-account/log-in.aspx"
+    real = server.post_redirects
+
+    class Redirects(dict):
+        def __contains__(self, path):
+            return path.startswith("/my-account/log-in.aspx")
+
+        def __getitem__(self, path):
+            body = server.posts[-1]["body"].decode()
+            return "/jobs/100/apply" if "CreationControl%24txtNouveauIdentifiant=camille" in body.replace("%40", "@") else "/my-account/log-in.aspx"
+
+    server.post_redirects = Redirects(real)
+
+
+@pytest.mark.parametrize("known", [False, True])
+async def test_talentsoft_duplicated_login_boxes(known, server, profile, tmp_path, fast, monkeypatch):
+    """Header + body login boxes and the creation box; `known` is the stale credential of a signup that never completed."""
+    app = setup(server, profile, tmp_path, monkeypatch, known=known)
+    unconfirmed = []
+    live = {"known": known}
+    monkeypatch.setattr(service.accounts, "account_known", lambda host, email: live["known"])
+    real_callbacks = service.accounts.guarded_account_callbacks
+
+    def callbacks(*args, **kw):
+        password, known_cb = real_callbacks(*args, **kw)
+        known_cb.unconfirm = lambda url: (unconfirmed.append(url), live.update(known=False))[0]
+        return password, known_cb
+
+    monkeypatch.setattr(service.accounts, "guarded_account_callbacks", callbacks)
+    two_step_site(server, known)
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(planner()))
+    posts = [parse_qs(p["body"].decode(), keep_blank_values=True) for p in server.posts_to("/my-account/log-in.aspx")]
+    created = [b for b in posts if b.get("ctl00$corps$CreationControl$txtNouveauIdentifiant") == ["camille@example.test"]]
+    assert len(created) == 1, (result.status, result.result.diagnostic_code, result.message, posts)
+    assert created[0]["ctl00$corps$CreationControl$txtNouveauMotDePasse"] == ["fixture-password"]
+    assert len(unconfirmed) == (1 if known else 0)
+    assert "fixture-password" not in repr(result.result.model_dump())
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message)
