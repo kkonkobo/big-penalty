@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -151,7 +152,9 @@ def get_settings() -> Settings:
         cv_allow_failover=env("JOBHUNT_CV_ALLOW_FAILOVER", "1").strip().lower() not in ("0", "false", "no", "off"),
         llm_deadline_s=float(env("JOBHUNT_LLM_DEADLINE_S") or 180),
         llm_usage_log=env("JOBHUNT_LLM_USAGE_LOG", "1").strip().lower() not in ("0", "false", "no", "off"),
-        llm_cli_enabled=env("JOBHUNT_LLM_CLI", "1").strip().lower() not in ("0", "false", "no", "off"),
+        # Off by default on Windows: the CLIs there are .cmd shims and long prompts through cmd.exe arguments are untested.
+        llm_cli_enabled=(env("JOBHUNT_LLM_CLI") or ("0" if sys.platform == "win32" else "1")).strip().lower()
+        not in ("0", "false", "no", "off"),
         llm_route_default="api" if (env("JOBHUNT_LLM_ROUTE") or "cli").strip().lower() == "api" else "cli",
         codex_cli_model=env("JOBHUNT_CODEX_CLI_MODEL") or "gpt-6.2-sol",
         codex_cli_effort=env("JOBHUNT_CODEX_CLI_EFFORT") or "low",

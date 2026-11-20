@@ -19,6 +19,10 @@ class Answer(BaseModel):
     key_seen: bool
 
 
+# The fake CLIs are POSIX scripts with a shebang; Windows cannot execute them (the CLIs are off by default there).
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="fake CLIs are POSIX shebang scripts")
+
+
 def fake_cli(tmp_path: Path, body: str) -> str:
     path = tmp_path / "fake-cli"
     path.write_text(f"#!{sys.executable}\nimport json, os, sys\nargv = sys.argv[1:]\nprompt = sys.stdin.read()\n{body}\n")
@@ -49,6 +53,7 @@ def settings(tmp_path):
     return get_settings().model_copy(update={"llm_usage_log": False, "data_dir": tmp_path})
 
 
+@posix_only
 async def test_claude_cli_parses_structured_output_without_api_key(tmp_path, settings, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-reach-the-cli")
     provider = ClaudeCLIProvider(settings, binary=fake_cli(tmp_path, CLAUDE_OK))
@@ -67,6 +72,7 @@ def test_claude_cli_argv_turns_tools_settings_and_mcp_off(settings):
     assert json.loads(argv[argv.index("--json-schema") + 1]) == output_schema(Answer)
 
 
+@posix_only
 async def test_claude_cli_limit_is_a_rate_limit_error(tmp_path, settings):
     body = 'print(json.dumps({"is_error": True, "subtype": "error", "result": "Claude AI usage limit reached|1767225600"}))'
     provider = ClaudeCLIProvider(settings, binary=fake_cli(tmp_path, body))
@@ -75,6 +81,7 @@ async def test_claude_cli_limit_is_a_rate_limit_error(tmp_path, settings):
     assert caught.value.code == "rate_limit" and "usage limit" not in str(caught.value)
 
 
+@posix_only
 async def test_claude_cli_invalid_output_never_quotes_it(tmp_path, settings):
     body = 'print(json.dumps({"is_error": False, "structured_output": {"answer": "SECRET-OUTPUT"}}))'
     provider = ClaudeCLIProvider(settings, binary=fake_cli(tmp_path, body))
@@ -83,6 +90,7 @@ async def test_claude_cli_invalid_output_never_quotes_it(tmp_path, settings):
     assert caught.value.code == "invalid_response" and "SECRET" not in str(caught.value)
 
 
+@posix_only
 async def test_codex_cli_reads_output_file_and_usage(tmp_path, settings, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-reach-the-cli")
     provider = CodexCLIProvider(settings, binary=fake_cli(tmp_path, CODEX_OK))
@@ -98,6 +106,7 @@ def test_codex_cli_ignores_user_config(settings, tmp_path):
     assert "--ignore-user-config" in argv and "--ephemeral" in argv and argv[argv.index("-s") + 1] == "read-only"
 
 
+@posix_only
 async def test_codex_cli_failure_without_output(tmp_path, settings):
     body = 'print(json.dumps({"type": "turn.failed", "error": {"message": "You\'ve hit your usage limit"}})); sys.exit(1)'
     provider = CodexCLIProvider(settings, binary=fake_cli(tmp_path, body))
@@ -129,6 +138,7 @@ def test_claude_cli_memory_and_sessions_off(settings):
     assert json.loads(argv[argv.index("--settings") + 1]) == {"autoMemoryEnabled": False}
 
 
+@posix_only
 async def test_claude_cli_child_env_disables_auto_memory(tmp_path, settings):
     provider = ClaudeCLIProvider(settings, binary=fake_cli(tmp_path, ECHO_ENV))
     out = await provider._parse(Answer, model="m", system_text="s", user_text="u", effort="low", max_tokens=10)
@@ -143,6 +153,7 @@ def test_codex_cli_memory_history_and_sessions_off(settings, tmp_path):
     assert 'history.persistence="none"' in joined
 
 
+@posix_only
 async def test_codex_cli_uses_a_dedicated_home_when_configured(tmp_path, settings, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", "/personal/codex")  # the user's own home never leaks into the child
     provider = CodexCLIProvider(settings, binary=fake_cli(tmp_path, ECHO_ENV))
@@ -161,6 +172,7 @@ def test_codex_provider_uses_sol_for_every_task(settings):
     assert provider.settings.scoring_model == "gpt-6.2-sol" and provider.settings.scoring_effort == "low"
 
 
+@posix_only
 async def test_transient_cli_failure_is_retried_once(tmp_path, settings):
     counter = tmp_path / "count"
     body = f"""
@@ -176,6 +188,7 @@ print(json.dumps({{"is_error": False, "usage": {{"input_tokens": 1}}, "structure
     assert out.answer == "ok" and counter.read_text() == "2"
 
 
+@posix_only
 async def test_usage_limit_puts_the_cli_on_cooldown(tmp_path, settings):
     from jobhunt.llm_cli import cooldowns, set_cooldown
 
@@ -195,6 +208,7 @@ print(json.dumps({{"is_error": True, "subtype": "error", "result": "Claude AI us
     assert "claude-cli" not in cooldowns(settings)
 
 
+@posix_only
 async def test_subscription_calls_cost_nothing_in_the_usage_log(tmp_path, settings):
     from jobhunt.llm import USAGE_FILE, read_usage
 

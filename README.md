@@ -66,7 +66,7 @@ straight to the next provider. A transient CLI failure is retried once.
 | Variable | Use |
 |---|---|
 | `JOBHUNT_LLM_ROUTE` | Default route of tasks not set on the IA page: `cli` (default) or `api` |
-| `JOBHUNT_LLM_CLI=0` | Never use the CLIs (API only) |
+| `JOBHUNT_LLM_CLI` | `0`: never use the CLIs (API only). Off by default on Windows (untested there); `1` turns them on |
 | `JOBHUNT_CODEX_CLI_MODEL` / `_EFFORT` / `_CV_EFFORT` | Codex model and efforts (`gpt-6.2-sol`, low, medium for CV writing) |
 | `JOBHUNT_CODEX_CLI_BIN` / `JOBHUNT_CLAUDE_CLI_BIN` | CLI paths (default: on `PATH`, else the ChatGPT app's bundled Codex) |
 | `JOBHUNT_CODEX_HOME` | Optional dedicated Codex home (run `codex login` with it once): nothing is then written to `~/.codex` |
