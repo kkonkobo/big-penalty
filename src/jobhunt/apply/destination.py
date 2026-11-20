@@ -11,7 +11,11 @@ from email.parser import BytesParser
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 _REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid", "jobreqid", "career_job_req_id"}
-_TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid"}
+# Query keys a job link may carry that only attribute the visit or pick a display mode: dropped from a navigation URL
+# (the posting is still reached from its path or requisition key). Any other key fails the link closed.
+_TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid", "lcid", "partner", "trid", "rs", "feedid",
+             "jobpipeline", "idorigine", "id_origin", "applicant_source_welcome", "in_iframe", "mode"}
+_TRACKING_PREFIXES = ("utm_", "rx_")  # rx_*: Radancy job-ad attribution on Workday links
 _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 _CODE = re.compile(
@@ -57,7 +61,7 @@ def clean_url(url: str | None, *, navigation: bool = False, allow_login_redirect
                 kept[name] = (key, value)
             elif navigation and name in _LOGIN_REDIRECT and allow_login_redirect and login_return(url):
                 continue
-            elif navigation and name not in _TRACKING and not name.startswith("utm_"):
+            elif navigation and name not in _TRACKING and not name.startswith(_TRACKING_PREFIXES):
                 return ""
         return urlunsplit((parsed.scheme, netloc, parsed.path or "/", urlencode(sorted(kept.values())), ""))
     except ValueError:

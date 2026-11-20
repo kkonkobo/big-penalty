@@ -50,6 +50,17 @@ def test_talentsoft_login_return_is_same_host_and_not_persisted(target, allowed)
     assert clean_url(f"{base}?ReturnUrl={target}", navigation=True) == (base if allowed else "")
 
 
+@pytest.mark.parametrize("query, cleaned", [
+    ("rx_ch=connector&rx_source=board&source=x", "https://example.test/job/42"),
+    ("feedId=1&jobPipeline=LinkedIn&mode=apply&LCID=1040&trid=a-b", "https://example.test/job/42"),
+    ("jobId=R123&partner=45", "https://example.test/job/42?jobId=R123"),
+    ("digest=abc", ""),                      # an unknown key still fails the link closed
+    ("next=https%3A%2F%2Fother.example", ""),
+])
+def test_navigation_drops_attribution_keys_only(query, cleaned):
+    assert clean_url(f"https://example.test/job/42?{query}", navigation=True) == cleaned
+
+
 @pytest.mark.parametrize("scenario", ["dry", "signin", "signup", "mixed", "wrong_requisition", "foreign", "otp"])
 async def test_continuity_account_boundary(scenario, server, profile, tmp_path, fast, monkeypatch):
     monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)

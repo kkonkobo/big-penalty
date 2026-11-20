@@ -557,6 +557,79 @@ async def test_a_captcha_pause_needs_an_explicit_resume_even_on_attended_pass(en
         assert not env.runs and s.paused == 1, kw
 
 
+def engine_paused_run(env, job, code, *, started, submit_clicked=False):
+    """An approved application of `job` paused `needs_human` by the engine itself (`code`), started at `started`."""
+    app = store.find_application(env.profile.id, job.id) or cvs.approve(env.draft(job).id, 1)
+    r = astore.start_run(app.id, 1, "submit", "auto", lambda rid: env.tmp / "runs" / str(rid))
+    astore.finish_run(r.id, RunResult(status="needs_human", diagnostic_code=code, submit_clicked=submit_clicked))
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET started_at=? WHERE id=?", (started, r.id))
+    return app
+
+
+OLD = "2026-11-19T19:50:00+00:00"   # before astore.ENGINE_RETRY_EPOCH
+NEW = "2026-11-20T11:00:00+00:00"   # after it
+
+
+@pytest.mark.parametrize("code", ["recipient_refused_same_site_write", "recipient_refused_redirect", "public_page_shell",
+                                  "apply_target_unverified", "job_page_no_apply_control"])
+async def test_an_engine_pause_from_older_code_is_retried_automatically(env, profile, code):
+    job = env.job(1)
+    app = engine_paused_run(env, job, code, started=OLD)
+    assert not astore.has_site_handoff(app.id)
+    s, _ = await daily(profile)
+    assert [a for a, _ in env.runs] == [app.id] and s.paused == 0
+
+
+async def test_an_engine_pause_from_current_code_still_waits(env, profile):
+    job = env.job(1)
+    app = engine_paused_run(env, job, "recipient_refused_same_site_write", started=NEW)
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
+
+
+@pytest.mark.parametrize("code", ["challenge_or_rate_limited", "human_required", "credential_page", "posting_mismatch"])
+async def test_an_old_human_pause_is_never_retried(env, profile, code):
+    job = env.job(1)
+    app = engine_paused_run(env, job, code, started=OLD)
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
+
+
+async def test_an_old_engine_pause_after_a_submit_click_is_never_retried(env, profile):
+    job = env.job(1)
+    app = engine_paused_run(env, job, "recipient_refused_same_site_write", started=OLD, submit_clicked=True)
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
+
+
+def autonomous_outcome(env, job, status, *, started, receipt=None, submit_clicked=False):
+    """A finished autonomous run on job.example.test (its reservation bound to that host)."""
+    app = store.find_application(env.profile.id, job.id) or cvs.approve(env.draft(job).id, 1)
+    r = astore.start_run(app.id, 1, "submit", "auto", lambda rid: env.tmp / "runs" / str(rid))
+    astore.finish_run(r.id, RunResult(status=status))
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET started_at=?, submit_clicked_at=? WHERE id=?",
+                  (started, started if submit_clicked else None, r.id))
+        c.execute("INSERT INTO apply_reservations(profile_id, application_id, run_id, trigger, role_key, url_key, created_at,"
+                  " released_at, binding_json, receipt_outcome) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (env.profile.id, app.id, r.id, "auto", f"role-{r.id}", f"url-{r.id}", started, started,
+                   '{"autonomous": 1, "host": "job.example.test"}', receipt))
+
+
+@pytest.mark.parametrize("outcomes, paused", [
+    ([("failed", OLD, None, False), ("failed", OLD, None, False)], False),        # judged by older code
+    ([("failed", NEW, None, False), ("failed", NEW, None, False)], True),
+    ([("failed", OLD, None, False), ("failed", NEW, None, False)], False),        # only one failure counts
+    ([("failed", OLD, None, True), ("failed", OLD, "uncertain", False)], True),   # a possible send always counts
+])
+async def test_old_engine_failures_no_longer_pause_their_host(env, profile, outcomes, paused):
+    for n, (status, started, receipt, clicked) in enumerate(outcomes, 1):
+        autonomous_outcome(env, env.job(n), status, started=started, receipt=receipt, submit_clicked=clicked)
+    assert astore.host_paused("job.example.test") is paused
+    assert ("job.example.test" in astore.paused_hosts()) is paused
+
+
 @pytest.mark.parametrize("status", ["needs_email", "needs_human"])
 async def test_a_new_cv_revision_does_not_clear_a_site_handoff(env, profile, status):
     job = env.job(1)
