@@ -631,6 +631,24 @@ def apply_diagnostics(
         console.print("Aucun échec moteur récurrent attribué à un ATS connu.")
 
 
+@apply_app.command("report")
+def apply_report(
+    since: Annotated[Optional[str], typer.Option("--since", help="début ISO (ex. 2026-11-20T10:00)")] = None,
+    last_batch: Annotated[bool, typer.Option("--last-batch", help="dernier lot (démarrages espacés de moins de 30 min)")] = False,
+    mode: Annotated[str, typer.Option("--mode", help="submit (défaut), dry_run ou all")] = "submit",
+    database: Annotated[Optional[Path], typer.Option("--db", help="autre base locale (lecture seule)")] = None,
+) -> None:
+    """Pourquoi les candidatures n'ont pas été envoyées : statuts, motifs, exemples (lecture seule, sans données personnelles)."""
+    from jobhunt.apply.report import build_report, render
+
+    try:
+        report = build_report(since=since or "", last_batch=last_batch or not since, mode=mode, path=database)
+    except (sqlite3.Error, ValueError) as exc:
+        console.print(f"Rapport indisponible : {type(exc).__name__}.", markup=False)
+        raise typer.Exit(1) from None
+    typer.echo(render(report))
+
+
 @apply_app.command("dry-run")
 def apply_dry_run(app_id: int, headless: HeadlessOpt = None) -> None:
     """Inspecte le formulaire sans saisie, pièce jointe ni envoi."""

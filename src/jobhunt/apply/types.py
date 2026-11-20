@@ -184,3 +184,12 @@ class RunResult(BaseModel):
     # own site nor a known ATS nor trusted by the user: that host, so the UI can offer "faire confiance à ce site".
     untrusted_host: str = ""
     finished_at: datetime | None = None
+
+
+# Non-secret reason codes of an account stop: shown instead of the generic credential_page, so the failure is diagnosable.
+ACCOUNT_REASONS = {
+    "account_signup_missing_link": "Compte requis : aucun accès à la création de compte trouvé sur la page de connexion.",
+    "account_signup_field_unfilled": "Création de compte : un champ obligatoire n'a pas pu être rempli automatiquement.",
+    "account_login_failed": "Connexion au compte impossible : le site refuse les identifiants.",
+    "account_signup_loop": "Création de compte : le lien de création ramène à la même page.",
+}

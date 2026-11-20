@@ -20,7 +20,7 @@ from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
 from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, posting_fingerprint, resolved_identity, similar_role
-from jobhunt.apply.types import Mode, RunResult, RunStatus
+from jobhunt.apply.types import ACCOUNT_REASONS, Mode, RunResult, RunStatus
 from jobhunt.db import _dt, _iso, connect, now
 from jobhunt.dedupe import canonical_url
 
@@ -32,6 +32,7 @@ _DIAGNOSTICS = {
     "failed": "La tentative a échoué.",
     "blocked": "L’action a été bloquée.",
     "credential_page": "Vérification ou connexion manuelle requise (credential_page).",
+    **ACCOUNT_REASONS,
     "recipient_refused": RECIPIENT_REFUSED,
     "posting_mismatch": "Identité du poste non vérifiée : saisie annulée.",
     "dry_untested": "Simulation non testée : inspection hors ligne, sans saisie, fichier ni envoi de candidature.",
@@ -191,7 +192,7 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
         if step["page_kind"] in sensitive or contains_verification_code(step["note"] or ""):
             credential_page = True
             step.update(note="credential_page", filled=[], clicked="", screenshot="")
-    if credential_page or result.status == "needs_email":
+    if (credential_page or result.status == "needs_email") and result.diagnostic_code not in ACCOUNT_REASONS:
         payload.update(message="Vérification ou connexion manuelle requise (credential_page).", questions=[])
     return RunResult.model_validate(scrub(payload))
 
@@ -447,7 +448,7 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
 # guard and page-reading code that has since been fixed: they no longer pause their host, and the automatic pass retries
 # their engine-caused pauses (ENGINE_PAUSE_CODES) once. Move it forward when a change is expected to clear such outcomes.
 # A run that may have sent the application (submit clicked, uncertain receipt) is never affected.
-ENGINE_RETRY_EPOCH = "2026-11-20T17:50:00+00:00"
+ENGINE_RETRY_EPOCH = "2026-11-20T18:10:00+00:00"
 
 # Pause codes the engine produced on its own (its guard refused a request, it could not read the page or find the apply
 # control): unlike a CAPTCHA, an e-mail or a login, nothing the candidate must do. Posting conflicts are not in this list.
@@ -738,6 +739,10 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
 
 def stale_engine_pause(run: ApplyRun | None) -> bool:
     """`run` is an engine-caused pause judged by code older than ENGINE_RETRY_EPOCH, and it cannot have sent anything."""
+    if (run is not None and run.status == "needs_input" and run.result is not None
+            and run.result.diagnostic_code == "credential_page" and not run.result.submit_clicked
+            and run.submit_clicked_at is None and run.nav_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH):
+        return True  # an account page the older engine could not get through (it now creates accounts): retry once
     return bool(run is not None and run.status == "needs_human" and run.result is not None
                 and run.result.diagnostic_code in ENGINE_PAUSE_CODES and not run.result.submit_clicked
                 and run.submit_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH)
