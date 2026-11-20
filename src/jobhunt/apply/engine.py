@@ -34,6 +34,7 @@ from jobhunt.apply.autonomous import (
 )
 from jobhunt.apply.destination import clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
+from jobhunt.apply.consent import dismiss_consent
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import IDENTITY, capture, exact_option, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
@@ -734,6 +735,8 @@ class _Run:
         await human_pause(0.3, 0.8)
 
     async def _snapshot(self) -> tuple[PageSnapshot, Resolver]:
+        if self.mode != "supervised":  # a consent dialog that came back on this page would cover what the run needs
+            await dismiss_consent(self.page)
         for attempt in range(3):
             try:
                 snapshot, resolve = await take_snapshot(self.page)
