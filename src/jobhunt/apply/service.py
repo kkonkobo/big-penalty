@@ -1382,6 +1382,20 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
             summary.prepared += 1
             return new
 
+        async def refresh(app: Application, job) -> Application | None:
+            """A CV generated from an older master can never be sent: one new revision from the confirmed master, within the
+            preparation cap of the pass (not counted as a retry: the old revision was not broken). None = left blocked."""
+            if budget[0] >= s.apply_prepare_daily_cap:
+                return None
+            budget[0] += 1
+            try:
+                new = await cvs.prepare_application(profile_id, job.id, shared_llm.get())
+            except (CVError, LLMError) as e:
+                summary.errors.append(f"{job.company or 'entreprise'} — {job.title} : {e}")
+                return None
+            summary.prepared += 1
+            return new
+
         order = [j for j in cands if j.id in apps] + [j for j in cands if j.id not in apps]  # existing CVs first
         total, budget = len(order), [0]  # budget[0]: CVs generated this pass (first versions and regenerations)
         for n, job in enumerate(order, 1):
@@ -1404,7 +1418,8 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
                         emit(f"{tag} : bloquée (CV non préparé : {e})")
                         continue
                 await _auto_one(apps[job.id], job, tag, summary, emit, lock_held=lock_held, pool=shared_pool, llm=shared_llm,
-                                planner=planner, verifier=verifier, headless=headless, attended=attended, min_score=min_score, regenerate=regenerate)
+                                planner=planner, verifier=verifier, headless=headless, attended=attended, min_score=min_score, regenerate=regenerate,
+                                refresh=refresh, master_hash=master.content_hash)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - one application never stops the pass
@@ -1427,7 +1442,8 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
 
 
 async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit, *, lock_held: bool, pool: _Pool, llm: _Llm,
-                    planner, verifier, headless: bool, attended: bool, min_score: float | None, regenerate=None) -> None:
+                    planner, verifier, headless: bool, attended: bool, min_score: float | None, regenerate=None,
+                    refresh=None, master_hash: str | None = None) -> None:
     """One application of the automatic pass: checks, auto-approval, the send itself and its progress line."""
     s = get_settings()
     app = cvstore.get_application(app.id) or app  # someone else (the web portal, the user) may have moved it since the pass began
@@ -1463,6 +1479,11 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         summary.supervised += 1
         emit(f"{tag} : {SUPERVISED_ONLY.lower()}")
         return
+    if refresh is not None and master_hash and app.status in ("draft", "approved") and app.master_hash != master_hash:
+        new = await refresh(app, job)  # generated from an older master: rebuild it from the confirmed one
+        if new is not None:
+            app = new
+            emit(f"{tag} : CV régénéré (CV maître modifié)")
     def broken(a: Application) -> bool:
         return a.status == "draft" and (bool(a.errors) or cvs.safe_pdf(a) is None)
 

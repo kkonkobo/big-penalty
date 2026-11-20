@@ -752,3 +752,31 @@ def test_auto_regens_counter_is_atomic_and_per_application(profile, master, tmp_
     b = make_app(profile, make_job(profile, title="Deux", company="B", url="https://c.exemple.test/2"), tmp_path, master_hash=master.content_hash)
     assert astore.auto_regens(a.id) == 0 and astore.bump_auto_regens(a.id) == 1 and astore.bump_auto_regens(a.id) == 2
     assert astore.auto_regens(b.id) == 0 and astore.auto_regens(9999) == 0
+
+
+# ------------------------------------------------------------------ CVs generated from an older master
+async def test_an_approved_cv_from_an_older_master_is_rebuilt_reapproved_and_sent(env, profile):
+    job = env.job(1)
+    old = cvs.approve(env.draft(job).id, 1)
+    newer = sample_master()
+    newer.summary += " Nouveau projet ajouté."
+    env.master = save_confirmed(profile.id, newer)
+    assert old.master_hash != env.master.content_hash
+    s, lines = await daily(profile)
+    assert env.prepared == [job.id] and s.prepared == 1 and s.sent == 1
+    assert "[1/1] Société 1 — Stage numéro 1 : CV régénéré (CV maître modifié)" in lines
+    app = store.find_application(profile.id, job.id)
+    assert app.current_rev == 2 and app.status == "submitted" and app.master_hash == env.master.content_hash
+    assert astore.auto_regens(app.id) == 0  # not a retry of a broken CV
+
+
+async def test_a_stale_cv_waits_when_the_preparation_cap_is_spent(env, profile, monkeypatch):
+    job = env.job(1)
+    cvs.approve(env.draft(job).id, 1)
+    newer = sample_master()
+    newer.summary += " Nouveau projet ajouté."
+    env.master = save_confirmed(profile.id, newer)
+    monkeypatch.setattr(get_settings(), "apply_prepare_daily_cap", 0)
+    s, lines = await daily(profile)
+    assert not env.prepared and not env.runs and s.sent == 0
+    assert any("CV maître modifié depuis la génération" in line for line in lines)
