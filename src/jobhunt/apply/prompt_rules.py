@@ -102,6 +102,11 @@ def is_manual_choice(label: str) -> bool:
     return decision_key(label) is not None
 
 
+# Country-only phone-country lists ("France"): a calling code is tied to a country by name only where that is unambiguous.
+DIAL_COUNTRY_NAMES = {"+33": frozenset({"france", "france metropolitaine"}), "+49": frozenset({"germany", "allemagne", "deutschland"}),
+                      "+44": frozenset({"united kingdom", "royaume uni", "grossbritannien", "vereinigtes konigreich"})}
+
+
 def international_calling_code(phone: str) -> str | None:
     """Recognize supported international formats without converting a domestic number into one."""
     if not re.fullmatch(r"(?:\+|00)[1-9][0-9 .-]+", phone.strip()):

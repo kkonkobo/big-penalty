@@ -1626,7 +1626,7 @@ class Resolver:
         return await self._boards[ref.key]
 
     async def _fetch_board(self, ref: BoardRef) -> list[Candidate] | None:
-        if self.cache.board_known_missing(ref.key):
+        if self.cache and self.cache.board_known_missing(ref.key):
             return None
         s = ref.slug
         jobs: list[Candidate] | None = None
@@ -1661,7 +1661,8 @@ class Resolver:
         except Exception as e:  # never let one board break the run
             log.debug("board %s failed: %s", ref.key, e)
             return None
-        self.cache.board_result(ref.key, jobs is not None)
+        if self.cache:
+            self.cache.board_result(ref.key, jobs is not None)
         return jobs
 
     async def _fetch_smartrecruiters(self, slug: str) -> list[Candidate] | None:
