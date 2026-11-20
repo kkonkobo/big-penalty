@@ -6,9 +6,9 @@ import pytest
 from apply_fakes import ScriptedPlanner, act, fast, server  # noqa: F401
 from test_apply_dispatch_safety import approved_fixture, posting_form
 
-from jobhunt.apply import service
+from jobhunt.apply import engine, service
 from jobhunt.apply.facts import save_answers
-from jobhunt.apply.types import StepPlan
+from jobhunt.apply.types import Action, Question, RunResult, StepPlan
 
 CREATE = "Je me crée un espace candidat"
 
@@ -283,3 +283,62 @@ async def test_signup_answered_account_exists_logs_in_with_the_stored_credential
     assert (site.created, site.logins) == (1, 1)  # one signup attempt, answered "already used", then one login
     assert len(server.posts_to("/jobs/100/apply")) == 1
     assert "fixture-password" not in repr(result.result.model_dump())
+
+
+SEARCH_BOX = ('<fieldset><legend>Moteur de recherche</legend>'
+              '<label>Localisation du poste<select name="ctl00$search$Location"><option value="0">Veuillez sélectionner une valeur</option>'
+              '<optgroup label="Zone"><option value="79">France (3)</option><option value="80">Autre (1)</option></optgroup></select></label>'
+              '<label>Contrat<select name="ctl00$search$Contract"><option value="0">Veuillez sélectionner une valeur</option>'
+              '<option value="1">Alternance (3)</option><option value="2">Stage (7)</option></select></label>'
+              '<input type="submit" name="ctl00$search$go" value="Lancer ma recherche"></fieldset>')
+
+
+@pytest.mark.parametrize("known", [False, True])
+async def test_talentsoft_search_selects_in_the_account_form_are_not_questions(known, server, profile, tmp_path, fast, monkeypatch):
+    """Real Talentsoft account pages are ONE ASP.NET form that also holds the site's job-search selects, whose blank option is
+    "Veuillez sélectionner une valeur" = 0. That value must not read as a choice the candidate has to confirm. The planner's plan
+    is the one observed live: the creation fields + the creation button (signup), or the login box (known account)."""
+    app = setup(server, profile, tmp_path, monkeypatch, known=known)
+    page = TALENTSOFT_HEADER + TALENTSOFT.replace('name="Login"', 'name="ctl00$corps$tbxIdentifiant"').replace(
+        'name="Password"', 'name="ctl00$corps$tbxPassword"').replace("CreationControl$", "ctl00$corps$CreationControl$").replace(
+        'id="aspnetForm">', 'id="aspnetForm">' + SEARCH_BOX)
+    assert "Veuillez sélectionner" in page
+    server.html["/my-account/log-in.aspx"] = page
+    server.post_redirects["/my-account/log-in.aspx"] = "/jobs/100/apply"
+
+    def plan(snap):
+        if urlsplit(snap.url).path == "/jobs/100":
+            return StepPlan(page_kind="job_page")
+        if any(f.kind == "password" for f in snap.fields):
+            if known:
+                return StepPlan(page_kind="account_login", actions=[
+                    act(snap, "Identifiant", "fill", "account_email", kind="text"), act(snap, "Mot de passe", "fill", "account_password"),
+                    act(snap, "Se connecter", "click", role="login")])
+            by = {f.name.rsplit("$", 1)[-1]: f.ref for f in snap.fields if "CreationControl" in f.name}
+            return StepPlan(page_kind="account_signup", actions=[
+                Action(ref=by["txtNouveauIdentifiant"], op="fill", fact="account_email"),
+                Action(ref=by["txtNouveauMotDePasse"], op="fill", fact="account_password"),
+                Action(ref=by["btnCreateAccount"], op="click", fact="account_exists", click_role="signup")])
+        return planner()(snap)
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    posts = [parse_qs(p["body"].decode(), keep_blank_values=True) for p in server.posts_to("/my-account/log-in.aspx")]
+    assert len(posts) == 1, (result.status, result.result.diagnostic_code, result.message, posts)
+    if known:
+        assert posts[0]["Login"] == ["camille@example.test"]  # the (header) login box the scripted plan picked
+    else:
+        assert posts[0]["ctl00$corps$CreationControl$txtNouveauIdentifiant"] == ["camille@example.test"]
+        assert posts[0]["ctl00$corps$CreationControl$txtNouveauMotDePasse"] == ["fixture-password"]
+        assert posts[0]["ctl00$corps$tbxIdentifiant"] == [""]
+        assert posts[0]["ctl00$search$Location"] == ["0"] and posts[0]["ctl00$search$Contract"] == ["0"]  # the search boxes stay untouched
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message)
+
+
+def test_stop_reason_names_the_unanswered_field_labels_but_no_passwords():
+    run = object.__new__(engine._Run)
+    run.steps, run.stop_note, run._r = [], "", (lambda text: text)
+    res = RunResult(status="needs_input", message="x", questions=[
+        Question(label="Localisation du poste", kind="select", reason="unmapped"),
+        Question(label="Mot de passe", kind="password", reason="unmapped")])
+    reason = run._stop_reason(res)
+    assert "2 unanswered question(s): unmapped" in reason and "Localisation du poste" in reason and "Mot de passe" not in reason
