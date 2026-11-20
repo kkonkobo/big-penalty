@@ -36,6 +36,9 @@ ENV_TEMPLATE = """\
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 # JOBHUNT_LLM_PROVIDERS=anthropic,openai
+# Subscription CLIs (Codex, then Claude Code) first, API as backup; switch per task on the "IA" page.
+# JOBHUNT_LLM_ROUTE=cli
+# JOBHUNT_CODEX_CLI_MODEL=gpt-6.2-sol
 
 # Optional sources
 FIRECRAWL_API_KEY=

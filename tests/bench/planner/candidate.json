@@ -1,0 +1,38 @@
+{
+  "_note": "Fictitious candidate for the planner benchmark. No real person; example.test addresses only.",
+  "profile": {
+    "name": "Camille Durand",
+    "email": "camille.durand@example.test",
+    "phone": "+33 6 00 00 00 00",
+    "headline": "Étudiant(e) en deuxième année d'école d'ingénieur mécatronique",
+    "education": "Bac+2 en cours, école d'ingénieur, cycle de cinq ans",
+    "experience_years": 0,
+    "skills": ["C", "C++", "STM32", "Arduino", "électronique", "robotique"],
+    "contract_types": ["stage", "alternance"],
+    "locations": ["Toulouse"],
+    "languages": ["fr", "en"]
+  },
+  "answers": {
+    "city": "Toulouse",
+    "postal_code": "31000",
+    "country": "France",
+    "work_authorization": "Autorisé(e) à travailler en France sans restriction",
+    "needs_visa_sponsorship": "Non",
+    "graduation_date": "2027-06-30",
+    "alternance": {"start": "2027-01-04", "duration": "24 mois", "rhythm": "3 semaines en entreprise / 1 semaine en cours"},
+    "notice_period": "Aucun (étudiant)",
+    "mobility": "Occitanie",
+    "languages": "Français (natif), anglais (B2)"
+  },
+  "job": {"title": "Alternance technicien mécatronique", "company": "Exemple SA", "url": "https://example.test/offre/1"},
+  "today": "2026-11-20",
+  "account_email": "camille.durand@example.test",
+  "fact_values": {
+    "candidate_profile": "Étudiant(e) en deuxième année d'école d'ingénieur mécatronique (Bac+2 en cours). Projets d'équipe : robot suiveur de ligne (STM32, C) et participation à la Coupe de France de robotique. Aucune expérience professionnelle salariée. Recherche une alternance à partir de janvier 2027.",
+    "school": "École d'ingénieurs fictive de Toulouse",
+    "degree": "Diplôme d'ingénieur en mécatronique (en cours)"
+  },
+  "extra_facts": [
+    {"key": "account_exists", "label": "Un compte existe déjà sur ce site pour le candidat", "value": "non"}
+  ]
+}

@@ -57,6 +57,10 @@ PRICES: dict[str, tuple[float, float, float, float]] = {
     "claude-sonnet-5-5": (2.0, 10.0, 0.10, 2.5),
     "claude-sonnet-5": (2.0, 10.0, 0.20, 2.5),
     "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
+    # OpenAI (cache write = OpenAI's extended-retention write). gpt-6.2-sol: third-party listings, same as gpt-6.1-sol.
+    "gpt-6.1-sol": (2.0, 10.0, 0.10, 2.5),
+    "gpt-6.2-sol": (2.0, 10.0, 0.10, 2.5),
+    "gpt-6-luna": (0.10, 0.50, 0.01, 0.125),
 }
 # Put this between two parts of a system prompt to give the first part its own prompt-cache breakpoint: a prefix shared by
 # every request (the rules) stays readable from the cache when the second part (per-run data) changes. Never sent as text.
@@ -92,12 +96,17 @@ def prompt_sha(model: str, system_text: str, user_text: str) -> str:
 
 
 def record_usage(settings: Settings, *, provider: str, model: str, site: str, input_tokens: int, output_tokens: int,
-                 cache_read: int, cache_write: int, sha: str = "", latency_s: float | None = None) -> dict[str, Any]:
+                 cache_read: int, cache_write: int, sha: str = "", latency_s: float | None = None,
+                 subscription: bool = False) -> dict[str, Any]:
     """Log one call (INFO on jobhunt.llm.usage) and append it to the usage file. Never raises: accounting must not break a run.
-    `input_tokens` is the UNCACHED input (Anthropic semantics; OpenAI cached tokens are subtracted by the caller)."""
+    `input_tokens` is the UNCACHED input (Anthropic semantics; OpenAI cached tokens are subtracted by the caller).
+    `subscription`: a CLI call billed to a plan, not the API: cost_usd is 0 and api_equiv_usd keeps the list-price figure."""
+    estimate = estimate_cost(model, input_tokens, output_tokens, cache_read, cache_write)
     row = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "provider": provider, "model": model, "site": site or "other",
            "input": input_tokens, "output": output_tokens, "cache_read": cache_read, "cache_write": cache_write,
-           "cost_usd": estimate_cost(model, input_tokens, output_tokens, cache_read, cache_write), "sha": sha}
+           "cost_usd": 0.0 if subscription else estimate, "sha": sha}
+    if subscription:
+        row["api_equiv_usd"] = estimate
     if latency_s is not None:
         row["latency_s"] = round(latency_s, 3)
     log.info("llm usage site=%s model=%s in=%d out=%d cache_read=%d cache_write=%d cost_usd=%s", row["site"], model,
@@ -581,8 +590,12 @@ class FailoverLLM:
             self.providers = [AnthropicProvider(self.settings, client, retry_base_s=retry_base_s,
                                                 max_attempts=max_attempts)]
         else:
-            self.providers = [factories[name](self.settings, retry_base_s=retry_base_s, max_attempts=max_attempts)
-                              for name in self.settings.llm_providers]
+            # Subscription CLIs first (used only for tasks routed "cli", see llm_routing), then the API providers.
+            from jobhunt.llm_cli import CLI_PROVIDERS  # noqa: PLC0415 (llm_cli imports this module)
+
+            cli = [factory(self.settings) for factory in CLI_PROVIDERS] if self.settings.llm_cli_enabled else []
+            self.providers = cli + [factories[name](self.settings, retry_base_s=retry_base_s, max_attempts=max_attempts)
+                                    for name in self.settings.llm_providers]
         self.errors: list[str] = []
         self.calls: list[dict[str, Any]] = []
 
@@ -606,8 +619,23 @@ class FailoverLLM:
                 message = message.replace(secret, "[redacted]")
         return f"{provider}: {message}"
 
+    def chain(self, task: str) -> list[LLMProvider]:
+        """Providers in call order for one task (llm_routing.TASKS): CLIs first when the task is routed "cli"."""
+        from jobhunt.llm_routing import order_providers  # noqa: PLC0415
+
+        return order_providers(self.providers, task, self.settings)
+
+    def model_label(self, task: str) -> str:
+        """`provider:model` of the first enabled provider for `task` (keys the rehearsal plan cache)."""
+        for provider in self.chain(task):
+            if provider.enabled:
+                model_for = getattr(provider, "model_for", None)
+                model = model_for(task)[0] if model_for else ""
+                return f"{provider.name}:{model}"
+        return ""
+
     async def _call(self, task: str, profile: Profile, argument: Any):
-        for provider in self.providers:
+        for provider in self.chain(f"search.{task}"):
             if not provider.enabled:
                 continue
             started = perf_counter()
@@ -650,15 +678,19 @@ class FailoverLLM:
                          origin="llm", scored_by=provider).clamp()
                 if index in by_ref else keyword_score(profile, job) for index, job in enumerate(jobs)]
 
-    def _cv_providers(self, prefer: str | None) -> list[LLMProvider]:
-        """Providers allowed to receive CV data, in call order. `prefer` moves one provider first (verifier: a different
-        model than the tailor). With JOBHUNT_CV_ALLOW_FAILOVER=0 only the first enabled provider (configured order) is used
-        and `prefer` is ignored: the CV never reaches a provider the user did not rank first."""
-        usable = [p for p in self.providers if p.enabled and hasattr(p, "structured")]
+    def _cv_providers(self, prefer: str | None, task: str = "cv.write") -> list[LLMProvider]:
+        """Providers allowed to receive CV data, in call order: the task's chain (CLIs first when routed "cli"). `prefer`
+        moves one API provider first among the API providers (verifier: a different model than the writer). With
+        JOBHUNT_CV_ALLOW_FAILOVER=0 only the first enabled provider is used and `prefer` is ignored: the CV never reaches a
+        provider the user did not rank first."""
+        usable = [p for p in self.chain(task) if p.enabled and hasattr(p, "structured")]
         if not self.settings.cv_allow_failover:
             return usable[:1]
         if prefer:
-            usable.sort(key=lambda p: 0 if p.name == prefer else 1)  # stable: keeps the configured order otherwise
+            cli = [p for p in usable if getattr(p, "via_cli", False)]
+            api = [p for p in usable if not getattr(p, "via_cli", False)]
+            api.sort(key=lambda p: 0 if p.name == prefer else 1)  # stable: keeps the configured order otherwise
+            usable = cli + api
         return usable
 
     @staticmethod
@@ -678,7 +710,9 @@ class FailoverLLM:
         """One structured call with provider failover and ONE overall deadline (settings.llm_deadline_s, retries and
         failover included). Returns ({"provider", "model"}, output). No rule-based fallback: raises LLMError with a short
         sanitized message (provider names + codes, never model output or document text)."""
-        providers = self._cv_providers(prefer)
+        from jobhunt.llm_routing import task_for  # noqa: PLC0415
+
+        providers = self._cv_providers(prefer, task_for(current_site(), model_cls.__name__))
         tried: list[str] = []
         try:
             async with asyncio.timeout(self.settings.llm_deadline_s):

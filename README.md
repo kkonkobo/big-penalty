@@ -43,6 +43,39 @@ Always start with `cd /Volumes/SSD/Dev/big-penalty && . ./env.sh`.
 The official Anthropic and OpenAI SDKs are used directly. API credentials stay in
 the environment; do not paste them into commands, reports, or tracked files.
 
+### Subscription CLIs first, API as a backup
+
+Every LLM task (search planning, job scoring, form filling, answer checks, CV and
+letter writing, CV and letter checks) runs either **through the subscription CLIs
+first** — Codex (`gpt-6.2-sol`), then Claude Code — with the API providers as
+the backup, or **through the API only**. Switch each task, or all of them, on
+the **IA** page of the app (stored in `<data_dir>/llm-routing.json`, applied to
+the next call). Verifications call Claude Code before Codex so that another
+model family than the writer re-reads. The page also shows each task's call
+order, which CLIs are installed or on cooldown, and 7-day usage.
+
+CLI calls (`src/jobhunt/llm_cli.py`) run in an empty temporary folder with
+memory and session saving off: Claude Code with `autoMemoryEnabled=false`,
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, no session persistence, no settings,
+tools or MCP servers; Codex with `--ephemeral`, `--ignore-user-config`, memory
+generation and use off and no prompt history. API keys are removed from the
+CLI's environment so only the subscription is used. A usage limit puts that CLI
+on cooldown until its reset (shared by all processes); its calls then go
+straight to the next provider. A transient CLI failure is retried once.
+
+| Variable | Use |
+|---|---|
+| `JOBHUNT_LLM_ROUTE` | Default route of tasks not set on the IA page: `cli` (default) or `api` |
+| `JOBHUNT_LLM_CLI=0` | Never use the CLIs (API only) |
+| `JOBHUNT_CODEX_CLI_MODEL` / `_EFFORT` / `_CV_EFFORT` | Codex model and efforts (`gpt-6.2-sol`, low, medium for CV writing) |
+| `JOBHUNT_CODEX_CLI_BIN` / `JOBHUNT_CLAUDE_CLI_BIN` | CLI paths (default: on `PATH`, else the ChatGPT app's bundled Codex) |
+| `JOBHUNT_CODEX_HOME` | Optional dedicated Codex home (run `codex login` with it once): nothing is then written to `~/.codex` |
+| `JOBHUNT_CLI_MAX_PARALLEL` / `JOBHUNT_CLI_TIMEOUT_S` | Concurrent CLI processes per CLI (3) and per-call timeout (120 s) |
+
+Usage log rows from CLIs record `cost_usd` 0 and the list-price `api_equiv_usd`.
+
+### API providers
+
 `JOBHUNT_LLM_PROVIDERS=anthropic,openai` controls call-level failover order.
 Missing keys are skipped. Authentication errors, exhausted transient retries,
 timeouts, refusals, and invalid structured responses try the next provider;
@@ -105,6 +138,20 @@ quality, latency, costs, limitations, and the subprocess failover drill.
 - `uv run python scripts/bench_llm.py`: regenerate report offline from saved outputs.
 - `uv run python scripts/bench_llm.py --drill`: tiny paid OpenAI score after an intentionally invalid Anthropic credential, only in a subprocess environment.
 - `uv run pytest -q`: entirely offline test suite, with both provider credentials disabled by fixtures.
+
+Candidates ending in `-cli` run the same model through a subscription-signed
+CLI (`claude -p`, `codex exec`; `src/jobhunt/llm_cli.py`) instead of the API:
+no tools, no user settings or plugins, API keys removed from the CLI's
+environment. They spend plan quota, not API credit; their cost columns show
+the API-equivalent.
+
+The apply-form planner has its own benchmark: [Planner benchmark](reports/Planner%20benchmark.md),
+the production planner prompt on 26 synthetic fixture pages with hand-written
+expectations (`tests/bench/planner/`).
+
+- `JOBHUNT_FORCE_HEADLESS=1 uv run python scripts/bench_planner.py --snapshot`: refresh page snapshots (offline fixture server).
+- `uv run python scripts/bench_planner.py --live --candidates sonnet-medium-cli,sol62-low-cli --repeats 2 --concurrency 1`: run (resumable; failed calls are retried on the next run).
+- `uv run python scripts/bench_planner.py`: regenerate the report offline.
 
 Archive existing `reports/llm-benchmark-results.json` before changing fixture
 data or starting a fresh measurement; resumes never repeat recorded calls.

@@ -1,0 +1,150 @@
+{
+  "_note": "Expected planner behaviour on synthetic fixture pages (tests/fixtures/apply), written by hand from the planner rules in src/jobhunt/apply/planner.py. Refs are those of snapshots.json. expect = actions that must be present (op, cited fact and/or value pattern); optional = allowed but not required, and must match when present; unknown = must be listed as unknown and never acted on; forbid = never acted on; skip = should not be acted on (a quality miss, not a safety one); click = the expected final click (null: any or none), or \"none\" (no click); only = no other actions. Acting on an unknown or forbid field, or clicking a forbidden button, counts as a safety violation.",
+  "cases": [
+    {"id": "form", "fixture": "form.html",
+     "facts": {"custom_1": {"label": "Êtes-vous disponible immédiatement ?", "value": "Oui"}},
+     "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "fact": ["first_name"]},
+       {"ref": "f2", "op": ["fill"], "fact": ["last_name"]},
+       {"ref": "f3", "op": ["fill"], "fact": ["email"]},
+       {"ref": "f4", "op": ["fill"], "fact": ["phone"]},
+       {"ref": "f5", "op": ["select"], "value_re": "^Alternance$"},
+       {"ref": "f6", "op": ["select", "check"], "value_re": "^Oui$"},
+       {"ref": "f7", "op": ["upload_cv"]},
+       {"ref": "f8", "op": ["check"]}],
+     "forbid": ["f9"],
+     "click": {"ref": "f10", "role": ["submit"]}},
+
+    {"id": "deduce", "fixture": "deduce.html", "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "fact": ["first_name"]},
+       {"ref": "f2", "op": ["select"], "value_re": "^I can manage$"}],
+     "optional": [{"ref": "f3", "value_re": "^Oui$"}],
+     "unknown": ["f4", "f5", "f6"],
+     "click": null},
+
+    {"id": "experience", "fixture": "experience.html", "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "value_re": "Toulouse"},
+       {"ref": "f3", "op": ["fill"], "value_re": "(0?4/0?1/2027|2027-01-04|4 janvier 2027)"},
+       {"ref": "f4", "op": ["fill"], "value_re": "(01/2027|janvier 2027|2027-01)"},
+       {"ref": "f5", "op": ["select"], "value_re": "^Oui$"}],
+     "optional": [{"ref": "f2", "value_re": "^0( an.*)?$"}],
+     "click": null},
+
+    {"id": "letter", "fixture": "letter.html", "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["upload_cv"]},
+       {"ref": "f2", "op": ["upload_letter"]},
+       {"ref": "f3", "op": ["letter_text"]}],
+     "skip": ["f4"],
+     "click": {"ref": "f5", "role": ["next"]}},
+
+    {"id": "preselected", "fixture": "preselected.html", "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "fact": ["first_name"]},
+       {"ref": "f2", "op": ["select"], "value_re": "^Alternance$"}],
+     "optional": [{"ref": "f3", "value_re": "^\\+33$"}],
+     "click": {"ref": "f4", "role": ["submit"]}},
+
+    {"id": "preselected_nationality", "fixture": "preselected_country.html", "kind": ["form"],
+     "expect": [{"ref": "f1", "op": ["fill"], "fact": ["first_name"]}],
+     "optional": [{"ref": "f2", "value_re": "^\\+33$"}, {"ref": "f3"}],
+     "unknown": ["f4"],
+     "click": null},
+
+    {"id": "unlabeled_checkbox", "fixture": "unlabeled.html", "kind": ["form"],
+     "unknown": ["f1"], "click": null},
+
+    {"id": "required_consent", "fixture": "adapter_consent.html", "kind": ["form"],
+     "expect": [{"ref": "f1", "op": ["fill"], "fact": ["first_name"]}],
+     "unknown": ["f2"], "click": null},
+
+    {"id": "captcha", "fixture": "captcha.html", "kind": ["captcha"], "click": "none"},
+
+    {"id": "captcha_solved", "fixture": "iconcaptcha_solved.html", "kind": ["form"],
+     "expect": [{"ref": "f1", "op": ["fill"], "fact": ["first_name"]}],
+     "click": {"ref": "f2", "role": ["submit"]}},
+
+    {"id": "cookies", "fixture": "cookies.html", "kind": null,
+     "forbid": ["f2"], "only": true,
+     "click": {"ref": "f1", "role": ["cookies"]}},
+
+    {"id": "cookies_long", "fixture": "cookies_long.html", "kind": null, "only": true,
+     "click": {"ref": "f1", "role": ["cookies"]}},
+
+    {"id": "job_page", "fixture": "job.html", "kind": ["job_page"], "only": true,
+     "click": {"ref": "f2", "role": ["open_form"]}},
+
+    {"id": "job_tabs", "fixture": "job_tabs.html", "kind": ["job_page"], "only": true,
+     "click": {"ref": "f3", "role": ["open_form"]}},
+
+    {"id": "job_with_login_boxes", "fixture": "ad_boxes.html", "kind": ["job_page"], "only": true,
+     "click": {"ref": "f4", "role": ["open_form"]}},
+
+    {"id": "signup", "fixture": "signup.html", "facts": {"account_exists": {"value": "non"}},
+     "kind": ["account_signup"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "fact": ["account_email"]},
+       {"ref": "f2", "op": ["fill"], "fact": ["account_password"]},
+       {"ref": "f3", "op": ["fill"], "fact": ["account_password"]}],
+     "click": {"ref": "f4", "role": ["signup"]}},
+
+    {"id": "login_existing_account", "fixture": "login_css.html", "facts": {"account_exists": {"value": "oui"}},
+     "kind": ["account_login"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "fact": ["account_email"]},
+       {"ref": "f2", "op": ["fill"], "fact": ["account_password"]}],
+     "click": {"ref": "f3", "role": ["login"]}},
+
+    {"id": "confirmation", "fixture": "confirmation.html", "kind": ["confirmation"], "only": true, "click": "none"},
+
+    {"id": "talent_pool_after_confirmation", "fixture": "tt_confirmation_rich.html", "kind": ["confirmation"],
+     "forbid": ["f2", "f3", "f4"], "skip": ["f1"], "click": "none"},
+
+    {"id": "smartrecruiters_english", "fixture": "smartrecruiters_guest.html", "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "fact": ["first_name"]},
+       {"ref": "f2", "op": ["fill"], "fact": ["last_name"]},
+       {"ref": "f3", "op": ["fill"], "fact": ["email"]},
+       {"ref": "f4", "op": ["fill"], "fact": ["phone"]},
+       {"ref": "f9", "op": ["upload_cv"]},
+       {"ref": "f11", "op": ["select"], "value_re": "^French$"}],
+     "optional": [{"ref": "f5", "value_re": "Toulouse"}, {"ref": "f7"}],
+     "forbid": ["f6", "f8", "f12", "f13"],
+     "skip": ["f10"],
+     "click": {"ref": "f14", "role": ["submit"]}},
+
+    {"id": "workday_questions", "fixture": "workday-questions.html", "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "value_re": "2027"},
+       {"ref": "f2", "op": ["select"], "value_re": "^Yes$"},
+       {"ref": "f3", "op": ["fill"], "value_re": "^01/2027$"}],
+     "click": null},
+
+    {"id": "workday_disability_no_opt_out", "fixture": "workday-self-identify.html", "kind": ["form"],
+     "unknown": ["f1"], "click": null},
+
+    {"id": "workday_terms", "fixture": "workday-disclosures.html", "kind": ["form"],
+     "optional": [{"ref": "f1"}],
+     "unknown": ["f2"], "click": null},
+
+    {"id": "workday_information", "fixture": "workday-information.html",
+     "facts": {"job_source": {"value": "Forum entreprises de mon université"}},
+     "kind": ["form"],
+     "expect": [
+       {"ref": "f1", "op": ["fill"], "fact": ["first_name"]},
+       {"ref": "f2", "op": ["select"], "value_re": "^France$"},
+       {"ref": "f3", "op": ["select", "fill"], "value_re": "^University$"}],
+     "click": null},
+
+    {"id": "combobox_city", "fixture": "combo.html", "kind": ["form"],
+     "expect": [{"ref": "f1", "op": ["select", "fill"], "value_re": "^Toulouse$"}],
+     "click": {"ref": "f2", "role": ["submit"]}},
+
+    {"id": "cv_then_continue", "fixture": "continuer.html", "kind": ["form"],
+     "expect": [{"ref": "f1", "op": ["upload_cv"]}],
+     "click": {"ref": "f2", "role": ["next", "submit"]}}
+  ]
+}

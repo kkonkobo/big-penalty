@@ -15,8 +15,26 @@ Corpus: 40 real postings × 3 profiles = 120 pairs; 4 good / 10 partial / 106 ba
 | sonnet-medium | 120 | 81.7% | 0.487 | 5 | 0/15 | 5.99 / 6.91 | $0.2710 |
 | sol-low | 120 | 85.0% | 0.506 | 5 | 0/15 | 10.98 / 14.33 | $0.2071 |
 | luna-low | 120 | 82.5% | 0.481 | 4 | 0/15 | 6.25 / 9.20 | $0.0107 |
+| opus-medium-cli | 120 | 85.8% | 0.507 | 0 | 0/15 | 9.01 / 11.49 | $0.7101 |
+| sonnet-low-cli | 120 | 83.3% | 0.489 | 3 | 0/15 | 7.26 / 8.61 | $0.3463 |
+| sol-low-cli | 120 | 83.3% | 0.489 | 7 | 0/15 | 15.44 / 17.58 | $0.5522 |
+| sol62-low-cli | 120 | 85.0% | 0.493 | 7 | 0/15 | 18.87 / 22.61 | $0.5260 |
+| sol62-medium-cli | 120 | 84.2% | 0.487 | 7 | 0/15 | 20.62 / 23.24 | $0.5971 |
 
-Balanced accuracy (mean recall across present classes; only four positive pairs): opus-low 60.8%; opus-medium 49.2%; haiku-low 60.2%; sonnet-low 45.8%; sonnet-medium 41.9%; sol-low 73.2%; luna-low 56.2%.
+Balanced accuracy (mean recall across present classes; only four positive pairs): opus-low 60.8%; opus-medium 49.2%; haiku-low 60.2%; sonnet-low 45.8%; sonnet-medium 41.9%; sol-low 73.2%; luna-low 56.2%; opus-medium-cli 60.5%; sonnet-low-cli 45.5%; sol-low-cli 69.6%; sol62-low-cli 76.2%; sol62-medium-cli 69.9%.
+
+## API vs CLI (same model and effort)
+
+CLI rows run through a subscription-signed `claude -p` / `codex exec` (tools, settings and plugins off; API keys removed from the CLI environment). Their cost is the API-equivalent, not money spent.
+
+| Model | Via | Accuracy | Balanced accuracy | Bad ≥70 | p50 batch (s) |
+|---|---|---:|---:|---:|---:|
+| opus-medium | API | 85.0% | 49.2% | 0 | 7.85 |
+| opus-medium-cli | CLI | 85.8% | 60.5% | 0 | 9.01 |
+| sonnet-low | API | 84.2% | 45.8% | 2 | 5.72 |
+| sonnet-low-cli | CLI | 83.3% | 45.5% | 3 | 7.26 |
+| sol-low | API | 85.0% | 73.2% | 5 | 10.98 |
+| sol-low-cli | CLI | 83.3% | 69.6% | 7 | 15.44 |
 
 ## PLAN
 
@@ -43,6 +61,21 @@ Balanced accuracy (mean recall across present classes; only four positive pairs)
 | sonnet-medium | mechatronics | 25 | 100% | 84% / 84% | 0 | 7.68 | $0.01252 |
 | sonnet-medium | logistics | 25 | 83% | 72% / 60% | 0 | 7.80 | $0.01273 |
 | sonnet-medium | web-junior | 25 | 100% | 76% / 68% | 0 | 5.97 | $0.01113 |
+| opus-medium-cli | mechatronics | 25 | 100% | 84% / 80% | 0 | 12.61 | $0.03977 |
+| opus-medium-cli | logistics | 25 | 83% | 76% / 68% | 0 | 13.11 | $0.03651 |
+| opus-medium-cli | web-junior | 25 | 100% | 76% / 68% | 0 | 10.05 | $0.03029 |
+| sonnet-low-cli | mechatronics | 25 | 100% | 88% / 88% | 0 | 7.88 | $0.01801 |
+| sonnet-low-cli | logistics | 25 | 83% | 80% / 76% | 0 | 7.89 | $0.01515 |
+| sonnet-low-cli | web-junior | 25 | 100% | 72% / 68% | 0 | 7.24 | $0.01448 |
+| sol-low-cli | mechatronics | 25 | 100% | 80% / 80% | 0 | 19.71 | $0.04023 |
+| sol-low-cli | logistics | 24 | 83% | 62% / 58% | 0 | 17.76 | $0.03661 |
+| sol-low-cli | web-junior | 24 | 100% | 62% / 50% | 0 | 18.55 | $0.03926 |
+| sol62-low-cli | mechatronics | 22 | 100% | 82% / 73% | 0 | 18.18 | $0.04005 |
+| sol62-low-cli | logistics | 21 | 83% | 67% / 67% | 0 | 17.85 | $0.04089 |
+| sol62-low-cli | web-junior | 21 | 100% | 76% / 57% | 0 | 17.39 | $0.03923 |
+| sol62-medium-cli | mechatronics | 22 | 100% | 82% / 68% | 0 | 25.76 | $0.04506 |
+| sol62-medium-cli | logistics | 20 | 83% | 70% / 70% | 0 | 18.97 | $0.04180 |
+| sol62-medium-cli | web-junior | 21 | 80% | 71% / 43% | 0 | 19.21 | $0.04245 |
 
 ## Typical run projection
 
@@ -57,6 +90,11 @@ One profile, one 25-query plan, 300 scored jobs; arithmetic mean across the thre
 | sonnet-medium | $0.0121 | $0.8131 | $0.8253 |
 | sol-low | $0.0084 | $0.6213 | $0.6297 |
 | luna-low | $0.0005 | $0.0322 | $0.0327 |
+| opus-medium-cli | $0.0355 | $2.1304 | $2.1659 |
+| sonnet-low-cli | $0.0159 | $1.0390 | $1.0548 |
+| sol-low-cli | $0.0387 | $1.6565 | $1.6952 |
+| sol62-low-cli | $0.0401 | $1.5780 | $1.6180 |
+| sol62-medium-cli | $0.0431 | $1.7914 | $1.8345 |
 
 ## Recommendation and chosen defaults
 
@@ -95,6 +133,18 @@ Examples below are gold-bad postings scored ≥70. Review the full source descri
 | luna-low | mechatronics | job-01 | 82 | Stage de fin d’études/M2 explicite, trois années au-dessus de cet étudiant Bac+2 malgré la robotique pertinente. |
 | luna-low | mechatronics | job-04 | 87 | Stage ingénieur de cinq/six mois en navigation temps réel, niveau Bac+5 demandé très au-dessus du Bac+2. |
 | luna-low | mechatronics | job-06 | 88 | Excellent domaine embarqué et STM32, mais dernière année d’école/Master 2 explicitement exigée. |
+| sonnet-low-cli | mechatronics | job-01 | 72 | Stage de fin d’études/M2 explicite, trois années au-dessus de cet étudiant Bac+2 malgré la robotique pertinente. |
+| sonnet-low-cli | mechatronics | job-04 | 78 | Stage ingénieur de cinq/six mois en navigation temps réel, niveau Bac+5 demandé très au-dessus du Bac+2. |
+| sonnet-low-cli | mechatronics | job-06 | 70 | Excellent domaine embarqué et STM32, mais dernière année d’école/Master 2 explicitement exigée. |
+| sol-low-cli | mechatronics | job-01 | 86 | Stage de fin d’études/M2 explicite, trois années au-dessus de cet étudiant Bac+2 malgré la robotique pertinente. |
+| sol-low-cli | mechatronics | job-02 | 81 | Bac+5 et stage de fin d’études requis ; le sujet VLA ne compense pas le niveau d’études incompatible. |
+| sol-low-cli | mechatronics | job-04 | 94 | Stage ingénieur de cinq/six mois en navigation temps réel, niveau Bac+5 demandé très au-dessus du Bac+2. |
+| sol62-low-cli | mechatronics | job-01 | 87 | Stage de fin d’études/M2 explicite, trois années au-dessus de cet étudiant Bac+2 malgré la robotique pertinente. |
+| sol62-low-cli | mechatronics | job-02 | 80 | Bac+5 et stage de fin d’études requis ; le sujet VLA ne compense pas le niveau d’études incompatible. |
+| sol62-low-cli | mechatronics | job-04 | 96 | Stage ingénieur de cinq/six mois en navigation temps réel, niveau Bac+5 demandé très au-dessus du Bac+2. |
+| sol62-medium-cli | mechatronics | job-01 | 86 | Stage de fin d’études/M2 explicite, trois années au-dessus de cet étudiant Bac+2 malgré la robotique pertinente. |
+| sol62-medium-cli | mechatronics | job-02 | 82 | Bac+5 et stage de fin d’études requis ; le sujet VLA ne compense pas le niveau d’études incompatible. |
+| sol62-medium-cli | mechatronics | job-04 | 96 | Stage ingénieur de cinq/six mois en navigation temps réel, niveau Bac+5 demandé très au-dessus du Bac+2. |
 
 ## List-price inputs
 
@@ -107,6 +157,7 @@ USD per million tokens, standard synchronous tier, retrieved November 17, 2026.
 | claude-sonnet-5-5 | $2 | $10 | $0.1 | $2.5 |
 | gpt-6.1-sol | $2 | $10 | $0.1 | $2.5 |
 | gpt-6-luna | $0.1 | $0.5 | $0.01 | $0.125 |
+| gpt-6.2-sol | $2 | $10 | $0.1 | $2.5 |
 
 OpenAI 12-hour writes, if present in usage, are billed at 2.5× input; cached/write tokens are subtracted from its aggregate input. Anthropic input, cache-read and cache-creation counters are disjoint.
 

@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}IA{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>IA</h1>
+    <p class="muted">Chaque tâche passe soit par les CLI d’abonnement (Codex, puis Claude Code), avec l’API en secours, soit
+      par l’API uniquement. Un changement s’applique à l’appel suivant ; une candidature en cours termine son étape.</p>
+  </div>
+</div>
+{% if notice %}<p role="status" class="notice">{{ notice }}</p>{% endif %}
+{% if error %}<p role="alert" class="notice error">{{ error }}</p>{% endif %}
+
+<section class="panel">
+  <div class="row between">
+    <h2>Tâches</h2>
+    <div class="row">
+      <form method="post" action="/ai/route"><input type="hidden" name="task" value="all"><input type="hidden" name="route" value="cli">
+        <button class="btn small" type="submit">Tout en CLI</button></form>
+      <form method="post" action="/ai/route"><input type="hidden" name="task" value="all"><input type="hidden" name="route" value="api">
+        <button class="btn small" type="submit">Tout en API</button></form>
+    </div>
+  </div>
+  <table class="tbl">
+    <thead><tr><th>Tâche</th><th>Voie</th><th>Ordre d’appel</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><strong>{{ r.label }}</strong><br><span class="muted small">{{ r.description }}</span></td>
+        <td>
+          <form method="post" action="/ai/route" class="row">
+            <input type="hidden" name="task" value="{{ r.task }}">
+            <input type="hidden" name="route" value="{{ 'api' if r.route == 'cli' else 'cli' }}">
+            <span class="badge {{ 'ok' if r.route == 'cli' else 'src' }}">{{ 'CLI + API en secours' if r.route == 'cli' else 'API' }}</span>
+            <button class="btn small" type="submit" aria-label="{{ r.label }} : passer {{ 'en API' if r.route == 'cli' else 'en CLI' }}">
+              Passer {{ 'en API' if r.route == 'cli' else 'en CLI' }}</button>
+          </form>
+        </td>
+        <td>
+          <ol class="small" style="margin:0;padding-left:1.1rem">
+          {% for p in r.chain %}
+            <li{% if not p.available %} class="muted"{% endif %}>{{ p.label }} · <span class="mono">{{ p.model }}</span> ({{ p.effort }})
+              {% if not p.available %}<span class="badge warn">{{ p.detail or 'indisponible' }}</span>{% endif %}</li>
+          {% else %}
+            <li class="muted">Aucun fournisseur.</li>
+          {% endfor %}
+          </ol>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>CLI d’abonnement</h2>
+  <form method="post" action="/ai/claude-fallback" class="row">
+    <input type="hidden" name="enabled" value="{{ 'false' if routing.claude_cli_fallback else 'true' }}">
+    <span>Claude Code entre Codex et l’API : <strong>{{ 'oui' if routing.claude_cli_fallback else 'non' }}</strong></span>
+    <button class="btn small" type="submit">{{ 'Ne plus utiliser' if routing.claude_cli_fallback else 'Utiliser' }} Claude Code</button>
+  </form>
+  <p class="muted small">Les vérifications appellent Claude Code avant Codex, pour qu’un autre modèle que le rédacteur relise.</p>
+  <ul>
+  {% for p in providers %}
+    <li>{{ p.label }} :
+      {% if p.available %}<span class="badge ok">disponible</span> <span class="muted small mono">{{ p.detail }}</span>
+      {% else %}<span class="badge warn">{{ p.detail }}</span>{% endif %}
+      {% if p.via_cli and 'limite' in p.detail %}
+        <form method="post" action="/ai/cooldown/clear" style="display:inline"><input type="hidden" name="provider" value="{{ p.name }}">
+          <button class="btn small" type="submit">Réessayer maintenant</button></form>
+      {% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+  <p class="muted small">Mémoire désactivée pour chaque appel CLI : aucune session, aucun historique, aucune mémoire n’est
+    enregistré ni relu dans Codex ou Claude Code ; la configuration, les plugins et les serveurs MCP personnels sont ignorés ;
+    les clés API sont retirées de l’environnement du CLI (seul l’abonnement est utilisé).
+    {% if settings.codex_home %}Codex utilise un dossier dédié : <span class="mono">{{ settings.codex_home }}</span>.{% endif %}</p>
+</section>
+
+<section class="panel">
+  <h2>Utilisation sur 7 jours</h2>
+  {% if usage %}
+  <table class="tbl">
+    <thead><tr><th>Fournisseur</th><th class="num">Appels</th><th class="num">Jetons</th><th class="num">Dépensé (API)</th><th class="num">Équivalent API</th></tr></thead>
+    <tbody>
+    {% for u in usage %}
+      <tr><td>{{ u.provider }}</td><td class="num">{{ u.calls }}</td><td class="num">{{ '{:,}'.format(u.tokens).replace(',', ' ') }}</td>
+        <td class="num">{{ '%.2f'|format(u.cost_usd) }} $</td>
+        <td class="num">{% if u.api_equiv_usd %}{{ '%.2f'|format(u.api_equiv_usd) }} ${% else %}—{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">« Équivalent API » : ce qu’auraient coûté les appels CLI au prix de l’API (non facturé). Estimation
+    aux prix publics.</p>
+  {% else %}<p class="muted">Aucun appel enregistré.</p>{% endif %}
+</section>
+{% endblock %}

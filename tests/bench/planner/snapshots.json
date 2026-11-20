@@ -1,0 +1,1917 @@
+{
+ "ad_boxes.html": {
+  "url": "https://jobs.example.test/ad_boxes",
+  "title": "Offre",
+  "text": "Technicien mécatronique Je postule à cette offre",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Offre",
+    "name": "",
+    "placeholder": "Rechercher une offre",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "email",
+    "label": "E-mail espace candidat",
+    "name": "",
+    "placeholder": "Votre e-mail",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f3",
+    "kind": "password",
+    "label": "Mot de passe espace candidat",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f4",
+    "kind": "button",
+    "label": "Je postule à cette offre",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   }
+  ],
+  "has_captcha": false
+ },
+ "adapter_consent.html": {
+  "url": "https://jobs.example.test/adapter_consent",
+  "title": "Candidature",
+  "text": "Prénom Je donne mon consentement au traitement de ma candidature. Envoyer",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "checkbox",
+    "label": "Je donne mon consentement au traitement de ma candidature.",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "button",
+    "label": "Envoyer",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "captcha.html": {
+  "url": "https://jobs.example.test/captcha",
+  "title": "Vérification",
+  "text": "Candidature Prénom * Je ne suis pas un robot Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "x",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": true
+ },
+ "combo.html": {
+  "url": "https://jobs.example.test/combo",
+  "title": "Localisation",
+  "text": "Où résidez-vous ? Ville de résidence * Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "combobox",
+    "label": "Ville de résidence",
+    "name": "city",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "Paris",
+      "label": "Paris"
+     },
+     {
+      "value": "Lyon",
+      "label": "Lyon"
+     },
+     {
+      "value": "Toulouse",
+      "label": "Toulouse"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "confirmation.html": {
+  "url": "https://jobs.example.test/confirmation",
+  "title": "Merci",
+  "text": "Merci ! Votre candidature a bien été reçue.",
+  "fields": [],
+  "has_captcha": false
+ },
+ "continuer.html": {
+  "url": "https://jobs.example.test/continuer",
+  "title": "Candidature rapide",
+  "text": "Candidature rapide CV * Continuer",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "file",
+    "label": "CV",
+    "name": "cv",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Continuer",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "cookies.html": {
+  "url": "https://jobs.example.test/cookies",
+  "title": "Candidature",
+  "text": "Nous utilisons des cookies. Tout refuser Accepter et envoyer Votre candidature Prénom * Nom * E-mail * Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "button",
+    "label": "Tout refuser",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Accepter et envoyer",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f3",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "text",
+    "label": "Nom",
+    "name": "last_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f5",
+    "kind": "email",
+    "label": "E-mail",
+    "name": "email",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f6",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "cookies_long.html": {
+  "url": "https://jobs.example.test/cookies_long",
+  "title": "Offre",
+  "text": "We use cookies. Decline all non-necessary cookies Votre candidature Prénom * Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "button",
+    "label": "Decline all non-necessary cookies",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "deduce.html": {
+  "url": "https://jobs.example.test/deduce",
+  "title": "Candidature",
+  "text": "Votre candidature Prénom * Niveau d'anglais * Choisir... I can manage Fluent Beginner Avez-vous déjà travaillé en équipe ? (facultatif) Choisir... Oui Non Date de naissance * Adresse postale * Nationalité * Choisir... Française Autre Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "select",
+    "label": "Niveau d'anglais",
+    "name": "eng",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "a",
+      "label": "I can manage"
+     },
+     {
+      "value": "b",
+      "label": "Fluent"
+     },
+     {
+      "value": "c",
+      "label": "Beginner"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "select",
+    "label": "Avez-vous déjà travaillé en équipe ? (facultatif)",
+    "name": "team",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [
+     {
+      "value": "o",
+      "label": "Oui"
+     },
+     {
+      "value": "n",
+      "label": "Non"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "text",
+    "label": "Date de naissance",
+    "name": "birth",
+    "placeholder": "JJ/MM/AAAA",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f5",
+    "kind": "text",
+    "label": "Adresse postale",
+    "name": "addr",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f6",
+    "kind": "select",
+    "label": "Nationalité",
+    "name": "nat",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "fr",
+      "label": "Française"
+     },
+     {
+      "value": "o",
+      "label": "Autre"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f7",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "experience.html": {
+  "url": "https://jobs.example.test/experience",
+  "title": "Candidature",
+  "text": "Votre candidature Ville * Années d'expérience * Disponible à partir de * Mois de début * Êtes-vous autorisé à travailler en France ? * Choisir... Oui Non Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Ville",
+    "name": "city_field",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "text",
+    "label": "Années d'expérience",
+    "name": "experience",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "text",
+    "label": "Disponible à partir de",
+    "name": "available",
+    "placeholder": "JJ/MM/AAAA",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "text",
+    "label": "Mois de début",
+    "name": "available_month",
+    "placeholder": "MM/AAAA",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f5",
+    "kind": "select",
+    "label": "Êtes-vous autorisé à travailler en France ?",
+    "name": "auth",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "o",
+      "label": "Oui"
+     },
+     {
+      "value": "n",
+      "label": "Non"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f6",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "form.html": {
+  "url": "https://jobs.example.test/form",
+  "title": "Candidature - Exemple SA",
+  "text": "Votre candidature Prénom * Nom (obligatoire) E-mail * Téléphone Situation * Choisir... Alternance Stage Êtes-vous disponible immédiatement ? * Oui Non Joindre mon CV * Curriculum vitae (PDF) * Disponible immédiatement * Je souhaite recevoir la newsletter et les offres partenaires Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "text",
+    "label": "Nom",
+    "name": "last_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "email",
+    "label": "E-mail",
+    "name": "email",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "tel",
+    "label": "Téléphone",
+    "name": "phone",
+    "placeholder": "+33 6 12 34 56 78",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f5",
+    "kind": "select",
+    "label": "Situation",
+    "name": "situation",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "alt",
+      "label": "Alternance"
+     },
+     {
+      "value": "stage",
+      "label": "Stage"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f6",
+    "kind": "radio",
+    "label": "Êtes-vous disponible immédiatement ?",
+    "name": "dispo",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "oui",
+      "label": "Oui"
+     },
+     {
+      "value": "non",
+      "label": "Non"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "Êtes-vous disponible immédiatement ? *",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f7",
+    "kind": "file",
+    "label": "Curriculum vitae (PDF)",
+    "name": "cv",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": ".pdf",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f8",
+    "kind": "checkbox",
+    "label": "Disponible immédiatement",
+    "name": "available",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f9",
+    "kind": "checkbox",
+    "label": "Je souhaite recevoir la newsletter et les offres partenaires",
+    "name": "newsletter",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f10",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "iconcaptcha_solved.html": {
+  "url": "https://jobs.example.test/iconcaptcha_solved",
+  "title": "Postuler",
+  "text": "Votre candidature Prénom * Contrôle de sécurité Vérification réussie IconCaptcha © Valider ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Valider ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "job.html": {
+  "url": "https://jobs.example.test/job",
+  "title": "Technicien mécatronique - Exemple SA",
+  "text": "Technicien mécatronique en alternance Exemple SA recrute un alternant pour septembre. Postuler",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Technicien mécatronique - Exemple SA",
+    "name": "",
+    "placeholder": "Rechercher une offre",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Postuler",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   }
+  ],
+  "has_captcha": false
+ },
+ "job_tabs.html": {
+  "url": "https://jobs.example.test/job_tabs",
+  "title": "Technicien - Exemple SA",
+  "text": "Technicien mécatronique AccueilNos métiers Je suis intéressé(e) Découvrir l'entreprise Description du poste.",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "link",
+    "label": "Accueil",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "link",
+    "label": "Nos métiers",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f3",
+    "kind": "button",
+    "label": "Je suis intéressé(e)",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f4",
+    "kind": "link",
+    "label": "Découvrir l'entreprise",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   }
+  ],
+  "has_captcha": false
+ },
+ "letter.html": {
+  "url": "https://jobs.example.test/letter",
+  "title": "Dossier",
+  "text": "Candidature CV * Lettre de motivation * Message au recruteur * Lettre facultativeSuivant",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "file",
+    "label": "CV",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "file",
+    "label": "Lettre de motivation",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f3",
+    "kind": "textarea",
+    "label": "Message au recruteur",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f4",
+    "kind": "file",
+    "label": "Lettre facultative",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f5",
+    "kind": "button",
+    "label": "Suivant",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   }
+  ],
+  "has_captcha": false
+ },
+ "login_css.html": {
+  "url": "https://jobs.example.test/login_css",
+  "title": "Connexion",
+  "text": "Connexion candidat Adresse e-mail * Mot de passe * Se connecter",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "email",
+    "label": "Adresse e-mail",
+    "name": "email",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "password",
+    "label": "Mot de passe",
+    "name": "password",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "button",
+    "label": "Se connecter",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "preselected.html": {
+  "url": "https://jobs.example.test/preselected",
+  "title": "Candidature",
+  "text": "Votre candidature Prénom * Type de contrat * Choisir... CDI Alternance Indicatif téléphonique * +33 +32 Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "select",
+    "label": "Type de contrat",
+    "name": "contrat",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "cdi",
+      "label": "CDI"
+     },
+     {
+      "value": "alt",
+      "label": "Alternance"
+     }
+    ],
+    "value": "CDI",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "select",
+    "label": "Indicatif téléphonique",
+    "name": "prefix",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "33",
+      "label": "+33"
+     },
+     {
+      "value": "32",
+      "label": "+32"
+     }
+    ],
+    "value": "+33",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "preselected_country.html": {
+  "url": "https://jobs.example.test/preselected_country",
+  "title": "Candidature",
+  "text": "Votre candidature Prénom * Téléphone mobile Choix +33 +32 Numéro Pays de nationalité * France Belgique Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "Prénom",
+    "name": "first_name",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "select",
+    "label": "Choix",
+    "name": "cc",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "33",
+      "label": "+33"
+     },
+     {
+      "value": "32",
+      "label": "+32"
+     }
+    ],
+    "value": "+33",
+    "accept": "",
+    "group": "Téléphone mobile",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "tel",
+    "label": "Numéro",
+    "name": "phone",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Téléphone mobile",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "select",
+    "label": "Pays de nationalité",
+    "name": "nat",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "fr",
+      "label": "France"
+     },
+     {
+      "value": "be",
+      "label": "Belgique"
+     }
+    ],
+    "value": "France",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f5",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "signup.html": {
+  "url": "https://jobs.example.test/signup",
+  "title": "Créer un compte",
+  "text": "Créez votre compte candidat Adresse e-mail * Mot de passe * Confirmez le mot de passe * Créer mon compte",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "email",
+    "label": "Adresse e-mail",
+    "name": "email",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "password",
+    "label": "Mot de passe",
+    "name": "password",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "password",
+    "label": "Confirmez le mot de passe",
+    "name": "password2",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "button",
+    "label": "Créer mon compte",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "smartrecruiters_guest.html": {
+  "url": "https://jobs.example.test/smartrecruiters_guest",
+  "title": "Synthetic guest application",
+  "text": "Apply to Fixture Co Sign in with SmartProfile Import with LinkedIn Import with Indeed Personal information First name Last name Email Phone number City LinkedIn profile Education School Experience Employer CV Message to hiring manager Screening questions Preferred working language Choose one English French Privacy notice I agree to the privacy policy I acknowledge the candidate notice Submit application",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "First name",
+    "name": "firstName",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Personal information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "text",
+    "label": "Last name",
+    "name": "lastName",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Personal information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "email",
+    "label": "Email",
+    "name": "email",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Personal information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "tel",
+    "label": "Phone number",
+    "name": "phone",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Personal information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f5",
+    "kind": "text",
+    "label": "City",
+    "name": "city",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Personal information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f6",
+    "kind": "url",
+    "label": "LinkedIn profile",
+    "name": "linkedin",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Personal information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f7",
+    "kind": "text",
+    "label": "School",
+    "name": "school",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Education",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f8",
+    "kind": "text",
+    "label": "Employer",
+    "name": "employer",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Experience",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f9",
+    "kind": "file",
+    "label": "CV",
+    "name": "resume",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "application/pdf",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f10",
+    "kind": "textarea",
+    "label": "Message to hiring manager",
+    "name": "message",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f11",
+    "kind": "select",
+    "label": "Preferred working language",
+    "name": "language",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "en",
+      "label": "English"
+     },
+     {
+      "value": "fr",
+      "label": "French"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "Screening questions",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f12",
+    "kind": "checkbox",
+    "label": "I agree to the privacy policy",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "Privacy notice",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f13",
+    "kind": "checkbox",
+    "label": "I acknowledge the candidate notice",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "Privacy notice",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f14",
+    "kind": "button",
+    "label": "Submit application",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "tt_confirmation_rich.html": {
+  "url": "https://jobs.example.test/tt_confirmation_rich",
+  "title": "Application sent - Exemple SA",
+  "text": "Thanks for applying We have received your application and we will be reviewing it shortly. Have someone who can be a reference? Let us know. Applied 2 Connect Stand out from the crowd Present yourself with a richer profile and stay up-to-date with future opportunities that match your interests. Your e-mail By connecting, I agree that I have read the Privacy Policy and that I may receive updates from Exemple SA about future job opportunities. * Yes, Exemple SA can contact me directly about specific future job opportunities. Connect",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "email",
+    "label": "Your e-mail",
+    "name": "mail",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "checkbox",
+    "label": "By connecting, I agree that I have read the Privacy Policy and that I may receive updates from Exemple SA about future job opportunities.",
+    "name": "agree",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "checkbox",
+    "label": "Yes, Exemple SA can contact me directly about specific future job opportunities.",
+    "name": "contact",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f4",
+    "kind": "button",
+    "label": "Connect",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "unlabeled.html": {
+  "url": "https://jobs.example.test/unlabeled",
+  "title": "",
+  "text": "Envoyer ma candidature",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "checkbox",
+    "label": "",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Envoyer ma candidature",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "workday-disclosures.html": {
+  "url": "https://jobs.example.test/workday-disclosures",
+  "title": "Workday fixture",
+  "text": "Voluntary Disclosures First Name I agree to the terms Save and Continue",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "First Name",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Voluntary Disclosures",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "checkbox",
+    "label": "I agree to the terms",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "false",
+    "accept": "",
+    "group": "Voluntary Disclosures",
+    "error": "",
+    "form": ""
+   }
+  ],
+  "has_captcha": false
+ },
+ "workday-information.html": {
+  "url": "https://jobs.example.test/workday-information",
+  "title": "Workday fixture",
+  "text": "My Information First Name Country Select France Germany Select University Referral Save and Continue",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "text",
+    "label": "First Name",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "My Information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "select",
+    "label": "Country",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "FR",
+      "label": "France"
+     },
+     {
+      "value": "DE",
+      "label": "Germany"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "My Information",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "combobox",
+    "label": "How did you hear about us?",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "University",
+      "label": "University"
+     },
+     {
+      "value": "Referral",
+      "label": "Referral"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "My Information",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "workday-questions.html": {
+  "url": "https://jobs.example.test/workday-questions",
+  "title": "Workday fixture",
+  "text": "Application Questions Graduation Date Have you built a robot? Select Yes No Start Date (MM/YYYY) Save and Continue",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "date",
+    "label": "Graduation Date",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Application Questions",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f2",
+    "kind": "select",
+    "label": "Have you built a robot?",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "yes",
+      "label": "Yes"
+     },
+     {
+      "value": "no",
+      "label": "No"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "Application Questions",
+    "error": "",
+    "form": "0:0"
+   },
+   {
+    "ref": "f3",
+    "kind": "text",
+    "label": "Start Date (MM/YYYY)",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "Application Questions",
+    "error": "",
+    "form": "0:0"
+   }
+  ],
+  "has_captcha": false
+ },
+ "workday-self-identify.html": {
+  "url": "https://jobs.example.test/workday-self-identify",
+  "title": "Workday fixture",
+  "text": "Self Identify Disability status Select No Submit",
+  "fields": [
+   {
+    "ref": "f1",
+    "kind": "select",
+    "label": "Disability status",
+    "name": "",
+    "placeholder": "",
+    "required": true,
+    "multiple": false,
+    "options": [
+     {
+      "value": "No",
+      "label": "No"
+     }
+    ],
+    "value": "",
+    "accept": "",
+    "group": "Self Identify",
+    "error": "",
+    "form": ""
+   },
+   {
+    "ref": "f2",
+    "kind": "button",
+    "label": "Submit",
+    "name": "",
+    "placeholder": "",
+    "required": false,
+    "multiple": false,
+    "options": [],
+    "value": "",
+    "accept": "",
+    "group": "",
+    "error": "",
+    "form": ""
+   }
+  ],
+  "has_captcha": false
+ }
+}
