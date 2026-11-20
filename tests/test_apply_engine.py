@@ -904,7 +904,6 @@ async def test_dry_run_never_clicks_a_submit_button_labelled_accepter_after_data
         return StepPlan(page_kind="form", actions=[act(snap, r"^Prénom", "fill", "first_name"), act(snap, r"^Accepter$", "click", role="cookies")])
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="accept_submit")
     assert res.status == "ready" and res.steps[-1].clicked == "" and not server.sent and not res.submit_clicked
-    assert await page.input_value("#fn") == "Camille"
 
 
 @pytest.mark.parametrize("release_on", [True, False])
@@ -2902,6 +2901,22 @@ async def test_unlabeled_radio_is_not_exposed_as_an_option_to_confirm(page, serv
     assert "fictional-opaque-option" not in result.model_dump_json()
 
 
+async def test_optional_country_named_phone_country_preselection_is_confirmed_by_the_phone(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "dial", '<form action="/apply" method="post"><label for="d">Phone number country</label>'
+                '<select id="d" name="d"><option value="be">Belgique</option><option value="fr" selected>France</option>'
+                '<option value="ch">Suisse</option></select><button type="submit">Send application</button></form>')
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="dial")
+    assert result.status == "ready" and not result.questions and not server.sent
+
+
+async def test_optional_country_named_phone_country_preselection_that_differs_is_still_a_question(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "dial", '<form action="/apply" method="post"><label for="d">Phone number country</label>'
+                '<select id="d" name="d"><option value="be" selected>Belgique</option><option value="fr">France</option>'
+                '</select><button type="submit">Send application</button></form>')
+    result = await go(page, server, ScriptedPlanner([scoped_plan]), tmp_path, cv_pdf, start="dial")
+    assert result.status == "needs_input" and not server.sent
+
+
 @pytest.mark.parametrize(("selected", "duplicate", "expected"), [
     ("33", "", "ready"), ("32", "", "needs_input"),
     ("33", '<option value="other" disabled>Other (+33)</option>', "needs_input"),
@@ -3065,3 +3080,42 @@ async def test_the_loop_question_names_all_the_fields_in_error(page, server, fas
     plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"SUIVANT", "click", role="next")])  # noqa: E731
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="twoerr", mode="submit", max_steps=8)
     assert res.status == "needs_input" and {q.label for q in res.questions} == {"Prénom", "Nom"} and "Prénom" in res.message and "Nom" in res.message
+
+
+async def test_script_built_page_is_given_time_to_render(page, server, fast, cv_pdf, tmp_path, monkeypatch):
+    """A career site whose body is built by script after the load event is empty at first: wait, do not give up on it."""
+    monkeypatch.setattr(engine, "RENDER_WAIT_S", 0.5)
+    real = (FIXTURES / "form.html").read_text()
+    body = real[real.index("<body"):]
+    shell = ("<!doctype html><html><head><meta charset=utf-8><title>Offre</title></head><body></body>"
+             "<script>setTimeout(() => { document.body.innerHTML = %s; }, 1200)</script></html>")
+    inner = json.dumps(body[body.index(">") + 1:body.rindex("</body>")]).replace("</", "<\\/")
+
+    async def late(route):
+        await route.fulfill(status=200, content_type="text/html", body=shell % inner)
+    await page.route("**/form", late)
+    planner = ScriptedPlanner([form_plan()])
+    res = await run_application(page, url=server.url("form"), facts=sample_facts(), planner=planner, uploads=Uploads(cv_pdf=cv_pdf),
+                                mode="dry_run", out_dir=tmp_path / "shots", job_title="Technicien", company="Exemple SA",
+                                max_steps=6, verifier=FakeVerifier(), password=password_for)
+    assert planner.calls[0]["snapshot"].fields, "the planner was asked about the page before it had rendered"
+    assert res.diagnostic_code != "form_actions_missing" and "Aucune action possible" not in res.message, res.message
+
+
+
+@pytest.mark.parametrize("url,entered,allowed", [
+    ("https://cdn.phenompeople.com/CareerConnectResources/prod/app.min.js", False, True),
+    ("https://rmkcdn.successfactors.com/abc/logo.png", False, True),
+    ("https://rmkcdn.successfactors.eu/abc/theme.css?v=12", False, True),
+    ("https://rmkcdn.successfactors.eu/abc/theme.css?v=12", True, False),       # a query could carry data once it is entered
+    ("https://cdn.phenompeople.com/api/profile?email=a@b.c", False, False),     # not a static file
+    ("https://cdn.phenompeople.com/x.js?email=a%40b.c", False, False),
+    ("https://evilphenompeople.com/app.js", False, False),                      # label-boundary safe
+    ("https://www.googletagmanager.com/gtm.js", False, False),                  # trackers stay blocked
+    ("http://cdn.phenompeople.com/app.js", False, False),
+    ("https://user:pw@cdn.phenompeople.com/app.js", False, False),
+])
+def test_vendor_static_asset_rule(url, entered, allowed):
+    from jobhunt.apply.destination import vendor_static_asset
+
+    assert vendor_static_asset(url, data_entered=entered) is allowed

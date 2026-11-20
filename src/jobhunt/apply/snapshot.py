@@ -615,6 +615,22 @@ async def live_button(target: Locator | ElementHandle) -> tuple[str, bool, bool]
         return None
 
 
+# Site chrome, never a candidate question: the page's own language / locale switcher (Workday "languageSelectorButton" and kin).
+_LOCALE_PICKER = re.compile(
+    r"(?:language|lang|locale|langue|sprache)[ _-]?(?:selector|switcher|picker|chooser|select|menu|toggle|dropdown|button|btn)(?:[ _-]?(?:button|btn|menu|toggle))?"
+    r"|(?:select|choose|change|switch|choisir|changer(?: de)?|choose your|sprache (?:wahlen|andern))[ _-]?(?:the |your |de |la |die )?(?:language|langue|locale|sprache)", re.I)
+_LOCALE_PICKER_ID = re.compile(r"(?:language|lang|locale)[ _-]?(?:selector|switcher|picker|chooser|menu|toggle|dropdown)\w*", re.I)
+
+
+def locale_picker(d: dict) -> bool:
+    """A language / locale switcher of the site itself (by its automation id, or a bare 'Language' combobox / button label)."""
+    if any(_LOCALE_PICKER_ID.fullmatch(str(d.get(key) or "").strip()) for key in ("automation_id", "name")):  # (a combobox's name is its id)
+        return True
+    if d.get("kind") not in {"combobox", "button"}:
+        return False
+    return any(_LOCALE_PICKER.fullmatch(" ".join(str(d.get(key) or "").split()).strip(" :*")) for key in ("label", "name"))
+
+
 async def take_snapshot(page: Page, *, read_only: bool = False) -> tuple[PageSnapshot, Resolver]:
     """Snapshot of the page (all frames) + `resolve(ref) -> Locator`. Refs are valid until the next snapshot."""
     fields: list[FormField] = []
@@ -638,6 +654,8 @@ async def take_snapshot(page: Page, *, read_only: bool = False) -> tuple[PageSna
                 prio.add(d["ref"])
             if d.get("form"):  # unique across frames
                 d["form"] = f"{page.frames.index(frame)}:{d['form']}"
+            if locale_picker(d):
+                continue
             fields.append(FormField(**d))
             owners[d["ref"]] = frame
         if res["text"]:

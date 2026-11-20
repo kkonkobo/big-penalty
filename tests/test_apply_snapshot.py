@@ -402,3 +402,26 @@ async def test_a_file_dialog_button_without_any_input_is_kept_with_its_group(pag
     snap, _ = await take_snapshot(page)
     btn = next(f for f in snap.fields if f.label == "CHOISIR UN FICHIER")
     assert btn.kind == "button" and btn.group == "CV"
+
+
+@pytest.mark.parametrize(("field", "expected"), [
+    ({"kind": "combobox", "name": "languageSelectorButton", "label": "", "automation_id": "languageSelectorButton"}, True),
+    ({"kind": "combobox", "name": "languageSelectorButton", "label": "languageSelectorButton", "automation_id": ""}, True),
+    ({"kind": "button", "name": "", "label": "Choisir la langue", "automation_id": ""}, True),
+    ({"kind": "combobox", "name": "", "label": "Select language", "automation_id": ""}, True),
+    ({"kind": "select", "name": "language", "label": "Preferred working language", "automation_id": ""}, False),
+    ({"kind": "select", "name": "lang", "label": "Langue", "automation_id": ""}, False),
+    ({"kind": "text", "name": "", "label": "Prénom", "automation_id": "legalNameSection_firstName"}, False),
+])
+def test_site_language_picker_is_chrome_not_a_question(field, expected):
+    from jobhunt.apply.snapshot import locale_picker
+
+    assert locale_picker(field) is expected
+
+
+async def test_language_picker_widget_is_dropped_from_the_snapshot(page):
+    await page.set_content(
+        '<header><button data-automation-id="languageSelectorButton" aria-haspopup="listbox" role="combobox" id="languageSelectorButton">'
+        'English</button></header><form><label for=a>Prénom</label><input id=a name=a></form>')
+    snap, _ = await take_snapshot(page)
+    assert [f.label for f in snap.fields] == ["Prénom"]

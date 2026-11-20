@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import re
 from typing import TYPE_CHECKING
 
-from jobhunt.apply.prompt_rules import decision_key, device_type, norm_question, recruiter_ai_polarity, technical_key
+from jobhunt.apply.prompt_rules import DIAL_COUNTRY_NAMES, decision_key, device_type, norm_question, recruiter_ai_polarity, technical_key
 from jobhunt.apply.types import FieldOption, FormField, Question
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ ALIASES = {
     "email": ("E-mail", "Email address", "E-mail address", "Adresse e-mail", "Courriel", "E-Mail-Adresse"),
     "phone": ("Téléphone", "Numéro de téléphone", "Phone", "Phone number", "Telephone number", "Telefonnummer"),
     "phone_calling_code": ("Indicatif de pays", "Indicatif téléphonique", "Indicatif du pays", "Country calling code", "Code de région/pays",
-                           "Phone country code", "Telephone country code", "Ländervorwahl", "Telefonländervorwahl"),
+                           "Phone country code", "Telephone country code", "Phone number country", "Phone country", "Country of phone number", "Ländervorwahl", "Telefonländervorwahl"),
     "phone_device_type": ("Phone Device Type", "Phone Type", "Type d’appareil téléphonique", "Type de téléphone",
                           "Type de périphérique téléphonique", "Telefon-Gerätetyp", "Telefongerätetyp", "Telefontyp",
                           "Telefon Gerätetyp", "Telefon Gerätetyp (privat)"),
@@ -248,7 +248,8 @@ def exact_option(key: str, value: str, options: list[str], label: str) -> int | 
         equivalent = YES_NO[polarity]
     matches = [index for index, option in enumerate(options) if (
         device_type(option) == value if key == "phone_device_type" else
-        (option.strip() == value or re.findall(r"\+[1-9][0-9]*", option) == [value]) if key == "phone_calling_code" else
+        (option.strip() == value or re.findall(r"\+[1-9][0-9]*", option) == [value]
+         or (not re.search(r"\+[1-9]", option) and norm_question(option) in DIAL_COUNTRY_NAMES.get(value, ()))) if key == "phone_calling_code" else
         norm_question(option) in equivalent)]
     if key == "recruiter_ai" and not matches:
         matches = [index for index, option in enumerate(options)

@@ -127,6 +127,8 @@ def test_inferred_phone_facts(profile, phone, code, device):
     ('department', '974', ['La Réunion'], 0), ('department', '31', ['Haute-Garonne', '31'], None),
     ('phone_calling_code', '+33', ['France (+33)', 'Luxembourg (+352)'], 0),
     ('phone_calling_code', '+33', ['Pays fictif (+330)', 'Non précisé'], None),
+    ('phone_calling_code', '+33', ['Belgique', 'France', 'Suisse'], 1), ('phone_calling_code', '+33', ['Belgique', 'Suisse'], None),
+    ('phone_calling_code', '+33', ['France', 'France (+33)'], None),
     ('phone_device_type', 'Mobile', ['Cell phone'], 0), ('phone_device_type', 'Mobile', ['Fixe'], None),
     ('internship_agreement', 'Oui', ['No', 'Yes'], 1), ('internship_agreement', 'Oui', ['Yes, under conditions'], None),
 ])
@@ -134,6 +136,12 @@ def test_standing_option_mapping_requires_unique_equivalence(key, value, options
     from jobhunt.apply.missing_answers import exact_option
 
     assert exact_option(key, value, options, '') == expected
+
+
+def test_phone_country_prompt_is_the_calling_code_question():
+    from jobhunt.apply.missing_answers import standing_key
+
+    assert standing_key('Phone number country') == 'phone_calling_code'
 
 
 def test_master_graduation_and_identity_are_not_guessed(profile):

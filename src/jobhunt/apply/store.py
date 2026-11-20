@@ -447,7 +447,7 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
 # guard and page-reading code that has since been fixed: they no longer pause their host, and the automatic pass retries
 # their engine-caused pauses (ENGINE_PAUSE_CODES) once. Move it forward when a change is expected to clear such outcomes.
 # A run that may have sent the application (submit clicked, uncertain receipt) is never affected.
-ENGINE_RETRY_EPOCH = "2026-11-20T10:00:00+00:00"
+ENGINE_RETRY_EPOCH = "2026-11-20T14:15:00+00:00"
 
 # Pause codes the engine produced on its own (its guard refused a request, it could not read the page or find the apply
 # control): unlike a CAPTCHA, an e-mail or a login, nothing the candidate must do. Posting conflicts are not in this list.
@@ -743,6 +743,16 @@ def stale_engine_pause(run: ApplyRun | None) -> bool:
                 and run.submit_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH)
 
 
+def counts_as_failure(run: ApplyRun) -> bool:
+    """`run` counts towards the two failed attempts that end automatic retries: a failure judged by code older than
+    ENGINE_RETRY_EPOCH that never reached a click (nothing can have been sent) does not."""
+    if run.status != "failed":
+        return False
+    clicked = (run.submit_clicked_at is not None or run.nav_clicked_at is not None
+               or bool(run.result is not None and run.result.submit_clicked))
+    return clicked or _iso(run.started_at) >= ENGINE_RETRY_EPOCH
+
+
 def _host_paused(conn, host: str) -> bool:
     outcomes = conn.execute("""SELECT r.status, v.receipt_outcome FROM apply_reservations v
         JOIN application_runs r ON r.id=v.run_id
@@ -927,10 +937,17 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
                                  (binding.dedupe_key,)).fetchone():
             raise ApplyError("Un essai existe déjà pour ce poste chez cet employeur.")
         if binding and trigger == "auto":
+            # A released reservation only stops an automatic retry when its attempt may have sent the form (a click, a
+            # receipt), a human verified the non-send (manual retry only) or its run is not over. A reservation the engine
+            # released itself because it stopped before any click (browser_clear) proves nothing was sent.
             identity = dedupe_identity((binding.tenant, binding.requisition_id))
-            released = c.execute("""SELECT dedupe_key, json_extract(binding_json, '$.tenant') AS tenant,
-                    json_extract(binding_json, '$.requisition_id') AS requisition
-                FROM apply_reservations WHERE profile_id=? AND released_at IS NOT NULL""", (profile_id,))
+            released = c.execute("""SELECT v.dedupe_key, json_extract(v.binding_json, '$.tenant') AS tenant,
+                    json_extract(v.binding_json, '$.requisition_id') AS requisition
+                FROM apply_reservations v LEFT JOIN application_runs r ON r.id=v.run_id
+                WHERE v.profile_id=? AND v.released_at IS NOT NULL AND (
+                    r.id IS NULL OR r.status='running' OR r.submit_clicked_at IS NOT NULL OR r.nav_clicked_at IS NOT NULL
+                    OR r.operator_not_sent_at IS NOT NULL OR v.receipt_outcome IS NOT NULL OR v.receipt_kind IS NOT NULL
+                    OR COALESCE(json_extract(r.result_json, '$.submit_clicked'), 0) != 0)""", (profile_id,))
             if any(row["dedupe_key"] == binding.dedupe_key or (
                     identity and identity == dedupe_identity((row["tenant"], row["requisition"]))) for row in released):
                 raise ApplyError("Nouvel essai manuel requis pour ce poste.")

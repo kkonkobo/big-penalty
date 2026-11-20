@@ -568,7 +568,7 @@ def engine_paused_run(env, job, code, *, started, submit_clicked=False):
 
 
 OLD = "2026-11-19T19:50:00+00:00"   # before astore.ENGINE_RETRY_EPOCH
-NEW = "2026-11-20T11:00:00+00:00"   # after it
+NEW = (datetime.fromisoformat(astore.ENGINE_RETRY_EPOCH) + timedelta(minutes=1)).isoformat()   # after it (moves with it)
 
 
 @pytest.mark.parametrize("code", ["recipient_refused_same_site_write", "recipient_refused_redirect", "public_page_shell",
@@ -659,6 +659,22 @@ async def test_a_technical_failure_without_a_click_is_retried_twice_per_revision
         assert len(env.runs) == attempt and s.failed == 1
     s, lines = await daily(profile)
     assert len(env.runs) == 2 and s.failed == 1 and any("deux essais ont déjà échoué" in line for line in lines)
+
+
+async def test_failures_from_before_the_engine_retry_epoch_without_a_click_do_not_end_retries(env, profile):
+    job = env.job(1)
+    env.run_status = "failed"
+    for _ in (1, 2):
+        await daily(profile)
+    assert len(env.runs) == 2
+    with db.connect() as conn:  # both failures were judged by older engine code and never clicked anything
+        conn.execute("UPDATE application_runs SET started_at='2026-01-01T00:00:00+00:00'")
+    s, _ = await daily(profile)
+    assert len(env.runs) == 3 and s.failed == 1
+    with db.connect() as conn:  # a click keeps the old failure counted: it may have sent something
+        conn.execute("UPDATE application_runs SET started_at='2026-01-01T00:00:00+00:00', nav_clicked_at=started_at")
+    s, lines = await daily(profile)
+    assert len(env.runs) == 3 and any("deux essais ont déjà échoué" in line for line in lines)
 
 
 async def test_a_blocked_unusable_link_run_never_counts_as_a_failed_attempt(env, profile):

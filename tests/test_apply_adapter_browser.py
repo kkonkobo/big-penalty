@@ -115,11 +115,19 @@ def workday_flow(server, scenario):
             + (f'document.querySelector("input[type=file]").onchange = event => {{const data = new FormData();'
                f'data.append("cv", event.target.files[0]); fetch({json.dumps(endpoint + "attachments")},'
                '{method:"POST", body:data});};' if index == 4 else '') + '</script>')
+    if scenario in {'locale', 'locale_other_posting'}:
+        # As on live Workday career sites: once loaded, the posting switches itself to the browser's locale with a real
+        # top-level navigation, before any input (same tenant, same requisition — or, here, a different requisition).
+        localized = path.replace('/en-US/', '/fr-FR/', 1)
+        if scenario == 'locale_other_posting':
+            localized = localized.replace('JR123', 'JR999')
+        server.html[localized] = server.html[path]
+        server.html[path] += f'<script>setTimeout(() => location.replace({json.dumps(localized)}), 50)</script>'
     return path
 
 
 @pytest.mark.parametrize('scenario', ['success', 'candidate_home', 'otp', 'changed', 'missing', 'draft', 'next_step', 'metadata_mismatch',
-                                      'stuck'])
+                                      'stuck', 'locale', 'locale_other_posting'])
 async def test_workday_browser_flow(scenario, adapter_pool, server, profile, tmp_path, fast, monkeypatch):
     install_adapter(monkeypatch, server, True)
     monkeypatch.setattr(service.accounts, 'create_password', lambda host, email: 'fixture-password')
@@ -134,6 +142,10 @@ async def test_workday_browser_flow(scenario, adapter_pool, server, profile, tmp
     if scenario == 'metadata_mismatch':
         assert result.status in {'blocked', 'needs_human'} and not server.requests and not server.posts
         return
+    if scenario == 'locale_other_posting':  # a script moving the page to another requisition still stops the run
+        assert result.status == 'needs_human' and not server.posts, result.result
+        assert result.result.diagnostic_code == 'recipient_refused_same_site_navigation'
+        return
     if scenario == 'stuck':  # no usable control: the run stops, and its folder says what the page looked like
         assert result.status == 'failed' and not server.posts, result.result
         run_dir = Path(result.out_dir)
@@ -143,11 +155,11 @@ async def test_workday_browser_flow(scenario, adapter_pool, server, profile, tmp
         assert outline['url'] == server.base + path and [h['text'] for h in outline['headings']] == ['Posting']
         assert {'kind': 'link', 'text': 'Share', 'automation_id': 'shareButton', 'disabled': False} in outline['controls']
         return
-    assert result.status == {'success': 'submitted', 'candidate_home': 'submitted', 'otp': 'needs_email',
+    assert result.status == {'success': 'submitted', 'locale': 'submitted', 'candidate_home': 'submitted', 'otp': 'needs_email',
                              'changed': 'needs_human', 'missing': 'failed', 'draft': 'failed', 'next_step': 'failed'}[scenario], (
         result.result.dispatch_diagnostics, [(step.index, step.page_kind, step.note) for step in result.result.steps],
         server.requests, [post['path'] for post in server.posts])
-    assert bool(result.submit_clicked_at) == (scenario in {'success', 'candidate_home', 'missing', 'draft', 'next_step'})
+    assert bool(result.submit_clicked_at) == (scenario in {'success', 'locale', 'candidate_home', 'missing', 'draft', 'next_step'})
     assert store.held_binding(result.id) is not None
     if result.status == 'submitted':
         assert result.result.dispatch_diagnostics.receipt_kind == (

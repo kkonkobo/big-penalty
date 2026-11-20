@@ -662,6 +662,10 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             await guard.navigate(page, attempt.url, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
             if guard.refused:
                 raise ApplyError(SUPERVISED_ONLY)
+            for _ in range(40):  # a script redirect followed hop by hop by the guard shows a transient error page meanwhile
+                if not page.url.startswith("chrome-error:") or page.is_closed():
+                    break
+                await asyncio.sleep(0.15)
             landed = clean_url(page.url, navigation=True)
             if audience.write_recipient(page.url) and audience.initial_redirect(attempt.url, landed):
                 audience.document = landed
@@ -1654,7 +1658,7 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         summary.paused_by["en attente"] = summary.paused_by.get("en attente", 0) + 1
         emit(f"{tag} : en pause (en attente de votre réponse)")
         return
-    if sum(1 for r in apply_store.list_runs(app.id) if r.rev == app.current_rev and r.status == "failed") >= 2:
+    if sum(1 for r in apply_store.list_runs(app.id) if r.rev == app.current_rev and apply_store.counts_as_failure(r)) >= 2:
         summary.failed += 1
         emit(f"{tag} : échec (deux essais ont déjà échoué)")
         return

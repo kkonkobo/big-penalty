@@ -38,7 +38,7 @@ from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verd
 from jobhunt.apply.missing_answers import IDENTITY, capture, exact_option, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
 from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, save_failure_diagnostics
-from jobhunt.apply.prompt_rules import decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
+from jobhunt.apply.prompt_rules import DIAL_COUNTRY_NAMES, decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
 from jobhunt.apply.widgets import DENIED, WIDGET, date_segment, date_segment_option, denied_widget
@@ -108,6 +108,9 @@ TYPE_DELAY_MS = (15, 45)  # per-keystroke delay range
 CLICK_WAIT_S = 0.5       # lets a popup / navigation start after a click
 RELEASE_WAIT_S = 0.2     # dry run: pause between "pages sent to about:blank" and removing the request guard
 RELEASE_PAGES = True     # dry run: send the pages to about:blank at the end (tests that inspect the final DOM switch it off)
+RENDER_WAITS = 4        # a page with no field and almost no text is still rendering (script-built site): re-read it this many times
+RENDER_WAIT_S = 2.0
+RENDER_TEXT_MIN = 40
 CLICK_ATTRIBUTION_S = 4.0  # a navigation aborted within this delay after a click of ours is attributed to that click
 SPLIT_UPLOADS = True     # uploads get a step of their own, then the page is read again (tests with scripted plans switch it off)
 UPLOAD_SETTLE_S = 2.5    # lets a CV parser re-render / pre-fill the form after an upload
@@ -497,7 +500,7 @@ def _secure_url(url: str, fallback: str = "") -> bool:
 
 def _dial_selector(f: FormField, snap: PageSnapshot) -> bool:
     """Recognize a calling-code prompt, without assuming the current selection is correct."""
-    if fact_key(_question(f)) == "phone_calling_code":
+    if fact_key(_question(f).model_copy(update={"required": True})) == "phone_calling_code":  # (optional or not, it is the same prompt)
         return True
     if f.kind == "select" and f.options and 2 * sum(bool(DIAL_OPTION_RE.match(o.label)) for o in f.options) >= len(f.options):
         return any(x.kind == "tel" and x.group == f.group for x in snap.fields)
@@ -585,6 +588,7 @@ class _Run:
         self.click_window = 0.0   # monotonic time until which an aborted navigation is attributed to our last click
         self.click_form: dict[str, Any] | None = None  # dry run: method / action of the form our last click belongs to
         self.widget_blocked = 0   # dry run: non-GET widget navigations aborted while a page was loading (harmless)
+        self.render_waited = False   # an empty page was given time to render (once per run)
         self.blocked_requests: list[str] = []   # dry run: page-initiated navigations aborted by the request guard
         self.secrets: set[str] = set()
         self.email_verification = None
@@ -1006,12 +1010,17 @@ class _Run:
     def _dial_option(f: FormField, fact: Fact) -> int:
         """Only a unique exact option for the country calling code of a confirmed international number."""
         code = "+33" if french_phone(fact.value or "") else international_calling_code(fact.value or "")
-        matches = [index for index, option in enumerate(f.options)
-                   if re.findall(r"\+\s*[0-9]+", option.label) == [code]] if code else []
+        names = DIAL_COUNTRY_NAMES.get(code or "", frozenset())
+
+        def is_code(label: str) -> bool:  # "+33" in the label, or (a country-only list) exactly the country the code belongs to
+            codes = re.findall(r"\+\s*[0-9]+", label)
+            return codes == [code] or (not codes and _norm(label) in names)
+
+        matches = [index for index, option in enumerate(f.options) if is_code(option.label)] if code else []
         if not fact.exact or len(matches) != 1:
             return -1
         option = f.options[matches[0]]
-        if f.choice_options and sum(value == option.value or code in re.findall(r"\+\s*[0-9]+", label)
+        if f.choice_options and sum(value == option.value or is_code(label)
                                     for value, label, _, _ in f.choice_options) != 1:
             return -1
         return matches[0] if _live_option(f, matches[0]) else -1
@@ -2209,6 +2218,13 @@ class _Run:
                     result.diagnostic_code = "apply_target_unverified"
                     return result
             snap, resolve = await self._snapshot()
+            for _ in range(RENDER_WAITS if self.mode != "supervised" and not self.render_waited and not self.touched and not self.app_touched else 0):
+                if snap.fields or len(snap.text.strip()) >= RENDER_TEXT_MIN or snap.has_captcha or self.page.is_closed():
+                    break
+                self.render_waited = True   # once per run: a page that stays empty is not waited for again
+                await asyncio.sleep(RENDER_WAIT_S)
+                await self._settle()
+                snap, resolve = await self._snapshot()
             if self.autonomous and self.autonomous.entry_binding and not self.final_awaiting:
                 from jobhunt.apply.autonomous import POSTING_IDS_JS
 

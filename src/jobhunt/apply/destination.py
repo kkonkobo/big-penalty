@@ -10,11 +10,12 @@ from email import policy
 from email.parser import BytesParser
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
-_REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid", "jobreqid", "career_job_req_id"}
+# jobseqno: Phenom career sites; extjobid: SAP SuccessFactors career-site previews.
+_REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid", "jobreqid", "career_job_req_id", "jobseqno", "extjobid"}
 # Query keys a job link may carry that only attribute the visit or pick a display mode: dropped from a navigation URL
 # (the posting is still reached from its path or requisition key). Any other key fails the link closed.
 _TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid", "lcid", "partner", "trid", "rs", "feedid",
-             "jobpipeline", "idorigine", "id_origin", "applicant_source_welcome", "in_iframe", "mode"}
+             "jobpipeline", "idorigine", "id_origin", "applicant_source_welcome", "in_iframe", "mode", "apply", "mapping"}
 _TRACKING_PREFIXES = ("utm_", "rx_")  # rx_*: Radancy job-ad attribution on Workday links
 _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
@@ -126,6 +127,27 @@ def _static_asset(url: str) -> bool:
     from jobhunt.apply.workday import static_asset  # (workday imports this module)
 
     return static_asset(url)
+
+
+_VENDOR_ASSET_HOST = re.compile(r"(?:\A|\.)(?:phenompeople\.com|rmkcdn\.successfactors\.(?:com|eu))\Z")
+_VENDOR_ASSET_PATH = re.compile(r"\.(?:m?js|css|woff2?|ttf|otf|eot|svg|png|jpe?g|gif|webp|ico)\Z", re.I)
+
+
+def vendor_static_asset(url: str, *, data_entered: bool) -> bool:
+    """A read of a static file (script, style, font, image) from an ATS vendor's own CDN or ATS host. Career sites built on
+    Phenom or SuccessFactors render nothing without them. A cache-busting query is only tolerated before any candidate data."""
+    from jobhunt.origin import ats_of_host
+
+    try:
+        parts = urlsplit(url or "")
+        port = parts.port
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower().rstrip(".")
+    return (parts.scheme == "https" and port is None and not parts.username and not parts.password and not parts.fragment
+            and (not parts.query or (not data_entered and len(parts.query) <= 64 and re.fullmatch(r"[\w.=&-]+", parts.query) is not None))
+            and bool(host) and (_VENDOR_ASSET_HOST.search(host) is not None or ats_of_host(host) is not None)
+            and _VENDOR_ASSET_PATH.search(parts.path) is not None and ".." not in parts.path and "%" not in parts.path)
 
 
 class RecipientGuard:
@@ -303,7 +325,9 @@ class RecipientGuard:
                     permitted = self.audience.request_allowed(request, self.page, initial=_navigation_matches(request.url, self._initial_url))
                 except Exception:
                     permitted = False
-            if not permitted and read and not navigation and _static_asset(request.url):
+            if not permitted and read and not navigation and (
+                    _static_asset(request.url)
+                    or vendor_static_asset(request.url, data_entered=bool(getattr(self.audience, "data_entered", True)))):
                 permitted = True  # an ATS's own static code / fonts / UI strings: without them its pages render empty
             if not permitted and lenient and not self.probe:
                 if not top:

@@ -27,7 +27,13 @@ class AdapterAudience(Audience):
         return bool(url and origin(url) == origin(self.reserved_url))
 
     def navigation_verdict(self, url, *, write=False):
-        return "refuse"  # the adapter's declared flow decides every top-level navigation; subresources are only aborted
+        # The adapter's declared flow decides every top-level navigation; subresources are only aborted. The one extra
+        # admission: before any candidate data, a plain GET to the same origin that still names the bound posting (the
+        # ATS switching itself to the browser locale, as Workday does) - the landing is re-bound by continuity.
+        if (not write and not self.data_entered and clean_url(url, navigation=True) == url
+                and origin(url) == origin(self.reserved_url) and self.posting(url)):
+            return "allow"
+        return "refuse"
 
     def pre_data_write(self, url):
         return False

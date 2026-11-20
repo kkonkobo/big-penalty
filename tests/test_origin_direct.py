@@ -629,3 +629,20 @@ def test_origins_cli_trace_option(profile, monkeypatch):
     monkeypatch.setattr(pipeline, "reresolve_origins", fake)
     out = CliRunner().invoke(cli.app, ["origins", str(profile.id), "--trace", "1"]).output
     assert "Trace" in out and "recherche [firecrawl]" in out and "Alpha | Stage A | apply_url : aucun" in out
+
+
+@pytest.mark.asyncio
+async def test_board_fetch_without_disk_cache_does_not_crash():
+    """`origins` re-resolution runs with the cache off: ATS board probes must still work (not raise on `cache=None`)."""
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        return httpx.Response(200, json={"jobs": []})
+
+    r = resolver_with(handler)
+    r.cache = None
+    try:
+        assert await r.board_jobs(origin.BoardRef("greenhouse", "orbitex")) is not None or seen
+    finally:
+        await r.aclose()

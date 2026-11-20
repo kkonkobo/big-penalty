@@ -54,6 +54,8 @@ def test_talentsoft_login_return_is_same_host_and_not_persisted(target, allowed)
     ("rx_ch=connector&rx_source=board&source=x", "https://example.test/job/42"),
     ("feedId=1&jobPipeline=LinkedIn&mode=apply&LCID=1040&trid=a-b", "https://example.test/job/42"),
     ("jobId=R123&partner=45", "https://example.test/job/42?jobId=R123"),
+    ("jobSeqNo=EXR123FR&source=ATS&apply", "https://example.test/job/42?jobSeqNo=EXR123FR"),
+    ("locale=fr_FR&extJobId=V_123&mapping=", "https://example.test/job/42?extJobId=V_123"),
     ("digest=abc", ""),                      # an unknown key still fails the link closed
     ("next=https%3A%2F%2Fother.example", ""),
 ])
@@ -1576,3 +1578,49 @@ def test_unbacked_positive_status_does_not_automatically_settle(profile, tmp_pat
     assert store.outstanding_attempt(app.id).id == run.id
     assert cvstore.get_application(app.id).status == "failed"
     assert db.get_job(job.id).status != "applied"
+
+
+def _auto_attempt(profile, tmp_path, app, url):
+    app = cvstore.get_application(app.id)
+    run = store.start_run(app.id, app.current_rev, "submit", "auto", lambda run_id: tmp_path / str(run_id))
+    return Attempt(run.id, app.id, app.current_rev, app.approved_sha256, url, urlsplit(url).hostname,
+                   "fixture-nonce", None, "", None, f"fixture-key-{app.id}", profile.id, autonomous=True)
+
+
+def _reserve_auto(profile, attempt):
+    store.reserve_send(attempt.run_id, profile_id=profile.id, application_id=attempt.application_id, trigger="auto",
+                       role_key="", url_key=store._url_key(attempt.url), daily_cap=9, binding=attempt)
+
+
+def test_released_attempt_that_never_clicked_does_not_block_an_automatic_retry(profile, tmp_path):
+    url = "https://jobs.example.test/apply/100"
+    _, app = approved_fixture(profile, tmp_path, url)
+    first = _auto_attempt(profile, tmp_path, app, url)
+    _reserve_auto(profile, first)
+    store.finish_and_settle(first.run_id, RunResult(status="needs_human", message="pause"), browser_attempt=first,
+                            browser_clear=True)
+    assert not store.active_reservations(profile.id)  # the engine released it: nothing was clicked
+    retry = _auto_attempt(profile, tmp_path, app, url)
+    _reserve_auto(profile, retry)  # no "Nouvel essai manuel requis"
+    assert [r["run_id"] for r in store.active_reservations(profile.id)] == [retry.run_id]
+
+
+@pytest.mark.parametrize("trace", ["submit_clicked", "nav_clicked", "uncertain_receipt", "operator_not_sent"])
+def test_released_attempt_that_may_have_sent_still_requires_a_manual_retry(profile, tmp_path, trace):
+    url = "https://jobs.example.test/apply/100"
+    _, app = approved_fixture(profile, tmp_path, url)
+    first = _auto_attempt(profile, tmp_path, app, url)
+    _reserve_auto(profile, first)
+    store.finish_and_settle(first.run_id, RunResult(status="needs_human", message="pause"), browser_attempt=first,
+                            browser_clear=True)
+    with db.connect() as conn:  # the trace a possibly-sent (or human-verified) attempt leaves behind once released
+        if trace == "uncertain_receipt":
+            conn.execute("UPDATE apply_reservations SET receipt_kind='none', receipt_outcome='uncertain' WHERE run_id=?",
+                         (first.run_id,))
+        else:
+            column = {"submit_clicked": "submit_clicked_at", "nav_clicked": "nav_clicked_at",
+                      "operator_not_sent": "operator_not_sent_at"}[trace]
+            conn.execute(f"UPDATE application_runs SET {column}='2026-01-01T00:00:00+00:00' WHERE id=?", (first.run_id,))
+    retry = _auto_attempt(profile, tmp_path, app, url)
+    with pytest.raises(ApplyError, match="Nouvel essai manuel requis"):
+        _reserve_auto(profile, retry)
