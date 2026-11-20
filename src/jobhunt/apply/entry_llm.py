@@ -43,6 +43,17 @@ MAX_ROUNDS = 7       # advisor calls (one scan + one answer each)
 MAX_HOPS = 3         # apply clicks that landed
 MAX_DISMISS = 6      # blockers closed in total
 MAX_ITEMS = 70
+BUDGET_S = 90.0      # total time of the fallback (each advisor call is a 10-20 s CLI round trip)
+
+_GENERIC = re.compile(r"\b(?:apply|application|applying|postuler|postulez|candidat\w*|bewerb\w*|bewerbung|career|careers|carri[eè]res?|jobs?|"
+                      r"offres?|emplois?|welcome|bienvenue|sign ?in|log ?in|create|account|compte|connexion|resume|r[ée]sum[ée]|cv|upload|"
+                      r"personal|information|informations|details|contact|email|e-mail|start|get started|join|rejoignez|talent|recruit\w*|"
+                      r"internship|intern|stage|stagiaire|alternance|vacancies|openings|positions?)\b", re.I)
+_ROLE = re.compile(r"\b(?:engineer|developer|d[ée]veloppeu\w*|intern|internship|stagiaire|stage|manager|analyst|analyste|assistant\w*|consultant\w*|"
+                   r"specialist|designer|scientist|officer|alternan\w*|apprenti\w*|ing[ée]nieur\w*|charg[ée]\w*|coordinat\w*|associate|director|"
+                   r"technician|technicien\w*|werkstudent|praktikum|praktikant\w*|architect|researcher|representative|executive|advisor|"
+                   r"administrator|lead|head|responsable|chef|expert|programmer|accountant|recruiter|trainee)\b", re.I)
+_WORD = re.compile(r"[^\W_]{3,}", re.U)
 
 _SCAN = r"""
 () => {
@@ -104,8 +115,8 @@ _SCAN = r"""
   }
   const dialogs = [...document.querySelectorAll(OVERLAY + ', ' + CONSENT)].filter(vis).map(n => clean(n.innerText).slice(0, 300)).filter(Boolean).slice(0, 3);
   const iframes = [...document.querySelectorAll('iframe[src]')].filter(vis).map(f => f.src).slice(0, 10);
-  const inputs = [...document.querySelectorAll('input[type="file"], input[type="email"], input[type="password"], input[autocomplete="given-name"]')]
-    .some(n => vis(n) && !n.closest('nav, footer, aside'));
+  const FIELD = 'input[type="file"], input[type="email"], input[type="password"], input[autocomplete="given-name"]';
+  const inputs = els.some(n => n.matches && n.matches(FIELD) && vis(n) && !n.closest('nav, footer, aside'));
   return {items, nodes, dialogs, iframes, ready: inputs,
           h1: clean(document.querySelector('h1')?.innerText || '').slice(0, 200),
           text: clean((scope || document.body).innerText).slice(0, 1500), title: document.title};
@@ -370,6 +381,32 @@ def embed_target(probe: Probe, sources: list[str]) -> str:
     return ""
 
 
+def names_other_job(h1: str, title: str, job_title: str, company: str) -> bool:
+    """True only when the landing's heading clearly names a DIFFERENT job: it reads like a job title, shares no word with the
+    posting's title, and is neither a generic application heading nor the company's name. Anything unclear is accepted."""
+    heading = re.sub(r"\s+", " ", h1 or "").strip()
+    if not heading or not job_title:
+        return False
+    words = lambda text: {w.casefold() for w in _WORD.findall(text or "")}
+    if words(heading) & words(job_title) or heading.casefold() in job_title.casefold() or job_title.casefold() in heading.casefold():
+        return False
+    if company and (company.casefold() in heading.casefold() or heading.casefold() in company.casefold()):
+        return False
+    if words(heading) & words(title):
+        return False  # the page title ties the heading to the posting's words: not a different job
+    if _GENERIC.search(heading) and not _ROLE.search(re.sub(_GENERIC, " ", heading)):
+        return False
+    return bool(_ROLE.search(heading)) and len(heading.split()) >= 2
+
+
+async def _heading(page) -> tuple[str, str]:
+    with contextlib.suppress(Exception):
+        h1, title = await page.evaluate("() => [(document.querySelector('h1')?.innerText || '').slice(0, 200), document.title || '']",
+                                        isolated_context=True)
+        return h1, title
+    return "", ""
+
+
 async def discover_llm(page, guard, audience, advisor: EntryAdvisor, *, requisition=None, platform=None, job_title="", company=""):
     """(landing tab, clean url) of the application page reached from the posting, or None when nothing was reached.
     Same contract as `discover` for a landing; never types, uploads or sends anything."""
@@ -382,21 +419,52 @@ async def discover_llm(page, guard, audience, advisor: EntryAdvisor, *, requisit
     context.on("page", on_page)
     accepted = False
     try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + BUDGET_S
+        if guard.refused or audience.active or audience.data_entered or not audience.document_nonce:
+            return None
+        lenient = bool(getattr(guard, "lenient", False))
+        probe = Probe(audience.live_url, requisition, [], platform=platform)
+        probe.lenient = lenient
+        guard.probe = probe
         state = await page.evaluate_handle(_POSTING, isolated_context=True)
         data = await state.get_properties()
-        if (await data["url"].json_value() != audience.live_url or not audience.document_nonce
-                or await data["nonce"].json_value() != audience.document_nonce or audience.active or guard.refused):
-            return None
+        if (await data["url"].json_value() != audience.live_url or await data["nonce"].json_value() != audience.document_nonce):
+            # A deterministic click / goto moved the page without binding a landing. Before any data: when it is still on the
+            # posting's site or a recognized ATS (and names no other posting) work from here, else go back to the posting.
+            here = clean_url(page.url, navigation=True)
+            if not (here and (probe.same_site(here) or ats_target(here)[0]) and probe.navigation(here)
+                    and not audience.posting_conflict(here)):
+                guard.probe = None  # the posting's own URL again: the guard's initial-redirect rules, as at the start of the run
+                await guard.navigate(page, audience.live_url, lambda tab, url: tab.goto(url, wait_until="domcontentloaded", timeout=35000))
+                guard.probe = probe
+                if guard.refused or page.is_closed() or clean_url(page.url, navigation=True) != audience.live_url:
+                    return None
+                await audience.bind_document(page)
+            state = await page.evaluate_handle(_POSTING, isolated_context=True)
+            data = await state.get_properties()
         if await is_challenge(page):
             return None
         probe = Probe(audience.live_url, requisition, await data["ids"].json_value(), platform=platform)
-        probe.lenient = bool(getattr(guard, "lenient", False))
+        probe.lenient = lenient
         guard.probe = probe
-        current, before_url, was_ready = page, audience.live_url, bool(await data["ready"].json_value())
+        current, before_url, was_ready = page, clean_url(page.url, navigation=True) or audience.live_url, bool(await data["ready"].json_value())
         landed = None
+        if clean_url(page.url, navigation=True) != audience.live_url and was_ready:
+            # Already on a form the click reached: accept it when it is bound to this posting, before asking anyone.
+            found = await await_landing(current, context, set(context.pages), opened, probe, guard, audience, workday=False,
+                                        before_url="", was_ready=False)
+            if found is not None and found[0] is None:
+                return found
+            if found is not None:
+                landed, current = found, found[0]
+                guard.page = current
         dismissed = hops = 0
         for _ in range(MAX_ROUNDS):
             if guard.refused or current.is_closed():
+                break
+            if loop.time() >= deadline:
+                log.info("entry fallback: time budget used up")
                 break
             view = await _scan(current, probe)
             if view.ready and landed is not None:
@@ -417,7 +485,12 @@ async def discover_llm(page, guard, audience, advisor: EntryAdvisor, *, requisit
                     probe.tab = None
                     break
                 continue
-            step = await advisor.advise_entry(view.payload(), job_title=job_title, company=company)
+            try:
+                step = await asyncio.wait_for(advisor.advise_entry(view.payload(), job_title=job_title, company=company),
+                                              max(1.0, deadline - loop.time()))
+            except asyncio.TimeoutError:
+                log.info("entry fallback: time budget used up while waiting for the advisor")
+                break
             log.info("entry advisor: state=%s dismiss=%s apply=%s", step.page_state, step.dismiss, step.apply)
             if step.page_state in {"application_form", "account_or_login", "closed"} and landed is not None:
                 break
@@ -469,6 +542,10 @@ async def discover_llm(page, guard, audience, advisor: EntryAdvisor, *, requisit
                 if hops >= MAX_HOPS:
                     break
         if landed is not None and not guard.refused:
+            h1, title = await _heading(landed[0])
+            if names_other_job(h1, title, job_title, company):
+                log.info("entry landing names another job: refused")
+                return None
             accepted = True
             return landed
         return None

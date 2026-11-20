@@ -88,6 +88,19 @@ def audit_url(url: str | None) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query), ""))
 
 
+def posting_gone_redirect(source: str, target: str) -> bool:
+    """The posting URL redirects, on the same host, to the site root or a bare one-segment path (careers index, language
+    home): what an expired ad does. The source must itself look like a specific posting (a deep path or an identifier)."""
+    a, b = urlsplit(source), urlsplit(target)
+    if not a.hostname or (a.hostname or "").lower() != (b.hostname or "").lower() or a.scheme != b.scheme:
+        return False
+    deep = [seg for seg in a.path.split("/") if seg]
+    specific = len(deep) >= 2 or bool(re.search(r"\d", a.path + a.query))
+    target_segments = [seg for seg in b.path.split("/") if seg]
+    bare = len(target_segments) <= 1 and not re.search(r"\d", b.path + b.query)
+    return specific and bare and (b.path.rstrip("/"), b.query) != (a.path.rstrip("/"), a.query)
+
+
 def _navigation_matches(actual: str, expected: str) -> bool:
     return bool(expected and actual == quote(expected, safe=":/?#[]@!$&'()*+,;=%"))
 
@@ -214,6 +227,7 @@ class RecipientGuard:
         self.request_allowed = request_allowed
         self.refused = False
         self.refusal_code = "recipient_refused_transport"
+        self.posting_gone = False  # the posting URL itself was redirected to its site's root / a bare path: the ad is gone
         self.refused_request = ""  # "METHOD url-without-query" of the first refused request (local failure record only)
         self.transmitted = False
         self.non_account_transmitted = False
@@ -522,6 +536,10 @@ class RecipientGuard:
                             and request.is_navigation_request() and request.frame == self.page.main_frame
                             and self.audience.account_redirect(target)):
                         await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif (initial and redirect and self.audience and not self.audience.data_entered
+                          and posting_gone_redirect(request.url, target)):
+                        self.posting_gone = True
+                        await refuse(route, "job_closed")
                     elif (initial
                             and (self.audience.initial_redirect(request.url, target) or
                                  (lenient and self.audience.navigation_verdict(target) == "allow")

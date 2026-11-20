@@ -249,7 +249,9 @@ class Probe:
             return False
         ats, identity = ats_target(target)
         if self.alias and ats == "smartrecruiters" and identity == self.alias:
-            return "requisition" if ready or _ENTRY.search(urlsplit(target).path) else ""
+            # The one-click form is a SPA that may not show its fields within the wait: its URL names the company AND the
+            # publication uuid this posting's own API gave, which is the posting's identity (`alias`).
+            return "requisition" if ready or _ENTRY.search(urlsplit(target).path) or "/oneclick-ui/" in urlsplit(target).path else ""
         declared = _identifiers(ids)
         expected = self.expected(target, ats)
         if ats == "workday":
@@ -395,6 +397,21 @@ async def _click_through_overlay(page, button, cookie_reject) -> None:
     await button.evaluate("node => node.click()", isolated_context=True)
 
 
+async def _same_document_form(tab, probe, audience) -> bool:
+    """An in-page modal: the click revealed the application form on the document already bound at the initial navigation
+    (same URL, same nonce), and every form action there is same-site (or absent). No navigation happened, no data exists."""
+    with contextlib.suppress(Exception):
+        info = await tab.evaluate(
+            """() => [document.__bp_autonomous_document || '', [...document.querySelectorAll('form')].filter(form =>
+                form.querySelector('input[type="file"], input[type="email"], input[autocomplete="given-name"]'))
+                .map(form => { try { return Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action').get.call(form); }
+                               catch (_) { return ''; } })]""", isolated_context=True)
+        if not info[0] or info[0] != audience.document_nonce:
+            return False
+        return all(probe.same_site(action) for action in info[1])
+    return False
+
+
 async def await_landing(page, context, baseline, opened, probe, guard, audience, *, workday, before_url, was_ready):
     """After a pre-data click or goto: wait for the page (or a new tab) to land on an admitted continuation of the posting.
     Returns (tab, clean_url), (None, code) for a fixed diagnostic, or None when nothing landed in time."""
@@ -422,10 +439,14 @@ async def await_landing(page, context, baseline, opened, probe, guard, audience,
                 ids = await landing["ids"].json_value()
                 if workday and await is_challenge(tab):
                     return None, "challenge_or_rate_limited"
+                same_document = False
+                if (probe.clicked and ready and not was_ready and tab == page and target == before_url
+                        and target == audience.live_url and not audience.data_entered and not workday):
+                    same_document = await _same_document_form(tab, probe, audience)
                 if ((probe.tab is None or tab == probe.tab)
                         and (tab != page or target != before_url or (ready and not was_ready))
                         and (not workday or marker or ready)
-                        and (binding := probe.landing(target, ids, ready=ready))):
+                        and (binding := probe.landing(target, ids, ready=ready) or ("continuity" if same_document else ""))):
                     if tab != page:
                         await page.close()
                     if guard.refused or len(opened) > 1:
