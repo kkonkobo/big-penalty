@@ -1247,7 +1247,8 @@ class _Run:
             if exact_key != "work_authorization" or a.fact != exact_key or op != "fill" or a.inferred:
                 return drop("autorisation de travail : question ou format non confirmé")
         explicit_facts = {"address", "address_line_2", "department", "phone_calling_code", "graduation_date",
-                          "politically_exposed", "internship_agreement", "recruiter_ai", "conflict_of_interest", "former_employer"}
+                          "politically_exposed", "internship_agreement", "recruiter_ai", "conflict_of_interest", "former_employer",
+                          "relatives_at_employer"}
         phone_dial = dial and a.fact == "phone" and not a.inferred
         if (exact_key in explicit_facts or a.fact in explicit_facts) and not phone_dial:
             return drop("réponse exacte confirmée nécessaire")

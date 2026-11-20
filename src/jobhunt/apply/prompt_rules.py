@@ -82,6 +82,10 @@ def decision_key(label: str) -> str | None:
         return "consent"
     if re.search(r"conflict of interest|conflit d interet|interessenkonflikt", label):
         return "conflict"
+    if (re.search(r"\b(?:family members?|relatives?|membres? de (?:votre|sa|leur) famille|famille|proches?|connaissances?|parente?s?|"
+                  r"verwandte\w*|familienmitglied\w*|angehorig\w*)\b", label)
+            and re.search(r"\b(?:work\w*|employ\w*|travaill\w*|emploi\w*|salarie\w*|arbeit\w*|beschaftig\w*|tatig)\b", label)):
+        return "relatives"
     if re.search(r"former employer|previously employed|previously worked (?:for|at|with us)|already worked (?:for|at|with us)|"
                  r"deja travaille (?:chez|pour|avec nous)|ancien employeur|"
                  r"fruher.*(?:gearbeitet|beschaftigt)|ehemalig\w* arbeitgeber", label):

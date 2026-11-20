@@ -57,7 +57,7 @@ YES_NO = {True: {"oui", "yes", "ja"}, False: {"non", "no", "nein"}}
 IDENTITY = {"first_name", "last_name", "full_name", "email", "phone"}
 POLICY = {"marketing", "recruiting", "consent"}
 _NEW_KEYS = {"address", "address_line_2", "department", "phone_calling_code", "politically_exposed"}
-_PROMOTED_DECISIONS = {"recruiter_ai", "former_employer", "conflict_of_interest", "country"}
+_PROMOTED_DECISIONS = {"recruiter_ai", "former_employer", "conflict_of_interest", "relatives_at_employer", "country"}
 _DEPARTMENTS = dict(line.split(" ", 1) for line in """01 Ain
 02 Aisne
 03 Allier
@@ -168,6 +168,7 @@ _KINDS = {
     "politically_exposed": {"text", "select", "combobox", "radio"},
     "conflict_of_interest": {"text", "select", "combobox", "radio"},
     "former_employer": {"text", "select", "combobox", "radio"},
+    "relatives_at_employer": {"text", "select", "combobox", "radio"},
     "recruiter_ai": {"select", "radio", "checkbox"},
     "graduation_date": {"text", "date", "select", "combobox"},
     "internship_agreement": {"text", "select", "combobox", "radio"},
@@ -189,6 +190,8 @@ def standing_key(label: str) -> str | None:
     if decision_key(label) == "conflict" and re.search(r"\b(?:employe|salarie|employee|client|customer)\b", normalized) \
             and not re.search(r"\b(?:no|not|aucun|aucune|absence|declarez ne)\b", normalized):
         return "conflict_of_interest"
+    if decision_key(label) == "relatives":  # owner rule: the candidate has no relative at the employer -> always "No"
+        return "relatives_at_employer"
     return _LABEL_KEYS.get(normalized)
 
 
@@ -239,7 +242,8 @@ def exact_option(key: str, value: str, options: list[str], label: str) -> int | 
             equivalent = {code.lower(), name, f"{code.lower()} {name}", f"{name} {code.lower()}"}
             if code.startswith("0"):
                 equivalent.add(code[1:])
-    if key in {"politically_exposed", "internship_agreement", "recruiter_ai", "conflict_of_interest", "former_employer", "needs_visa_sponsorship"}:
+    if key in {"politically_exposed", "internship_agreement", "recruiter_ai", "conflict_of_interest", "former_employer",
+               "relatives_at_employer", "needs_visa_sponsorship"}:
         polarity = next((yes for yes, words in YES_NO.items() if wanted in words), None)
         if polarity is None:
             return None
