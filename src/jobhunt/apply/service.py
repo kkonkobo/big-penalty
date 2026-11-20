@@ -1384,6 +1384,8 @@ def _waiting_on_user(app: Application, job, last: ApplyRun | None) -> bool:
         return False
     if last.status == 'needs_email' and last.email_resumed:
         return False
+    if apply_store.stale_engine_pause(last):  # the engine paused itself under older code: retry once, unattended
+        return False
     if last.status in ("needs_email", "needs_human"):
         return True
     if last.rev != app.current_rev:

@@ -443,13 +443,38 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
     return get_run(run_id)  # type: ignore[return-value]
 
 
+# Autonomous runs that the engine itself failed or paused before this instant (UTC, the format of `started_at`) were judged by
+# guard and page-reading code that has since been fixed: they no longer pause their host, and the automatic pass retries
+# their engine-caused pauses (ENGINE_PAUSE_CODES) once. Move it forward when a change is expected to clear such outcomes.
+# A run that may have sent the application (submit clicked, uncertain receipt) is never affected.
+ENGINE_RETRY_EPOCH = "2026-11-20T10:00:00+00:00"
+
+# Pause codes the engine produced on its own (its guard refused a request, it could not read the page or find the apply
+# control): unlike a CAPTCHA, an e-mail or a login, nothing the candidate must do. Posting conflicts are not in this list.
+ENGINE_PAUSE_CODES = frozenset({
+    "recipient_refused_ats_navigation", "recipient_refused_ats_write", "recipient_refused_other_navigation",
+    "recipient_refused_other_write", "recipient_refused_redirect", "recipient_refused_response",
+    "recipient_refused_same_site_navigation", "recipient_refused_same_site_write", "recipient_refused_transport",
+    "apply_target_unverified", "public_page_shell", "job_page_no_apply_control", "apply_control_ambiguous",
+})
+
+
+def _site_handoff(t: str) -> str:
+    """SQL: run `t` hands the application over to the candidate on the site (a stale engine pause does not)."""
+    codes = ", ".join(f"'{code}'" for code in sorted(ENGINE_PAUSE_CODES))
+    return (f"(({t}.status='needs_human' AND NOT ({t}.started_at < '{ENGINE_RETRY_EPOCH}' AND {t}.submit_clicked_at IS NULL"
+            f" AND COALESCE(json_extract({t}.result_json, '$.submit_clicked'), 0) = 0"
+            f" AND json_extract({t}.result_json, '$.diagnostic_code') IN ({codes})))"
+            f" OR ({t}.status='needs_email' AND {t}.email_resumed=0))")
+
+
 _OUTSTANDING_RUNS = """
     SELECT run.*, app.id AS owner_application_id, EXISTS (
         SELECT 1 FROM application_runs retry WHERE retry.application_id = app.id
         AND retry.operator_not_sent_at IS NOT NULL
     ) AS manual_retry, EXISTS (
         SELECT 1 FROM application_runs handoff WHERE handoff.application_id = app.id
-        AND (handoff.status='needs_human' OR (handoff.status='needs_email' AND handoff.email_resumed=0))
+        AND """ + _site_handoff("handoff") + """
     ) AS site_handoff FROM applications app
     LEFT JOIN application_runs run ON run.id = COALESCE(
         (SELECT v.run_id FROM apply_reservations v JOIN application_runs held ON held.id = v.run_id
@@ -489,8 +514,7 @@ def requires_manual_retry(application_id: int) -> bool:
 def has_site_handoff(application_id: int) -> bool:
     """A site handoff requires manual follow-up; unrelated attempts cannot clear it."""
     with connect() as conn:
-        return conn.execute("SELECT 1 FROM application_runs WHERE application_id=? "
-                            "AND (status='needs_human' OR (status='needs_email' AND email_resumed=0)) LIMIT 1",
+        return conn.execute("SELECT 1 FROM application_runs r WHERE r.application_id=? AND " + _site_handoff("r") + " LIMIT 1",
                             (application_id,)).fetchone() is not None
 
 
@@ -712,12 +736,21 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
         return updated
 
 
+def stale_engine_pause(run: ApplyRun | None) -> bool:
+    """`run` is an engine-caused pause judged by code older than ENGINE_RETRY_EPOCH, and it cannot have sent anything."""
+    return bool(run is not None and run.status == "needs_human" and run.result is not None
+                and run.result.diagnostic_code in ENGINE_PAUSE_CODES and not run.result.submit_clicked
+                and run.submit_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH)
+
+
 def _host_paused(conn, host: str) -> bool:
     outcomes = conn.execute("""SELECT r.status, v.receipt_outcome FROM apply_reservations v
         JOIN application_runs r ON r.id=v.run_id
         WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
         AND ? IN (json_extract(v.binding_json, '$.host'), json_extract(v.binding_json, '$.landing_host'))
-        ORDER BY v.id DESC LIMIT 2""", (host,)).fetchall()
+        AND NOT (r.status='failed' AND r.started_at < ? AND r.submit_clicked_at IS NULL
+                 AND COALESCE(v.receipt_outcome, '') != 'uncertain')
+        ORDER BY v.id DESC LIMIT 2""", (host, ENGINE_RETRY_EPOCH)).fetchall()
     return len(outcomes) == 2 and all(row["status"] == "failed" or row["receipt_outcome"] == "uncertain" for row in outcomes)
 
 
@@ -733,6 +766,8 @@ def paused_hosts() -> set[str]:
             json_extract(v.binding_json, '$.landing_host') AS landing, v.receipt_outcome, r.status
             FROM apply_reservations v JOIN application_runs r ON r.id=v.run_id
             WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
+            AND NOT (r.status='failed' AND r.started_at < ? AND r.submit_clicked_at IS NULL
+                     AND COALESCE(v.receipt_outcome, '') != 'uncertain')
         ), hosts AS (
             SELECT id, host, receipt_outcome, status FROM eligible
             UNION ALL SELECT id, landing, receipt_outcome, status FROM eligible WHERE landing != host
@@ -740,7 +775,8 @@ def paused_hosts() -> set[str]:
             SELECT host, receipt_outcome, status, ROW_NUMBER() OVER (PARTITION BY host ORDER BY id DESC) AS pos
             FROM hosts
         ) SELECT host FROM host_runs WHERE pos<=2 GROUP BY host
-        HAVING SUM(CASE WHEN status='failed' OR receipt_outcome='uncertain' THEN 1 ELSE 0 END)=2""").fetchall()
+        HAVING SUM(CASE WHEN status='failed' OR receipt_outcome='uncertain' THEN 1 ELSE 0 END)=2""",
+                            (ENGINE_RETRY_EPOCH,)).fetchall()
         return {row["host"] for row in rows}
 
 
