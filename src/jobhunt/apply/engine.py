@@ -113,6 +113,7 @@ RENDER_WAITS = 4        # a page with no field and almost no text is still rende
 RENDER_WAIT_S = 2.0
 RENDER_TEXT_MIN = 40
 CLICK_ATTRIBUTION_S = 4.0  # a navigation aborted within this delay after a click of ours is attributed to that click
+AUTO_CONSENT = True      # clear consent dialogs before each page read (tests of the planner's own cookie rules switch it off)
 SPLIT_UPLOADS = True     # uploads get a step of their own, then the page is read again (tests with scripted plans switch it off)
 UPLOAD_SETTLE_S = 2.5    # lets a CV parser re-render / pre-fill the form after an upload
 OBSERVE_S = 12.0         # after a post-data click: how long the engine only observes the page before giving up ("not confirmed")
@@ -741,7 +742,9 @@ class _Run:
         await human_pause(0.3, 0.8)
 
     async def _snapshot(self) -> tuple[PageSnapshot, Resolver]:
-        if self.mode != "supervised":  # a consent dialog that came back on this page would cover what the run needs
+        # A consent dialog that came back on this page would cover what the run needs. Never in supervised mode (a person
+        # drives), and never after data entry in a dry run (a rehearsal clicks nothing once the form is touched).
+        if AUTO_CONSENT and self.mode != "supervised" and not (self.mode == "dry_run" and (self.touched or self.app_touched)):
             await dismiss_consent(self.page)
         for attempt in range(3):
             try:

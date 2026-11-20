@@ -792,7 +792,8 @@ async def test_fill_actions_are_logged_with_the_fact_actually_used(page, server,
 
 
 # ------------------------------------------------------------------ cookie banners
-async def test_cookie_banner_is_dismissed_first_and_never_counts_as_submit(page, server, fast, cv_pdf, tmp_path):
+async def test_cookie_banner_is_dismissed_first_and_never_counts_as_submit(page, server, fast, cv_pdf, tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "AUTO_CONSENT", False)  # this test is about the planner's own cookie rules
     def cookie(snap):
         return StepPlan(page_kind="form", actions=[act(snap, r"^Tout refuser$", "click", role="cookies")])
 
@@ -804,14 +805,16 @@ async def test_cookie_banner_is_dismissed_first_and_never_counts_as_submit(page,
     assert not server.posts and await page.input_value("#fn") == "Camille"
 
 
-async def test_no_click_at_all_after_data_entry_in_dry_run_cookie_exception_removed(page, server, fast, cv_pdf, tmp_path):
+async def test_no_click_at_all_after_data_entry_in_dry_run_cookie_exception_removed(page, server, fast, cv_pdf, tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "AUTO_CONSENT", False)  # this test is about the planner's own cookie rules
     def plan(snap):
         return StepPlan(page_kind="form", actions=[act(snap, r"^Prénom", "fill", "first_name"), act(snap, r"^Tout refuser$", "click", role="cookies")])
     res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="form")]), tmp_path, cv_pdf, start="cookies", max_steps=2)
     assert res.status == "ready" and res.steps[0].clicked == "" and await page.locator("#banner").count() == 1 and not server.sent
 
 
-async def test_cookies_role_on_a_non_cookie_label_is_never_clicked_in_dry_run(page, server, fast, cv_pdf, tmp_path):
+async def test_cookies_role_on_a_non_cookie_label_is_never_clicked_in_dry_run(page, server, fast, cv_pdf, tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "AUTO_CONSENT", False)  # this test is about the planner's own cookie rules
     def plan(snap):
         return StepPlan(page_kind="form", actions=[act(snap, r"^Prénom", "fill", "first_name"), act(snap, r"^Nom", "fill", "last_name"),
                                                    act(snap, r"E-mail", "fill", "email"), act(snap, r"Accepter et envoyer", "click", role="cookies")])
@@ -823,7 +826,8 @@ async def test_cookies_role_on_a_non_cookie_label_is_never_clicked_in_dry_run(pa
     assert not server.posts and res.status in ("ready", "needs_input")
 
 
-async def test_cookie_click_after_data_is_gated_and_recorded_but_not_a_final_click_in_submit_mode(page, server, fast, cv_pdf, tmp_path):
+async def test_cookie_click_after_data_is_gated_and_recorded_but_not_a_final_click_in_submit_mode(page, server, fast, cv_pdf, tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "AUTO_CONSENT", False)  # this test is about the planner's own cookie rules
     hooks, navs, gates = [], [], []
 
     async def hook():
