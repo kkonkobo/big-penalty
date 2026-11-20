@@ -272,6 +272,7 @@ class ApplyRun(BaseModel):
     operator_not_sent_at: datetime | None = None
     origin_sha: str | None = None
     application_version: str | None = None
+    email_resumed: bool = False
 
 
 def _from_row(r) -> ApplyRun:
@@ -279,6 +280,7 @@ def _from_row(r) -> ApplyRun:
         id=r["id"], application_id=r["application_id"], rev=r["rev"], mode=r["mode"], trigger=r["trigger"], status=r["status"],
         message=r["message"] or "", result=RunResult.model_validate_json(r["result_json"]) if r["result_json"] else None,
         out_dir=r["out_dir"], started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]),
+        email_resumed=bool(r["email_resumed"]),
         submit_clicked_at=_dt(r["submit_clicked_at"]), nav_clicked_at=_dt(r["nav_clicked_at"]), pid=r["pid"],
         approved_by=r["approved_by"], operator_not_sent_at=_dt(r["operator_not_sent_at"]),
         origin_sha=r["origin_sha"], application_version=r["application_version"])
@@ -447,7 +449,7 @@ _OUTSTANDING_RUNS = """
         AND retry.operator_not_sent_at IS NOT NULL
     ) AS manual_retry, EXISTS (
         SELECT 1 FROM application_runs handoff WHERE handoff.application_id = app.id
-        AND handoff.status IN ('needs_email', 'needs_human')
+        AND (handoff.status='needs_human' OR (handoff.status='needs_email' AND handoff.email_resumed=0))
     ) AS site_handoff FROM applications app
     LEFT JOIN application_runs run ON run.id = COALESCE(
         (SELECT v.run_id FROM apply_reservations v JOIN application_runs held ON held.id = v.run_id
@@ -488,7 +490,7 @@ def has_site_handoff(application_id: int) -> bool:
     """A site handoff requires manual follow-up; unrelated attempts cannot clear it."""
     with connect() as conn:
         return conn.execute("SELECT 1 FROM application_runs WHERE application_id=? "
-                            "AND status IN ('needs_email', 'needs_human') LIMIT 1",
+                            "AND (status='needs_human' OR (status='needs_email' AND email_resumed=0)) LIMIT 1",
                             (application_id,)).fetchone() is not None
 
 
@@ -633,6 +635,32 @@ def latest_runs(profile_id: int) -> dict[int, ApplyRun]:
                          " WHERE a.profile_id=? AND r.id=(SELECT MAX(id) FROM application_runs WHERE application_id=r.application_id)",
                          (profile_id,)).fetchall()
     return {r["application_id"]: _from_row(r) for r in rows}
+
+
+def email_scope(run_id: int, candidates: list[str]) -> str:
+    """Restore a scope only from current trusted URLs matching the released reservation digest."""
+    with connect() as conn:
+        row = conn.execute('SELECT binding_json FROM apply_reservations WHERE run_id=? AND released_at IS NOT NULL '
+                           'AND receipt_outcome IS NULL', (run_id,)).fetchone()
+    binding = json.loads(row[0]) if row and row[0] else {}
+    if not binding.get('autonomous'):
+        return ''
+    digest = binding.get('landing_digest') or binding.get('url_digest')
+    return next((candidate for candidate in candidates if _url_key(candidate) == digest), '')
+
+
+def record_email_resume(run: ApplyRun, code: str) -> bool:
+    if code not in {'email_link_used', 'email_not_found', 'email_auth_failed'} or not run.result:
+        return False
+    result = run.result.model_copy(deep=True)
+    result.dispatch_diagnostics.email = code
+    with connect() as conn:
+        cursor = conn.execute("UPDATE application_runs SET email_resumed=?, result_json=? WHERE id=? AND email_resumed=0 "
+                              "AND status='needs_email' AND id=(SELECT MAX(id) FROM application_runs WHERE application_id=?) "
+                              "AND EXISTS (SELECT 1 FROM applications WHERE id=? AND status='approved' AND current_rev=? "
+                              "AND updated_at=?)", (code == 'email_link_used', result.model_dump_json(), run.id,
+                                                     run.application_id, run.application_id, run.rev, run.application_version))
+    return cursor.rowcount == 1
 
 
 def _binding_current(conn, run, attempt: Attempt) -> bool:

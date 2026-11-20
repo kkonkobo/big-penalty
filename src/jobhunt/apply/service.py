@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from jobhunt import db
-from jobhunt.apply import accounts, policy
+from jobhunt.apply import accounts, mail, policy
 from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Match, Receipt, WriteGate, clean_receipt, origin, registry
 from jobhunt.apply.adapter_browser import AdapterAudience
 from jobhunt.apply.autonomous import Audience
@@ -208,7 +208,7 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
         bucket = "failed"
     elif run_ is not None and run_.status == "running" and now() - run_.started_at < apply_store.STALE_RUN_AFTER:
         bucket = "sending"
-    elif run_ is not None and run_.status in PAUSE_REASON and run_.rev == app.current_rev:
+    elif run_ is not None and run_.status in PAUSE_REASON and not run_.email_resumed and run_.rev == app.current_rev:
         bucket, pause = "paused", PAUSE_REASON[run_.status]
         questions = list(run_.result.questions) if run_.result else []
     elif untrusted:
@@ -527,6 +527,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             raise ApplyError(SUPERVISED_ONLY)
 
     async def recheck():
+        if guard.refused:
+            return [RECIPIENT_REFUSED]
         try:
             check()
         except ApplyError as exc:
@@ -561,6 +563,31 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         apply_store.mark_autonomous_submit(attempt)
         guard.final_started = True
         audience.final_started = True
+
+    async def verify_mail():
+        return await mail.poll(email, audience.recipient_url, run_.started_at)
+
+    async def follow_mail(tab, link, still_current):
+        if not await mail.open_link(tab.context, audience.recipient_url, link, still_current):
+            return False
+        diagnostics.email = 'email_link_used'
+        if await still_current():
+            return False
+        target = audience.recipient_url
+        with contextlib.suppress(ApplyError):
+            accounts.set_state(_host(target), email, 'active', site=accounts.workday_site(target))
+        audience.clicking = audience.account_click = False
+        audience.next_document = audience.account_next = ''
+        audience.active = False
+        await guard.navigate(tab, target, lambda current, url: pool.goto(current, url, challenge_timeout_s=0))
+        if guard.refused or not audience.initial_redirect(target, tab.url):
+            return False
+        audience.document = clean_url(tab.url, navigation=True)
+        await audience.bind_document(tab)
+        return True
+
+    mail_flow = mail.BrowserVerification(verify_mail, follow_mail) if mail.provider(email) and (
+        not browser_adapter or match.adapter.boundaries.get('account_creation') == 'auto') else None
 
     diagnostics.control = "navigation"
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
@@ -609,6 +636,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
                 password=(lambda url: password(url)) if password else None,
                 account_known=(lambda url: account_known(url)) if account_known else None,
+                email_verification=mail_flow,
                 diagnostics=diagnostics, apply_entry=None if browser_adapter else open_apply,
                 host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
@@ -1049,7 +1077,9 @@ def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool, *, rec
     if browser:
         attempt, guard = browser
         confirmed = guard.final_response and not guard.refused and not crashed
-        clear = not guard.transmitted and not guard.final_started and not crashed
+        account_only_email = (result.status == 'needs_email' and result.dispatch_diagnostics.email is not None
+                              and not guard.non_account_transmitted)
+        clear = (not guard.transmitted or account_only_email) and not guard.final_started and not crashed
         return apply_store.finish_and_settle(run_.id, result, browser_attempt=attempt,
                                              browser_confirmed=confirmed, browser_clear=clear)
     return apply_store.finish_and_settle(run_.id, result, receipt=receipt)
@@ -1298,6 +1328,8 @@ def _waiting_on_user(app: Application, job, last: ApplyRun | None) -> bool:
     """
     if last is None:
         return False
+    if last.status == 'needs_email' and last.email_resumed:
+        return False
     if last.status in ("needs_email", "needs_human"):
         return True
     if last.rev != app.current_rev:
@@ -1305,6 +1337,78 @@ def _waiting_on_user(app: Application, job, last: ApplyRun | None) -> bool:
     if last.status == "needs_input" and _questions_answered_since(app, last):
         return False
     return last.status in PAUSE_REASON or bool(_host_pause(app, job, last))
+
+
+async def resume_email(profile_id: int | None = None, *, pool=None, _lock_held: bool = False) -> int:
+    """Activate account-level links on still-approved holds without sending an application."""
+    if not get_settings().apply_autonomous:
+        return 0
+    if not _lock_held:
+        try:
+            with send_lock():
+                return await resume_email(profile_id, pool=pool, _lock_held=True)
+        except SendLocked:
+            return 0
+    shared = _Pool(pool, headless=True)
+    resumed = 0
+    try:
+        for pid in ([profile_id] if profile_id is not None else [profile.id for profile in db.list_profiles()]):
+            try:
+                address = mail.profile_address(pid)
+            except ApplyError:
+                continue
+            applications = {app.id: app for app in cvstore.list_applications(pid)}
+            for held in apply_store.latest_runs(pid).values():
+                app = applications.get(held.application_id)
+                if (not app or held.mode != 'submit' or held.status != 'needs_email' or held.email_resumed
+                        or not held.finished_at or now() - held.started_at > mail.RESUME_WINDOW):
+                    continue
+                job = db.get_job(app.job_id)
+                if not job or not held.origin_sha or origin_digest(job.origin_url) != held.origin_sha:
+                    continue
+                match = _dispatch_match(job, 'submit')
+                if match and match.capability == 'unattended' and match.adapter.boundaries.get('account_creation') != 'auto':
+                    continue
+                metadata = job.extra.get('origin_resolution') if isinstance(job.extra, dict) else None
+                verified = metadata.get('verified_urls') if isinstance(metadata, dict) and metadata.get('canonical_ok') is True else None
+                urls = [dispatch_url(job.origin_url, job.extra, autonomous=True), clean_url(job.origin_url, navigation=True)]
+                if isinstance(verified, list):
+                    urls.extend(clean_url(url, navigation=True) for url in verified if isinstance(url, str))
+                scope = apply_store.email_scope(held.id, urls)
+                if not scope:
+                    continue
+
+                async def recheck():
+                    current, live = cvstore.get_application(app.id), db.get_job(app.job_id)
+                    if (not current or current.status != 'approved' or current.updated_at != app.updated_at
+                            or current.current_rev != held.rev or not live or live.origin_url != job.origin_url or live.extra != job.extra
+                            or _dispatch_match(live, 'submit') != match or apply_store.get_run(held.id) != held
+                            or apply_store.outstanding_attempt(app.id) or apply_store.requires_manual_retry(app.id)
+                            or apply_store.host_paused(_host(scope)) or not get_settings().apply_autonomous
+                            or _gate(current, live, 'submit', held.trigger)):
+                        return ['Candidature modifiée ou non autorisée.']
+                    return []
+
+                if await recheck():
+                    continue
+                verification, code = await mail.poll(address, scope, held.started_at, links_only=True)
+                if not verification or verification.kind != 'link':
+                    if code:
+                        apply_store.record_email_resume(held, code)
+                    if code == 'email_auth_failed':
+                        break
+                    continue
+                try:
+                    browser = await shared.get().context(pid, f'apply-auto-{_host(scope)}', headless=True)
+                except Exception:
+                    continue
+                if await mail.open_link(browser, scope, verification.value, recheck) and not await recheck():
+                    with contextlib.suppress(ApplyError):
+                        accounts.set_state(_host(scope), address, 'active', site=accounts.workday_site(scope))
+                    resumed += apply_store.record_email_resume(held, 'email_link_used')
+    finally:
+        await shared.aclose()
+    return resumed
 
 
 def _print_now(line: str) -> None:
@@ -1367,6 +1471,8 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
         except SendLocked:
             summary.errors.append("Un autre envoi est en cours : aucun envoi automatique cette fois-ci")
             emit(f"Candidatures : {summary.errors[-1]}")
+        if lock_held and s.apply_auto and s.apply_autonomous:
+            await resume_email(profile_id, _lock_held=True)
         async def regenerate(app: Application, job) -> Application | None:
             """A new revision for a draft whose current one has blocking errors (or no PDF): at most `apply_cv_retries` times per
             application (counted in the database), within the preparation cap of the pass. None = give up."""

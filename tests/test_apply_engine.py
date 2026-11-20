@@ -430,7 +430,10 @@ async def test_residual_limit_fetch_post_from_a_change_handler_is_NOT_blocked(pa
     def upload(snap):
         return StepPlan(page_kind="form", actions=[act(snap, r"^CV", "upload_cv", kind="file")])
     await go(page, server, ScriptedPlanner([upload, StepPlan(page_kind="form")]), tmp_path, cv_pdf, start="fetchsubmit", max_steps=3)
-    await asyncio.sleep(0.3)
+    for _ in range(50):  # the handler's fetch lands asynchronously; slow runners need more than a fixed pause
+        if apply_posts(server):
+            break
+        await asyncio.sleep(0.1)
     assert len(apply_posts(server)) == 1
 
 

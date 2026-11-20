@@ -580,6 +580,7 @@ async def test_production_autonomous_submits_with_receipt_and_scoped_decisions(p
     assert b"marketing=" not in server.posts[0]["body"]
     assert result.result.dispatch_diagnostics.model_dump() == {
         "step": 1, "control": "final_submit", "receipt_kind": "first_party_confirmation", "receipt_reason": "confirmation_text",
+        "email": None,
     }
 
 

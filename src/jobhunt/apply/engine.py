@@ -27,6 +27,7 @@ from urllib.parse import quote, quote_plus, urldefrag, urlparse
 from patchright.async_api import ElementHandle, Locator, Page
 from pydantic import BaseModel
 
+from jobhunt.apply import mail
 from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.autonomous import (
     SUPERVISED_REQUIRED, _live_option, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
@@ -585,6 +586,8 @@ class _Run:
         self.widget_blocked = 0   # dry run: non-GET widget navigations aborted while a page was loading (harmless)
         self.blocked_requests: list[str] = []   # dry run: page-initiated navigations aborted by the request guard
         self.secrets: set[str] = set()
+        self.email_verification = None
+        self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
         self.no_shot_noted = False
         self.final_url = ""
@@ -1961,8 +1964,9 @@ class _Run:
                                                history=self.steps[:-1], mode=self.mode)
                 log.page_kind = plan.page_kind
                 if plan.page_kind == "email_verification":
-                    await self._shot(log)
-                    return self._end("needs_email", plan.note or "Le site attend la validation d'un lien envoyé par e-mail.")
+                    if await self._verify_email(snap, resolve):
+                        return await self._snapshot()
+                    return await self._email_hold(log, plan.note if not self.email_verification else '')
                 if plan.page_kind == "captcha":
                     await self._shot(log)
                     return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
@@ -2013,6 +2017,98 @@ class _Run:
 
     def _unconfirmed(self) -> RunResult:
         return self._end("failed", UNCONFIRMED_MSG)
+
+    async def _email_hold(self, log: StepLog, note: str = '') -> RunResult:
+        await self._shot(log)
+        return self._end('needs_email', note or "Le site attend la validation d'un lien envoyé par e-mail.")
+
+    async def _verify_email(self, snap: PageSnapshot, resolve: Resolver) -> bool:
+        if (not self.email_verification or self.email_attempted or not self.autonomous or not self.before_submit
+                or self.final_clicked or self.final_awaiting or self.app_touched or snap.has_captcha):
+            return False
+        self.email_attempted = True
+        url = self.page.url
+        if url != snap.url or not self.autonomous.write_recipient(url) or await self.before_submit():
+            return False
+        fields = [field for field in snap.fields if field.kind in {'text', 'number', 'tel', 'password'}
+                  and (field.autocomplete == 'one-time-code' or field.automation_id.casefold() in {'verificationcode', 'otp'}
+                       or mail.CODE_LABEL.search(field.label))]
+        target = await self._el(resolve, fields[0].ref) if len(fields) == 1 else None
+        async def still_current():
+            if self.page.is_closed() or self.page.url != url or await self.before_submit():
+                return ['Vérification interrompue.']
+            nonce = await self.page.evaluate('() => document.__bp_autonomous_document', isolated_context=True)
+            return [] if nonce and nonce == self.autonomous.document_nonce else ['Document modifié.']
+
+        try:
+            verification, code = await self.email_verification.poll()
+            if code:
+                self.diagnostics.email = code
+            if not verification or await still_current():
+                return False
+            self.diagnostics.control = 'login_otp'
+            if verification.kind == 'link':
+                self.secrets.add(verification.value)
+                if not await self.email_verification.open(self.page, verification.value, still_current):
+                    return False
+                self.diagnostics.email = 'email_link_used'
+                self.pending = self.last_sent = self.nav_ref = None
+                self.nav_pending = False
+                return True
+            if target is None:
+                return False
+            field = fields[0]
+            live = await target.evaluate("""node => ({ok: node.matches('input:not([readonly]):not([disabled])')
+                && ['text', 'number', 'tel', 'password'].includes(node.type),
+                label: node.getAttribute('autocomplete'), name: node.name, size: node.maxLength,
+                value: node.value, lone: !node.form || [...node.form.elements].every(el => el === node || el.disabled
+                     || ['submit', 'button', 'reset', 'hidden', 'fieldset'].includes(el.type))})""")
+            if (not live['ok'] or not live['lone'] or live['name'] != field.name or field.value or live['value']
+                    or (field.autocomplete == 'one-time-code' and live['label'] != field.autocomplete)
+                    or (live['size'] >= 0 and live['size'] < len(verification.value))):
+                return False
+            await self.autonomous.target(target)
+            self.secrets.add(verification.value)
+            await target.fill(verification.value, timeout=ACTION_TIMEOUT_MS)
+            self.diagnostics.email = 'email_code_used'
+            buttons = [button for button in snap.fields if button.kind == 'button' and button.native_submit and field.form
+                       and button.form == field.form and re.fullmatch(
+                           r'(?:verify|validate|confirm|activate|verifier|valider|confirmer|activer|bestatigen)(?: (?:code|le code|email|e-mail))?',
+                           fold(button.label).strip())]
+            if len(buttons) != 1:
+                return False
+            button = buttons[0]
+            control = await self._el(resolve, button.ref)
+            if not await self._same_target(control, button):
+                return False
+            async def check_click():
+                if await still_current() or not await self._same_target(control, button):
+                    raise ManualField()
+                await self._live_decisions(snap, button, {})
+                await self.autonomous.target(control, button=True)
+                if (self.autonomous.method != 'POST' or not mail.same_recipient(url, self.autonomous.endpoint)
+                        or not await control.evaluate("""(node, code) => node.form && node.form === code.form && code.isConnected
+                            && [...code.form.elements].every(el => el === code || el.disabled
+                            || ['submit', 'button', 'reset', 'hidden', 'fieldset'].includes(el.type))""", target)):
+                    raise ManualField()
+                adapter_verify = getattr(self.autonomous, 'arm_email_code', None)
+                if adapter_verify:
+                    adapter_verify()
+                elif mail.VERIFY_ENDPOINT.search(urlparse(self.autonomous.endpoint).path):
+                    self.autonomous.arm_click(scripted=False, account=True)
+                else:
+                    raise ManualField()
+
+            await self._click(control, recheck=check_click)
+            await self._after_click()
+            await self.autonomous.after_click(self.page)
+            if not self.autonomous.click_write:
+                return False
+            self.pending = self.last_sent = self.nav_ref = None
+            self.nav_pending = False
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _has_form(snap: PageSnapshot) -> bool:
@@ -2197,8 +2293,9 @@ class _Run:
                 await self._shot(log)
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if kind == "email_verification":
-                await self._shot(log)
-                return self._end("needs_email", "Le site attend la validation d'un lien envoyé par e-mail.")
+                if await self._verify_email(snap, resolve):
+                    continue
+                return await self._email_hold(log)
             if kind == "closed":
                 await self._shot(log)
                 return self._end("blocked", "Offre clôturée")
@@ -2646,7 +2743,8 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
                           supervised_widgets: bool = False,
                           live_mutation_check: Callable[[ElementHandle | Locator | None], Awaitable[None]] | None = None,
                           autonomous=None, autonomous_attempt: Attempt | None = None,
-                          diagnostics: DispatchDiagnostics | None = None, apply_navigation=None, apply_entry=None) -> RunResult:
+                          diagnostics: DispatchDiagnostics | None = None, apply_navigation=None, apply_entry=None,
+                          email_verification=None) -> RunResult:
     """Inspect or fill a form; only a bound, guarded unattended flow can submit.
 
     Legacy dispatch callbacks alone do not authorize live sends. Dry callers
@@ -2689,6 +2787,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     flow.generic_step = generic_step
     flow.live_mutation_check = live_mutation_check
     flow.autonomous = autonomous
+    flow.email_verification = email_verification if mode == 'submit' else None
     if diagnostics is not None:
         flow.diagnostics = diagnostics
     flow.attended_accounts = attended_accounts

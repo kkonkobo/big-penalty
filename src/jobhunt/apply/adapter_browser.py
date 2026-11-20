@@ -58,6 +58,19 @@ class AdapterAudience(Audience):
         self.click_source = self.live_url
         super().arm_click(scripted=scripted)
 
+    def account_only_request(self, request):
+        return (self.adapter.name == 'workday' and self.click_write is request and (
+            self.click_boundary == 'account_creation' and not request.is_navigation_request()
+            and self.gate.matches_endpoint('account_creation', request.url)
+            or self.click_boundary == 'login_otp' and request.is_navigation_request() and request.url == self.live_url))
+
+    def arm_email_code(self):
+        if (self.adapter.name != 'workday' or not self.adapter.browser_native_post(self.live_url, self.endpoint, 'account_creation')
+                or not self.posting(self.live_url, self.endpoint)):
+            raise ApplyError('Formulaire de vérification non autorisé.')
+        self.click_boundary = 'login_otp'
+        self.arm_click(scripted=False)
+
     def request_allowed(self, request, page, *, initial):
         url, method = request.url, request.method
         navigation = request.is_navigation_request()

@@ -534,6 +534,8 @@ def cv_list(profile: Annotated[Optional[int], typer.Option("--profile", "-p")] =
 apply_app = typer.Typer(help="Candidature sur le site de l'entreprise : file d'envoi, simulation, envoi, réponses aux questions.",
                         no_args_is_help=True)
 app.add_typer(apply_app, name="apply")
+mail_app = typer.Typer(help="Vérification des comptes candidats par Gmail.", no_args_is_help=True)
+app.add_typer(mail_app, name="mail")
 from jobhunt.portal.cli import portal_app  # noqa: E402
 app.add_typer(portal_app, name="portal")
 HeadlessOpt = Annotated[Optional[bool], typer.Option("--headless/--headful", help="défaut : visible, sauf JOBHUNT_HEADLESS=1")]
@@ -852,6 +854,62 @@ def _accounts_call(fn, *args, **kw):
     except ApplyError as e:
         console.print(f"Erreur : {e}", markup=False, highlight=False)
         raise typer.Exit(1) from None
+
+
+@mail_app.command('set-password', context_settings={'allow_extra_args': True, 'ignore_unknown_options': True})
+def mail_set_password(ctx: typer.Context, profile: int, file: Annotated[Path | None, typer.Option('--file')] = None) -> None:
+    """Enregistre un mot de passe d’application Gmail lu sur stdin ou dans --file."""
+    import getpass
+    import sys
+    import warnings
+    from jobhunt.apply import mail
+
+    if ctx.args:
+        typer.echo('Utilisez stdin ou --file, jamais un argument pour le mot de passe.', err=True)
+        raise typer.Exit(1)
+    address = _accounts_call(mail.profile_address, profile)
+    try:
+        if file is not None:
+            with file.open(encoding='utf-8') as source:
+                value = source.read(129)
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', getpass.GetPassWarning)
+                value = getpass.getpass('Mot de passe d’application : ') if sys.stdin.isatty() else sys.stdin.read(129)
+    except (OSError, UnicodeError, EOFError, getpass.GetPassWarning):
+        typer.echo('Impossible de lire le mot de passe.', err=True)
+        raise typer.Exit(1) from None
+    _accounts_call(mail.set_password, address, value)
+
+
+@mail_app.command('test')
+def mail_test(profile: int) -> None:
+    """Vérifie l’accès en lecture seule et affiche uniquement le nombre de messages."""
+    from jobhunt.apply import mail
+
+    address = _accounts_call(mail.profile_address, profile)
+    try:
+        count = mail.test_inbox(address)
+    except mail.MailUnavailable:
+        typer.echo('Accès IMAP indisponible.', err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f'OK {count}')
+
+
+@mail_app.command('forget')
+def mail_forget(profile: int) -> None:
+    """Supprime le mot de passe d’application du trousseau."""
+    from jobhunt.apply import mail
+
+    _accounts_call(mail.forget, _accounts_call(mail.profile_address, profile))
+
+
+@mail_app.command('resume')
+def mail_resume(profile: int | None = None) -> None:
+    """Vérifie les liens d’activation en attente sans envoyer de candidature."""
+    from jobhunt.apply.service import resume_email
+
+    typer.echo(asyncio.run(resume_email(profile)))
 
 
 @apply_app.command("accounts")
