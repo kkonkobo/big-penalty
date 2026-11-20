@@ -32,12 +32,12 @@ from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.autonomous import (
     SUPERVISED_REQUIRED, _live_option, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
 )
-from jobhunt.apply.destination import clean_text, clean_url, origin
+from jobhunt.apply.destination import clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import IDENTITY, capture, exact_option, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
-from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, save_failure_diagnostics
+from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, safe_reason, save_failure_diagnostics
 from jobhunt.apply.prompt_rules import DIAL_COUNTRY_NAMES, decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
@@ -1900,8 +1900,10 @@ class _Run:
             except _DecisionHold as hold:
                 res = hold.result
             except LLMError as e:
+                self.stop_note = f"LLMError {e.code}"
                 res = self._end("failed", f"Planificateur indisponible ({e.code}).")
             except Exception as e:  # message: exception type only, never page content
+                self.stop_note = f"{type(e).__name__}: {e}"  # (local failure record only, redacted and trimmed when written)
                 res = self._end("failed", f"Erreur technique ({type(e).__name__}).")
                 if self.autonomous or self.apply_navigation:
                     res.diagnostic_code = self.diagnostics.exception_code(e)
@@ -1929,6 +1931,26 @@ class _Run:
         self._scrub(res)
         return res
 
+    stop_note = ""
+
+    def _stop_reason(self, res: RunResult) -> str:
+        """Why the run stopped, for the local failure record: no secret, no typed value (the message is cut when it may quote one)."""
+        sensitive = {"account_login", "account_signup", "email_verification"}
+        last = self.steps[-1].page_kind if self.steps else ""
+        parts = [f"page_kind={last}"] if last else []
+        if self.stop_note:
+            parts.append(self.stop_note)
+        if res.status == "needs_input":
+            cats = sorted({q.category or q.reason or "other" for q in res.questions})
+            parts.append(f"{len(res.questions)} unanswered question(s): {','.join(cats)}")
+        elif last in sensitive or res.status == "needs_email" or contains_verification_code(res.message):
+            parts.append("account / verification page (message withheld)")
+        else:
+            parts.append(res.message)
+        if res.diagnostic_code:
+            parts.append(f"code={res.diagnostic_code}")
+        return safe_reason(" ; ".join(parts), self._r, limit=400)
+
     async def _diagnose(self, res: RunResult) -> None:
         """A run that stops short of sending leaves, in its own folder, a masked screenshot and a value-free page outline."""
         try:
@@ -1936,7 +1958,7 @@ class _Run:
             if page is None:
                 return
             await save_failure_diagnostics(page, self.out_dir, status=res.status, diagnostic_code=res.diagnostic_code or "",
-                                           step=len(self.steps),
+                                           step=len(self.steps), reason=self._stop_reason(res),
                                            screenshot=not self.secrets, redact=self._r)
         except Exception:
             pass
