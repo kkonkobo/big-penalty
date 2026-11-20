@@ -584,3 +584,14 @@ def test_not_sent_cannot_release_another_hold_for_the_same_application(profile, 
     astore.resolve_attempt(app.id, sent=False, run_id=first.id)
     assert store.get_application(app.id).status == "draft"
     reserve(duplicate, attempt, trigger="user")
+
+
+def test_engine_retry_epoch_is_a_past_utc_instant():
+    """A future epoch would treat every fresh engine pause as stale and retry it at once, over and over."""
+    from datetime import UTC, datetime
+
+    from jobhunt.apply import store as apply_store
+
+    epoch = datetime.fromisoformat(apply_store.ENGINE_RETRY_EPOCH)
+    assert epoch.tzinfo is not None and epoch.utcoffset().total_seconds() == 0
+    assert epoch <= datetime.now(UTC)
