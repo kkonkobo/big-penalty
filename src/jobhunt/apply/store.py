@@ -761,10 +761,12 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
 
 def stale_engine_pause(run: ApplyRun | None) -> bool:
     """`run` is an engine-caused pause judged by code older than ENGINE_RETRY_EPOCH, and it cannot have sent anything."""
-    if (run is not None and run.status == "needs_input" and run.result is not None
-            and run.result.diagnostic_code == "credential_page" and not run.result.submit_clicked
+    if (run is not None and run.status == "needs_input" and run.result is not None and not run.result.submit_clicked
             and run.submit_clicked_at is None and run.nav_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH):
-        return True  # an account page the older engine could not get through (it now creates accounts): retry once
+        # A question stop (missing answer, unfilled widget, account page) judged by older engine code: the newer engine
+        # may answer it itself (new standing facts, widget fixes, account creation). Nothing was clicked, so a retry is
+        # safe; a question that really needs the candidate comes back as a new pause.
+        return True
     return bool(run is not None and run.status == "needs_human" and run.result is not None
                 and run.result.diagnostic_code in ENGINE_PAUSE_CODES and not run.result.submit_clicked
                 and run.submit_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH)

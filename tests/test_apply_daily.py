@@ -916,3 +916,23 @@ async def test_an_account_page_stop_from_before_the_epoch_is_retried_once(env, p
                      "'credential_page')", (OLD,))
     s, _ = await daily(profile)
     assert len(env.runs) == 2
+
+
+async def test_a_question_stop_from_before_the_epoch_is_retried_once_then_waits(env, profile):
+    """A missing-answer pause judged by older engine code is retried once (the new engine may answer it); a new pause from
+    current code waits for the candidate again; a pause after a click is never retried."""
+    job = env.job(1)
+    env.run_status = "needs_input"
+    await daily(profile)
+    assert len(env.runs) == 1
+    with db.connect() as conn:
+        conn.execute("UPDATE application_runs SET started_at=?, result_json=json_set(result_json, '$.diagnostic_code', "
+                     "'required_fields')", (OLD,))
+    await daily(profile)
+    assert len(env.runs) == 2            # retried once with the newer engine
+    await daily(profile)
+    assert len(env.runs) == 2            # the new pause (current code) waits for an answer
+    with db.connect() as conn:            # an old pause after a click: never retried
+        conn.execute("UPDATE application_runs SET started_at=?, nav_clicked_at=?", (OLD, OLD))
+    await daily(profile)
+    assert len(env.runs) == 2
