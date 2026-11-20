@@ -177,3 +177,10 @@ def test_live_engine_standing_options_and_ai_polarity(tmp_path):
     assert run._standing_item(ai).act.op == 'uncheck'
     assert run._standing_item(ai.model_copy(update={'label': 'Je refuse que le recruteur soit assisté par un outil doté d’IA'})).act.op == 'check'
     assert run._standing_item(ai.model_copy(update={'label': 'J’accepte la politique de confidentialité'})) is None
+
+
+@pytest.mark.parametrize("label,expected", [("Ville", None), ("Numéro de téléphone", None), ("Code de vérification", "credentials"),
+                                            ("Code", "credentials"), ("", "credentials")])
+def test_one_time_code_autocomplete_only_makes_a_credential_of_a_code_field(label, expected):
+    from jobhunt.apply.prompt_rules import technical_key
+    assert technical_key(label, "text", autocomplete="one-time-code") == expected

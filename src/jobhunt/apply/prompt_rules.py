@@ -12,8 +12,22 @@ def norm_question(label: str) -> str:
 CREDENTIAL_ERROR = "Cette question doit être traitée sur le site ; aucune réponse n’a été enregistrée."
 
 
+def _plain_field_label(label: str) -> bool:
+    """A label naming an ordinary profile datum (city, phone, name...), never a one-time code."""
+    text = norm_question(label)
+    return bool(re.search(r"\b(?:ville|city|town|telephone|phone|mobile|portable|tel|numero de tel\w*|prenom|first name|"
+                          r"nom de famille|last name|surname|family name|email|e mail|adresse|address|pays|country|"
+                          r"code postal|postal code|zip|region|state|province|nationalite|nationality)\b", text)
+                and not re.search(r"verification|securite|security|usage unique|one time|otp|sms|connexion|validation", text))
+
+
 def technical_key(label: str, kind: str = "", *, group: str = "", autocomplete: str = "") -> str | None:
-    if set(autocomplete.lower().split()) & {"one-time-code", "current-password", "new-password"}:
+    tokens = set(autocomplete.lower().split())
+    if tokens & {"current-password", "new-password"}:
+        return "credentials"
+    if "one-time-code" in tokens and not _plain_field_label(label):
+        # Some ATS (Eightfold) put autocomplete="one-time-code" on phone / city inputs only to stop browser autofill:
+        # a field that names an ordinary profile datum is not a verification code.
         return "credentials"
     if group and technical_key(group) == "credentials":
         return "credentials"

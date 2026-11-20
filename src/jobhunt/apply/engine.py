@@ -78,6 +78,8 @@ REQUEST_RE = re.compile(
     r"\bplease\b|\bkindly\b|\bveuillez\b|\bmerci de\b|\bpriere de\b|\bconfirm(?:ez|er)?\b.*\b(?:your|votre)\b|\bverifie[zr]\b|"
     r"\bcheck (?:that|whether|if)\b|\bmake sure\b|\bassurez|\bensure\b|\bclick\b|\bcliquez\b|\bto (?:submit|send|complete)\b|"
     r"\bpour (?:envoyer|soumettre|finaliser|valider)\b")
+DIAL_PROMPT_RE = re.compile(r"\b(?:code (?:du |de )?(?:pays|region)|country code|calling code|dial(?:ing)? code|indicatif)\b")
+PHONE_LABEL_RE = re.compile(r"\b(?:telephone|phone|mobile|portable|tel)\b")
 DIAL_OPTION_RE = re.compile(r"^\s*\(?\+\d{1,4}")
 TEXT_KINDS = {"text", "email", "tel", "url", "number", "date", "password", "textarea", "combobox"}
 PROFILE_KINDS = {"text", "email", "tel", "url", "number", "date", "textarea"}  # a pre-filled value there = a form with a profile
@@ -406,6 +408,8 @@ class _Item:
     hard: bool = False                # the label asks for a hard fact: only a `supported` answer citing a fact is accepted
     inferred: bool = False            # final: deduced (verdict `plausible`), logged as such
     basis: str = ""
+    dial_code: str = ""               # combobox calling-code picker: the code ("+33") of the candidate's own phone to pick
+    national: bool = False            # phone number typed next to a calling-code picker: national format, without the "+CC"
 
 
 @dataclass
@@ -496,8 +500,10 @@ def _site_consent(f: FormField) -> bool:
 
 
 def _choice_shape(f: FormField) -> tuple:
+    typeahead = f.kind == "combobox" and bool(DIAL_PROMPT_RE.search(fold(f"{f.placeholder} {f.name}")))
+    # (a calling-code typeahead renders / filters its list only while open: the list is not part of its identity)
     return (f.form, f.kind, f.name, f.label, f.wording, f.group, f.required, f.multiple, f.autocomplete,
-            f.destination, f.choice_destination, f.choice_options, f.options)
+            f.destination, f.choice_destination, [] if typeahead else f.choice_options, [] if typeahead else f.options)
 
 
 def _choice_state(f: FormField) -> tuple:
@@ -516,14 +522,19 @@ def _dial_selector(f: FormField, snap: PageSnapshot) -> bool:
     """Recognize a calling-code prompt, without assuming the current selection is correct."""
     if fact_key(_question(f).model_copy(update={"required": True})) == "phone_calling_code":  # (optional or not, it is the same prompt)
         return True
+    if f.kind == "combobox" and DIAL_PROMPT_RE.search(fold(f"{f.placeholder} {f.name}")):  # a picker of its own, next to the number
+        return any(x is not f and x.kind in ("tel", "text") and x.form == f.form and PHONE_LABEL_RE.search(fold(x.label))
+                   for x in snap.fields)
     if f.kind == "select" and f.options and 2 * sum(bool(DIAL_OPTION_RE.match(o.label)) for o in f.options) >= len(f.options):
         return any(x.kind == "tel" and x.group == f.group for x in snap.fields)
     return False
 
 
-def pick_variant(fact: Fact, f: FormField, maxlength: int | None = None, pattern: str | None = None) -> str:
+def pick_variant(fact: Fact, f: FormField, maxlength: int | None = None, pattern: str | None = None, *, national: bool = False) -> str:
     """Exact fact value, or the variant that best fits the field (placeholder shape, maxlength, pattern). Default: the value."""
     cands = [fact.value or "", *fact.variants]
+    if national:  # the country code is chosen in its own picker: type the number without it
+        cands = [c for c in cands if not c.lstrip().startswith(("+", "00"))] or cands
     if maxlength:
         cands = [c for c in cands if len(c) <= maxlength] or cands
     if pattern:
@@ -1054,6 +1065,13 @@ class _Run:
         return any(h == host and lb == label and (self.attach_done or stem in text) for h, lb, stem in self.uploaded_files)
 
     @staticmethod
+    def _dial_code(fact: Fact) -> str:
+        """Calling code of a confirmed (exact) phone, "" when unknown."""
+        if not fact.exact:
+            return ""
+        return "+33" if french_phone(fact.value or "") else international_calling_code(fact.value or "") or ""
+
+    @staticmethod
     def _dial_option(f: FormField, fact: Fact) -> int:
         """Only a unique exact option for the country calling code of a confirmed international number."""
         code = "+33" if french_phone(fact.value or "") else international_calling_code(fact.value or "")
@@ -1296,6 +1314,16 @@ class _Run:
             if op == "check" and not f.required and ((fact is not None and fact.key == "consent_optional") or MARKETING_RE.search(f.label)):
                 return drop("case facultative non cochée")
             return need_verdict("true" if op == "check" else "false", False)
+        if fact is not None and fact.key == "phone" and dial and k == "combobox":
+            # a typeahead picker (its list only exists once opened, often truncated): type the code, pick the one option holding it
+            item.dial_code = self._dial_code(fact)
+            if not item.dial_code:
+                return drop("indicatif téléphonique introuvable pour ce numéro")
+            item.value = item.dial_code
+            return need_verdict(item.dial_code, True)
+        if fact is not None and fact.key == "phone" and k in TEXT_KINDS and any(
+                x is not f and x.form == f.form and _dial_selector(x, snap) for x in snap.fields):
+            item.national = True
         if fact is not None and fact.key == "phone" and dial:
             item.option_index = self._dial_option(f, fact)  # the code of the candidate's own phone decides, not the planner's text
             if item.option_index < 0:
@@ -1511,7 +1539,7 @@ class _Run:
             return await self._supervised_combobox(loc, f, it)
         standing_radio = (f.kind == "radio" and (self.autonomous or self.mode == "supervised")
                           and it.used == _question(f).fact_id and self._standing_item(f) is not None)
-        if it.used in {"eeo_opt_out", "eeo_race_ethnicity"} or standing_radio:
+        if it.used in {"eeo_opt_out", "eeo_race_ethnicity", "application_background_check"} or standing_radio:
             if self.autonomous:
                 nonce = self.autonomous.document_nonce
             else:
@@ -1524,6 +1552,8 @@ class _Run:
                 applied = False
             if not applied:
                 raise _DecisionHold(self._end("blocked", "Une question ou sa sélection a changé : action annulée."))
+            if it.used == "application_background_check":
+                self.consent_codes.add(it.used)
             return f.options[it.option_index].label
         if self.autonomous:
             if a.op == "upload_cv" and f.kind == "file":
@@ -1638,7 +1668,7 @@ class _Run:
             else:
                 ml = await loc.get_attribute("maxlength", timeout=T)
                 pat = await loc.get_attribute("pattern", timeout=T)
-            text = pick_variant(fact, f, int(ml) if ml and ml.isdigit() else None, pat)
+            text = pick_variant(fact, f, int(ml) if ml and ml.isdigit() else None, pat, national=it.national)
         await self._before_mutation(a.op, loc)
         await self._type(loc, f, text)
         return text
@@ -1726,6 +1756,7 @@ class _Run:
         want = it.value or ""
         if f.options and it.option_index >= 0:
             want = f.options[it.option_index].label
+        codes = lambda t: re.findall(r"\+\s*[0-9]+", t)  # noqa: E731
         await loc.click(timeout=T)
         if await loc.evaluate("e => e.matches('input,textarea')"):
             await loc.fill("", timeout=T)
@@ -1738,14 +1769,18 @@ class _Run:
                 o = opts.nth(i)
                 if await o.is_visible():
                     found.append((o, (await o.inner_text()).strip()))
-        hit = [o for o, t in found if option_matches_fact(t, want)]
+        if it.dial_code:  # exactly one option names this calling code (+1 is shared: then nothing is chosen)
+            hit = [o for o, t in found if codes(t) == [it.dial_code]]
+            hit = hit if len(hit) == 1 else []
+        else:
+            hit = [o for o, t in found if option_matches_fact(t, want)]
         if not hit:
             await self._abandon_combobox(loc)
             raise _Skip("option introuvable dans la liste")
         await hit[0].click(timeout=T)
         await human_pause(0.1, 0.4)
         live = await self._combo_value(loc)
-        if not option_matches_fact(live, want):
+        if not (codes(live) == [it.dial_code] if it.dial_code else option_matches_fact(live, want)):
             await self._abandon_combobox(loc)
             raise _Skip("valeur lue différente de la réponse validée")
         return live

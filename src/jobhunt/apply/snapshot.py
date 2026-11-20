@@ -294,7 +294,10 @@ _JS = r"""
       if (!g) {
         const questionOf = (member) => {
           const rg = member.closest('[role=radiogroup],[role=group]');
-          return legendOf(member) || (rg ? (idsText(rg, 'aria-labelledby') || clean(rg.getAttribute('aria-label'))) : '')
+          // (a <label for="group-id"> naming the group: a div[role=radiogroup] is not labelable, so `labels` never sees it)
+          const forLabel = rg && rg.id ? member.getRootNode().querySelector('label[for="' + CSS.escape(rg.id) + '"]') : null;
+          return (forLabel ? textOf(forLabel) : '') || legendOf(member)
+            || (rg ? (idsText(rg, 'aria-labelledby') || clean(rg.getAttribute('aria-label'))) : '')
             || preceding(member.closest('label') || member) || '';
         };
         const raw = questionOf(el);

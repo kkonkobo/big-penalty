@@ -3123,3 +3123,42 @@ def test_vendor_static_asset_rule(url, entered, allowed):
     from jobhunt.apply.destination import vendor_static_asset
 
     assert vendor_static_asset(url, data_entered=entered) is allowed
+
+
+# ------------------------------------------------------------------ 7. one-page form with a split phone and anti-autofill inputs
+SPLIT_PHONE_PAGE = (
+    '<form method="post" action="/apply"><label for=fn>Prénom *</label><input id=fn name=first_name required>'
+    '<label for=cc>Téléphone</label><input id=cc role=combobox aria-controls=lst aria-expanded=false aria-label="Code du pays"'
+    ' placeholder="Sélectionner le code de pays" type=text autocomplete=off required aria-required=true>'
+    '<ul id=lst role=listbox hidden></ul>'
+    '<label for=ph>Téléphone</label><input id=ph type=text placeholder="Numéro de téléphone" autocomplete="one-time-code" required aria-required=true>'
+    '<label for=ct><span>Ville* (obligatoire)</span></label><input id=ct type=text autocomplete="one-time-code" required aria-required=true>'
+    '<button type="submit">Envoyer ma candidature</button></form>'
+    '<script>const cc=document.getElementById("cc"),lst=document.getElementById("lst");'
+    'const ALL=["🇧🇪 (+32) Belgium","🇫🇷 (+33) France","🇨🇭 (+41) Switzerland","🇺🇸 (+1) United States"];'
+    'function draw(q){lst.innerHTML="";ALL.filter(o=>o.toLowerCase().includes(q.toLowerCase())).forEach((o,i)=>{'
+    'const li=document.createElement("li");li.setAttribute("role","presentation");const b=document.createElement("button");'
+    'b.type="button";b.setAttribute("role","option");b.id="lst-option-"+i;b.textContent=o;b.onclick=()=>{cc.value=o;lst.hidden=true;'
+    'cc.setAttribute("aria-expanded","false")};li.appendChild(b);lst.appendChild(li)});lst.hidden=false;cc.setAttribute("aria-expanded","true")}'
+    'cc.addEventListener("click",()=>draw(""));cc.addEventListener("input",()=>draw(cc.value));</script>')
+
+
+async def test_split_phone_and_anti_autofill_city_are_filled_not_reported_as_credentials(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "split", SPLIT_PHONE_PAGE)
+    plan = deduce_plan(lambda s: act(s, r"Téléphone", "select", "phone", "France (+33)", kind="combobox"),
+                       lambda s: act(s, r"Téléphone", "fill", "phone", kind="text"),
+                       lambda s: act(s, r"Ville", "fill", "city"), click=False)
+    res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="split", verifier=None)
+    assert [q.label for q in res.questions if q.category == "credentials"] == [], res.questions
+    assert await page.input_value("#cc") == "🇫🇷 (+33) France"
+    assert await page.input_value("#ph") in {"0600000000", "06 00 00 00 00"}   # national format: the code is in the picker
+    assert await page.input_value("#ct") == "Toulouse"
+    assert not apply_posts(server)
+
+
+async def test_a_one_time_code_input_with_a_code_label_is_still_a_credential_question(page, server, fast, cv_pdf, tmp_path):
+    await serve(page, "otpf", '<form method="post" action="/apply"><label for=fn>Prénom *</label><input id=fn name=first_name required>'
+                              '<label for=c>Code de vérification *</label><input id=c autocomplete="one-time-code" required>'
+                              '<button type="submit">Envoyer ma candidature</button></form>')
+    res = await go(page, server, ScriptedPlanner([deduce_plan(click=False)]), tmp_path, cv_pdf, start="otpf", verifier=None)
+    assert any(q.category == "credentials" for q in res.questions) and await page.input_value("#c") == ""
