@@ -1741,3 +1741,43 @@ async def test_posting_scan_reports_smartrecruiters_interested_links_and_ignores
     assert [link.split("?")[0] for link in state["smart"]] == [
         f"https://jobs.smartrecruiters.com/oneclick-ui/company/Example/publication/{uuid}"]
     assert state["controls"] == []
+
+
+async def test_dry_entry_dismisses_a_consent_platform_dialog_named_after_its_vendor(server, profile, tmp_path, fast):
+    """A consent-management dialog (Didomi and the like): no role=dialog, no "cookie" in its ids, and the cookie text sits
+    on the outer container while the nearest one is just the button row."""
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = '''<main><h1>Offre</h1><a href="/jobs/100/apply">Je postule à cette offre</a></main>
+        <div id="didomi-host"><div id="didomi-popup" class="didomi-popup-backdrop" style="position:fixed;inset:0;background:#789;z-index:99">
+          <div class="didomi-popup-container"><p>Nos partenaires et nous utilisons des cookies pour mesurer l'audience.</p>
+          <div id="buttons" class="didomi-buttons">
+            <button id="didomi-notice-disagree-button" onclick="document.getElementById('didomi-host').remove()">REFUSER</button>
+            <button id="didomi-notice-agree-button" onclick="document.getElementById('didomi-host').remove(); fetch('/accepted', {method:'POST'})">ACCEPTER &amp; FERMER</button>
+          </div></div></div></div>'''
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == "dry_apply_form_found"
+    assert "/accepted" not in server.requests and not server.posts
+
+
+async def test_dry_entry_reaches_the_apply_link_under_an_overlay_it_cannot_dismiss(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = '''<main><h1>Offre</h1><a href="/jobs/100/apply">Postuler</a></main>
+        <div style="position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:99"><p>Découvrez nos métiers</p></div>'''
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == "dry_apply_form_found"
+    assert not server.posts
+
+
+def test_greenhouse_embed_goes_to_the_same_posting_on_greenhouse():
+    probe = apply_entry.Probe("https://careers.example.test/careers/search/5287200001?gh_jid=5287200001", None, [])
+    entry = apply_entry._greenhouse_embed_entry(probe, ["exampleco"])
+    assert entry == "https://job-boards.greenhouse.io/exampleco/jobs/5287200001" and probe.navigation(entry)
+    assert not probe.navigation("https://job-boards.greenhouse.io/exampleco/jobs/5287200002")   # another posting
+    assert apply_entry._greenhouse_embed_entry(probe, ["exampleco", "otherco"]) == ""            # two boards: unclear
+    assert apply_entry._greenhouse_embed_entry(probe, ["bad/board"]) == ""
+    assert apply_entry._greenhouse_embed_entry(apply_entry.Probe("https://careers.example.test/jobs/1", None, []),
+                                               ["exampleco"]) == ""                             # no gh_jid
