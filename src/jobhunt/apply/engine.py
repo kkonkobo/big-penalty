@@ -2509,7 +2509,11 @@ class _Run:
 
             if self.current_step:
                 await self._supervised_checkpoint()
-            bound_account = bool(self.autonomous and self.autonomous.entry_binding and
+            # Core guard mode: the entry step may not have bound the landing, but an account page on a trusted host (the
+            # employer, its ATS, or reached from them) is the same case: create / use the candidate account there.
+            account_host_ok = bool(self.autonomous and (self.autonomous.entry_binding or (
+                getattr(self.autonomous, "core", False) and self.autonomous.trusted(self.page.url))))
+            bound_account = bool(account_host_ok and
                                  (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields)))
             signup_page, inline = False, None
             if bound_account:
