@@ -25,7 +25,7 @@ _CODE = re.compile(
     r"(?:verifizierungs|bestätigungs|sicherheits)[ -]?code)(?:\s+(?:is|est|ist|lautet)\b)?\s*[:=–—-]?\s*"
     r"[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*", re.I)
 _JOB_PATH = re.compile(r"/(?:jobs?|job-postings?|requisitions?|positions?)/([0-9]{1,18})/?\Z", re.I)
-_LOGIN_PATH = re.compile(r"(?:^|/)(?:(?:login|sign-?in|register|createaccount)(?:\.aspx)?|account\.aspx)(?:/|$)", re.I)
+_LOGIN_PATH = re.compile(r"(?:^|/)(?:(?:log-?in|sign-?in|register|createaccount)(?:\.aspx)?|account\.aspx)(?:/|$)", re.I)
 _LOGIN_REDIRECT = {"returnurl", "redirect"}
 
 

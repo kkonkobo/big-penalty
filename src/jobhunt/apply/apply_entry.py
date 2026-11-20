@@ -52,7 +52,7 @@ _POSTING = r"""() => {
       .filter(node => visible(node) && !node.matches(':disabled,[aria-disabled="true"],[download]')
         && !(node.form || node.closest('form'))?.querySelector('input[type="password"], input[type="file"], input[type="email"], input[autocomplete="given-name"]')
         && !node.closest(excluded) && (scope.contains(node) || (!node.closest('main, [role="main"]') && !!scope.querySelector('h1')))
-        && (/^(?:apply(?: now| for this job)?|(?:je )?postul(?:er|ez|e)(?: maintenant| à cette offre)?|candidater|(?:jetzt )?bewerben)$/iu.test(label(node))
+        && (/^(?:apply(?: now| for this (?:job|position|role)| online| here)?|start (?:your |my )?application|(?:commencer à |je )?postul(?:er|ez|e)(?: maintenant| à cette offre| en ligne| ici)?|candidat(?:er|ez)(?: maintenant| en ligne)?|je candidate|(?:jetzt )?(?:online )?bewerben)$/iu.test(label(node))
             || node.tagName === 'A' && (/\/talentcommunity\/apply\/\d+(?:\/|$)/i.test(node.pathname)
                 || /[?&](?:career_job_req_id|jobReqId)=\d+/i.test(node.search)) && /postul|apply|candidater|bewerben/i.test(label(node))));
     const smart = [...document.querySelectorAll('a[href]')].filter(node => visible(node) && !node.closest(excluded)
@@ -385,7 +385,7 @@ async def _click_through_overlay(page, button, cookie_reject) -> None:
         await button.click(timeout=2500, no_wait_after=True)
         return
     except Exception as error:  # noqa: BLE001 - intercepted / not visible / detached
-        log.info("apply control click failed (%s): retrying past the overlay", type(error).__name__)
+        log.warning("apply control click failed (%s): retrying past the overlay", type(error).__name__)
     if cookie_reject is not None:
         with contextlib.suppress(Exception):
             await cookie_reject.click(timeout=2500, no_wait_after=True)
@@ -549,7 +549,7 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
     except PermissionError:
         return None, "challenge_or_rate_limited"
     except Exception as error:  # noqa: BLE001 - the run stops with a diagnostic; the cause goes to the log
-        log.info("apply entry stopped: %s: %s", type(error).__name__, str(error)[:200])
+        log.warning("apply entry stopped: %s: %s", type(error).__name__, str(error)[:200])
     finally:
         context.remove_listener("page", on_page)
         if not accepted:

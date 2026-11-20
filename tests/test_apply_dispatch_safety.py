@@ -50,6 +50,13 @@ def test_talentsoft_login_return_is_same_host_and_not_persisted(target, allowed)
     assert clean_url(f"{base}?ReturnUrl={target}", navigation=True) == (base if allowed else "")
 
 
+@pytest.mark.parametrize("target, allowed", [("%2fmon-compte%2fmon-cv-pour-ma-candidature-pour-stage-x_1306.aspx", True),
+                                             ("%2F%2Fother.example%2Fmon-compte", False)])
+def test_talentsoft_hyphenated_log_in_page_keeps_a_same_host_return(target, allowed):
+    base = "https://jobs.example.test/my-account/log-in.aspx"
+    assert clean_url(f"{base}?ReturnUrl={target}", navigation=True) == (base if allowed else "")
+
+
 @pytest.mark.parametrize("query, cleaned", [
     ("rx_ch=connector&rx_source=board&source=x", "https://example.test/job/42"),
     ("feedId=1&jobPipeline=LinkedIn&mode=apply&LCID=1040&trid=a-b", "https://example.test/job/42"),
@@ -1781,3 +1788,15 @@ def test_greenhouse_embed_goes_to_the_same_posting_on_greenhouse():
     assert apply_entry._greenhouse_embed_entry(probe, ["bad/board"]) == ""
     assert apply_entry._greenhouse_embed_entry(apply_entry.Probe("https://careers.example.test/jobs/1", None, []),
                                                ["exampleco"]) == ""                             # no gh_jid
+
+
+@pytest.mark.parametrize("label, found", [("Commencer à postuler", True), ("Candidatez", True), ("Apply for this position", True),
+                                          ("Start your application", True), ("Candidate", False), ("Espace candidat", False)])
+async def test_dry_entry_recognizes_common_apply_wordings(label, found, server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = f'<main><h1>Offre</h1><a href="/jobs/100/apply">{label}</a></main>'
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert (result.result.diagnostic_code == "dry_apply_form_found") is found, result.result.diagnostic_code
+    assert not server.posts
