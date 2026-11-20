@@ -44,7 +44,7 @@ from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_butt
 from jobhunt.apply.widgets import DENIED, WIDGET, date_segment, date_segment_option, denied_widget
 from jobhunt.apply.store import binding_active
 from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
-                                 RunStatus, StepLog, StepPlan)
+                                 RunStatus, StepLog, StepPlan, ACCOUNT_REASONS)
 from jobhunt.apply.unattended import ClickUncertain as _Dispatched, click_once, handoff_result, trial_click
 from jobhunt.browser import human_pause
 from jobhunt.llm import LLMError
@@ -100,7 +100,7 @@ OTHER_DOC_RE = re.compile(r"diplome|releve|transcript|bulletin|lettre|motivation
                           r"photo|certificat|attestation|justificatif|recommandation|reference")
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 ACCOUNT_KINDS = ("account_login", "account_signup")
-ACCOUNT_FACTS = frozenset({"account_email", "account_password", "email", "first_name", "last_name", "full_name", "phone"})
+ACCOUNT_FACTS = frozenset({"account_email", "account_password", "email", "first_name", "last_name", "full_name", "phone", "civility"})
 ACTION_TIMEOUT_MS = 8000
 MAX_SUBMIT_CLICKS = 1  # at most ONE final dispatch per run: a field error is never proof that nothing was sent
 IDLE_TIMEOUT_MS = 3000   # network-idle wait of a step (never fatal)
@@ -122,8 +122,17 @@ UPLOAD_CONFIRM_RE = re.compile(r"^\s*(?:ajouter|add|attach|joindre|telecharger|t
                                r"hinzufugen|hochladen|anhangen|anadir|adjuntar|subir|cargar|adicionar|anexar|toevoegen|uploaden)\b")
 NEXT_OR_SEND_RE = re.compile(r"postuler|envoyer|soumettre|valider|confirmer|terminer|finish|enregistrer|save|suivant|continuer|next|continue|submit|apply|send|"
                              r"weiter|senden|avanti|siguiente|seguinte|volgende|inviare|enviar|\bok\b")
-SIGNUP_LINK_RE = re.compile(r"creer (?:un|votre|mon) compte|s'?inscrire|inscription|nouveau candidat|pas encore de compte|create (?:an )?account|sign ?up|"
+SIGNUP_LINK_RE = re.compile(r"cre(?:er|ez|e) (?:un |une |mon |ma |votre )?(?:compte|espace|profil)|creation (?:de |d')?(?:un |mon )?(?:compte|espace)|"
+                            r"s'?inscrire|inscription|nouveau candidat|pas encore de compte|create (?:an )?(?:account|profile)|sign ?up|"
                             r"register|new user|konto erstellen|registrieren|nouvel utilisateur|premiere visite")
+# "Inscription avec Google" and the like create nothing on the employer's site: never taken for the account-creation control.
+SOCIAL_RE = re.compile(r"google|linkedin|facebook|apple|microsoft|github|twitter|france ?connect|\bsso\b|\bavec (?:un |une )?autre")
+LOGIN_BUTTON_RE = re.compile(r"se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden|identifier")
+CREATION_NAME_RE = re.compile(r"creation|creer|create|nouveau|nouvelle|\bnew|register|signup|sign up|inscri")
+EMAIL_FIELD_RE = re.compile(r"e-?mail|courriel|identifiant|login|username|adresse mail")
+SIGNUP_CONSENT_RE = re.compile(r"conditions|\bcgu\b|\bcgv\b|terms|politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement|"
+                               r"j'?ai lu|lu et|accepte|agree|consent")
+SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer")
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
 PRE_STEP_CAP = 8         # pure pre-data steps (cookie banner, open_form, account pages) that do not use the max_steps budget
@@ -563,6 +572,8 @@ class _Run:
         self.choices = choices or {}
         self.choice_fields: dict[str, tuple[Question, str, list[int]]] = {}
         self.questions_by_ref: dict[str, Question] = {}
+        self.signup_scope: set[str] | None = None   # refs of the account-creation form when it shares its <form> with the login box
+        self.signup_link_clicks = 0          # signup LINK clicks of this run (a link that only reloads the login page must not loop)
         self.login_unknown_try = False       # a login was attempted on a host without a known account
         self.uploaded = False                # a file was set by the engine in this run
         self.uploaded_files: list[tuple[str, str, str]] = []  # (host, normalized label, file name stem in lowercase) of every upload done
@@ -966,7 +977,7 @@ class _Run:
         pw = self.facts.get("account_password")
         if plan.page_kind == "account_signup" and self.mode == "submit" and pw is not None and pw.secret and self.facts.known(pw.key):
             for f in snap.fields:  # a password / confirmation field the planner left alone gets the same secret
-                if f.kind == "password" and f.ref not in seen and _is_empty(f):
+                if f.kind == "password" and f.ref not in seen and _is_empty(f) and (self.signup_scope is None or f.ref in self.signup_scope):
                     frame_url = self._frame_url(resolve, f.ref) if resolve else self.page.url
                     if self._secret(frame_url) is not None:
                         seen.add(f.ref)
@@ -1790,6 +1801,47 @@ class _Run:
     def _inspection_only(self) -> bool:
         return self.mode == "dry_run"
 
+    def _account_stop(self, code: str, status: RunStatus = "needs_human") -> RunResult:
+        result = self._end(status, ACCOUNT_REASONS[code])
+        result.diagnostic_code = code
+        return result
+
+    def _inline_signup(self, plan: StepPlan, snap: PageSnapshot) -> tuple[FormField, list[Action]] | None:
+        """An account-creation form that is on the page itself (Talentsoft's "Création compte" box next to the login box,
+        talentview's "Inscription" form): its own submit button, the e-mail / password / name fields that belong to IT (never
+        the login box of a shared form: those are told apart by their creation-looking name), and the planner's other
+        account-fact fills inside it."""
+        for button in snap.fields:
+            if button.kind != "button" or not button.form or not SIGNUP_LINK_RE.search(fold(button.label)) or SOCIAL_RE.search(fold(button.label)):
+                continue
+            members = [f for f in snap.fields if f.form == button.form and f.kind not in ("button", "link")]
+            mixed = any(f.kind == "button" and f.form == button.form and LOGIN_BUTTON_RE.search(fold(f.label)) and f.ref != button.ref
+                        for f in snap.fields)
+            scope = [f for f in members if not mixed or CREATION_NAME_RE.search(fold(f"{f.name} {f.group}"))]
+            passwords = [f for f in scope if f.kind == "password" and _is_empty(f)]
+            emails = [f for f in scope if f.kind in {"text", "email"} and _is_empty(f)
+                      and (f.kind == "email" or EMAIL_FIELD_RE.search(fold(f"{f.label} {f.name}")))]
+            if not passwords or not emails:
+                continue
+            refs = {f.ref for f in scope}
+            actions = [Action(ref=emails[0].ref, op="fill", fact="account_email")]
+            actions += [Action(ref=f.ref, op="fill", fact="account_password") for f in passwords]
+            used = {emails[0].ref, *(f.ref for f in passwords)}
+            actions += [a for a in plan.actions if a.op in ("fill", "select") and a.fact in ACCOUNT_FACTS - {"account_email", "account_password"}
+                        and a.ref in refs and a.ref not in used]
+            used |= {a.ref for a in actions}
+            for f in scope:  # the identity fields of the form the planner did not propose: answered from the candidate's own facts
+                text = fold(f"{f.label} {f.name}")
+                key = ("first_name" if re.search(r"prenom|first ?name|given name|first_name", text) else
+                       "last_name" if re.search(r"^nom\b|\bnom de famille|last ?name|family name|surname|last_name", fold(f.label).strip() + " " + text) else
+                       "phone" if f.kind == "tel" or re.search(r"telephone|phone|mobile", text) else "")
+                fact = self.facts.get(key) if key else None
+                if f.ref not in used and fact is not None and fact.value and _is_empty(f) and f.kind in {"text", "tel"}:
+                    actions.append(Action(ref=f.ref, op="fill", fact=key))
+            actions.append(Action(ref=button.ref, op="click", click_role="signup"))
+            return button, actions
+        return None
+
     def _account_handoff(self) -> RunResult:
         if self.mode == "supervised" and self.attended_accounts:
             return self._end("needs_human", "Connectez-vous ou créez le compte vous-même.")
@@ -2359,15 +2411,31 @@ class _Run:
                 await self._supervised_checkpoint()
             bound_account = bool(self.autonomous and self.autonomous.entry_binding and
                                  (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields)))
+            signup_page, inline = False, None
             if bound_account:
-                if self.app_touched or kind not in ACCOUNT_KINDS or any(field.kind == "file" for field in snap.fields):
+                if self.app_touched or any(field.kind == "file" for field in snap.fields):
                     return self._end("needs_human", SUPERVISED_REQUIRED)
                 known_account = self.account_known and self.account_known(self._account_address(self.page.url))
-                if kind == "account_login" and not known_account:
-                    signup = [field for field in snap.fields if field.kind in {"button", "link"} and
+                inline = None if known_account else self._inline_signup(plan, snap)
+                if kind not in ACCOUNT_KINDS:  # the planner called it otherwise: the page itself says what it is
+                    login_form = any(f.kind == "button" and LOGIN_BUTTON_RE.search(fold(f.label)) for f in snap.fields)
+                    if inline is None and not login_form:
+                        return self._end("needs_human", SUPERVISED_REQUIRED)
+                    kind = log.page_kind = "account_signup" if inline is not None else "account_login"
+                    plan = plan.model_copy(update={"page_kind": kind})
+                if inline is not None:
+                    signup_page = True
+                    plan = plan.model_copy(update={"page_kind": "account_signup", "actions": inline[1]})
+                elif kind == "account_login" and not known_account:
+                    signup = [field for field in snap.fields if field.kind in {"button", "link"} and not SOCIAL_RE.search(fold(field.label)) and
                               SIGNUP_LINK_RE.search(fold(field.label)) and (field.kind == "link" or not field.form)]
-                    if len(signup) != 1:
-                        return self._end("needs_human", "Création du compte à effectuer à la main.")
+                    # The same control twice (header + body) is one control; two different ones are ambiguous.
+                    if len({fold(field.label).strip() for field in signup}) != 1:
+                        return self._account_stop("account_signup_missing_link")
+                    if self.signup_link_clicks >= 2:
+                        return self._account_stop("account_signup_loop")
+                    self.signup_link_clicks += 1
+                    signup.sort(key=lambda field: field.kind != "link")
                     plan = plan.model_copy(update={"actions": [Action(ref=signup[0].ref, op="click", click_role="signup")]})
                 elif kind == "account_signup" and known_account:
                     signin = [field for field in snap.fields if field.kind == "link" and re.fullmatch(
@@ -2376,12 +2444,27 @@ class _Run:
                         return self._end("needs_human", SUPERVISED_REQUIRED)
                     plan = plan.model_copy(update={"actions": [Action(ref=signin[0].ref, op="click", click_role="open_form")]})
                 else:
+                    signup_page = kind == "account_signup"
+                    byref = {field.ref: field for field in snap.fields}
                     plan = plan.model_copy(update={"actions": [action for action in plan.actions if
                         (action.op == "fill" and action.fact in ACCOUNT_FACTS) or
-                        (action.op == "click" and action.click_role == ("login" if kind == "account_login" else "signup"))]})
+                        (action.op == "click" and action.click_role == ("login" if kind == "account_login" else "signup")
+                         and not (byref.get(action.ref) and SOCIAL_RE.search(fold(byref[action.ref].label))))]})
+            self.signup_scope = {a.ref for a in plan.actions} if bound_account and signup_page and inline is not None else None
             v = self._validate(plan, snap, resolve)
+            self.signup_scope = None
             if bound_account:
-                v.items = [item for item in v.items if item.act.op == "fill" and item.used in ACCOUNT_FACTS]
+                v.items = [item for item in v.items if item.act.op in ("fill", "select") and item.used in ACCOUNT_FACTS]
+                if signup_page:  # the terms / privacy boxes an account form requires: the owner authorizes ticking them
+                    target = v.click[0].form if v.click else ""
+                    taken = {item.field.ref for item in v.items}
+                    for field in snap.fields:
+                        text = fold(f"{field.label} {field.group}")
+                        if (field.kind == "checkbox" and field.required and _is_empty(field) and field.ref not in taken
+                                and (not target or field.form == target) and SIGNUP_CONSENT_RE.search(text) and not blocked_consent(text)
+                                and recruiter_ai_polarity(text) is None):
+                            code = "application_privacy" if SIGNUP_PRIVACY_RE.search(text) else "application_terms"
+                            v.items.append(_Item(Action(ref=field.ref, op="check"), field, used=code))
             if not self._inspection_only:
                 await self._verify(v)
             if self.current_step:
@@ -2605,6 +2688,8 @@ class _Run:
             if v.questions and (guarded or self._inspection_only or self.mode == "supervised"):
                 result = self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in v.questions) + ".",
                                    v.questions)
+                if bound_account and kind == "account_signup":
+                    result.diagnostic_code = "account_signup_field_unfilled"
                 if self._inspection_only and self.apply_link_followed and kind == "form" and self._has_form(snap):
                     result.diagnostic_code = "dry_apply_form_needs_input"
                 return result
@@ -2631,7 +2716,10 @@ class _Run:
                             and (f.error or (f.required and _is_empty(f) and (not field.form or not f.form or f.form == field.form)))]
                 if loop_sig:  # the same click on the same page with the same problem still showing: stop instead of burning the steps
                     qs = [_question(f) for f in loop_sig]  # every field still in error / empty, by name
-                    return self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in qs) + ".", qs)
+                    result = self._end("needs_input", "Informations manquantes : " + ", ".join(q.label for q in qs) + ".", qs)
+                    if bound_account:
+                        result.diagnostic_code = "account_login_failed" if kind == "account_login" else "account_signup_field_unfilled"
+                    return result
             if self.mode == "dry_run" and not attach and not self._dry_may_click(field, role, snap):  # type: ignore[arg-type]
                 return self._dry_end(plan, field, role, planned)  # type: ignore[arg-type]
             if self.mode == "dry_run":  # "post-data" is decided from the PAGE too: a pre-filled form must not be submitted
