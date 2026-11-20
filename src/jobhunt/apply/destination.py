@@ -30,6 +30,14 @@ _LOGIN_PATH = re.compile(r"(?:^|/)(?:(?:log-?in|sign-?in|register|createaccount)
 _LOGIN_REDIRECT = {"returnurl", "redirect"}
 
 
+def core_guard() -> bool:
+    """Guard mode `core` (the default): the browser browses like any browser, only candidate data and double sends are guarded.
+    `strict` keeps every posting-identity / entry / recipient proof."""
+    from jobhunt.config import get_settings
+
+    return get_settings().apply_guard_mode != "strict"
+
+
 def login_return(url: str) -> str:
     try:
         parsed = urlsplit(url)
@@ -244,6 +252,8 @@ class RecipientGuard:
         # Autonomous (unattended) runs abort an unauthorized request and keep going instead of closing the window: an
         # aborted request can only prevent a leak. Dry inspection and supervised windows keep the fail-closed rule.
         self.lenient = audience is not None and not inspection_only
+        # Guard mode "core": an autonomous run behaves like a normal browser (see `_core_guard`). Decided per audience.
+        self.core = self.lenient and bool(getattr(audience, "core", False))
         self.aborted_hosts: dict[str, int] = {}
 
     def record_abort(self, url: str) -> None:
@@ -290,6 +300,14 @@ class RecipientGuard:
             response = await asyncio.wait_for(request.response(), 60)
         except Exception:
             return
+        if response is not None and self.core and response.status in {301, 302, 303} and request.is_navigation_request():
+            if not self.refused:  # a native form post answered by a redirect: the server took it, the next page decides
+                target = self.audience.confirmation_redirect(urljoin(request.url, response.headers.get("location", "")))
+                if target and self.audience.receipt_url(target):
+                    self.audience.final_receipt_url = target
+                self.final_response = True
+                self.audience.record_response()
+            return
         if response is None or not 200 <= response.status < 300 or self.refused:
             return  # a redirect or an error: the landing page decides, as for any unconfirmed send
         with contextlib.suppress(Exception):
@@ -324,21 +342,81 @@ class RecipientGuard:
             return None
         return None
 
+    async def _core_guard(self, route, request):
+        """Guard mode `core`: the browser sends everything itself (`continue_`: its own TLS stack, cookies, redirects, so bot
+        checks see a normal browser). Only the two core rules are enforced here:
+          1. candidate data goes only to the employer or its ATS: once data was entered, a write (or a GET whose query carries
+             an entered value) to any other site is aborted silently, the run goes on; before that nothing can carry data.
+          2. nothing is sent twice: the final request is identified (`click_write`) and its response observed, whoever sent it."""
+        audience = self.audience
+        try:
+            if self.refused:
+                await route.abort()
+                return
+            url, method = request.url, request.method
+            if urlsplit(url).scheme not in {"http", "https"}:
+                await route.continue_()
+                return
+            navigation = request.is_navigation_request()
+            read = method in {"GET", "HEAD"}
+            if navigation and request.frame.parent_frame is None:
+                source = request.frame.url
+                if not source or source.startswith("about:"):
+                    source = self.page.url if self.page is not None else ""
+                if audience.trusted(source):
+                    audience.extend_chain(url)  # (per hop: a redirect's next request still comes from the source page)
+            if read:
+                if (audience.data_entered and urlsplit(url).query and not audience.trusted(url)
+                        and (navigation or request.resource_type not in {"script", "stylesheet", "font", "image", "media"}
+                             or audience.carries_data(url))):
+                    self.record_abort(url)  # a read that could carry what was entered: a tracker call, a pixel
+                    await route.abort()
+                    return
+                await route.continue_()
+                return
+            if audience.data_entered and not audience.trusted(url):
+                self.record_abort(url)
+                await route.abort()
+                return
+            try:
+                audience.recheck()
+            except Exception:  # the reservation no longer allows a send: close the window
+                self.refused, self.refusal_code = True, "recipient_refused_transport"
+                await route.abort()
+                return
+            if audience.data_entered:
+                self.transmitted = True
+                if not getattr(audience, "account_only_request", lambda _: False)(request):
+                    self.non_account_transmitted = True
+            if audience.clicking and (audience.click_write is None or (
+                    navigation and url == audience.endpoint and not audience.click_write.is_navigation_request())):
+                audience.click_write = request
+            final_request = self.final_started and audience.click_write is request
+            await route.continue_()
+            if final_request:
+                await self._browser_final_response(request)
+        except Exception:  # (a closed page / a request already handled)
+            with contextlib.suppress(Exception):
+                await route.abort()
+
     async def install(self, page) -> None:
         self.page = page
         await page.context.add_init_script(script="""(() => {
             const allowed = new Set(%s);
             const inert = function () { throw new DOMException('Transport disabled', 'SecurityError'); };
             const lock = (key, value) => Object.defineProperty(globalThis, key, {value, writable: false, configurable: false});
-            for (const key of ['WebSocket', 'WebTransport', 'RTCPeerConnection', 'webkitRTCPeerConnection',
-                               'mozRTCPeerConnection', 'RTCDataChannel', 'Worker', 'SharedWorker']) lock(key, inert);
+            for (const key of %s) lock(key, inert);
             const Native = globalThis.EventSource;
-            if (Native) lock('EventSource', function (url, options) {
+            if (Native && %s) lock('EventSource', function (url, options) {
                 const target = new URL(url, location.href);
                 if (!allowed.has(target.origin)) return inert();
                 return new Native(target.href, options);
             });
-        })();""" % json.dumps(sorted(self.allowed)))
+        })();""" % (json.dumps(sorted(self.allowed)), json.dumps(
+            ["WebSocket", "WebTransport", "RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection", "RTCDataChannel"]
+            if self.core else  # core: workers and server-sent events are plain browser features; sockets can carry data anywhere
+            ["WebSocket", "WebTransport", "RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection", "RTCDataChannel",
+             "Worker", "SharedWorker"]), "false" if self.core else "true"))
 
         async def refuse(route, code="recipient_refused_transport"):
             if not self.refused_request:
@@ -590,4 +668,4 @@ class RecipientGuard:
                     with contextlib.suppress(Exception):
                         await response.dispose()
 
-        await page.context.route("**/*", guard)
+        await page.context.route("**/*", self._core_guard if self.core else guard)

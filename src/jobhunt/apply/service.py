@@ -654,15 +654,65 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         guard.page = tab
         return True
 
+    async def follow_core(tab):
+        """Core mode: the page moved (redirect, locale switch, script, click, new tab): rebind to it, whatever it is. A new
+        landing on another trusted site before any input is also reserved (landing dedupe), never required to proceed."""
+        nonlocal attempt
+        guard.page = tab
+        if tab.is_closed():
+            return False
+        url = tab.url.split("#", 1)[0]
+        if (not guard.refused and not audience.data_entered and audience.trusted(url) and not audience.write_recipient(url)):
+            target = clean_url(url, navigation=True)
+            if target and not attempt.landing_digest:
+                attempt = apply_store.bind_apply_landing(attempt, target, method="continuity", confirmed_distinct=confirmed_distinct)
+                browser[-1] = (attempt, guard)
+            audience.bind_recipient(target or url)
+            refresh_accounts(target or url)
+        await audience.rebind(tab)
+        return True
+
     if not browser_adapter:
-        audience.follow_landing = follow_landing
+        audience.follow_landing = follow_core if audience.core else follow_landing
 
     diagnostics.control = "navigation"
     entry_advisor = None if browser_adapter else advisor_for(planner, llm)
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
         await guard.install(page)
+        async def open_apply_core(tab, *, require_posting):
+            """Core mode: look for the application entry, never stop for not finding or proving one (the engine goes on from the
+            current page and its planner clicks "apply"). Only the reservation can refuse: a landing that duplicates another."""
+            landing = target = None
+            try:
+                try:
+                    landing, target = await discover(tab, guard, audience, requisition=attempt.requisition_id,
+                                                     require_posting=require_posting, platform=job.origin_ats)
+                except Exception as exc:
+                    note_stop_reason(run_.out_dir, f"entry step: {type(exc).__name__}: {exc}")
+                if (landing is None and not guard.refused and entry_advisor is not None and not tab.is_closed()
+                        and target != "challenge_or_rate_limited"):
+                    guard.probe = None
+                    try:
+                        found = await discover_llm(tab, guard, audience, entry_advisor, requisition=attempt.requisition_id,
+                                                   platform=job.origin_ats, job_title=job.title, company=job.company or "")
+                    except Exception as exc:
+                        found = None
+                        note_stop_reason(run_.out_dir, f"entry fallback: {type(exc).__name__}: {exc}")
+                    if found is not None:
+                        landing, target = found
+                if landing is not None:
+                    await follow_core(landing)
+                return landing, target or "apply_target_unverified"
+            except ApplyError as exc:
+                note_stop_reason(run_.out_dir, f"entry step: {type(exc).__name__}: {exc}")
+                return None, "reservation_refused"
+            finally:
+                guard.probe = None
+
         async def open_apply(tab, *, require_posting):
             nonlocal attempt, password, account_known
+            if audience.core and not browser_adapter:
+                return await open_apply_core(tab, require_posting=require_posting)
             try:
                 landing, target = await discover(tab, guard, audience, requisition=attempt.requisition_id,
                                                  require_posting=require_posting, platform=job.origin_ats)
@@ -698,7 +748,9 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                     break
                 await asyncio.sleep(0.15)
             landed = clean_url(page.url, navigation=True)
-            if audience.write_recipient(page.url) and audience.initial_redirect(attempt.url, landed):
+            if audience.core:
+                await audience.sync(page)
+            elif audience.write_recipient(page.url) and audience.initial_redirect(attempt.url, landed):
                 audience.document = landed
                 await audience.bind_document(page)
             elif browser_adapter or not await follow_landing(page):
@@ -714,7 +766,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 account_known=live_known(),
                 email_verification=mail_flow,
                 diagnostics=diagnostics, apply_entry=None if browser_adapter else open_apply,
-                host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),
+                host_allowed=audience.trusted_host if audience.core else (lambda host: host == _host(audience.document)), max_steps=min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
             result = handoff_result("human", diagnostics=diagnostics).model_copy(

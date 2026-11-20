@@ -52,6 +52,15 @@ class AdapterAudience(Audience):
         return self.write_recipient(endpoint) and self.posting(endpoint)
 
     async def check_click(self, target, field, role, final):
+        if self.core:  # the declared control boundary only labels the click (continuation proofs); it never stops the run
+            try:
+                await self._check_click(target, field, role, final)
+            except ApplyError:
+                self.click_boundary = None
+            return
+        await self._check_click(target, field, role, final)
+
+    async def _check_click(self, target, field, role, final):
         live = await target.evaluate("node => [node.isConnected, node.getAttribute('data-automation-id') || '', "
                                      "(node.innerText || node.value || '').trim()]")
         boundary = self.adapter.browser_control(self.live_url, field.automation_id, field.label, role, final)
@@ -129,6 +138,8 @@ class AdapterAudience(Audience):
         return self._admit_click_write(request)
 
     async def after_click(self, page, *, observing=False):
+        if self.core:
+            return await Audience.after_click(self, page, observing=observing)
         if self.final_started:
             return
         live = page.url

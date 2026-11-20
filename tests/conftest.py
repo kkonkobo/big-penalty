@@ -62,6 +62,7 @@ def isolated(tmp_path, monkeypatch):
         if name.startswith("apply_"):
             monkeypatch.setattr(s, name, field.default)
     monkeypatch.setattr(s, "apply_autonomous", False)
+    monkeypatch.setattr(s, "apply_guard_mode", "strict")  # the suite pins the strict guard; core mode has its own tests
 
     def offline_connect(sock, address, *args, **kwargs):
         # Loopback stays allowed: on Windows, asyncio builds its event-loop wake-up socket pair by connecting

@@ -35,6 +35,7 @@ _DIAGNOSTICS = {
     **ACCOUNT_REASONS,
     "recipient_refused": RECIPIENT_REFUSED,
     "posting_mismatch": "Identité du poste non vérifiée : saisie annulée.",
+    "reservation_refused": "La réservation de l’envoi ne permet pas de poursuivre (doublon possible ou site en pause).",
     "dry_untested": "Simulation non testée : inspection hors ligne, sans saisie, fichier ni envoi de candidature.",
     "dry_account_gate": "L’étape de connexion ou de création de compte a été atteinte, sans saisie.",
     "no_adapter": "Envoi bloqué : aucun adaptateur d'envoi et de reçu vérifié pour ce site. À envoyer en mode supervisé.",
