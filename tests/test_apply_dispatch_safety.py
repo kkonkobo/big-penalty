@@ -1800,3 +1800,40 @@ async def test_dry_entry_recognizes_common_apply_wordings(label, found, server, 
                                planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
     assert (result.result.diagnostic_code == "dry_apply_form_found") is found, result.result.diagnostic_code
     assert not server.posts
+
+
+@pytest.mark.parametrize("buttons, expect", [
+    ('<button onclick="window.choice=\'reject\'; document.getElementById(\'cmp\').remove()">Refuser</button>'
+     '<button onclick="window.choice=\'accept\'; document.getElementById(\'cmp\').remove()">Accepter &amp; fermer</button>', "reject"),
+    ('<button onclick="window.choice=\'accept\'; document.getElementById(\'cmp\').remove()">Tout accepter</button>', "accept"),
+])
+async def test_a_consent_dialog_back_on_the_form_page_is_cleared_and_the_application_sent(buttons, expect, server, profile,
+                                                                                          tmp_path, fast, monkeypatch):
+    """The dialog comes back on the application page itself (not only on the posting): reject when offered, else accept
+    (owner decision: a fresh browser per application), then the form is filled and sent."""
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    _, app = approved_fixture(profile, tmp_path, server.url("careers/100"))
+    dialog = (f'<div id="cmp" class="didomi-popup" style="position:fixed;inset:0;background:#789;z-index:99">'
+              f'<p>Nous utilisons des cookies.</p><div class="didomi-buttons">{buttons}</div></div>')
+    server.html["/careers/100"] = '<main><h1>Offre</h1><a href="/careers/100/apply">Postuler</a></main>'
+    server.html["/careers/100/apply"] = posting_form("/careers/100/apply") + dialog
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.status == "submitted", result.message
+    assert [post["path"] for post in server.posts] == ["/careers/100/apply"]
+
+
+async def test_consent_dismissal_never_clicks_a_form_button(server):
+    from jobhunt.apply.consent import dismiss_consent
+    from patchright.async_api import async_playwright
+
+    server.html["/c"] = '''<form method="post" action="/c"><div id="cookie-note">Nous utilisons des cookies.
+        <button>Accepter</button></div></form>
+        <div id="consent-box"><p>Cookies et traceurs</p><button onclick="window.done=1">Refuser</button></div>'''
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(server.url("c"))
+        assert await dismiss_consent(page) == "Refuser"
+        await browser.close()
+    assert not server.posts
