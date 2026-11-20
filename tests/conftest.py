@@ -49,6 +49,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "anthropic_api_key", None)
     monkeypatch.setattr(s, "openai_api_key", None)
     monkeypatch.setattr(s, "firecrawl_api_key", None)
+    monkeypatch.setattr(s, "serper_api_key", None)
     monkeypatch.setattr(s, "linkedin_detail_cmd", "off")  # never spawn the paid provider from tests
     monkeypatch.setattr(s, "llm_cli_enabled", False)  # never spawn the developer's signed-in Codex / Claude Code CLIs
     monkeypatch.setattr(s, "data_dir", tmp_path / "data")

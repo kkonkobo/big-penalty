@@ -22,6 +22,12 @@ class Settings(BaseModel):
     openai_planner_effort: str = "low"
     openai_scoring_effort: str = "low"
     firecrawl_api_key: str | None = None
+    # Web search of the origin resolver (step 5). Serper (SERPER_API_KEY, Google results, ~1 credit a query) is tried first,
+    # Firecrawl (2 credits a search) when Serper is absent or errors, DuckDuckGo (free, often blocked) last.
+    serper_api_key: str | None = Field(default=None, repr=False, exclude=True)
+    search_paid_per_job: int = 2  # JOBHUNT_SEARCH_PAID_PER_JOB: paid queries per posting; the rest go to DuckDuckGo
+    search_paid_budget_per_run: int = 300  # JOBHUNT_SEARCH_PAID_BUDGET: paid queries per run, then free search only
+    search_cache_days: float = 14  # JOBHUNT_SEARCH_CACHE_DAYS: paid results reused this long (empty answers: 3 days)
     # External command returning a LinkedIn job as JSON (JOBHUNT_LINKEDIN_DETAIL_CMD): "auto" = treg when installed,
     # "off" = disabled, else a template with {id} (split with shlex, never run through a shell).
     linkedin_detail_cmd: str = "auto"
@@ -136,6 +142,10 @@ def get_settings() -> Settings:
         openai_planner_effort=env("JOBHUNT_OPENAI_PLANNER_EFFORT", "low"),
         openai_scoring_effort=env("JOBHUNT_OPENAI_SCORING_EFFORT", "low"),
         firecrawl_api_key=env("FIRECRAWL_API_KEY"),
+        serper_api_key=env("SERPER_API_KEY") or None,
+        search_paid_per_job=int(env("JOBHUNT_SEARCH_PAID_PER_JOB") or 2),
+        search_paid_budget_per_run=int(env("JOBHUNT_SEARCH_PAID_BUDGET") or 300),
+        search_cache_days=float(env("JOBHUNT_SEARCH_CACHE_DAYS") or 14),
         linkedin_detail_cmd=(env("JOBHUNT_LINKEDIN_DETAIL_CMD") or "auto").strip(),
         linkedin_detail_max_per_run=int(env("JOBHUNT_LINKEDIN_DETAIL_MAX_PER_RUN") or 150),
         france_travail_client_id=env("FRANCE_TRAVAIL_CLIENT_ID"),

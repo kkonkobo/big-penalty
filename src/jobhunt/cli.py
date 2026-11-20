@@ -230,7 +230,7 @@ def reresolve(
 @app.command("origins")
 def origins(
     profile_id: int,
-    min_score: Annotated[float, typer.Option("--min-score", help="score minimal des offres à traiter")] = 50.0,
+    min_score: Annotated[Optional[float], typer.Option("--min-score", help="score minimal des offres à traiter (défaut : seuil de préparation des candidatures)")] = None,
     limit: Annotated[Optional[int], typer.Option("--limit", "-n", help="nombre maximal d'offres (meilleur score d'abord)")] = None,
     force: Annotated[bool, typer.Option("--force", help="reprend aussi les origines sous le seuil de confiance")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="rapport seulement : rien n'est enregistré")] = False,
@@ -247,6 +247,8 @@ def origins(
 
     if db.get_profile(profile_id) is None:
         raise typer.BadParameter(f"profil {profile_id} introuvable")
+    if min_score is None:  # web search is paid: by default only jobs good enough to apply to
+        min_score = get_settings().apply_prepare_min_score
 
     def progress(done: int, total: int) -> None:
         if done == total or done % 10 == 0:
@@ -259,6 +261,12 @@ def origins(
                   f"après : {rep.with_origin_after}{mode}")
     console.print(f"Reprises : {rep.tried} · liens entreprise trouvés : {rep.found} · liens d'annonces effacés : {rep.cleared} · "
                   f"pages relues : {rep.refetched} (liens de candidature récupérés : {rep.apply_urls_found})")
+    if rep.web_search:
+        w = rep.web_search
+        console.print(f"Recherche web : {w.get('paid', 0)} requête(s) payante(s) (serper {w.get('serper', 0)}, firecrawl "
+                      f"{w.get('firecrawl', 0)}, ~{w.get('credits', 0)} crédits) · cache : {w.get('cached', 0)} · "
+                      f"DuckDuckGo : {w.get('duckduckgo', 0)}"
+                      + (f" · [yellow]budget atteint : {w['over_budget']} requête(s) non payée(s)[/yellow]" if w.get("over_budget") else ""))
     if rep.li_calls:
         console.print(f"Détails LinkedIn : {rep.li_calls} appel(s) · liens entreprise récupérés : {rep.li_links} · Easy Apply : {rep.li_easy} · "
                       f"fermées : {rep.li_closed} · échecs : {rep.li_failures} · coût : {rep.li_cost:.4f} $")

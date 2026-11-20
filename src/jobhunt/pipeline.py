@@ -33,6 +33,7 @@ MAX_CONSECUTIVE_BLOCKS = 2  # 429 / Cloudflare "Just a moment": the site is rate
 MAX_TOTAL_ERRORS = 6
 SEARCH_BUDGET_S = 20 * 60.0  # sources stop starting new queries after this; what they found is already stored
 ORIGIN_BUDGET_S = 15 * 60.0  # jobs left unresolved are picked up by the next run (`_origin_due`)
+SEARCH_RETRY_AFTER = timedelta(days=3)  # a job the post-score web search missed is searched again after this
 ORIGIN_CHUNK = 48
 ORIGIN_CHUNKS_IN_FLIGHT = 2
 SCORE_BATCH = 12
@@ -91,6 +92,9 @@ class RunResult:
     llm_stats: dict[str, Any] = field(default_factory=dict)
     linkedin_detail_calls: int = 0  # LinkedIn detail calls (paid provider) of this run
     linkedin_links: int = 0  # employer apply links recovered by them
+    origin_searched: int = 0  # jobs sent to the post-score web search (paid providers)
+    origin_search_found: int = 0
+    web_search: dict[str, int] = field(default_factory=dict)  # origin.SearchBudget.summary() of the run
     sources_ok: list[str] = field(default_factory=list)  # sources that completed with no error/challenge/block
     stage: str = "pending"
     pid: int = field(default_factory=os.getpid)  # lets later runs tell a live run from one killed mid-way
@@ -279,12 +283,24 @@ def _origin_due(job: MergedJob) -> bool:
     return db.now() - attempted >= timedelta(days=3)
 
 
+def _supported_kwargs(fn: Callable[..., Any], **kw: Any) -> dict[str, Any]:
+    """The keyword arguments `fn` accepts (resolvers swapped in by tests or older modules take (postings, ctx) only)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kw
+    return {k: v for k, v in kw.items() if k in params}
+
+
 async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: RunResult, *,
                            persist: Callable[[], Any] | None = None, profile: Any = None,
-                           deadline: float | None = None) -> list[MergedJob]:
+                           deadline: float | None = None, search: bool = True) -> list[MergedJob]:
     """Resolve the origin of the jobs that need it, a chunk at a time; `persist` stores `jobs` after each chunk (it may
     consolidate duplicates in place), so an interruption keeps every chunk done. Jobs the profile's prefilter already
-    drops are not worth a ladder run. Past `deadline` the remaining jobs wait for the next run."""
+    drops are not worth a ladder run. Past `deadline` the remaining jobs wait for the next run. `search=False` stops the
+    ladder before the paid web search: `_search_origins` runs it after scoring, for the jobs worth applying to."""
     try:
         mod = importlib.import_module("jobhunt.origin")
         resolve = getattr(mod, "resolve_origins", None)
@@ -319,7 +335,7 @@ async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: Ru
                 skipped += len(chunk)
                 return
             try:
-                resolved = await resolve([j.to_posting() for j in chunk], ctx)
+                resolved = await resolve([j.to_posting() for j in chunk], ctx, **_supported_kwargs(resolve, search=search))
                 for j, p in zip(chunk, resolved):
                     j.apply_origin(p)
                     j.recompute_posted_at()  # repairs rows where an old run folded the ATS date into posted_at
@@ -342,6 +358,64 @@ async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: Ru
         if skipped:
             result.errors.append(f"Résolution de l'origine : budget de temps atteint, {skipped} offre(s) reportée(s)")
     return jobs
+
+
+def _search_due(job: MergedJob, settings: Any, now: datetime) -> bool:
+    """Worth a paid web search: no origin yet, scored at or above the apply threshold, young enough to be sent, still
+    open, and not already searched with the same inputs in the last `SEARCH_RETRY_AFTER`."""
+    from jobhunt.freshness import over_age_limit
+
+    if job.origin_url or job.status in ("rejected", "applied"):
+        return False
+    if job.score is None or job.score < min(settings.apply_prepare_min_score, settings.apply_auto_min_score):
+        return False
+    if over_age_limit(job, settings.apply_max_age_days, now) is True:
+        return False
+    if job.extra.get("origin_search_fingerprint") != origin_fingerprint(job):
+        return True
+    try:
+        searched = datetime.fromisoformat(job.extra["origin_searched_at"])
+        searched = searched.replace(tzinfo=searched.tzinfo or UTC)
+    except (KeyError, TypeError, ValueError):
+        return True
+    return now - searched >= SEARCH_RETRY_AFTER
+
+
+async def _search_origins(jobs: list[MergedJob], ctx: SourceContext, result: RunResult, budget: Any, *,
+                          persist: Callable[[], Any] | None = None, deadline: float | None = None) -> None:
+    """Runs AFTER scoring: the full ladder, web search included, for the jobs `_search_due` keeps, best score first, a
+    chunk at a time until the run's paid search budget or `deadline` runs out (the rest waits for the next run)."""
+    try:
+        mod = importlib.import_module("jobhunt.origin")
+    except Exception:  # noqa: BLE001
+        return
+    resolve = getattr(mod, "resolve_origins", None)
+    if resolve is None or "search" not in _supported_kwargs(resolve, search=True):
+        return  # this resolver never defers its web search
+    now = db.now()
+    settings = get_settings()
+    todo = sorted((j for j in jobs if _search_due(j, settings, now)), key=lambda j: -(j.score or 0))
+    for i in range(0, len(todo), ORIGIN_CHUNK):
+        if (deadline is not None and time.monotonic() >= deadline) or not budget.available():
+            result.errors.append(f"Recherche web des origines : {len(todo) - i} offre(s) reportée(s) au prochain lancement"
+                                 + (" (budget de recherche payante atteint)" if not budget.available() else ""))
+            break
+        chunk = todo[i:i + ORIGIN_CHUNK]
+        try:
+            resolved = await resolve([origin_posting(j) for j in chunk], ctx, **_supported_kwargs(resolve, search=True, budget=budget))
+        except Exception as e:  # noqa: BLE001
+            log.warning("origin web search failed: %s", e)
+            result.errors.append(f"Recherche web des origines : {type(e).__name__}: {e}")
+            return
+        stamp = db.now().isoformat()
+        for j, p in zip(chunk, resolved):
+            _store_origin(j, p)
+            j.extra["origin_searched_at"] = stamp
+            j.extra["origin_search_fingerprint"] = origin_fingerprint(j)
+            result.origin_searched += 1
+            result.origin_search_found += bool(j.origin_url)
+        if persist is not None:
+            persist()
 
 
 def reap_stale_runs() -> int:
@@ -448,7 +522,7 @@ async def run_search(
             result.new_jobs = max(0, len(jobs) - n_before)
 
         await _resolve_origins(jobs, ctx, result, persist=persist, profile=profile,
-                               deadline=time.monotonic() + ORIGIN_BUDGET_S)
+                               deadline=time.monotonic() + ORIGIN_BUDGET_S, search=False)
         persist()
 
         # 5. SCORE (stored batch by batch)
@@ -460,6 +534,15 @@ async def run_search(
         db.save_scores(profile_id, jobs)
         if await _linkedin_second_pass(jobs, ctx, result):
             db.save_jobs(profile_id, jobs, consolidate_origins=True)
+
+        # 6. WEB SEARCH for the origins still missing, only on jobs scored high enough to apply to (paid providers)
+        from jobhunt.origin import SearchBudget
+
+        budget = SearchBudget.for_settings(ctx.settings)
+        await _search_origins(jobs, ctx, result, budget, persist=persist, deadline=time.monotonic() + ORIGIN_BUDGET_S)
+        persist()
+        result.web_search = budget.summary()
+        log.info(budget.line())
 
         result.stage = "done"
         db.update_run(result.run_id, stats=result.stats_dict(), status="done", finished=True)
@@ -585,6 +668,7 @@ class OriginReport:
     li_closed: int = 0
     li_cost: float = 0.0
     li_failures: int = 0
+    web_search: dict[str, int] = field(default_factory=dict)  # origin.SearchBudget.summary()
     dry_run: bool = False
     rows: list[OriginRow] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -733,7 +817,13 @@ async def reresolve_origins(
                 posting = posting.model_copy(update={"apply_url": _best_apply_url(job)})
             posting = _with_provenance(job, posting)
             postings.append(posting)
-        results = await origin_mod.resolve_origins_detailed(postings, ctx, use_cache=False, on_done=tick)
+        # use_cache=False re-runs the ladder, but paid search answers still come from the search cache, and the run
+        # budget caps what a re-resolve of hundreds of jobs may spend.
+        budget = origin_mod.SearchBudget.for_settings(ctx.settings)
+        results = await origin_mod.resolve_origins_detailed(
+            postings, ctx, **_supported_kwargs(origin_mod.resolve_origins_detailed, use_cache=False, on_done=tick, budget=budget))
+        report.web_search = budget.summary()
+        log.info(budget.line())
     finally:
         if browser is not None:
             try:
@@ -879,7 +969,8 @@ async def _linkedin_second_pass(jobs: list[MergedJob], ctx: SourceContext, resul
     try:
         if got:
             mod = importlib.import_module("jobhunt.origin")
-            resolved = await mod.resolve_origins([origin_posting(j) for j in got], ctx)
+            resolved = await mod.resolve_origins([origin_posting(j) for j in got], ctx,
+                                                 **_supported_kwargs(mod.resolve_origins, search=False))
             for j, p in zip(got, resolved):
                 _store_origin(j, p)
     except Exception as e:  # noqa: BLE001
