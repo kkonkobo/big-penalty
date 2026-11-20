@@ -20,22 +20,27 @@ uv run jobhunt rescore 1                          # rescore stored jobs after pr
 uv run jobhunt serve                              # http://127.0.0.1:8765
 uv run jobhunt daily [PROFILE_IDS...]             # headless search of every profile + French summary (~27 min/profile, paid LLM)
 uv run jobhunt new 1                              # "new today" jobs of profile 1
-uv run jobhunt schedule install [--time 07:30 ...]  # launchd agent com.bigpenalty.daily; --time repeatable (several runs/day)
-uv run jobhunt schedule set 07:30 19:00           # replace all times (installs if needed); also: add HH:MM | remove HH:MM
-uv run jobhunt schedule run                       # on-demand run now (launchctl kickstart; the daily lock prevents overlap)
-uv run jobhunt schedule status                    # loaded?, times, next run, run in progress, log tail (also: uninstall)
+uv run jobhunt schedule set 07:30 19:00           # replace all local times; also: add HH:MM | remove HH:MM
+uv run jobhunt schedule run                       # start the same daily CLI in a separate process now
+uv run jobhunt schedule status                    # enabled?, times, next run, run in progress, log tail
+uv run jobhunt schedule uninstall-launchd         # remove the legacy macOS agent, after migrating its times
 uv run big-penalty cv import 1 --pdf CV.pdf       # milestone 2a: CV -> data/profiles/1/master.pending.yaml + report (1 paid LLM call); then CONFIRM in the web UI; or --text FILE; --stage-qualifier "…"
 uv run big-penalty cv tailor JOB_ID               # tailored CV for a job (2 paid LLM calls: tailor + verifier): new revision, flags, one-page PDF in data/applications/<job_id>/rev-<n>/
 uv run big-penalty cv list [-p PROFILE]           # applications and status (web: /applications, master CV: /profiles/<id>/cv)
-# Web UI: http://127.0.0.1:8765/schedule ("Planification": times, add/remove, "Lancer maintenant")
+# Web UI: http://127.0.0.1:8765/schedule ("Planification": times, add/remove, on/off, "Lancer maintenant")
 ```
 `daily`: non-blocking `flock` on the persistent `data/daily.lock` (released by the kernel when the process exits), log line per profile in `data/logs/daily-YYYY-MM-DD.log`, macOS notification
 at the end (`JOBHUNT_NO_NOTIFY=1` to silence), exit ≠ 0 only if a profile's run failed (a failing source is not an error).
 Always headless (passed explicitly to the pipeline, no global state), so sources needing a human (APEC/Cadremploi challenges) just report an error in the log.
-`schedule install` writes `~/Library/LaunchAgents/com.bigpenalty.daily.plist` (StartCalendarInterval = array of {Hour, Minute}, the plist is the source of truth for the times; changes rewrite it then bootout+bootstrap; `/bin/zsh -lc`, launchd logs in
-`~/Library/Logs/big-penalty/`, run output in `data/logs/launchd.*.log`); install/uninstall abort if a loaded agent cannot be booted out and runs `launchctl bootstrap gui/$UID`. If the Mac sleeps at the scheduled time, launchd runs the
-missed job on wake (the catch-up we want); powered off = no run. The wrapper exits 0 quietly when the SSD is not mounted.
-Nothing is installed by the code or tests until you run `schedule install` yourself.
+The web server (including the desktop app) checks the atomic `data/schedule.json` every ~30 seconds. First use copies
+`StartCalendarInterval` from `~/Library/LaunchAgents/com.bigpenalty.daily.plist` if present; otherwise it enables `07:30`.
+Missed slots while the app is closed are not replayed. After sleep with the app open, only slots within a roughly
+ten-minute grace window are eligible (the newest if several were crossed). Claimed slot IDs persist in `data/schedule-slots.json`,
+including slots skipped because the daily lock was held. A daily subprocess inherits the server environment and uses
+`python -m jobhunt daily` or, in the PyInstaller desktop app, the same bundled executable with the `daily` argument.
+`schedule install` only enables in-app scheduling, with optional `--time` values; `schedule uninstall` only disables it.
+Visit Planification (or run `schedule status`) before running `schedule uninstall-launchd`, which verifies that the legacy
+agent is unloaded before deleting the plist. The app and its tests never uninstall it automatically.
 Data: `data/jobhunt.sqlite3` (gitignored). Profile 1 = mechatronics student, **Bac+4** (2nd year of cycle ingénieur).
 
 ## Done (milestone 1: search + shortlist)
@@ -135,8 +140,7 @@ uv run big-penalty apply accounts | accounts-export FILE | accounts-import FILE 
   SmartRecruiters showed a DataDome CAPTCHA after repeated visits. Reviewed three times by Codex (findings fixed each time); a fourth review is in progress.
 - **Not done**: dedicated adapters (Workday, Talentsoft, SmartRecruiters), e-mail verification via IMAP, better origin resolution for jobs whose only link is a
   job board (16 board hosts were added to `origin.AGGREGATOR_DOMAINS`), a real send (waits for the user's OK on the dry-run screenshots).
-- **Known issue found on 2026-11-18**: the 07:30 launchd run failed with `operation not permitted` on the SSD (macOS privacy: `/bin/zsh` needs Full Disk Access or
-  Removable Volumes access). Until the user grants it, the scheduled search does not run.
+- **November 18, 2026**: the legacy 07:30 launchd run failed with `operation not permitted` on the SSD. The in-app scheduler no longer uses launchd.
 
 ## Freshness (done in this PR)
 - Hard cutoff **14 days** (`MAX_JOB_AGE_DAYS` in `src/jobhunt/freshness.py`): searches request ≤14 days where the source
@@ -150,15 +154,15 @@ uv run big-penalty apply accounts | accounts-export FILE | accounts-import FILE 
 - **Expiry** (`EXPIRE_AFTER_DAYS = 7`, `db.query_jobs(include_expired=False)`): a job whose `last_seen` is older than 7 days is hidden
   (not deleted, status untouched), only if every source the job was seen on completed without error (`runs.stats.sources_ok`) in a run of the profile that started after its `last_seen` and finished within the last 2 days. Only real sightings bump `last_seen` (not rescore/origin updates).
   The web shortlist shows the number of hidden expired jobs under the table.
-- Daily scheduler: done (see Setup). Not validated end-to-end yet: no real `daily` run or `schedule install` has been done.
+- Daily scheduler: covered by offline tests (see Setup); no real daily run or packaged scheduler smoke test performed.
 
 ## Scoring rules
 - Only hard blockers: contract type and location. Education level, experience, tools, languages = wish list (moderate
   penalty, mentioned in the rationale). Fingerprint version 3. Jobs dropped by an older, stricter prefilter are rescored.
 
 ## Next steps (suggested order)
-1. **Daily run**: code done (`daily`, `schedule`, `new`, expiry). To do by the user: one real `uv run jobhunt daily 1`, then
-   `uv run jobhunt schedule install`, check `schedule status` the next morning.
+1. **Daily run**: after merge, migrate the times and remove the old agent. For a live check, leave Big Penalty open through
+   a scheduled slot and inspect the Planification journal.
 2. **Speed**: 27 min for 10 queries; LinkedIn detail fetches dominate. Fetch details only after prefilter; cap per query.
 3. ~~Wish-list scoring~~ done (see Scoring rules). Rescore after any prompt change.
 4. Bugs: Jobijoba redirect URL with a contact-form-7 shortcode crashes origin resolution; 115 jobs with contract `unknown`;

@@ -1,274 +1,369 @@
-"""Daily scheduling with launchd (macOS): `jobhunt schedule install|set|add|remove|run|status|uninstall`.
-
-The agent `com.bigpenalty.daily` has a StartCalendarInterval: always an ARRAY of {Hour, Minute} dicts (one per
-time of day). The plist is the source of truth for the times (read back with plistlib). If the Mac is asleep at that time,
-launchd runs the missed job as soon as it wakes: that is the catch-up behaviour we rely on. If the Mac is
-powered off, nothing runs (and nothing is replayed at boot): the next day's run finds the extra days anyway
-because searches ask for the last 14 days and "new today" is measured since the latest completed run.
-
-The external SSD may be unmounted: the wrapper command exits 0 silently when the repo directory is missing.
-launchd's own StandardOut/ErrorPath live in ~/Library/Logs/big-penalty (always mounted), so launchd never fails to
-spawn the job; once the repo is known to be there, the wrapper redirects the run's output to data/logs.
-
-Pure functions (`build_plist`, `build_shell_command`, `next_run`) are separate from the side effects
-(`install`, `uninstall`, `status`), which take injectable paths and a command runner so tests never touch the real
-LaunchAgents directory or launchctl.
-"""
+"""Local daily schedule, shared by the web server and CLI."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import os
 import plistlib
 import re
-import shlex
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from threading import Lock, Thread
+from time import monotonic, sleep, time
+from typing import Callable, Iterable
 
-from jobhunt.filelock import try_lock, unlock
+from jobhunt.config import get_settings
+from jobhunt.daily import LOCK_NAME, append_log, log_line
+from jobhunt.filelock import local_file_lock, try_lock, unlock
 
 LABEL = "com.bigpenalty.daily"
 DEFAULT_TIME = "07:30"
-Runner = Callable[[list[str]], Any]  # returns an object with .returncode / .stdout
+POLL_SECONDS = 30
+GRACE_SECONDS = 10 * 60
+LOCK_TIMEOUT = 2.0
+_SCHEDULE_MUTEX = Lock()
+log = logging.getLogger(__name__)
 
 
 class ScheduleError(Exception):
     pass
 
 
-def repo_root() -> Path:
-    """Repository root, derived from the package location (src/jobhunt/schedule.py -> repo)."""
-    return Path(__file__).resolve().parents[2]
+class ScheduleBusy(ScheduleError):
+    pass
+
+
+class DailyAlreadyRunning(ScheduleError):
+    pass
+
+
+@dataclass
+class Schedule:
+    times: list[str]
+    enabled: bool
 
 
 def parse_time(value: str) -> tuple[int, int]:
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
-    if not m or int(m[1]) > 23 or int(m[2]) > 59:
+    match = re.fullmatch(r"([0-9]{1,2}):([0-9]{2})", value.strip())
+    if not match or int(match[1]) > 23 or int(match[2]) > 59:
         raise ScheduleError(f"heure invalide : {value!r} (format HH:MM, ex. 07:30)")
-    return int(m[1]), int(m[2])
+    return int(match[1]), int(match[2])
+
+
+def normalize_times(times: str | Iterable[str]) -> list[str]:
+    return sorted({"%02d:%02d" % parse_time(value) for value in ([times] if isinstance(times, str) else times)})
 
 
 def plist_path(home: Path | None = None) -> Path:
     return (home or Path.home()) / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
-def launchd_log_dir(home: Path | None = None) -> Path:
-    return (home or Path.home()) / "Library" / "Logs" / "big-penalty"
-
-
-def build_shell_command(repo: Path) -> str:
-    """Exits 0 quietly when the repo (external SSD) is not mounted; otherwise sends the run's output to data/logs
-    and runs the daily command."""
-    r = shlex.quote(str(repo))
-    return (f"[ -d {r} ] || exit 0; cd {r} && mkdir -p data/logs && "
-            "exec >> data/logs/launchd.out.log 2>> data/logs/launchd.err.log && . ./env.sh && uv run jobhunt daily")
-
-
-def launch_path(home: Path | None = None) -> str:
-    """PATH for the agent: `zsh -l` does not read ~/.zshrc, and uv usually lives in ~/.local/bin or Homebrew."""
-    h = home or Path.home()
-    return ":".join([str(h / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
-                     "/usr/sbin", "/sbin"])
-
-
-def normalize_times(times: str | Iterable[str]) -> list[str]:
-    """Validate HH:MM strings, dedupe and sort them; returns zero-padded "HH:MM". Raises on empty input."""
-    if isinstance(times, str):
-        times = [times]
-    out = sorted({"%02d:%02d" % parse_time(t) for t in times})
-    if not out:
-        raise ScheduleError("aucune heure indiquée (format HH:MM, ex. 07:30)")
-    return out
-
-
-def build_plist(repo: Path, times: str | Iterable[str], *, home: Path | None = None) -> bytes:
-    """The launchd property list (XML bytes) for the daily agent. Pure. StartCalendarInterval is always an array."""
-    intervals = [{"Hour": h, "Minute": m} for h, m in map(parse_time, normalize_times(times))]
-    logs = launchd_log_dir(home)
-    return plistlib.dumps({
-        "Label": LABEL,
-        "ProgramArguments": ["/bin/zsh", "-lc", build_shell_command(repo)],
-        "StartCalendarInterval": intervals,
-        "StandardOutPath": str(logs / "launchd.out.log"),
-        "StandardErrorPath": str(logs / "launchd.err.log"),
-        "EnvironmentVariables": {"PATH": launch_path(home)},
-        "RunAtLoad": False,
-    })
-
-
-def next_run_of(times: Iterable[str], now: datetime) -> datetime:
-    """Earliest next local occurrence among several HH:MM times."""
-    return min(next_run(*parse_time(t), now) for t in times)
-
-
-def next_run(hour: int, minute: int, now: datetime) -> datetime:
-    """Next local occurrence of HH:MM strictly after `now`."""
-    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return candidate if candidate > now else candidate + timedelta(days=1)
-
-
-def _domain(uid: int | None = None) -> str:
-    return f"gui/{os.getuid() if uid is None else uid}"
-
-
-def _run(cmd: list[str]) -> Any:
-    return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)
-
-
-def _require_macos() -> None:
-    if sys.platform != "darwin":
-        raise ScheduleError("launchd n'existe que sous macOS")
-
-
-def is_loaded(runner: Runner = _run, uid: int | None = None) -> bool:
-    return runner(["launchctl", "print", f"{_domain(uid)}/{LABEL}"]).returncode == 0
-
-
-def _unload(runner: Runner, uid: int | None) -> bool:
-    """Boot the agent out if it is loaded. Returns whether it was loaded; raises if it is still loaded after."""
-    if not is_loaded(runner, uid):
-        return False
-    res = runner(["launchctl", "bootout", f"{_domain(uid)}/{LABEL}"])
-    if is_loaded(runner, uid):
-        raise ScheduleError(f"launchctl bootout a échoué, l'agent est toujours chargé (rien n'a été modifié) : "
-                            f"{(res.stderr or res.stdout or '').strip() or 'code ' + str(res.returncode)}")
-    return True
-
-
-def read_times(home: Path | None = None) -> list[str] | None:
-    """Times stored in the plist (the source of truth); None if there is no readable plist."""
-    path = plist_path(home)
+def _legacy_times(home: Path | None) -> list[str]:
     try:
-        interval = plistlib.loads(path.read_bytes())["StartCalendarInterval"]
-        if isinstance(interval, dict):  # tolerate a hand-edited single dict
-            interval = [interval]
-        return sorted({"%02d:%02d" % (int(i["Hour"]), int(i["Minute"])) for i in interval}) or None
-    except (OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException):
-        return None
+        interval = plistlib.loads(plist_path(home).read_bytes())["StartCalendarInterval"]
+        entries = [interval] if isinstance(interval, dict) else interval
+        return normalize_times("%02d:%02d" % (entry["Hour"], entry["Minute"]) for entry in entries)
+    except (OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException, ScheduleError):
+        return []
 
 
-def install(times: str | Iterable[str] = DEFAULT_TIME, *, repo: Path | None = None, home: Path | None = None,
-            runner: Runner = _run, uid: int | None = None, check_platform: bool = True) -> Path:
-    """Write the plist, create the log directories and load the agent (replacing a previously loaded one).
-    `times`: one or several HH:MM. If the loaded agent cannot be booted out, nothing is changed and ScheduleError
-    is raised."""
-    if check_platform:
-        _require_macos()
-    normalized = normalize_times(times)
-    repo = repo or repo_root()
-    path = plist_path(home)
-    _unload(runner, uid)  # before any change: a failure leaves the old plist and agent untouched
-    (repo / "data" / "logs").mkdir(parents=True, exist_ok=True)
-    launchd_log_dir(home).mkdir(parents=True, exist_ok=True)  # launchd does not create log directories
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(build_plist(repo, normalized, home=home))
-    res = runner(["launchctl", "bootstrap", _domain(uid), str(path)])
-    if res.returncode != 0:
-        raise ScheduleError(f"launchctl bootstrap a échoué : {(res.stderr or res.stdout or '').strip()}")
-    return path
-
-
-def set_times(times: str | Iterable[str], **kw: Any) -> Path:
-    """`schedule set`: replace all times (installs when not installed)."""
-    return install(times, **kw)
-
-
-def add_time(time: str, **kw: Any) -> list[str]:
-    """Add one time to the installed schedule (installs with just that time if nothing is installed)."""
-    new = normalize_times(list(read_times(kw.get("home")) or []) + [time])
-    install(new, **kw)
-    return new
-
-
-def remove_time(time: str, **kw: Any) -> list[str]:
-    cur = read_times(kw.get("home"))
-    if cur is None:
-        raise ScheduleError("aucune planification installée")
-    target = normalize_times(time)[0]
-    if target not in cur:
-        raise ScheduleError(f"{target} n'est pas planifié (heures : {', '.join(cur)})")
-    new = [t for t in cur if t != target]
-    if not new:
-        raise ScheduleError("c'est la dernière heure : utilisez `schedule uninstall` pour tout désactiver")
-    install(new, **kw)
-    return new
-
-
-def is_running(data_dir: Path | None = None, repo: Path | None = None) -> bool:
-    """Whether a daily run holds data/daily.lock. Non-blocking probe; the lock is never kept nor created."""
-    path = (data_dir or (repo or repo_root()) / "data") / "daily.lock"
+def _write_json(path: Path, value) -> None:
+    stream = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
+    temp = Path(stream.name)
     try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return False
-    try:
-        if not try_lock(fd, shared=True):
-            return True
-        unlock(fd)
-        return False
+        with stream:
+            json.dump(value, stream)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(path)
     finally:
-        os.close(fd)
+        temp.unlink(missing_ok=True)
 
 
-def run_now(*, repo: Path | None = None, home: Path | None = None, runner: Runner = _run,
-            uid: int | None = None, check_platform: bool = True) -> None:
-    """On-demand run through launchd (`kickstart`, returns immediately). The daily lock prevents any overlap."""
-    if check_platform:
-        _require_macos()
-    if not is_loaded(runner, uid):
-        raise ScheduleError("planification non installée : lancez `big-penalty daily` directement, "
-                            "ou `big-penalty schedule install` d'abord")
-    if is_running(repo=repo):
-        raise ScheduleError("une recherche est déjà en cours")
-    res = runner(["launchctl", "kickstart", f"{_domain(uid)}/{LABEL}"])
-    if res.returncode != 0:
-        raise ScheduleError(f"launchctl kickstart a échoué : {(res.stderr or res.stdout or '').strip()}")
+@contextmanager
+def _schedule_lock(data_dir: Path):
+    """Serialize migration, edits and slot claims across the CLI and server processes."""
+    deadline = monotonic() + LOCK_TIMEOUT
+    if not _SCHEDULE_MUTEX.acquire(timeout=LOCK_TIMEOUT):
+        raise ScheduleBusy("planification occupée, réessayez")
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        with (data_dir / "schedule.lock").open("a+b") as stream:
+            fd = stream.fileno()
+            while not try_lock(fd):
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise ScheduleBusy("planification occupée, réessayez")
+                sleep(min(remaining, 0.025))
+            try:
+                yield
+            finally:
+                unlock(fd)
+    finally:
+        _SCHEDULE_MUTEX.release()
 
 
-def uninstall(*, home: Path | None = None, runner: Runner = _run, uid: int | None = None,
-              check_platform: bool = True, repo: Path | None = None) -> bool:
-    """Unload the agent and remove the plist. Returns True if something was there. If the agent is still loaded
-    after bootout, raises ScheduleError and keeps the plist."""
-    if check_platform:
-        _require_macos()
-    path = plist_path(home)
-    was_loaded = _unload(runner, uid)
-    existed = path.exists()
-    path.unlink(missing_ok=True)
-    return existed or was_loaded
+def _read_snapshot(path: Path) -> Schedule:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        raise ScheduleError("schedule.json invalide") from None
+    if (not isinstance(value, dict) or type(value.get("enabled")) is not bool
+            or not isinstance(value.get("times"), list) or not all(isinstance(item, str) for item in value["times"])):
+        raise ScheduleError("schedule.json invalide")
+    return Schedule(normalize_times(value["times"]), value["enabled"])
+
+
+def _initial_schedule(home: Path | None) -> Schedule:
+    return Schedule(_legacy_times(home) or [DEFAULT_TIME], True)
+
+
+def _read_schedule(data_dir: Path, home: Path | None) -> Schedule:
+    path = data_dir / "schedule.json"
+    try:
+        return _read_snapshot(path)
+    except FileNotFoundError:
+        settings = _initial_schedule(home)
+        _write_json(path, vars(settings))
+        return settings
+
+
+def _edit(change, *, data_dir: Path | None = None, home: Path | None = None) -> Schedule:
+    directory = data_dir or get_settings().data_dir
+    try:
+        with _schedule_lock(directory):
+            settings = _read_schedule(directory, home)
+            change(settings)
+            _write_json(directory / "schedule.json", vars(settings))
+            return settings
+    except OSError:
+        raise ScheduleError("impossible d’enregistrer la planification") from None
+
+
+def set_times(times: Iterable[str], **kwargs) -> list[str]:
+    return _edit(lambda settings: setattr(settings, "times", normalize_times(times)), **kwargs).times
+
+
+def add_time(value: str, **kwargs) -> list[str]:
+    def change(settings: Schedule) -> None:
+        settings.times = normalize_times([*settings.times, value])
+
+    return _edit(change, **kwargs).times
+
+
+def remove_time(value: str, **kwargs) -> list[str]:
+    target = normalize_times(value)[0]
+
+    def change(settings: Schedule) -> None:
+        if target not in settings.times:
+            raise ScheduleError(f"{target} n'est pas planifié")
+        settings.times.remove(target)
+
+    return _edit(change, **kwargs).times
+
+
+def set_enabled(enabled: bool, **kwargs) -> None:
+    _edit(lambda settings: setattr(settings, "enabled", enabled), **kwargs)
+
+
+def is_running(data_dir: Path) -> bool:
+    """Probe, but never create or unlink, the persistent daily lock."""
+    path = data_dir / LOCK_NAME
+    with local_file_lock(path) as acquired:
+        if not acquired:
+            return True
+        try:
+            with path.open("r+b") as stream:
+                fd = stream.fileno()
+                if not try_lock(fd, shared=True):
+                    return True
+                unlock(fd)
+                return False
+        except FileNotFoundError:
+            return False
+
+
+def daily_command(*, executable: str | None = None, frozen: bool | None = None) -> list[str]:
+    executable = executable or sys.executable
+    if frozen is None:
+        frozen = getattr(sys, "frozen", False)
+    if frozen:
+        return [executable, "daily"]
+    return [executable, "-m", "jobhunt", "daily"]
+
+
+def _launch_daily(data_dir: Path) -> None:
+    env = {**os.environ, "JOBHUNT_DATA_DIR": str(data_dir.resolve())}
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+               if os.name == "nt" else {"start_new_session": True})
+    process = subprocess.Popen(daily_command(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=env, **options)
+    Thread(target=process.wait, name="jobhunt-daily-reaper", daemon=True).start()
+
+
+def run_now(*, data_dir: Path | None = None, launcher: Callable[[Path], None] | None = None) -> None:
+    directory = data_dir or get_settings().data_dir
+    try:
+        if is_running(directory):
+            raise DailyAlreadyRunning("une recherche est déjà en cours")
+        (launcher or _launch_daily)(directory)
+    except OSError:
+        raise ScheduleError("impossible de lancer la recherche") from None
+
+
+class Scheduler:
+    """Use elapsed real time for the grace window, and local wall time for slot IDs."""
+
+    def __init__(self, *, data_dir: Path | None = None, home: Path | None = None,
+                 clock: Callable[[], float] = time, launcher: Callable[[Path], None] | None = None):
+        self.data_dir = data_dir or get_settings().data_dir
+        self.home = home
+        self.clock = clock
+        self.launcher = launcher
+        self.started = self.checked = clock()
+
+    def tick(self) -> None:
+        now = self.clock()
+        try:
+            with _schedule_lock(self.data_dir):
+                settings = _read_schedule(self.data_dir, self.home)
+                if settings.enabled and settings.times:
+                    self._trigger(settings.times, now)
+        except ScheduleBusy:
+            return
+        self.checked = now
+
+    def _trigger(self, times: list[str], now: float) -> None:
+        slots = {}
+        cutoff = max(self.started, self.checked, now - GRACE_SECONDS)
+        first_minute = (int(cutoff) // 60 + 1) * 60
+        for instant in range(first_minute, int(now) + 1, 60):
+            local = datetime.fromtimestamp(instant)
+            if local.strftime("%H:%M") in times:
+                slots[local.isoformat(timespec="minutes")] = local
+        if not slots:
+            return
+        path = self.data_dir / "schedule-slots.json"
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(previous, list) or not all(isinstance(item, str) for item in previous):
+                raise ValueError
+            consumed = set(previous)
+        except FileNotFoundError:
+            consumed = set()
+        except ValueError:
+            raise ScheduleError("schedule-slots.json invalide") from None
+        pending = slots.keys() - consumed
+        if not pending:
+            return
+        _write_json(path, sorted(consumed | pending))
+        latest = max(pending, key=lambda slot: slots[slot].timestamp())
+        for slot in sorted(pending - {latest}):
+            log.warning("Créneau %s ignoré : créneau plus récent dans la fenêtre de grâce", slot)
+        try:
+            run_now(data_dir=self.data_dir, launcher=self.launcher)
+        except DailyAlreadyRunning:
+            log.warning("Créneau %s ignoré : une recherche est déjà en cours", latest)
+        except ScheduleError:
+            log.error("Créneau %s : impossible de lancer la recherche", latest)
+
+    async def run(self, stopped: asyncio.Event) -> None:
+        while not stopped.is_set():
+            try:
+                await asyncio.to_thread(self.tick)
+            except (ScheduleError, OSError):
+                log.error("Impossible de vérifier la planification")
+            try:
+                await asyncio.wait_for(stopped.wait(), timeout=POLL_SECONDS)
+            except TimeoutError:
+                pass
+
+
+def next_run_of(times: Iterable[str], now: datetime) -> datetime | None:
+    """Find the next real local occurrence (including clock changes), not a nonexistent wall time."""
+    timestamp = now.timestamp()
+    local_now = datetime.fromtimestamp(timestamp)
+    candidates = []
+    for value in times:
+        hour, minute = parse_time(value)
+        for days in range(3):
+            day = local_now + timedelta(days=days)
+            wall = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            for fold in (0, 1):
+                instant = wall.replace(fold=fold).timestamp()
+                if instant > timestamp and datetime.fromtimestamp(instant) == wall:
+                    candidates.append(instant)
+    return datetime.fromtimestamp(min(candidates)) if candidates else None
 
 
 @dataclass
 class Status:
-    installed: bool
-    loaded: bool
-    times: list[str] | None = None
-    running: bool = False
-    next_run: datetime | None = None
-    last_log: Path | None = None
-    log_tail: list[str] | None = None
+    times: list[str]
+    enabled: bool
+    running: bool
+    next_run: datetime | None
+    last_log: Path | None
+    log_tail: list[str]
 
 
-def latest_daily_log(logs: Path) -> Path | None:
-    return max(logs.glob("daily-*.log"), default=None, key=lambda p: p.name) if logs.is_dir() else None
+def status(*, data_dir: Path | None = None, home: Path | None = None,
+           now: datetime | None = None, tail: int = 5) -> Status:
+    directory = data_dir or get_settings().data_dir
+    try:
+        try:
+            with _schedule_lock(directory):
+                settings = _read_schedule(directory, home)
+        except ScheduleBusy:
+            try:
+                settings = _read_snapshot(directory / "schedule.json")
+            except FileNotFoundError:
+                settings = _initial_schedule(home)
+        last_log = max((directory / "logs").glob("daily-*.log"), default=None, key=lambda path: path.name)
+        lines = last_log.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:] if last_log and tail else []
+        return Status(settings.times, settings.enabled, is_running(directory),
+                      next_run_of(settings.times, now or datetime.now()) if settings.enabled else None, last_log, lines)
+    except OSError:
+        raise ScheduleError("impossible de lire la planification ou le journal") from None
 
 
-def status(*, repo: Path | None = None, home: Path | None = None, runner: Runner = _run, uid: int | None = None,
-           now: datetime | None = None, tail: int = 5, check_platform: bool = True) -> Status:
-    if check_platform:
-        _require_macos()
-    repo = repo or repo_root()
+def uninstall_launchd(*, home: Path | None = None, runner: Callable | None = None, uid: int | None = None) -> bool:
+    """Remove only the legacy agent, and keep its plist if unloading cannot be confirmed."""
+    if runner is None:
+        if sys.platform != "darwin":
+            raise ScheduleError("launchd n'est disponible que sur macOS")
+
+        def runner(command):
+            return subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+    service = f"gui/{os.getuid() if uid is None else uid}/{LABEL}"
     path = plist_path(home)
-    st = Status(installed=path.exists(), loaded=is_loaded(runner, uid))
-    st.running = is_running(repo=repo)
-    if st.installed:
-        st.times = read_times(home)
-        if st.times:
-            st.next_run = next_run_of(st.times, now or datetime.now().astimezone())
-    st.last_log = latest_daily_log(repo / "data" / "logs")
-    if st.last_log:
-        st.log_tail = st.last_log.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
-    return st
+
+    def loaded() -> bool:
+        result = runner(["launchctl", "print", service])
+        if result.returncode == 0:
+            return True
+        if result.returncode == 113 or "Could not find service" in (result.stderr or ""):
+            return False
+        raise ScheduleError("impossible de vérifier l'agent launchd ; plist conservé")
+
+    try:
+        was_loaded = loaded()
+        if was_loaded:
+            runner(["launchctl", "bootout", service])
+            if loaded():
+                raise ScheduleError("launchctl bootout a échoué ; plist conservé")
+        existed = path.exists()
+        path.unlink(missing_ok=True)
+        return was_loaded or existed
+    except (OSError, subprocess.TimeoutExpired):
+        raise ScheduleError("impossible de désinstaller l'agent launchd") from None

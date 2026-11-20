@@ -232,19 +232,24 @@ async def async_sync_all(profile_ids: list[int] | None = None, execute: bool = T
             return [ProfileSyncReport(None, error=BUSY, message=BUSY)]
         journal = journal or Journal()
         ids = [p.profile_id for p in journal.list_profiles(enabled_only=True) if profile_ids is None or p.profile_id in profile_ids]
-        if not ids:
-            return []
-        own = client is None
-        try:
-            client = client or _client_from_journal(journal)
-        except (PortalError, secrets.PortalSecretError) as e:
-            msg = str(e)
-            return [ProfileSyncReport(pid, error=msg) for pid in ids]
-        try:
-            return await _async_pass(journal, client, ids, now, execute)
-        finally:
-            if own:
-                client.close()
+        return await sync_selected(journal, ids, now, execute, client=client)
+
+
+async def sync_selected(journal: Journal, ids: list[int], now: datetime, execute: bool = True, *,
+                        client: PortalClient | None = None) -> list[ProfileSyncReport]:
+    """Run one pass while the caller owns the portal sync lock."""
+    if not ids:
+        return []
+    own = client is None
+    try:
+        client = client or _client_from_journal(journal)
+    except (PortalError, secrets.PortalSecretError) as error:
+        return [ProfileSyncReport(pid, error=str(error)) for pid in ids]
+    try:
+        return await _async_pass(journal, client, ids, now, execute)
+    finally:
+        if own:
+            client.close()
 
 
 def sync_all(profile_ids: list[int] | None = None, execute: bool = True, *, journal: Journal | None = None,

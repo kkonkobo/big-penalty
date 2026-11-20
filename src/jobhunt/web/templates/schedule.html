@@ -4,53 +4,48 @@
 <div class="page-head">
   <div>
     <h1>Planification</h1>
-    <p class="muted">La recherche tourne seule chaque jour, pour tous les profils. Si le Mac dort à l'heure prévue, elle est lancée au réveil.</p>
+    <p class="muted">Le lancement automatique n’a lieu que si l’application est ouverte à l’heure prévue.</p>
   </div>
 </div>
-{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
-{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
-{% if st %}
+{% if notice %}<p role="status" class="notice">{{ notice }}</p>{% endif %}
+{% if error %}<p role="alert" class="notice error">{{ error }}</p>{% endif %}
+
 <section class="panel">
-  <div class="panel-head plain">
-    <h2>Recherche quotidienne</h2>
-    <p class="row">
-      {% if st.installed %}<span class="tag ok">active</span>{% else %}<span class="tag warn">désactivée</span>{% endif %}
-      {% if st.installed and not st.loaded %}<span class="tag bad">agent non chargé</span>{% endif %}
-      {% if st.running %}<span class="tag warn" id="running"><span class="spinner sm" aria-hidden="true"></span>recherche en cours…</span>{% endif %}
-    </p>
+  <h2>Recherche quotidienne</h2>
+  <div class="row">
+    <form method="post" action="/schedule/run"><button class="btn primary" type="submit">Lancer maintenant</button></form>
+    {% if st %}
+      <form method="post" action="/schedule/enabled">
+        <input type="hidden" name="enabled" value="{{ 'false' if st.enabled else 'true' }}">
+        <button class="btn" type="submit">{{ 'Désactiver' if st.enabled else 'Activer' }} la planification</button>
+      </form>
+    {% endif %}
   </div>
-  {% if st.installed %}
-    {% if st.loaded and st.next_run %}<p class="lead">Prochain passage le <strong>{{ st.next_run.strftime('%d/%m/%Y à %H:%M') }}</strong>.</p>{% endif %}
-    <h3>Heures de passage</h3>
-    <ul class="chips">
-    {% for t in st.times or [] %}
-      <li><strong class="num">{{ t }}</strong>
-        <form method="post" action="/schedule/remove">
-          <input type="hidden" name="time" value="{{ t }}">
-          <button class="chip-x" type="submit" title="Retirer {{ t }}" aria-label="Retirer {{ t }}"><svg class="ic"><use href="#i-x"/></svg></button>
-        </form></li>
-    {% else %}<li class="muted">plist illisible.</li>{% endfor %}
-      <li class="chip-add">
-        <form method="post" action="/schedule/add" class="row">
-          <input type="time" name="time" required aria-label="Nouvelle heure">
-          <button class="btn small" type="submit">Ajouter une heure</button>
-        </form></li>
-    </ul>
-    <div class="row actions-row">
-      <form method="post" action="/schedule/run"><button class="btn primary" type="submit">Lancer maintenant</button></form>
-      <form method="post" action="/schedule/uninstall" onsubmit="return confirm('Désactiver la recherche quotidienne ?')"><button class="btn quiet-bad" type="submit">Désactiver la planification</button></form>
-    </div>
-  {% else %}
-    <p>La recherche automatique n'est pas activée. Une fois activée, de nouvelles offres vous attendent chaque matin.</p>
-    <form method="post" action="/schedule/install">
-      <button class="btn primary" type="submit">Activer ({{ default_time }})</button>
+  {% if st %}
+    <p>Planification {{ 'activée' if st.enabled else 'désactivée' }}{% if st.running %} · Recherche en cours{% endif %}</p>
+    <p class="muted">Prochain lancement : {{ st.next_run.strftime('%d/%m/%Y à %H:%M') if st.next_run else 'aucun' }} (heure locale)</p>
+    <h3>Heures prévues</h3>
+    {% for time in st.times %}
+      <form method="post" action="/schedule/remove" class="row">
+        <input type="hidden" name="time" value="{{ time }}">
+        <span class="mono">{{ time }}</span>
+        <button class="btn quiet-bad" type="submit" aria-label="Retirer {{ time }}">Retirer</button>
+      </form>
+    {% else %}
+      <p class="muted">Aucune heure prévue.</p>
+    {% endfor %}
+    <form method="post" action="/schedule/add" class="row">
+      <label for="schedule-time">Ajouter une heure</label>
+      <input type="time" id="schedule-time" name="time" required>
+      <button class="btn" type="submit">Ajouter</button>
     </form>
   {% endif %}
 </section>
 
-<section class="panel">
-  <h2>Dernier journal{% if st.last_log %} <small class="muted mono">{{ st.last_log.name }}</small>{% endif %}</h2>
-  {% if st.log_tail %}<pre class="log">{{ st.log_tail|join("\n") }}</pre>{% else %}<p class="muted">Aucun journal pour l'instant : il apparaîtra après le premier passage automatique.</p>{% endif %}
-</section>
+{% if st %}
+  <section class="panel">
+    <h2>Dernière recherche — journal{% if st.last_log %} <small class="muted mono">{{ st.last_log.name }}</small>{% endif %}</h2>
+    {% if st.log_tail %}<pre class="log">{{ st.log_tail|join("\n") }}</pre>{% else %}<p class="muted">Aucun journal pour l’instant.</p>{% endif %}
+  </section>
 {% endif %}
 {% endblock %}

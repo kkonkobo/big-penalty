@@ -85,17 +85,24 @@ def portal_dir() -> Path:
 @contextlib.contextmanager
 def pass_lock(name: str = "sync.lock") -> Iterator[bool]:
     """Non-blocking exclusive file lock `data/portal/<name>`; yields False (nothing held) when it is busy."""
-    from jobhunt.filelock import try_lock, unlock
+    from jobhunt.filelock import local_file_lock, try_lock, unlock
 
-    fd = os.open(portal_dir() / name, os.O_RDWR | os.O_CREAT, 0o600)
-    got = False
-    try:
-        got = try_lock(fd)
-        yield got
-    finally:
-        if got:
-            unlock(fd)
-        os.close(fd)
+    path = portal_dir() / name
+    with local_file_lock(path) as acquired:
+        if not acquired:
+            yield False
+            return
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        locked = False
+        try:
+            locked = try_lock(fd)
+            yield locked
+        finally:
+            try:
+                if locked:
+                    unlock(fd)
+            finally:
+                os.close(fd)
 
 
 @dataclass

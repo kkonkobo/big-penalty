@@ -29,7 +29,7 @@
       <button class="btn primary" type="submit" {% if running %}disabled{% endif %}>Lancer la recherche</button>
     </form>
   </div>
-  <p class="muted small">Une recherche complète prend 20 à 30 minutes. Elle tourne aussi automatiquement chaque jour (<a href="/schedule">planification</a>).</p>
+  <p class="muted small">Une recherche complète prend 20 à 30 minutes. Elle peut aussi se lancer automatiquement si l’application est ouverte (<a href="/schedule">planification</a>).</p>
   <div id="progress">{% include "_progress.html" %}</div>
 </section>
 {% endblock %}
