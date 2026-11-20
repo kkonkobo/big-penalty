@@ -184,3 +184,21 @@ def test_live_engine_standing_options_and_ai_polarity(tmp_path):
 def test_one_time_code_autocomplete_only_makes_a_credential_of_a_code_field(label, expected):
     from jobhunt.apply.prompt_rules import technical_key
     assert technical_key(label, "text", autocomplete="one-time-code") == expected
+
+@pytest.mark.parametrize('label, relatives', [
+    ('Do you or a family member work at ExampleCo?', True),
+    ('Est-ce que vous, ou un membre de votre famille, travaillez chez ExampleCo ?', True),
+    ('Do you have any relatives working at ExampleCo?', True),
+    ('Avez-vous des connaissances travaillant chez ExampleCo ?', True),
+    ('Haben Sie Verwandte, die bei ExampleCo arbeiten?', True),
+    ('Avez-vous un conflit d’intérêts avec un employé ou un client de l’employeur ?', False),  # stays a conflict question
+    ('Do you currently work at ExampleCo?', False),
+    ('Membre de votre famille à contacter en cas d’urgence', False),
+])
+def test_relatives_at_the_employer_is_a_standing_no(label, relatives):
+    from jobhunt.apply.missing_answers import exact_option, standing_key
+
+    assert (standing_key(label) == 'relatives_at_employer') is relatives
+    if relatives:
+        assert exact_option('relatives_at_employer', 'Non', ['Oui', 'Non'], label) == 1
+        assert exact_option('relatives_at_employer', 'Non', ['Yes', 'No'], label) == 1

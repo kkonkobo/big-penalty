@@ -639,6 +639,8 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
     add("phone_calling_code", "Indicatif téléphonique", identity["phone_calling_code"], exact=True)
     employer_key = employer_path(employer or "")
     add("former_employer", "Emploi antérieur auprès de cet employeur", get_answer(answers, employer_key) if employer_key else None, exact=True)
+    # Owner rule (2026-11-20): "do you or a family member / relative work at <employer>?" is always answered "No".
+    add("relatives_at_employer", "Proche ou membre de la famille employé chez cet employeur", "Non", exact=True)
     # Forms validate this field as a URL ("Veuillez entrer une url LinkedIn valide" on a real site when the scheme was
     # missing): the value typed is always the full https URL; the shorter spellings stay as accepted variants.
     full_linkedin = linkedin_full_url(linkedin)
