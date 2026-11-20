@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
+import hashlib
 import json
 import logging
 import re
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal, Protocol, TypeVar
 
@@ -37,6 +43,112 @@ class LLMError(Exception):
 
 class LLMRefusal(LLMError):
     pass
+
+
+# ----------------------------------------------------------------- usage accounting
+# One JSON line per API call in <data_dir>/logs/llm-usage.jsonl: when, which call site, which model, how many tokens, and an
+# estimated cost. Counts and hashes only: never prompt or output text. `jobhunt llm-usage` sums it up.
+USAGE_FILE = "llm-usage.jsonl"
+# USD per million tokens: input, output, cache read, 5-minute cache write (1.25x input). Estimates only (list prices
+# 2026-11); the billing console is the source of truth. Unknown models are logged without a cost.
+PRICES: dict[str, tuple[float, float, float, float]] = {
+    "claude-opus-5-5": (4.0, 20.0, 0.20, 5.0),
+    "claude-opus-5": (5.0, 25.0, 0.50, 6.25),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10, 2.5),
+    "claude-sonnet-5": (2.0, 10.0, 0.20, 2.5),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
+}
+# Put this between two parts of a system prompt to give the first part its own prompt-cache breakpoint: a prefix shared by
+# every request (the rules) stays readable from the cache when the second part (per-run data) changes. Never sent as text.
+CACHE_BREAK = "\x00cache-breakpoint\x00"
+_SITE: contextvars.ContextVar[str] = contextvars.ContextVar("jobhunt_llm_site", default="")
+
+
+@contextlib.contextmanager
+def llm_site(name: str) -> Iterator[None]:
+    """Label the LLM calls made inside the block (e.g. "apply.planner") in the usage log."""
+    token = _SITE.set(name)
+    try:
+        yield
+    finally:
+        _SITE.reset(token)
+
+
+def current_site(default: str = "") -> str:
+    return _SITE.get() or default
+
+
+def estimate_cost(model: str, input_tokens: int, output_tokens: int, cache_read: int, cache_write: int) -> float | None:
+    price = PRICES.get(model)
+    if price is None:
+        return None
+    p_in, p_out, p_read, p_write = price
+    return round((input_tokens * p_in + output_tokens * p_out + cache_read * p_read + cache_write * p_write) / 1e6, 6)
+
+
+def prompt_sha(model: str, system_text: str, user_text: str) -> str:
+    """Short fingerprint of a request: identical prompts share it (measures how often a plan cache would hit)."""
+    return hashlib.sha256("\x00".join((model, system_text, user_text)).encode("utf-8")).hexdigest()[:16]
+
+
+def record_usage(settings: Settings, *, provider: str, model: str, site: str, input_tokens: int, output_tokens: int,
+                 cache_read: int, cache_write: int, sha: str = "", latency_s: float | None = None) -> dict[str, Any]:
+    """Log one call (INFO on jobhunt.llm.usage) and append it to the usage file. Never raises: accounting must not break a run.
+    `input_tokens` is the UNCACHED input (Anthropic semantics; OpenAI cached tokens are subtracted by the caller)."""
+    row = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "provider": provider, "model": model, "site": site or "other",
+           "input": input_tokens, "output": output_tokens, "cache_read": cache_read, "cache_write": cache_write,
+           "cost_usd": estimate_cost(model, input_tokens, output_tokens, cache_read, cache_write), "sha": sha}
+    if latency_s is not None:
+        row["latency_s"] = round(latency_s, 3)
+    log.info("llm usage site=%s model=%s in=%d out=%d cache_read=%d cache_write=%d cost_usd=%s", row["site"], model,
+             input_tokens, output_tokens, cache_read, cache_write, row["cost_usd"])
+    if getattr(settings, "llm_usage_log", True):
+        try:
+            path = Path(settings.data_dir) / "logs" / USAGE_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            log.warning("llm usage log not written: %s", type(exc).__name__)
+    return row
+
+
+def read_usage(path: Path, since: datetime | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if since is not None:
+            try:
+                if datetime.fromisoformat(row.get("ts", "")) < since:
+                    continue
+            except ValueError:
+                continue
+        rows.append(row)
+    return rows
+
+
+def summarize_usage(rows: list[dict[str, Any]], key: tuple[str, ...] = ("site", "model")) -> list[dict[str, Any]]:
+    """Totals per (site, model), most expensive first. `repeats` = calls whose exact prompt was already sent before."""
+    groups: dict[tuple, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for row in rows:
+        k = tuple(row.get(name, "") for name in key)
+        g = groups.setdefault(k, {**dict(zip(key, k)), "calls": 0, "input": 0, "output": 0, "cache_read": 0,
+                                   "cache_write": 0, "cost_usd": 0.0, "repeats": 0})
+        g["calls"] += 1
+        for name in ("input", "output", "cache_read", "cache_write"):
+            g[name] += int(row.get(name) or 0)
+        g["cost_usd"] += float(row.get("cost_usd") or 0)
+        sha = row.get("sha")
+        if sha:
+            g["repeats"] += sha in seen
+            seen.add(sha)
+    return sorted(groups.values(), key=lambda g: (-g["cost_usd"], -g["calls"]))
 
 
 # ----------------------------------------------------------------- schemas
@@ -107,6 +219,16 @@ def profile_text(p: Profile) -> str:
     if d.get("cv_text"):
         d["cv_text"] = d["cv_text"][:6000]
     return json.dumps({k: v for k, v in d.items() if v not in ([], "")}, ensure_ascii=False, indent=1)
+
+
+def system_blocks(system_text: str) -> list[dict[str, Any]]:
+    """Anthropic system blocks: one cache breakpoint at the end of each CACHE_BREAK-separated part (the API allows 4)."""
+    parts = [part for part in system_text.split(CACHE_BREAK) if part][-4:] or [""]
+    return [{"type": "text", "text": part, "cache_control": {"type": "ephemeral"}} for part in parts]
+
+
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) else 0
 
 
 def _retryable(exc: BaseException) -> bool:
@@ -265,6 +387,7 @@ class AnthropicProvider:
     async def _parse(self, model_cls: type[T], *, model: str, system_text: str, user_text: str, effort: str,
                      max_tokens: int) -> T:
         assert self.client is not None
+        started = perf_counter()
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(self.max_attempts), wait=self._wait,
@@ -274,7 +397,7 @@ class AnthropicProvider:
                     resp = await self.client.beta.messages.parse(
                         model=model, max_tokens=max_tokens, betas=BETAS, fallbacks="default",
                         output_format=model_cls,
-                        system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
+                        system=system_blocks(system_text),
                         messages=[{"role": "user", "content": user_text}],
                         output_config={"effort": effort},
                     )
@@ -288,11 +411,17 @@ class AnthropicProvider:
             raise LLMError("Réponse structurée Anthropic invalide", code="invalid_response") from e
         u = getattr(resp, "usage", None)
         if u is not None:
+            tokens = {name: _int(getattr(u, attr, 0)) for name, attr in (
+                ("input", "input_tokens"), ("output", "output_tokens"), ("cache_read", "cache_read_input_tokens"),
+                ("cache_write", "cache_creation_input_tokens"))}
             self.usage["calls"] += 1
-            self.usage["input"] += getattr(u, "input_tokens", 0) or 0
-            self.usage["output"] += getattr(u, "output_tokens", 0) or 0
-            self.usage["cache_read"] += getattr(u, "cache_read_input_tokens", 0) or 0
-            self.usage["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
+            for name, value in tokens.items():
+                self.usage[name] += value
+            served = getattr(resp, "model", None)
+            record_usage(self.settings, provider=self.name, model=served if isinstance(served, str) and served else model,
+                         site=current_site(model_cls.__name__), input_tokens=tokens["input"], output_tokens=tokens["output"],
+                         cache_read=tokens["cache_read"], cache_write=tokens["cache_write"],
+                         sha=prompt_sha(model, system_text, user_text), latency_s=perf_counter() - started)
         if resp.stop_reason == "refusal":
             raise LLMRefusal("Le modèle a refusé de répondre")
         if resp.stop_reason == "max_tokens":
@@ -306,18 +435,26 @@ class AnthropicProvider:
     async def plan(self, profile: Profile, max_queries: int = 25) -> Plan:
         if not self.enabled:
             raise LLMError(f"{self.name}: clé absente")
-        return await self._parse(
-            Plan, model=self.settings.planner_model,
-            system_text=PROFILE_SYSTEM.format(profile=profile_text(profile)),
-            user_text=PLAN_TASK.format(n=max_queries), effort=self.settings.planner_effort, max_tokens=4000,
-        )
+        with llm_site("search.plan"):
+            return await self._parse(
+                Plan, model=self.settings.planner_model,
+                system_text=PROFILE_SYSTEM.format(profile=profile_text(profile)),
+                user_text=PLAN_TASK.format(n=max_queries), effort=self.settings.planner_effort, max_tokens=4000,
+            )
 
     # ---- generic structured call (CV import / tailoring)
     async def structured(self, model_cls: type[T], *, system_text: str, user_text: str, max_tokens: int = 8000) -> T:
         if not self.enabled:
             raise LLMError(f"{self.name}: clé absente")
-        return await self._parse(model_cls, model=self.settings.cv_model, system_text=system_text, user_text=user_text,
-                                 effort=self.settings.cv_effort, max_tokens=max_tokens)
+        model, effort = self.model_for(current_site())
+        return await self._parse(model_cls, model=model, system_text=system_text, user_text=user_text, effort=effort,
+                                 max_tokens=max_tokens)
+
+    def model_for(self, site: str) -> tuple[str, str]:
+        """(model, effort) of a structured call: the apply-form planner has its own pair, every other call uses the CV pair."""
+        if site.startswith("apply.planner"):
+            return self.settings.apply_planner_model, self.settings.apply_planner_effort
+        return self.settings.cv_model, self.settings.cv_effort
 
     # ---- scorer
     async def score(self, profile: Profile, jobs: list[MergedJob]) -> ScoreBatch:
@@ -332,12 +469,13 @@ class AnthropicProvider:
             }
             for i, j in enumerate(jobs)
         ]
-        return await self._parse(
-            ScoreBatch, model=self.settings.scoring_model,
-            system_text=PROFILE_SYSTEM.format(profile=profile_text(profile)) + "\n" + SCORE_TASK,
-            user_text="Jobs:\n" + json.dumps(items, ensure_ascii=False), effort=self.settings.scoring_effort,
-            max_tokens=700 * len(jobs) + 500,
-        )
+        with llm_site("search.score"):
+            return await self._parse(
+                ScoreBatch, model=self.settings.scoring_model,
+                system_text=PROFILE_SYSTEM.format(profile=profile_text(profile)) + "\n" + SCORE_TASK,
+                user_text="Jobs:\n" + json.dumps(items, ensure_ascii=False), effort=self.settings.scoring_effort,
+                max_tokens=700 * len(jobs) + 500,
+            )
 
 
 class LLMProvider(Protocol):
@@ -368,6 +506,7 @@ class OpenAIProvider(AnthropicProvider):
             "planner_model": settings.openai_planner_model, "scoring_model": settings.openai_scoring_model,
             "planner_effort": settings.openai_planner_effort, "scoring_effort": settings.openai_scoring_effort,
             "cv_model": settings.openai_planner_model, "cv_effort": settings.openai_planner_effort,
+            "apply_planner_model": settings.openai_planner_model, "apply_planner_effort": settings.openai_planner_effort,
         })
         super().__init__(provider_settings, client, **kwargs)
 
@@ -387,6 +526,7 @@ class OpenAIProvider(AnthropicProvider):
         options = {}
         if effort and model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4")):
             options["reasoning"] = {"effort": effort}
+        started = perf_counter()
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(self.max_attempts), wait=self._wait,
@@ -394,7 +534,7 @@ class OpenAIProvider(AnthropicProvider):
             ):
                 with attempt:
                     response = await self.client.responses.parse(
-                        model=model, instructions=system_text, input=user_text, text_format=model_cls,
+                        model=model, instructions=system_text.replace(CACHE_BREAK, ""), input=user_text, text_format=model_cls,
                         max_output_tokens=max_tokens, store=False, **options,
                     )
         except openai.APIStatusError as exc:
@@ -413,6 +553,12 @@ class OpenAIProvider(AnthropicProvider):
             details = getattr(usage.input_tokens_details, "cache_write_tokens_details", None)
             if details is not None:
                 self.usage["cache_write_12h"] = self.usage.get("cache_write_12h", 0) + (getattr(details, "ttl_12h_tokens", 0) or 0)
+            cached = _int(getattr(usage.input_tokens_details, "cached_tokens", 0))
+            written = _int(getattr(usage.input_tokens_details, "cache_write_tokens", 0))
+            record_usage(self.settings, provider=self.name, model=model, site=current_site(model_cls.__name__),
+                         input_tokens=max(0, _int(usage.input_tokens) - cached), output_tokens=_int(usage.output_tokens),
+                         cache_read=cached, cache_write=written, sha=prompt_sha(model, system_text, user_text),
+                         latency_s=perf_counter() - started)
         for item in response.output or []:
             for content in getattr(item, "content", []) or []:
                 if content.type == "refusal":
@@ -550,7 +696,9 @@ class FailoverLLM:
                         continue
                     self.calls.append({"task": "structured", "provider": provider.name, "status": "ok",
                                        "latency_s": round(perf_counter() - started, 4)})
-                    model = getattr(getattr(provider, "settings", None), "cv_model", "") or ""
+                    model_for = getattr(provider, "model_for", None)
+                    model = model_for(current_site())[0] if model_for else getattr(
+                        getattr(provider, "settings", None), "cv_model", "") or ""
                     return {"provider": provider.name, "model": model}, output
         except TimeoutError:
             self.errors.append("deadline")

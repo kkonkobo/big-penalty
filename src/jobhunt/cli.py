@@ -48,6 +48,28 @@ def llm_check() -> None:
         raise typer.Exit(1)
 
 
+@app.command("llm-usage")
+def llm_usage(days: Annotated[float, typer.Option(help="fenêtre en jours (0 = tout)")] = 7) -> None:
+    """Consommation IA par point d'appel et modèle (tokens, coût estimé) d'après data/logs/llm-usage.jsonl."""
+    from datetime import UTC, timedelta
+
+    from jobhunt.llm import USAGE_FILE, read_usage, summarize_usage
+
+    since = datetime.now(UTC) - timedelta(days=days) if days > 0 else None
+    rows = read_usage(get_settings().data_dir / "logs" / USAGE_FILE, since)
+    if not rows:
+        console.print("Aucun appel IA enregistré sur la période.")
+        return
+    table = Table("Point d'appel", "Modèle", "Appels", "Répétés", "Entrée", "Cache lu", "Cache écrit", "Sortie", "Coût estimé ($)")
+    total = 0.0
+    for g in summarize_usage(rows):
+        total += g["cost_usd"]
+        table.add_row(g["site"], g["model"], str(g["calls"]), str(g["repeats"]), str(g["input"]), str(g["cache_read"]),
+                      str(g["cache_write"]), str(g["output"]), f"{g['cost_usd']:.2f}")
+    console.print(table)
+    console.print(f"Total estimé : {total:.2f} $ sur {len(rows)} appels (prix catalogue ; modèles inconnus non chiffrés).")
+
+
 @app.command()
 def serve(host: str = "127.0.0.1", port: int = 8765, reload: bool = False) -> None:
     """Lance l'interface web."""

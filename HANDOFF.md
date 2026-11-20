@@ -93,7 +93,7 @@ code from master ids; domain restricted to words of the ad), `tailored.py` (data
   short codes (`LLMError.code`), never model output; web messages go through a server-side one-shot flash (`?f=token`), never in URLs.
   `JOBHUNT_CV_ALLOW_FAILOVER` (default 1): 0 = CV data goes only to the FIRST enabled provider (verifier included).
 - DB: migration 3 (revisions, approval columns, partial unique index); migrations run under `BEGIN IMMEDIATE` before reading `user_version`.
-- Settings `JOBHUNT_CV_MODEL` (default = planner model), `JOBHUNT_CV_EFFORT`. Web: "Préparer le CV" on shortlist rows, `/applications`, `/applications/<id>`, `/profiles/<id>/cv`.
+- Settings `JOBHUNT_CV_MODEL` (default = `JOBHUNT_PLANNER_MODEL`, else `claude-sonnet-5-5`), `JOBHUNT_CV_EFFORT`. Web: "Préparer le CV" on shortlist rows, `/applications`, `/applications/<id>`, `/profiles/<id>/cv`.
 - Master per candidate: `identity.stage_qualifier` in master.yaml; a re-import keeps it. `applications.job_id` has no foreign key on purpose.
 - Not done: cover letter, auto-approval function (eligibility already accepts an approved revision).
 

@@ -7,9 +7,9 @@ import pytest
 
 from apply_fakes import FACT_PASSWORD, ScriptedPlanner, sample_facts
 from cv_fakes import fake_llm
-from jobhunt.apply.planner import SECRET_PLACEHOLDER, SYSTEM, LLMPlanner, facts_payload
+from jobhunt.apply.planner import SECRET_PLACEHOLDER, SYSTEM, LLMPlanner, facts_payload, system_with_facts
 from jobhunt.apply.types import Action, FormField, FieldOption, PageSnapshot, StepLog, StepPlan
-from jobhunt.llm import LLMError
+from jobhunt.llm import CACHE_BREAK, LLMError
 
 
 def snapshot() -> PageSnapshot:
@@ -28,16 +28,34 @@ async def test_one_call_with_facts_fields_history_and_no_secret():
                                      mode="supervised")
     assert out == plan and len(prov.calls) == 1 and prov.calls[0]["cls"] == "StepPlan"
     call = prov.calls[0]
-    assert call["system"] == SYSTEM
+    # rules, then the job and the facts (constant during a run: served from the prompt cache after the first step)
+    assert call["system"].startswith(SYSTEM) and call["system"] == system_with_facts(sample_facts(), job_title="Technicien",
+                                                                                    company="Exemple SA")
+    rules, known_text = call["system"].split(CACHE_BREAK)
+    assert rules == SYSTEM
+    known = json.loads(known_text.split("\n", 2)[2])
+    assert known["job"] == {"title": "Technicien", "company": "Exemple SA"}
     user = json.loads(call["user"])
-    assert user["job"] == {"title": "Technicien", "company": "Exemple SA"}
-    facts = {f["key"]: f for f in user["facts"]}
+    assert set(user) == {"mode", "page", "history"} and user["mode"] == "supervised"
+    facts = {f["key"]: f for f in known["facts"]}
     assert facts["first_name"]["value"] == "Camille" and facts["first_name"]["known"] and not facts["salary"]["known"]
     assert facts["account_password"]["value"] == SECRET_PLACEHOLDER and facts["account_password"]["known"]
     assert [f["ref"] for f in user["page"]["fields"]] == ["f1", "f2", "f3", "f4"]
     assert user["page"]["fields"][1]["options"] == ["Alternance"] and "value" not in user["page"]["fields"][2]
     assert user["history"] == [{"step": 1, "page_kind": "job_page", "clicked": "Postuler", "fields_filled": 0}]
     assert FACT_PASSWORD not in call["user"] and FACT_PASSWORD not in call["system"]
+
+
+async def test_steps_of_one_run_share_the_system_prefix_only_the_page_varies():
+    llm, prov = fake_llm({"StepPlan": StepPlan(page_kind="form")})
+    planner, facts = LLMPlanner(llm), sample_facts()
+    await planner.plan(snapshot(), facts, job_title="T", company="C", history=[], mode="submit")
+    second = snapshot()
+    second.text = "Étape 2"
+    await planner.plan(second, facts, job_title="T", company="C",
+                       history=[StepLog(index=1, url="u", page_kind="form", clicked="Suivant")], mode="submit")
+    first_call, second_call = prov.calls
+    assert first_call["system"] == second_call["system"] and first_call["user"] != second_call["user"]
 
 
 async def test_dry_planner_sends_only_field_and_fact_schema():
@@ -117,3 +135,46 @@ def test_system_prompt_states_the_account_upload_dial_and_aggregator_rules():
 def test_system_prompt_states_the_imported_profile_rule():
     flat = " ".join(SYSTEM.split())
     assert "imported from the CV" in flat and "fill them, do not click again" in flat
+
+
+async def test_rehearsal_reuses_the_plan_of_an_identical_inspection_prompt(monkeypatch):
+    import os
+    from jobhunt.config import get_settings
+    from jobhunt.llm import USAGE_FILE, read_usage
+
+    plan = StepPlan(page_kind="form", actions=[Action(ref="f1", op="fill", fact="first_name")])
+    llm, provider = fake_llm({"StepPlan": plan})
+    planner = LLMPlanner(llm)
+    args = dict(job_title="", company="", history=[], mode="dry_run")
+    assert await planner.plan(snapshot(), sample_facts(), **args) == plan
+    assert await planner.plan(snapshot(), sample_facts(), **args) == plan
+    assert len(provider.calls) == 1  # second rehearsal of the same page: no LLM call
+    rows = read_usage(get_settings().data_dir / "logs" / USAGE_FILE)
+    assert [(r["site"], r["model"], r["cost_usd"]) for r in rows] == [("apply.planner.inspect", "plan-cache", None)]
+
+    changed = snapshot()
+    changed.fields[0].label = "Nom de famille"
+    await planner.plan(changed, sample_facts(), **args)  # another page: another prompt
+    monkeypatch.setattr(get_settings(), "apply_planner_model", "another-model")
+    await planner.plan(snapshot(), sample_facts(), **args)  # another model: another key
+    assert len(provider.calls) == 3
+
+    monkeypatch.setattr(get_settings(), "apply_planner_model", "claude-sonnet-5-5")
+    for path in (get_settings().data_dir / "cache" / "plans").iterdir():  # older than the window: called again
+        os.utime(path, (1, 1))
+    await planner.plan(snapshot(), sample_facts(), **args)
+    assert len(provider.calls) == 4
+
+
+async def test_real_runs_and_disabled_cache_always_call_the_planner(monkeypatch):
+    from jobhunt.config import get_settings
+
+    llm, provider = fake_llm({"StepPlan": StepPlan(page_kind="form")})
+    planner = LLMPlanner(llm)
+    for _ in range(2):
+        await planner.plan(snapshot(), sample_facts(), job_title="T", company="C", history=[], mode="submit")
+    monkeypatch.setattr(get_settings(), "apply_plan_cache_days", 0)
+    for _ in range(2):
+        await planner.plan(snapshot(), sample_facts(), job_title="", company="", history=[], mode="dry_run")
+    assert len(provider.calls) == 4
+    assert not (get_settings().data_dir / "cache" / "plans").exists()
