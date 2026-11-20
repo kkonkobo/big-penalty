@@ -568,7 +568,7 @@ def engine_paused_run(env, job, code, *, started, submit_clicked=False):
 
 
 OLD = "2026-11-19T19:50:00+00:00"   # before astore.ENGINE_RETRY_EPOCH
-NEW = "2026-11-20T11:00:00+00:00"   # after it
+NEW = (datetime.fromisoformat(astore.ENGINE_RETRY_EPOCH) + timedelta(minutes=1)).isoformat()   # after it (moves with it)
 
 
 @pytest.mark.parametrize("code", ["recipient_refused_same_site_write", "recipient_refused_redirect", "public_page_shell",
