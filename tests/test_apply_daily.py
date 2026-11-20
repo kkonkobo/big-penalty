@@ -780,3 +780,22 @@ async def test_a_stale_cv_waits_when_the_preparation_cap_is_spent(env, profile, 
     s, lines = await daily(profile)
     assert not env.prepared and not env.runs and s.sent == 0
     assert any("CV maître modifié depuis la génération" in line for line in lines)
+
+
+async def test_a_generic_site_draft_above_the_threshold_is_auto_approved_and_sent(env, profile, monkeypatch):
+    monkeypatch.setattr(get_settings(), "apply_autonomous", True)
+    job = make_job(profile, title="Stage générique", company="Société G", score=88.0,
+                   url="https://emplois.autre-site.test/offres/7")
+    assert service._generic_enabled(db.get_job(job.id))
+    s, lines = await daily(profile)
+    app = store.find_application(profile.id, job.id)
+    assert s.sent == 1 and app.status == "submitted" and app.approved_by == "auto", lines
+
+
+async def test_a_generic_site_draft_below_the_threshold_stays_a_draft(env, profile, monkeypatch):
+    monkeypatch.setattr(get_settings(), "apply_autonomous", True)
+    job = make_job(profile, title="Stage générique", company="Société G", score=55.0,
+                   url="https://emplois.autre-site.test/offres/7")
+    s, _ = await daily(profile)
+    app = store.find_application(profile.id, job.id)
+    assert s.sent == 0 and app.status == "draft" and not env.runs

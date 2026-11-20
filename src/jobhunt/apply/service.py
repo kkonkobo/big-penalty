@@ -1502,7 +1502,7 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         emit(f"{tag} : bloquée (envoi automatique désactivé)")
         return
     threshold = max(s.apply_auto_min_score, min_score or 0)
-    if app.status == "draft" and not generic and (job.score or 0) >= threshold:
+    if app.status == "draft" and (job.score or 0) >= threshold:  # generic sites too: the send keeps its own guards
         try:
             app = cvs.auto_approve(app.id, expected_rev=app.current_rev)
         except CVError as e:  # ApprovalError, StaleRevision, TransitionError: this job only
