@@ -829,3 +829,30 @@ async def test_adapter_fill_step_identity(platform, change, request, server, pag
             await page.close()
         result = await asyncio.wait_for(task, timeout=8)
     assert not server.posts and store.outstanding_attempt(app.id).id == result.id
+
+
+def test_workday_jobreq_requisition_is_enrolled():
+    url = "https://demo.wd3.myworkdayjobs.com/fr-FR/Site/job/Paris/Stage-Ingenieur_JOBREQ_12345678"
+    match = production_registry.find(url, "workday")
+    assert match and match.capability == "unattended"
+    assert match.requisition.requisition_id == "12345678"
+    assert WorkdayAdapter().dedupe_identity(url) == WorkdayAdapter().dedupe_identity(url + "/apply/applyManually")
+    assert production_registry.find(url.replace("_JOBREQ_12345678", "_JOBREQ_12"), "workday") is None
+
+
+def test_workday_controls_in_any_tenant_language():
+    adapter = WorkdayAdapter()
+    posting = "https://demo.wd3.myworkdayjobs.com/de-DE/Site/job/Paris/Stage_R123"
+    assert adapter.browser_control(posting, "adventureButton", "Bewerben", "open_form", False) == "draft_write"
+    assert adapter.browser_control(posting + "/apply", "applyManually", "Manuell bewerben", "open_form", False) == "draft_write"
+    assert adapter.browser_control(posting, "adventureButton", "Share", "open_form", False) is None
+    # unauthenticated /apply/applyManually shows the sign-in page: e-mail reveal, then sign in / create account
+    gate = posting + "/apply/applyManually"
+    assert adapter.browser_control(gate, "SignInWithEmailButton", "Se connecter avec une adresse e-mail", "open_form", False) == "draft_write"
+    assert adapter.browser_control(gate, "GoogleSignInButton", "Se connecter avec Google", "open_form", False) is None
+    assert adapter.browser_control(gate, "createAccountLink", "Create Account", "signup", False) == "account_creation"
+    assert adapter.browser_control(gate, "signInSubmitButton", "Sign In", "login", False) is None
+    assert adapter.browser_control(gate, "signInButton", "Sign In", "login", False) == "account_creation"
+    assert adapter.browser_control(posting + "/apply/myInformation", "bottom-navigation-next-button", "Weiter", "next", False) == "draft_write"
+    assert adapter.browser_continuation(posting + "/apply/useMyLastApplication", gate)
+    assert adapter.browser_continuation(posting + "/apply/myInformation", posting + "/apply/useMyLastApplication")

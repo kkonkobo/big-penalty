@@ -451,7 +451,7 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
 # guard and page-reading code that has since been fixed: they no longer pause their host, and the automatic pass retries
 # their engine-caused pauses (ENGINE_PAUSE_CODES) once. Move it forward when a change is expected to clear such outcomes.
 # A run that may have sent the application (submit clicked, uncertain receipt) is never affected.
-ENGINE_RETRY_EPOCH = "2026-11-20T19:39:00+00:00"
+ENGINE_RETRY_EPOCH = "2026-11-20T21:05:00+00:00"
 
 # Pause codes the engine produced on its own (its guard refused a request, it could not read the page or find the apply
 # control): unlike a CAPTCHA, an e-mail or a login, nothing the candidate must do. Posting conflicts are not in this list.

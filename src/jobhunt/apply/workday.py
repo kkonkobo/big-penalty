@@ -23,7 +23,7 @@ _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _HOST = re.compile(rf"{_LABEL}(?:\.{_LABEL})*\.(?:myworkdayjobs|myworkdaysite)\.com\Z")
 _SITE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _LOCALE = re.compile(r"[a-z]{2,3}-[a-z]{2}\Z", re.I)
-_REQ = re.compile(r"(?:^|_)((?:JR|REQ|R)[-_]?\d[A-Za-z0-9-]{0,35})\Z", re.I)
+_REQ = re.compile(r"(?:^|_)((?:JR|REQ|R)[-_]?\d[A-Za-z0-9-]{0,35})\Z|(?:^|_)JOBREQ_(\d{5,12})\Z", re.I)
 _APPLY_STEPS = frozenset({"signin", "autofillwithresume", "applymanually", "usemylastapplication", "myinformation",
                           "myexperience", "applicationquestions", "voluntarydisclosures", "selfidentify", "review", "submit"})
 
@@ -56,6 +56,17 @@ _CUSTOM_QUESTION = re.compile(r"(?:primary|secondary)?questionnaire(?:page[-_])?
 # Workday career sites are a single-page app whose code, fonts and UI strings are served from the data center's static hosts.
 _STATIC_HOST = re.compile(r"wd\d{1,3}\.(?:myworkdaycdn|myworkday)\.com\Z")
 _ENTRY_IDS = frozenset({"adventurebutton", "applybutton", "jobpostingapplybutton"})
+# The tenant renders in the language of its locale path segment (de-DE, es-ES...), whatever the browser asks for.
+_APPLY_LABELS = frozenset({"apply", "postuler", "bewerben", "jetzt bewerben", "solicitar", "aplicar", "candidarsi", "candidatar",
+                           "sollicitar", "solliciteren", "ansok", "ansoeg", "ubiegac sie"})
+_MANUAL_LABELS = frozenset({"apply manually", "postuler manuellement", "manuell bewerben", "manuell bewerben",
+                            "solicitar manualmente", "candidarsi manualmente", "candidatar manualmente"})
+_NEXT_LABELS = frozenset({"next", "continue", "save and continue", "suivant", "continuer", "enregistrer et continuer",
+                          "weiter", "speichern und weiter", "siguiente", "continuar", "guardar y continuar", "avanti",
+                          "salva e continua", "seguinte", "guardar e continuar"})
+_SUBMIT_LABELS = frozenset({"submit", "envoyer", "soumettre", "absenden", "senden", "enviar", "invia", "inviare"})
+_SIGNIN_LABELS = frozenset({"sign in", "se connecter", "anmelden", "iniciar sesion", "accedi", "entrar"})
+_SIGNUP_LABELS = frozenset({"create account", "creer un compte", "konto erstellen", "crear cuenta", "crea account", "criar conta"})
 
 
 def static_asset(url: str) -> bool:
@@ -111,7 +122,7 @@ def _posting(url: str) -> tuple[str, str, str] | None:
     match = _REQ.search(parts[-1])
     if not match:
         return None
-    requisition = match[1]
+    requisition = match[1] or match[2]
     tenant = f"{host}/{namespace}{parts[0].casefold()}"
     if not canonical_identity(tenant, requisition):
         return None
@@ -229,25 +240,30 @@ class WorkdayAdapter:
     @staticmethod
     def _step(url):
         path = urlsplit(url).path.casefold().rstrip('/')
-        return path.rsplit('/', 1)[-1].replace('-', '') if '/apply/' in path else ''
+        step = path.rsplit('/', 1)[-1].replace('-', '') if '/apply/' in path else ''
+        # An unauthenticated visitor of /apply/applyManually is shown the candidate sign-in / create-account page right there.
+        return 'signin' if step == 'applymanually' else step
 
     def browser_control(self, url, automation_id, label, role, final):
         marker, text, step = automation_id.casefold(), _normalized(label), self._step(url)
         if final:
             if (step == 'review' and role == 'submit' and marker in {'bottom-navigation-next-button', 'submitbutton'}
-                    and text in {'submit', 'envoyer', 'soumettre'}):
+                    and text in _SUBMIT_LABELS):
                 return 'final_submit'
-        elif role == 'open_form' and not step:
-            if ((marker == 'applymanually' and text in {'apply manually', 'postuler manuellement'}) or
-                (marker in _ENTRY_IDS and text in {'apply', 'postuler'})):
+        elif role == 'open_form' and step in {'', 'autofillwithresume', 'usemylastapplication'}:
+            if ((marker == 'applymanually' and text in _MANUAL_LABELS) or
+                (not step and marker in _ENTRY_IDS and text in _APPLY_LABELS)):
+                return 'draft_write'
+        elif role == 'open_form' and step == 'signin':
+            if marker == 'signinwithemailbutton':  # reveals the e-mail form (client side only); Apple / Google stay unused
                 return 'draft_write'
         elif role in {'login', 'signup'} and step == 'signin':
-            if ((role == 'login' and marker == 'signinbutton' and text in {'sign in', 'se connecter'}) or
-                (role == 'signup' and marker == 'createaccountbutton' and text in {'create account', 'creer un compte'})):
+            if ((role == 'login' and marker == 'signinbutton' and text in _SIGNIN_LABELS) or
+                (role == 'signup' and marker in {'createaccountbutton', 'createaccountlink'} and text in _SIGNUP_LABELS)):
                 return 'account_creation'
         elif (role == 'next' and step in _APPLY_STEPS - {'review', 'submit', 'signin', 'autofillwithresume', 'usemylastapplication'}
               and marker in {'bottom-navigation-next-button', 'pagefooternextbutton'}
-              and text in {'next', 'continue', 'save and continue', 'suivant', 'continuer', 'enregistrer et continuer'}):
+              and text in _NEXT_LABELS):
             return 'draft_write'
         return None
 
@@ -262,6 +278,10 @@ class WorkdayAdapter:
     def browser_continuation(self, url, previous_url):
         steps = ('signin', 'myinformation', 'myexperience', 'applicationquestions', 'voluntarydisclosures', 'selfidentify', 'review')
         before, after = self._step(previous_url), self._step(url)
+        if before == 'signin' and after in {'autofillwithresume', 'usemylastapplication'}:
+            return True  # the choice page a returning / new candidate meets before the form; "Apply Manually" leaves it
+        if before in {'autofillwithresume', 'usemylastapplication'} and after == 'myinformation':
+            return True
         return before in steps and after in steps and steps.index(after) == steps.index(before) + 1
 
     def browser_native_post(self, source, target, boundary):
