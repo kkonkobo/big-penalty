@@ -717,7 +717,12 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 raise
             result = handoff_result("human", diagnostics=diagnostics)
             note_stop_reason(run_.out_dir, f"{type(exc).__name__}: {exc}")
-        if guard.refused:
+        if guard.refused and getattr(guard, "posting_gone", False):
+            # The posting URL itself now redirects to the site's root: an expired ad, not a pause worth retrying.
+            note_stop_reason(run_.out_dir, "posting URL redirected to the site root (closed)")
+            result = RunResult(status="blocked", message="Offre clôturée", diagnostic_code="job_closed",
+                               dispatch_diagnostics=diagnostics)
+        elif guard.refused:
             diagnostics.receipt_kind = "none"
             diagnostics.receipt_reason = "recipient_refused"
             result = result.model_copy(update={"status": "needs_human", "message": RECIPIENT_REFUSED + " " + SUPERVISED_ONLY,

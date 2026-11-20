@@ -181,3 +181,74 @@ def test_a_link_to_another_site_must_itself_say_apply():
     assert _apply_allowed(link("Postuler", other), probe)
     assert not _apply_allowed(link("Postuler", other, region="related"), probe)
     assert _apply_allowed(link("Continuer", "https://careers.employer.example/jobs/embedded-intern/start"), probe)
+
+
+@pytest.mark.parametrize("h1,title,expected", [
+    ("Data Analyst Intern", "Careers", True),               # clearly another posting
+    ("Ingénieur systèmes embarqués", "Offre", False),       # this posting
+    ("Apply for this job", "Application", False),           # generic application heading
+    ("Postuler à l'offre", "", False),
+    ("Embedded systems", "", False),                        # no role word: unclear -> accepted
+    ("", "Senior Sales Manager", False),                    # no heading: unclear -> accepted
+    ("Welcome to Example Corp", "", False),
+])
+def test_a_landing_is_refused_only_when_it_clearly_names_another_job(h1, title, expected):
+    from jobhunt.apply.entry_llm import names_other_job
+    assert names_other_job(h1, title, "Ingénieur systèmes embarqués", "Example Corp") is expected
+
+
+@pytest.mark.parametrize("source,target,gone", [
+    ("https://jobs.example.test/careers/jobs/12345", "https://jobs.example.test/", True),
+    ("https://jobs.example.test/careers/jobs/12345", "https://jobs.example.test/careers", True),
+    ("https://jobs.example.test/careers/jobs/12345", "https://jobs.example.test/careers/jobs/12345?lang=fr", False),
+    ("https://jobs.example.test/careers/jobs/12345", "https://other.example.test/", False),
+    ("https://jobs.example.test/careers/jobs/12345", "https://jobs.example.test/careers/jobs/777", False),
+    ("https://jobs.example.test/jobs", "https://jobs.example.test/", False),  # not a specific posting
+])
+def test_a_posting_redirected_to_the_site_root_is_gone(source, target, gone):
+    from jobhunt.apply.destination import posting_gone_redirect
+    assert posting_gone_redirect(source, target) is gone
+
+
+async def test_a_posting_that_redirects_to_the_site_root_is_closed_not_retried(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("careers/jobs/100"))
+    server.redirects["/careers/jobs/100"] = "/"
+    server.html["/"] = "<title>Home</title><main><h1>Welcome</h1></main>"
+    result = await run(app, Advisor([StepPlan(page_kind="job_page"), form]))
+    assert result.status == "blocked" and result.message.startswith("Offre clôturée"), result.message
+    assert not server.posts and not server.sent
+
+
+def test_the_smartrecruiters_one_click_form_of_this_posting_is_its_entry():
+    company, publication = "examplecorp", "123e4567-e89b-12d3-a456-426614174000"
+    source = "https://jobs.smartrecruiters.com/ExampleCorp/743999000000001-embedded-intern"
+    probe = Probe(source, "743999000000001", [])
+    probe.alias = company, publication
+    url = f"https://jobs.smartrecruiters.com/oneclick-ui/company/{company}/publication/{publication}"
+    assert probe.landing(url, [], ready=False) == "requisition"
+    other = url.replace("4000", "4999")
+    assert not probe.landing(other, [], ready=False)
+
+
+def modal_page(action):
+    return ('<title>Ingénieur systèmes embarqués</title><main><h1>Ingénieur systèmes embarqués</h1><p>Stage.</p>'
+            '<button onclick="document.getElementById(\'m\').style.display=\'block\'">Candidatez</button></main>'
+            f'<div id="m" style="display:none"><form action="{action}" method="post">'
+            '<label for="name">Prénom</label><input id="name" name="first_name">'
+            '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer ma candidature</button></form></div>')
+
+
+async def test_an_in_page_modal_form_is_the_application_on_the_same_document(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("rejoindre"))
+    server.html["/rejoindre"] = modal_page("/envoi")
+    result = await run(app, Advisor([StepPlan(page_kind="job_page"), form]))
+    assert result.status == "submitted", result.result.diagnostic_code
+    assert [post["path"] for post in server.posts] == ["/envoi"]
+
+
+async def test_an_in_page_modal_form_posting_to_another_host_is_refused(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("rejoindre"))
+    server.html["/rejoindre"] = modal_page(server.url("collect").replace("127.0.0.1", "localhost"))
+    result = await run(app, Advisor([StepPlan(page_kind="job_page"), form]))
+    assert result.status != "submitted"
+    assert not server.posts and not server.sent
