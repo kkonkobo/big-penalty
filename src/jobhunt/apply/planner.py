@@ -206,7 +206,12 @@ class PlanCache:
         settings = getattr(llm, "settings", None)
         if settings is None or float(getattr(settings, "apply_plan_cache_days", 0) or 0) <= 0:
             return None
-        return cls(settings, str(getattr(settings, "apply_planner_model", "")))
+        # Keyed by the provider and model that answer first for this task (Codex CLI, Claude Code or an API model), so a
+        # switch of route or model in the UI never reuses another model's plans.
+        label = getattr(llm, "model_label", None)
+        model = label("apply.planner") if callable(label) else ""
+        configured = str(getattr(settings, "apply_planner_model", ""))
+        return cls(settings, f"{model}|{configured}" if model else configured)
 
     def _path(self, system: str, user_text: str) -> Path:
         key = hashlib.sha256("\x00".join((self.model, system, user_text)).encode("utf-8")).hexdigest()

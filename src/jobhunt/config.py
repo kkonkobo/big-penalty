@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -51,6 +52,21 @@ class Settings(BaseModel):
     # One JSON line per LLM call (tokens, model, call site, estimated cost) in <data_dir>/logs/llm-usage.jsonl
     # (JOBHUNT_LLM_USAGE_LOG=0 disables it). Counts only, never prompt text: `jobhunt llm-usage` sums it up.
     llm_usage_log: bool = True
+    # Subscription CLIs (src/jobhunt/llm_cli.py). Each task runs "cli" (Codex CLI first, then Claude Code, then the API as a
+    # backup) or "api"; the per-task choice is made in the UI (page "IA", <data_dir>/llm-routing.json). JOBHUNT_LLM_ROUTE is
+    # the default for tasks never set there. JOBHUNT_LLM_CLI=0 removes the CLIs entirely (API only, e.g. on a machine
+    # without them).
+    llm_cli_enabled: bool = True
+    llm_route_default: str = "cli"
+    codex_cli_model: str = "gpt-6.2-sol"
+    codex_cli_effort: str = "low"  # forms, scoring, search planning, verifications (benchmarked: low = medium)
+    codex_cli_cv_effort: str = "medium"  # CV import, tailoring, cover letters
+    codex_cli_bin: str | None = None  # None = `codex` on PATH, else the ChatGPT app's bundled CLI
+    claude_cli_bin: str | None = None  # None = `claude` on PATH
+    # Optional dedicated Codex home (its own `codex login`): nothing at all is written to ~/.codex then.
+    codex_home: Path | None = None
+    cli_max_parallel: int = 3  # concurrent CLI processes per provider (Codex fails transiently above ~10)
+    cli_timeout_s: float = 120.0  # one CLI call; the API backup still fits in llm_deadline_s
     # Milestone 2b: apply on the company's own ATS. apply_auto is the master switch of AUTOMATIC sending (off by default).
     apply_auto: bool = False  # JOBHUNT_APPLY_AUTO
     apply_daily: bool = False  # JOBHUNT_APPLY_DAILY: the daily run prepares CVs (and sends, if apply_auto) after the search
@@ -136,6 +152,18 @@ def get_settings() -> Settings:
         cv_allow_failover=env("JOBHUNT_CV_ALLOW_FAILOVER", "1").strip().lower() not in ("0", "false", "no", "off"),
         llm_deadline_s=float(env("JOBHUNT_LLM_DEADLINE_S") or 180),
         llm_usage_log=env("JOBHUNT_LLM_USAGE_LOG", "1").strip().lower() not in ("0", "false", "no", "off"),
+        # Off by default on Windows: the CLIs there are .cmd shims and long prompts through cmd.exe arguments are untested.
+        llm_cli_enabled=(env("JOBHUNT_LLM_CLI") or ("0" if sys.platform == "win32" else "1")).strip().lower()
+        not in ("0", "false", "no", "off"),
+        llm_route_default="api" if (env("JOBHUNT_LLM_ROUTE") or "cli").strip().lower() == "api" else "cli",
+        codex_cli_model=env("JOBHUNT_CODEX_CLI_MODEL") or "gpt-6.2-sol",
+        codex_cli_effort=env("JOBHUNT_CODEX_CLI_EFFORT") or "low",
+        codex_cli_cv_effort=env("JOBHUNT_CODEX_CLI_CV_EFFORT") or "medium",
+        codex_cli_bin=env("JOBHUNT_CODEX_CLI_BIN") or None,
+        claude_cli_bin=env("JOBHUNT_CLAUDE_CLI_BIN") or None,
+        codex_home=Path(env("JOBHUNT_CODEX_HOME")) if env("JOBHUNT_CODEX_HOME") else None,
+        cli_max_parallel=int(env("JOBHUNT_CLI_MAX_PARALLEL") or 3),
+        cli_timeout_s=float(env("JOBHUNT_CLI_TIMEOUT_S") or 120),
         apply_auto=env("JOBHUNT_APPLY_AUTO", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_daily=env("JOBHUNT_APPLY_DAILY", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_auto_min_score=float(env("JOBHUNT_APPLY_AUTO_MIN_SCORE") or 60),

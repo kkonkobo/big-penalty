@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from jobhunt.config import get_settings
 from jobhunt.llm import (USAGE_FILE, AnthropicProvider, LLMClient, OpenAIProvider, Plan, PlannedQuery, estimate_cost, llm_site,
                          read_usage, record_usage, summarize_usage)
@@ -75,7 +77,8 @@ async def test_openai_cached_tokens_are_not_counted_as_uncached_input():
         await provider.structured(Plan, system_text="s", user_text="u")
     [row] = usage_rows()
     assert (row["provider"], row["input"], row["cache_read"], row["output"]) == ("openai", 952, 2048, 200)
-    assert row["cost_usd"] is None  # no price table for OpenAI models: tokens only
+    # gpt-6-luna list prices: uncached input, output and cache reads priced separately.
+    assert row["cost_usd"] == pytest.approx((952 * 0.10 + 200 * 0.50 + 2048 * 0.01) / 1e6, abs=1e-6)
 
 
 def test_usage_log_can_be_disabled(monkeypatch):

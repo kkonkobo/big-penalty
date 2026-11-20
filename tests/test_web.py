@@ -274,3 +274,20 @@ class TestOriginGuard:
         assert self.post(client, {"Host": "mac.lan:8765", "Origin": "http://mac.lan:8765"}).status_code == 303
         assert self.post(client, {"Host": "other.example.test", "Sec-Fetch-Site": "same-origin"}).status_code == 303
         assert self.post(client, {"Host": "mac.lan:8765", "Origin": "http://evil.example.test"}).status_code == 403
+
+
+def test_ai_page_switches_routes(client):
+    from jobhunt.config import get_settings
+    from jobhunt.llm_routing import load_routing
+
+    html = client.get("/ai").text
+    assert "Remplissage des formulaires" in html and "Tout en API" in html
+    r = client.post("/ai/route", data={"task": "apply.planner", "route": "api"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert load_routing(get_settings()).route("apply.planner", "cli") == "api"
+    client.post("/ai/route", data={"task": "all", "route": "cli"})
+    assert load_routing(get_settings()).route("apply.planner", "api") == "cli"
+    client.post("/ai/claude-fallback", data={"enabled": "false"})
+    assert load_routing(get_settings()).claude_cli_fallback is False
+    assert "Tâche inconnue" in client.post("/ai/route", data={"task": "nope", "route": "cli"}).text
+    assert client.post("/ai/cooldown/clear", data={"provider": "codex-cli"}).status_code == 200

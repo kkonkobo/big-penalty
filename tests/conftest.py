@@ -50,6 +50,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "openai_api_key", None)
     monkeypatch.setattr(s, "firecrawl_api_key", None)
     monkeypatch.setattr(s, "linkedin_detail_cmd", "off")  # never spawn the paid provider from tests
+    monkeypatch.setattr(s, "llm_cli_enabled", False)  # never spawn the developer's signed-in Codex / Claude Code CLIs
     monkeypatch.setattr(s, "data_dir", tmp_path / "data")
     # The developer's .env may carry personal auto-apply limits (age, thresholds, caps, switches): tests always start
     # from the documented defaults and change what they need themselves.

@@ -18,6 +18,7 @@ import time
 from jobhunt.config import get_settings
 from jobhunt.dedupe import MergedJob, strip_accents
 from jobhunt.llm import AnthropicProvider, FailoverLLM, LLMError, OpenAIProvider
+from jobhunt.llm_cli import ClaudeCLIProvider, CodexCLIProvider
 from jobhunt.models import JobPosting, Profile, SearchQuery
 from jobhunt.sources import registry
 from jobhunt.sources.base import SourceContext
@@ -37,6 +38,8 @@ PRICES = {
     "claude-sonnet-5-5": (2.0, 10.0, 0.10, 2.50),
     "gpt-6.1-sol": (2.0, 10.0, 0.10, 2.50),
     "gpt-6-luna": (0.10, 0.50, 0.01, 0.125),
+    # Third-party listings report the same prices as gpt-6.1-sol (not confirmed on OpenAI's pricing page).
+    "gpt-6.2-sol": (2.0, 10.0, 0.10, 2.50),
 }
 CANDIDATES = [
     ("opus-low", "anthropic", "claude-opus-5-5", "low"),
@@ -46,7 +49,18 @@ CANDIDATES = [
     ("sonnet-medium", "anthropic", "claude-sonnet-5-5", "medium"),
     ("sol-low", "openai", "gpt-6.1-sol", "low"),
     ("luna-low", "openai", "gpt-6-luna", "low"),
+    # The same models through subscription CLIs (no API spend; cost columns show the API-equivalent).
+    ("opus-medium-cli", "claude-cli", "claude-opus-5-5", "medium"),
+    ("sonnet-low-cli", "claude-cli", "claude-sonnet-5-5", "low"),
+    ("sol-low-cli", "codex-cli", "gpt-6.1-sol", "low"),
+    ("sol62-low-cli", "codex-cli", "gpt-6.2-sol", "low"),
+    ("sol62-medium-cli", "codex-cli", "gpt-6.2-sol", "medium"),
 ]
+PROVIDER_CLASSES = {"anthropic": AnthropicProvider, "openai": OpenAIProvider, "claude-cli": ClaudeCLIProvider,
+                    "codex-cli": CodexCLIProvider}
+CLI_PROVIDERS = {"claude-cli", "codex-cli"}
+# API config -> the same model and effort through its CLI.
+API_CLI_PAIRS = [("opus-medium", "opus-medium-cli"), ("sonnet-low", "sonnet-low-cli"), ("sol-low", "sol-low-cli")]
 CHECKLISTS = [
     {"embarqué": ["systemes embarques", "embedded"], "firmware": ["firmware"],
      "électronique": ["electronique", "electronics"], "automatisme": ["automatisme", "automation"],
@@ -248,11 +262,14 @@ async def benchmark(budget: float, selected: set[str] | None = None) -> None:
         if selected and candidate not in selected:
             continue
         overrides = {"planner_model": model, "scoring_model": model,
-                     "planner_effort": effort, "scoring_effort": effort} if provider_name == "anthropic" else {
+                     "planner_effort": effort, "scoring_effort": effort} if provider_name != "openai" else {
                          "openai_planner_model": model, "openai_scoring_model": model,
                          "openai_planner_effort": effort, "openai_scoring_effort": effort}
-        provider = (AnthropicProvider if provider_name == "anthropic" else OpenAIProvider)(
-            settings.model_copy(update=overrides), max_attempts=1)
+        if provider_name in CLI_PROVIDERS:  # never write the benchmark's usage into the real data/ folder
+            overrides["llm_usage_log"] = False
+        if provider_name == "codex-cli":  # the Codex provider takes its model and effort from these fields
+            overrides.update(codex_cli_model=model, codex_cli_effort=effort, codex_cli_cv_effort=effort)
+        provider = PROVIDER_CLASSES[provider_name](settings.model_copy(update=overrides), max_attempts=1)
         if not provider.enabled:
             raise ValueError(f"Missing credential for {provider_name}")
         try:
@@ -265,7 +282,7 @@ async def benchmark(budget: float, selected: set[str] | None = None) -> None:
                     if any(call["id"] == identity for call in data["calls"]):
                         continue
                     spent = sum(call.get("budget_charge_usd", call["cost_usd"]) for call in data["calls"])
-                    reserve = 0.25 if "opus" in model else 0.10
+                    reserve = 0.0 if provider_name in CLI_PROVIDERS else 0.25 if "opus" in model else 0.10
                     if spent + reserve > min(budget, 5.50):
                         raise RuntimeError(f"Budget stop at ${spent:.4f}; next call reserved ${reserve:.2f}")
                     before = dict(provider.usage)
@@ -288,7 +305,11 @@ async def benchmark(budget: float, selected: set[str] | None = None) -> None:
                         record["error"] = type(exc).__name__
                     record["latency_s"] = time.perf_counter() - started
                     record["usage"] = usage_delta(before, provider.usage)
-                    record["cost_usd"] = cost(model, provider_name, record["usage"])
+                    # A CLI call is billed to the subscription: cost_usd stays 0, api_equiv_usd is for comparison.
+                    equivalent = cost(model, provider_name, record["usage"])
+                    record["cost_usd"] = 0.0 if provider_name in CLI_PROVIDERS else equivalent
+                    if provider_name in CLI_PROVIDERS:
+                        record["api_equiv_usd"] = equivalent
                     record["budget_charge_usd"] = max(record["cost_usd"], reserve if "error" in record else 0)
                     data["calls"].append(record)
                     save(RESULTS, data)
@@ -296,7 +317,8 @@ async def benchmark(budget: float, selected: set[str] | None = None) -> None:
                           f"{record['latency_s']:.2f}s ${record['cost_usd']:.5f}; "
                           f"total ${sum(call['cost_usd'] for call in data['calls']):.4f}", flush=True)
         finally:
-            await provider.client.close()
+            if provider.client is not None:
+                await provider.client.close()
     report()
 
 
@@ -349,7 +371,7 @@ def report() -> None:
         metrics = score_metrics(score_calls, labels)
         latencies = [call["latency_s"] for call in score_calls]
         count = sum(len(call["job_ids"]) for call in score_calls)
-        cost_100 = sum(call["cost_usd"] for call in score_calls) * 100 / count
+        cost_100 = sum(call.get("api_equiv_usd", call["cost_usd"]) for call in score_calls) * 100 / count
         failures = sum("error" in call for call in score_calls)
         summaries[name] = {**metrics, "cost_100": cost_100}
         accuracy = f"{metrics['accuracy']:.1%}" if metrics['accuracy'] is not None else "n/a"
@@ -360,6 +382,18 @@ def report() -> None:
     lines += ["", "Balanced accuracy (mean recall across present classes; only four positive pairs): " +
               "; ".join(f"{name} {summary['balanced_accuracy']:.1%}" for name, summary in summaries.items()
                         if summary['balanced_accuracy'] is not None) + "."]
+    pairs = [(api, cli) for api, cli in API_CLI_PAIRS if api in summaries and cli in summaries]
+    if pairs:
+        lines += ["", "## API vs CLI (same model and effort)", "",
+                  "CLI rows run through a subscription-signed `claude -p` / `codex exec` (tools, settings and plugins off; "
+                  "API keys removed from the CLI environment). Their cost is the API-equivalent, not money spent.", "",
+                  "| Model | Via | Accuracy | Balanced accuracy | Bad ≥70 | p50 batch (s) |", "|---|---|---:|---:|---:|---:|"]
+        for api, cli in pairs:
+            for name in (api, cli):
+                summary = summaries[name]
+                latencies = [call["latency_s"] for call in data["calls"] if call["candidate"] == name and call["task"] == "score"]
+                lines.append(f"| {name} | {'CLI' if name == cli else 'API'} | {summary['accuracy']:.1%} | "
+                             f"{summary['balanced_accuracy']:.1%} | {summary['bad_high']} | {statistics.median(latencies):.2f} |")
     lines += ["", "## PLAN", "", "| Config | Profile | Queries | Checklist | FR declared / lexical | Invalid ROME codes | Seconds | Cost |",
               "|---|---|---:|---:|---:|---:|---:|---:|"]
     profile_indices = {entry["id"]: index for index, entry in enumerate(load(FIXTURES / "profiles.json"))}
@@ -368,15 +402,16 @@ def report() -> None:
             continue
         metrics = plan_metrics(call["output"], profile_indices[call["profile"]]) if "output" in call else None
         if not metrics:
-            lines.append(f"| {call['candidate']} | {call['profile']} | ERROR | — | — | — | {call['latency_s']:.2f} | ${call['cost_usd']:.5f} |")
+            lines.append(f"| {call['candidate']} | {call['profile']} | ERROR | — | — | — | {call['latency_s']:.2f} | ${call.get('api_equiv_usd', call['cost_usd']):.5f} |")
             continue
         lines.append(f"| {call['candidate']} | {call['profile']} | {metrics['queries']} | "
                      f"{metrics['coverage_rate']:.0%} | {metrics['french_declared']:.0%} / {metrics['french_lexical']:.0%} | "
-                     f"{metrics['invalid_rome_codes']} | {call['latency_s']:.2f} | ${call['cost_usd']:.5f} |")
+                     f"{metrics['invalid_rome_codes']} | {call['latency_s']:.2f} | ${call.get('api_equiv_usd', call['cost_usd']):.5f} |")
     lines += ["", "## Typical run projection", "", "One profile, one 25-query plan, 300 scored jobs; arithmetic mean across the three profiles.", "",
               "| Config | Plan | 300 jobs | Total USD |", "|---|---:|---:|---:|"]
     for name, summary in summaries.items():
-        plans = [call["cost_usd"] for call in data["calls"] if call["candidate"] == name and call["task"] == "plan"]
+        plans = [call.get("api_equiv_usd", call["cost_usd"]) for call in data["calls"]
+                 if call["candidate"] == name and call["task"] == "plan"]
         plan_cost = statistics.mean(plans) if plans else 0
         lines.append(f"| {name} | ${plan_cost:.4f} | ${summary['cost_100'] * 3:.4f} | ${plan_cost + summary['cost_100'] * 3:.4f} |")
     lines += ["", "## Recommendation and chosen defaults", "",

@@ -469,6 +469,76 @@ def schedule_run():
     return _schedule_action(sched.run_now, "Recherche lancée (~25 min par profil).")
 
 
+# ------------------------------------------------------------ IA (CLI d'abonnement / API)
+def _ai_usage(settings, days: int = 7) -> list[dict[str, Any]]:
+    """Calls, tokens, money spent and API-equivalent per provider over the last `days` days (from llm-usage.jsonl)."""
+    from datetime import UTC, datetime, timedelta
+
+    from jobhunt.llm import USAGE_FILE, read_usage
+
+    rows = read_usage(Path(settings.data_dir) / "logs" / USAGE_FILE, since=datetime.now(UTC) - timedelta(days=days))
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        g = groups.setdefault(row.get("provider") or "?", {"provider": row.get("provider") or "?", "calls": 0,
+                                                         "tokens": 0, "cost_usd": 0.0, "api_equiv_usd": 0.0})
+        g["calls"] += 1
+        g["tokens"] += sum(int(row.get(k) or 0) for k in ("input", "output", "cache_read", "cache_write"))
+        g["cost_usd"] += float(row.get("cost_usd") or 0)
+        g["api_equiv_usd"] += float(row.get("api_equiv_usd") or 0)
+    return sorted(groups.values(), key=lambda g: -g["calls"])
+
+
+@app.get("/ai", response_class=HTMLResponse)
+def ai_page(request: Request, notice: str | None = None, error: str | None = None):
+    from jobhunt.llm_cli import provider_status, route_overview
+    from jobhunt.llm_routing import load_routing
+
+    settings = get_settings()
+    return render(request, "ai.html", rows=route_overview(settings), providers=provider_status(settings),
+                  routing=load_routing(settings), usage=_ai_usage(settings), settings=settings, notice=notice, error=error)
+
+
+def _ai_redirect(notice: str | None = None, error: str | None = None) -> RedirectResponse:
+    q = f"?notice={quote(notice)}" if notice else f"?error={quote(error or '')}"
+    return RedirectResponse("/ai" + q, status_code=303)
+
+
+@app.post("/ai/route")
+def ai_route(task: str = Form(...), route: str = Form(...)):
+    from jobhunt.llm_routing import TASKS, set_route
+
+    if route not in ("cli", "api"):
+        return _ai_redirect(error="Choix inconnu.")
+    if task == "all":
+        set_route(get_settings(), None, route)
+        return _ai_redirect(notice="Toutes les tâches passent " + ("par les CLI (API en secours)." if route == "cli"
+                                                                   else "par l'API."))
+    try:
+        set_route(get_settings(), task, route)
+    except ValueError as e:
+        return _ai_redirect(error=str(e))
+    label = next(name for tid, name, _ in TASKS if tid == task)
+    return _ai_redirect(notice=f"{label} : " + ("CLI d'abord, API en secours." if route == "cli" else "API uniquement."))
+
+
+@app.post("/ai/claude-fallback")
+def ai_claude_fallback(enabled: bool = Form(...)):
+    from jobhunt.llm_routing import set_claude_fallback
+
+    set_claude_fallback(get_settings(), enabled)
+    return _ai_redirect(notice="Claude Code " + ("utilisé" if enabled else "n'est plus utilisé") + " entre Codex et l'API.")
+
+
+@app.post("/ai/cooldown/clear")
+def ai_cooldown_clear(provider: str = Form(...)):
+    from jobhunt.llm_cli import CLI_PROVIDERS, set_cooldown
+
+    if provider not in {factory.name for factory in CLI_PROVIDERS}:
+        return _ai_redirect(error="Fournisseur inconnu.")
+    set_cooldown(get_settings(), provider, None)
+    return _ai_redirect(notice="Limite levée : le prochain appel réessaiera ce CLI.")
+
+
 # ------------------------------------------------------------ CV sur mesure (candidatures)
 # job_id -> {"running", "error", "app_id", "task"}; in-memory, one generation per job at a time.
 GENERATING: dict[int, dict[str, Any]] = {}
