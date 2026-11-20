@@ -9,7 +9,10 @@ Ladder (stop at first confident hit), see `_resolve_one`:
   2. classify the URL / page into a stable ATS id (see `classify_ats`)
   3. probe public ATS JSON endpoints; guessed tenants require employer evidence
   4. company careers-page discovery (embedded ATS links / matching anchors)              -> <= 0.8
-  5. web search (Firecrawl if key, else DuckDuckGo HTML) + page validation               -> <= 0.75
+  5. web search (Serper, else Firecrawl, else DuckDuckGo HTML) + page validation         -> <= 0.75
+     Paid search is the costly step: results are cached on disk (`SearchCache`), each posting may spend at most
+     `search_paid_per_job` paid queries and each run `search_paid_budget_per_run` (`SearchBudget`); the daily run only
+     searches for jobs whose score makes them worth applying to (`search=False` before scoring).
 Below MIN_CONFIDENCE origin_url stays None (best guess only goes to the log).
 """
 
@@ -46,6 +49,10 @@ MIN_CONFIDENCE = 0.6
 FIRECRAWL_GAP_S = 1.5       # minimum spacing between two Firecrawl searches
 FIRECRAWL_RETRIES = 3       # on a rate-limit answer
 FIRECRAWL_BACKOFF_S = 20.0  # x attempt number
+SERPER_URL = "https://google.serper.dev/search"
+SEARCH_EXCLUDES = " -site:linkedin.com -site:indeed.com -site:glassdoor.com"
+SEARCH_EMPTY_TTL = timedelta(days=3)
+PAID_CREDITS = {"serper": 1, "firecrawl": 2}  # credits one query costs (Serper: 1 per 10 results, Firecrawl: 2 per 10)
 CONCURRENCY = 4
 HIT_TTL = timedelta(days=30)
 MISS_TTL = timedelta(days=3)
@@ -1400,6 +1407,101 @@ class DiskCache:
             pass
 
 
+class SearchCache:
+    """Answers of the PAID search providers, per query, on disk: a re-run (new code, `use_cache=False`, a later run) re-checks
+    the same results instead of buying them again. Empty answers are kept `SEARCH_EMPTY_TTL` only."""
+
+    def __init__(self, root: Path, days: float):
+        self.root = root
+        self.ttl = timedelta(days=days)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+    def _path(self, query: str) -> Path:
+        return self.root / (hashlib.sha1(("s1|" + query).encode()).hexdigest()[:24] + ".json")
+
+    def get(self, query: str) -> list[SearchHit] | None:
+        if self.ttl <= timedelta(0):
+            return None
+        try:
+            d = json.loads(self._path(query).read_text())
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(d["ts"])
+            hits = [SearchHit(h["url"], h.get("title") or "", h.get("snippet") or "", d.get("provider") or "")
+                    for h in d.get("hits") or []]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return hits if age <= (self.ttl if hits else min(self.ttl, SEARCH_EMPTY_TTL)) else None
+
+    def put(self, query: str, provider: str, hits: list[SearchHit]) -> None:
+        data = {"ts": datetime.now(timezone.utc).isoformat(), "provider": provider,
+                "hits": [{"url": h.url, "title": h.title, "snippet": h.snippet} for h in hits]}
+        path = self._path(query)
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(data, ensure_ascii=False))
+            tmp.replace(path)
+        except OSError as e:
+            log.debug("search cache write failed: %s", e)
+
+
+class SearchBudget:
+    """Paid web searches of ONE run (shared by every resolver of the run): a hard cap, counts per provider and one JSON
+    line per paid call in <data_dir>/logs/search-usage.jsonl (provider, results, credits; never the query)."""
+
+    def __init__(self, limit: int, usage_log: Path | None = None):
+        self.limit = limit
+        self.usage_log = usage_log
+        self.calls: Counter[str] = Counter()
+        self.cached = 0  # queries answered by SearchCache
+        self.over_budget = 0  # paid queries refused because the run budget was spent
+        self.over_job_cap = 0  # paid queries refused because the posting already spent its share
+
+    @classmethod
+    def for_settings(cls, settings) -> "SearchBudget":
+        return cls(settings.search_paid_budget_per_run, settings.data_dir / "logs" / "search-usage.jsonl")
+
+    @property
+    def paid(self) -> int:
+        return sum(self.calls[p] for p in PAID_CREDITS)
+
+    @property
+    def credits(self) -> int:
+        return sum(self.calls[p] * c for p, c in PAID_CREDITS.items())
+
+    def available(self) -> bool:
+        return self.paid < self.limit
+
+    def record(self, provider: str, results: int) -> None:
+        self.calls[provider] += 1
+        if self.usage_log is None:
+            return
+        try:
+            self.usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with self.usage_log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "provider": provider, "results": results,
+                                    "credits": PAID_CREDITS.get(provider, 0)}) + "\n")
+        except OSError as e:
+            log.debug("search usage log failed: %s", e)
+
+    def summary(self) -> dict[str, int]:
+        return {"paid": self.paid, "credits": self.credits, **{p: self.calls[p] for p in PAID_CREDITS},
+                "duckduckgo": self.calls["duckduckgo"], "cached": self.cached, "over_budget": self.over_budget,
+                "over_job_cap": self.over_job_cap}
+
+    def line(self) -> str:
+        d = self.summary()
+        return (f"recherche web : {d['paid']} requête(s) payante(s) (serper {d['serper']}, firecrawl {d['firecrawl']}, "
+                f"~{d['credits']} crédits), {d['cached']} depuis le cache, {d['duckduckgo']} DuckDuckGo"
+                + (f", {d['over_budget']} refusée(s) budget du lancement ({self.limit}) atteint" if d["over_budget"] else "")
+                + (f", {d['over_job_cap']} au-delà du plafond par offre" if d["over_job_cap"] else ""))
+
+
+# Paid queries the posting being resolved may still spend (a one-item list shared with the tasks it spawns); None = no cap.
+_PAID_LEFT: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar("origin_paid_left", default=None)
+
+
 # --------------------------------------------------------------------------------------------
 # Diagnostics (why did a posting get no origin?)
 # --------------------------------------------------------------------------------------------
@@ -1534,9 +1636,13 @@ def _retry_after(value: str) -> float:
 
 
 class Resolver:
-    def __init__(self, ctx: SourceContext, *, cache: bool = True):
+    def __init__(self, ctx: SourceContext, *, cache: bool = True, search: bool = True, budget: SearchBudget | None = None):
         self.ctx = ctx
         self.cache = DiskCache(ctx.settings.cache_dir / "origin") if cache else None
+        # The search cache stays on with cache=False: re-running the ladder must not buy the same searches again.
+        self.search_cache = SearchCache(ctx.settings.cache_dir / "search", ctx.settings.search_cache_days)
+        self.search_enabled = search
+        self.budget = budget or SearchBudget.for_settings(ctx.settings)
         self.pacer = Pacer(0.5)
         self.client = ctx.http(timeout=20, follow_redirects=False, event_hooks={"request": [require_http_request]})
         self._host_locks: dict[str, asyncio.Lock] = {}
@@ -2069,57 +2175,49 @@ class Resolver:
         return [h.url for h in await self._search_hits(query)]
 
     async def _search_hits(self, query: str) -> list[SearchHit]:
-        """Firecrawl first (key configured), DuckDuckGo when Firecrawl errors OR comes back empty. The trace says which
-        provider answered."""
-        key = self.ctx.settings.firecrawl_api_key
+        """Cached paid answer, else ONE paid provider (Serper, Firecrawl when Serper is absent or errors) within the
+        posting's share and the run budget, else DuckDuckGo. An empty paid answer falls through to DuckDuckGo without
+        paying a second provider. The trace says which provider answered."""
         failures: list[str] = []
         answered = False
-        if key:
+        cached = self.search_cache.get(query)
+        if cached is not None:
+            self.budget.cached += 1
+            tlog(f"  recherche [cache] {query[:90]!r} -> {len(cached)} résultat(s)")
+            if cached:
+                return cached
+            answered = True
+        providers = [(name, fn) for name, key, fn in (("serper", self.ctx.settings.serper_api_key, self._serper),
+                                                      ("firecrawl", self.ctx.settings.firecrawl_api_key, self._firecrawl))
+                     if key] if cached is None else []
+        left = _PAID_LEFT.get()
+        if providers and left is not None and left[0] <= 0:
+            self.budget.over_job_cap += 1
+            tlog("  recherche payante : part de l'offre épuisée, DuckDuckGo seulement")
+            providers = []
+        elif providers and not self.budget.available():
+            self.budget.over_budget += 1
+            failures.append(f"budget de recherche payante épuisé ({self.budget.limit} requêtes)")
+            tlog(f"  recherche payante : budget du lancement épuisé ({self.budget.limit}), DuckDuckGo seulement")
+            providers = []
+        for name, fn in providers:
             try:
-                from firecrawl import Firecrawl
-
-                def run():
-                    res = Firecrawl(api_key=key).search(
-                        query + " -site:linkedin.com -site:indeed.com -site:glassdoor.com",
-                        limit=8, country="FR", exclude_domains=["linkedin.com", "indeed.com", "indeed.fr", "glassdoor.com", "glassdoor.fr"],
-                    )
-                    web = getattr(res, "web", None) or []
-                    out = []
-                    for w in web:
-                        get = (lambda k, w=w: w.get(k) if isinstance(w, dict) else getattr(w, k, None))
-                        if get("url"):
-                            out.append(SearchHit(get("url"), get("title") or "", get("description") or get("snippet") or "", "firecrawl"))
-                    return out
-
-                # One Firecrawl search at a time, spaced out, and a rate-limit answer is waited out instead of giving up:
-                # a burst of parallel postings used to exhaust the per-minute quota and lose the whole search step.
-                hits = None
-                for attempt in range(FIRECRAWL_RETRIES + 1):
-                    async with self.fc_lock:
-                        wait = FIRECRAWL_GAP_S - (time.monotonic() - self.fc_last)
-                        if wait > 0:
-                            await asyncio.sleep(wait)
-                        try:
-                            hits = await asyncio.to_thread(run)
-                        except Exception as e:  # noqa: BLE001
-                            if "ratelimit" not in type(e).__name__.lower() or attempt == FIRECRAWL_RETRIES:
-                                raise
-                            tlog(f"  recherche [firecrawl] limite de débit : nouvelle tentative dans {FIRECRAWL_BACKOFF_S * (attempt + 1):.0f} s")
-                            self.fc_last = time.monotonic()
-                            await asyncio.sleep(FIRECRAWL_BACKOFF_S * (attempt + 1))
-                            continue
-                        finally:
-                            self.fc_last = time.monotonic()
-                    break
-                answered = True
-                tlog(f"  recherche [firecrawl] {query[:90]!r} -> {len(hits)} résultat(s)")
-                if hits:
-                    return hits
-                tlog("    firecrawl sans résultat : repli sur DuckDuckGo")
+                hits = await fn(query)
             except Exception as e:  # noqa: BLE001
-                failures.append(f"firecrawl : {type(e).__name__}")
-                tlog(f"  recherche [firecrawl] erreur {type(e).__name__} : repli sur DuckDuckGo")
-                log.info("firecrawl search failed (%s); falling back to DuckDuckGo", e)
+                failures.append(f"{name} : {type(e).__name__}")
+                tlog(f"  recherche [{name}] erreur {type(e).__name__} : repli sur le fournisseur suivant")
+                log.info("%s search failed (%s); falling back", name, e)
+                continue
+            answered = True
+            if left is not None:
+                left[0] -= 1
+            self.budget.record(name, len(hits))
+            self.search_cache.put(query, name, hits)
+            tlog(f"  recherche [{name}] {query[:90]!r} -> {len(hits)} résultat(s)")
+            if hits:
+                return hits
+            tlog(f"    {name} sans résultat : repli sur DuckDuckGo")
+            break
         html = None
         if self.ddg_blocked:
             failures.append("duckduckgo bloqué pour ce lancement")
@@ -2155,11 +2253,58 @@ class Resolver:
                 if href.startswith("http"):
                     sn = None if blk.tag == "a" else blk.css_first(".result__snippet")
                     out.append(SearchHit(href, (a.text() or "").strip(), (sn.text() or "").strip() if sn else "", "duckduckgo"))
+            self.budget.calls["duckduckgo"] += 1
             tlog(f"  recherche [duckduckgo] {query[:90]!r} -> {len(out)} résultat(s)")
         if not answered and failures:
             note("search_failed", "; ".join(failures))
             tlog("  recherche en échec : " + "; ".join(failures))
         return out
+
+    async def _serper(self, query: str) -> list[SearchHit]:
+        r = await self.client.post(SERPER_URL, json={"q": query + SEARCH_EXCLUDES, "gl": "fr", "hl": "fr", "num": 10},
+                                   headers={"X-API-KEY": self.ctx.settings.serper_api_key or "", "Content-Type": "application/json"})
+        r.raise_for_status()
+        out = []
+        for o in (r.json() or {}).get("organic") or []:
+            if isinstance(o, dict) and o.get("link"):
+                out.append(SearchHit(o["link"], o.get("title") or "", o.get("snippet") or "", "serper"))
+        return out[:8]
+
+    async def _firecrawl(self, query: str) -> list[SearchHit]:
+        key = self.ctx.settings.firecrawl_api_key
+        from firecrawl import Firecrawl
+
+        def run():
+            res = Firecrawl(api_key=key).search(
+                query + SEARCH_EXCLUDES,
+                limit=8, country="FR", exclude_domains=["linkedin.com", "indeed.com", "indeed.fr", "glassdoor.com", "glassdoor.fr"],
+            )
+            web = getattr(res, "web", None) or []
+            out = []
+            for w in web:
+                get = (lambda k, w=w: w.get(k) if isinstance(w, dict) else getattr(w, k, None))
+                if get("url"):
+                    out.append(SearchHit(get("url"), get("title") or "", get("description") or get("snippet") or "", "firecrawl"))
+            return out
+
+        # One Firecrawl search at a time, spaced out, and a rate-limit answer is waited out instead of giving up:
+        # a burst of parallel postings used to exhaust the per-minute quota and lose the whole search step.
+        for attempt in range(FIRECRAWL_RETRIES + 1):
+            async with self.fc_lock:
+                wait = FIRECRAWL_GAP_S - (time.monotonic() - self.fc_last)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                try:
+                    return await asyncio.to_thread(run)
+                except Exception as e:  # noqa: BLE001
+                    if "ratelimit" not in type(e).__name__.lower() or attempt == FIRECRAWL_RETRIES:
+                        raise
+                    tlog(f"  recherche [firecrawl] limite de débit : nouvelle tentative dans {FIRECRAWL_BACKOFF_S * (attempt + 1):.0f} s")
+                    self.fc_last = time.monotonic()
+                    await asyncio.sleep(FIRECRAWL_BACKOFF_S * (attempt + 1))
+                finally:
+                    self.fc_last = time.monotonic()
+        return []
 
     async def _ddg_via_browser(self, url: str) -> str | None:
         if self.ctx.browser is None or not is_http_url(url):
@@ -2472,6 +2617,8 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
     trace = Trace()
     token = _TRACE.set(trace)
     request_token = _REQUEST_POSTING.set(p)
+    paid_token = _PAID_LEFT.set([max(0, r.ctx.settings.search_paid_per_job)])
+    search_deferred = False
     url = ats = None
     conf, extra, via = 0.0, None, ""
     lead = ({"url": clean_url(p.apply_url), "state": "unverified", "reason": "linkedin_offsite"}
@@ -2529,7 +2676,10 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
                 take(m.cand.url, m.cand.ats, m.conf, m.cand, m.via)
             elif m:
                 below(m)
-        if url is None and (extra is None or lead):  # step 5
+        if url is None and (extra is None or lead) and not r.search_enabled:  # step 5 waits for the score
+            search_deferred = True
+            tlog("étape 5 (recherche web) : reportée (seulement pour les offres au score suffisant)")
+        elif url is None and (extra is None or lead):  # step 5
             m = await r.web_search(p)
             tlog("étape 5 (recherche web) : " + (f"{_host(m.cand.url)} {m.conf:.2f}" if m else "rien"))
             if m and m.conf >= MIN_CONFIDENCE:
@@ -2553,6 +2703,7 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
     finally:
         _TRACE.reset(token)
         _REQUEST_POSTING.reset(request_token)
+        _PAID_LEFT.reset(paid_token)
     log.info("origin %s -> %s [%s %s %.2f]", p.url, url, ats, via, conf)
     out = _apply(p, url, ats, conf, extra)
     if not out.origin_resolution:
@@ -2562,7 +2713,8 @@ async def _resolve_traced(r: Resolver, p: JobPosting, *, use_cache: bool = True)
             out = out.model_copy(update={"origin_resolution": _resolution_data(evidence)})
     if lead and not out.origin_url:
         out = out.model_copy(update={"origin_lead": lead})
-    if r.cache and (out.origin_resolution or {}).get("state") != "deferred":
+    # A miss whose web search was deferred is not a verdict: caching it would hide the job from the post-score search pass.
+    if r.cache and (out.origin_resolution or {}).get("state") != "deferred" and not (search_deferred and not out.origin_url):
         r.cache.put(key, {
             "origin_url": out.origin_url, "origin_ats": out.origin_ats, "origin_confidence": out.origin_confidence,
             "posted_at": extra.posted_at.isoformat() if extra and extra.posted_at else None,
@@ -2715,12 +2867,14 @@ def is_wttj(url: str) -> bool:
 
 
 async def resolve_origins_detailed(postings: list[JobPosting], ctx: SourceContext, *, use_cache: bool = True,
-                                   on_done=None) -> list[Resolution]:
+                                   on_done=None, search: bool = True, budget: SearchBudget | None = None) -> list[Resolution]:
     """Like `resolve_origins` but returns, per posting, the ladder step that hit or the reason for the miss.
-    `use_cache=False` ignores the disk cache (hits AND the 3-day miss back-off) and re-runs the whole ladder."""
+    `use_cache=False` ignores the disk cache (hits AND the 3-day miss back-off) and re-runs the whole ladder; paid search
+    answers still come from `SearchCache`. `search=False` stops before the web search (step 5). `budget` is the run's paid
+    search budget (a fresh one per call when None)."""
     if not postings:
         return []
-    r = Resolver(ctx, cache=use_cache)
+    r = Resolver(ctx, cache=use_cache, search=search, budget=budget)
 
     async def guarded(p: JobPosting) -> Resolution:
         async with r.sem:
@@ -2735,9 +2889,10 @@ async def resolve_origins_detailed(postings: list[JobPosting], ctx: SourceContex
         await r.aclose()
 
 
-async def resolve_origins(postings: list[JobPosting], ctx: SourceContext) -> list[JobPosting]:
+async def resolve_origins(postings: list[JobPosting], ctx: SourceContext, *, search: bool = True,
+                          budget: SearchBudget | None = None) -> list[JobPosting]:
     """Fill origin_url / origin_ats / origin_confidence (and posted_at / description when the origin has better).
 
     Returns new JobPosting objects in the same order; never raises for a single posting.
     """
-    return [res.posting for res in await resolve_origins_detailed(postings, ctx)]
+    return [res.posting for res in await resolve_origins_detailed(postings, ctx, search=search, budget=budget)]
