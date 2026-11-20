@@ -118,6 +118,12 @@ def is_bound_pdf(content_type: str, body: bytes | None, pdf: bytes) -> bool:
             and part.get_payload(decode=True) == pdf)
 
 
+def _static_asset(url: str) -> bool:
+    from jobhunt.apply.workday import static_asset  # (workday imports this module)
+
+    return static_asset(url)
+
+
 class RecipientGuard:
     def __init__(self, allowed: frozenset[str], *, audience=None, read_only: frozenset[str] = frozenset(),
                  inspection_only: bool = False,
@@ -130,6 +136,7 @@ class RecipientGuard:
         self.request_allowed = request_allowed
         self.refused = False
         self.refusal_code = "recipient_refused_transport"
+        self.refused_request = ""  # "METHOD url-without-query" of the first refused request (local failure record only)
         self.transmitted = False
         self.non_account_transmitted = False
         self.final_started = False
@@ -169,6 +176,25 @@ class RecipientGuard:
     def refusal_status(status: int) -> bool:
         return status in {301, 302, 303, 307, 308, 403, 429}
 
+    @staticmethod
+    async def _static_redirect(page, method: str, target: str):
+        """A static asset moved to its versioned path: followed only while every hop is a static asset too."""
+        for _ in range(3):
+            try:
+                response = await page.context.request.fetch(target, method=method, max_redirects=0, max_retries=0, timeout=15000)
+            except Exception:
+                return None
+            location = response.headers.get("location", "")
+            if 300 <= response.status < 400 and location and _static_asset(urljoin(target, location)):
+                target = urljoin(target, location)
+                await response.dispose()
+                continue
+            if 200 <= response.status < 300:
+                return response
+            await response.dispose()
+            return None
+        return None
+
     async def install(self, page) -> None:
         self.page = page
         await page.context.add_init_script(script="""(() => {
@@ -186,6 +212,11 @@ class RecipientGuard:
         })();""" % json.dumps(sorted(self.allowed)))
 
         async def refuse(route, code="recipient_refused_transport"):
+            if not self.refused_request:
+                with contextlib.suppress(Exception):
+                    from jobhunt.apply.page_outline import bare_url
+
+                    self.refused_request = f"{route.request.method} {bare_url(route.request.url)}"
             self.refused = True
             self.refusal_code = code
             await route.abort()
@@ -228,6 +259,8 @@ class RecipientGuard:
                     permitted = self.audience.request_allowed(request, self.page, initial=_navigation_matches(request.url, self._initial_url))
                 except Exception:
                     permitted = False
+            if not permitted and read and not navigation and _static_asset(request.url):
+                permitted = True  # an ATS's own static code / fonts / UI strings: without them its pages render empty
             if not permitted:
                 if write or navigation:
                     from jobhunt.origin import classify_ats
@@ -274,7 +307,15 @@ class RecipientGuard:
                         self.audience.final_receipt_url = target
                 if self.refusal_status(response.status):
                     target = urljoin(request.url, response.headers.get("location", ""))
-                    if (self.probe and response.status in ({301, 302, 303} if entry_post else {301, 302, 303, 307, 308})
+                    if (read and not navigation and 300 <= response.status < 400 and response.headers.get("location")
+                            and _static_asset(request.url) and _static_asset(target)):
+                        await response.dispose()
+                        response = await self._static_redirect(page, request.method, target)
+                        if response is None:
+                            await route.abort()
+                        else:
+                            await route.fulfill(response=response)
+                    elif (self.probe and response.status in ({301, 302, 303} if entry_post else {301, 302, 303, 307, 308})
                             and response.headers.get("location")
                             and request.is_navigation_request() and self.probe.redirect(target)):
                         await route.fulfill(status=200, content_type="text/plain", body="")

@@ -1,0 +1,166 @@
+"""Local failure diagnostics: a screenshot and a value-free outline of the page an apply run stopped on.
+
+Written only into the run's own folder under the (gitignored) data dir. The outline holds page STRUCTURE only - the URL
+without query string / fragment, title, headings, the text of buttons and links, and each form field's label / type /
+required flag. It never reads a field's value or checked state, cookies, storage or request bodies; in the screenshot every
+form control is masked, and no screenshot is taken at all once a secret (password) was typed in the run.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
+
+OUTLINE_FILE = "failure-page.json"
+RUN_FILE = "failure-run.json"
+SCREENSHOT_FILE = "failure.png"
+DIAGNOSED_STATUSES = frozenset({"needs_input", "needs_email", "needs_human", "blocked", "failed"})
+MASK_SELECTOR = "input, textarea, select, [contenteditable=''], [contenteditable='true'], [role='textbox'], [role='combobox']"
+_TEXT_MAX = 160
+_LIST_MAX = 80
+
+# Runs in an isolated world; reads attributes and visible text only (never .value / .checked / .files / storage).
+OUTLINE_JS = r"""([textMax, listMax]) => {
+    // Value-holding controls: their own text / aria-label may BE the value (a dropdown button showing the chosen option).
+    const VALUE = 'input, textarea, select, option, [contenteditable]:not([contenteditable="false"]), [role="textbox"], '
+        + '[role="combobox"], [role="listbox"], [role="spinbutton"], [role="searchbox"], [role="option"], [aria-haspopup="listbox"]';
+    const clip = text => (text || '').normalize('NFKC').replace(/\s+/g, ' ').trim().slice(0, textMax);
+    const visible = node => {
+        const style = getComputedStyle(node);
+        return node.getClientRects().length > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const text = node => {  // the node's text with every value-holding control (and script / style) taken out
+        if (!node || node.matches(VALUE)) return '';
+        const copy = node.cloneNode(true);
+        copy.querySelectorAll(VALUE + ', script, style, template').forEach(child => child.remove());
+        return copy.textContent;
+    };
+    const labelOf = node => {
+        const parts = [];
+        for (const id of (node.getAttribute('aria-labelledby') || '').split(/\s+/))
+            if (id && id !== node.id) parts.push(text(document.getElementById(id)));
+        const ownText = !node.matches('[role="combobox"], [role="listbox"], [aria-haspopup="listbox"], [contenteditable]');
+        if (!clip(parts.join(' ')) && ownText && node.getAttribute('aria-label')) parts.push(node.getAttribute('aria-label'));
+        if (!clip(parts.join(' ')) && node.labels) for (const label of node.labels) parts.push(text(label));
+        if (!clip(parts.join(' ')) && node.closest('label')) parts.push(text(node.closest('label')));
+        if (!clip(parts.join(' '))) {
+            const legend = node.closest('fieldset')?.querySelector('legend');
+            if (legend) parts.push(text(legend));
+        }
+        if (!clip(parts.join(' ')) && node.getAttribute('placeholder')) parts.push(node.getAttribute('placeholder'));
+        if (!clip(parts.join(' ')) && ownText && node.getAttribute('title')) parts.push(node.getAttribute('title'));
+        return clip(parts.join(' '));
+    };
+    const automation = node => clip(node.getAttribute('data-automation-id') || node.getAttribute('data-testid') || '');
+    const headings = [...document.querySelectorAll('h1, h2, h3, [role="heading"], legend')]
+        .filter(visible).map(node => ({level: /^H\d$/.test(node.tagName) ? node.tagName.toLowerCase()
+                                              : node.getAttribute('aria-level') ? 'h' + node.getAttribute('aria-level') : node.tagName.toLowerCase(),
+                                       text: clip(text(node))}))
+        .filter(item => item.text).slice(0, listMax);
+    const controls = [...document.querySelectorAll('button, a[href], [role="button"], [role="link"], input[type="submit"], input[type="button"]')]
+        .filter(node => visible(node) && !node.matches(VALUE.replace('input, ', '')))
+        .map(node => ({
+            kind: node.matches('a[href], [role="link"]') ? 'link' : 'button',
+            text: clip(node.matches('input') ? node.getAttribute('value') : (text(node) || node.getAttribute('aria-label') || node.getAttribute('title'))),
+            automation_id: automation(node),
+            disabled: node.matches(':disabled, [aria-disabled="true"]'),
+        })).filter(item => item.text || item.automation_id).slice(0, listMax);
+    const fields = [...document.querySelectorAll('input, textarea, select, [role="textbox"], [role="combobox"], [role="listbox"], [role="spinbutton"], '
+                                                 + '[role="searchbox"], [role="radiogroup"], [role="checkbox"], [role="switch"], [aria-haspopup="listbox"], '
+                                                 + '[contenteditable]:not([contenteditable="false"])')]
+        .filter(node => !node.matches('input[type="hidden"], input[type="submit"], input[type="button"], input[type="reset"], input[type="image"]'))
+        .filter(node => !node.parentElement?.closest('[role="combobox"], [role="listbox"], [aria-haspopup="listbox"]'))
+        .filter(node => visible(node) || node.matches('input[type="file"]'))
+        .map(node => ({
+            label: labelOf(node),
+            type: node.matches('input') ? (node.getAttribute('type') || 'text').toLowerCase()
+                : node.matches('textarea, select') ? node.tagName.toLowerCase()
+                : node.getAttribute('role') || (node.matches('[aria-haspopup="listbox"]') ? 'listbox' : 'contenteditable'),
+            required: node.required === true || node.getAttribute('aria-required') === 'true',
+            automation_id: automation(node),
+            name: clip(node.getAttribute('name') || ''),
+            options: node.matches('select') ? node.options.length : undefined,
+        })).slice(0, listMax);
+    const frames = [...document.querySelectorAll('iframe')].map(node => {
+        try { return new URL(node.src, location.href).origin; } catch (e) { return ''; }
+    }).filter(origin => origin && origin !== 'null').slice(0, 20);
+    return {title: clip(document.title), headings, controls, fields, frames,
+            forms: document.forms.length, password_fields: document.querySelectorAll('input[type="password"]').length};
+}"""
+
+
+def bare_url(url: str) -> str:
+    """The URL without user info, query string or fragment (those may carry tokens / personal data)."""
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https"):
+        return parts.scheme + ":" if parts.scheme else ""
+    host = parts.hostname or ""
+    netloc = host + (f":{parts.port}" if parts.port else "")
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _redact(obj: Any, redact: Callable[[str], str]) -> Any:
+    if isinstance(obj, str):
+        return redact(obj)
+    if isinstance(obj, list):
+        return [_redact(item, redact) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _redact(value, redact) for key, value in obj.items() if value is not None}
+    return obj
+
+
+async def page_outline(page) -> dict[str, Any]:
+    outline = await page.evaluate(OUTLINE_JS, [_TEXT_MAX, _LIST_MAX], isolated_context=True)
+    return {"url": bare_url(page.url), **outline}
+
+
+async def save_failure_diagnostics(page, out_dir: Path, *, status: str, diagnostic_code: str = "",
+                                   step: int = 0, screenshot: bool = True,
+                                   redact: Callable[[str], str] = lambda text: text) -> list[str]:
+    """Write `failure-page.json` (+ `failure.png`) into `out_dir`; best effort, never raises. Returns the files written."""
+    written: list[str] = []
+    if page is None or page.is_closed():
+        return written
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return written
+    try:
+        outline = await page_outline(page)
+    except Exception as exc:  # (a page mid-navigation): the run facts are still worth keeping
+        outline = {"url": bare_url(page.url), "error": f"outline unavailable ({type(exc).__name__})"}
+    # (the run's message stays in the database only: it may quote a field label that shows the chosen answer)
+    record = _redact({"status": status, "diagnostic_code": diagnostic_code, "step": step, **outline}, redact)
+    with contextlib.suppress(Exception):
+        path = out_dir / OUTLINE_FILE
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        written.append(str(path))
+    if screenshot:
+        with contextlib.suppress(Exception):
+            path = out_dir / SCREENSHOT_FILE
+            await page.screenshot(path=str(path), full_page=True, timeout=10_000, animations="disabled",
+                                  mask=[page.locator(MASK_SELECTOR)], mask_color="#808080")
+            written.append(str(path))
+    return written
+
+
+def save_run_record(out_dir: Path, *, status: str, diagnostic_code: str = "", final_url: str = "",
+                    step: int = 0, control: str = "", receipt_reason: str = "", refused_request: str = "") -> str:
+    """`failure-run.json`: how the run ended, written even when no page was left to outline (e.g. a refused request closed it)."""
+    record = {"status": status, "diagnostic_code": diagnostic_code, "final_url": bare_url(final_url),
+              "step": step, "control": control, "receipt_reason": receipt_reason, "refused_request": refused_request,
+              "page_outline": OUTLINE_FILE if (out_dir / OUTLINE_FILE).is_file() else ""}
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / RUN_FILE
+        path.write_text(json.dumps({key: value for key, value in record.items() if value not in ("", None)},
+                                   ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
+    except Exception:
+        return ""

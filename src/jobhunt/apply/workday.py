@@ -53,6 +53,21 @@ _OTP = re.compile(r"\b(?:verification code|one.time (?:code|password)|code (?:de
 _EMAIL_CHALLENGE = re.compile(r"\b(?:check your (?:e-mail|email|inbox)|verify your (?:e-mail|email) address|"
                               r"verifiez votre (?:e-mail|email|boite de reception)|lien de verification)\b")
 _CUSTOM_QUESTION = re.compile(r"(?:primary|secondary)?questionnaire(?:page[-_])?.+")
+# Workday career sites are a single-page app whose code, fonts and UI strings are served from the data center's static hosts.
+_STATIC_HOST = re.compile(r"wd\d{1,3}\.(?:myworkdaycdn|myworkday)\.com\Z")
+_ENTRY_IDS = frozenset({"adventurebutton", "applybutton", "jobpostingapplybutton"})
+
+
+def static_asset(url: str) -> bool:
+    """A read of Workday's versioned static assets (`https://wdN.myworkdaycdn.com/wday/asset/...`): no query, no credentials."""
+    try:
+        parts = urlsplit(url or "")
+        port = parts.port
+    except ValueError:
+        return False
+    return (parts.scheme == "https" and port is None and not parts.username and not parts.password and not parts.query
+            and not parts.fragment and _STATIC_HOST.fullmatch(parts.hostname or "") is not None
+            and parts.path.startswith("/wday/asset/") and ".." not in parts.path and "%" not in parts.path)
 
 
 def _normalized(text: str) -> str:
@@ -224,7 +239,7 @@ class WorkdayAdapter:
                 return 'final_submit'
         elif role == 'open_form' and not step:
             if ((marker == 'applymanually' and text in {'apply manually', 'postuler manuellement'}) or
-                (marker in {'applybutton', 'jobpostingapplybutton'} and text in {'apply', 'postuler'})):
+                (marker in _ENTRY_IDS and text in {'apply', 'postuler'})):
                 return 'draft_write'
         elif role in {'login', 'signup'} and step == 'signin':
             if ((role == 'login' and marker == 'signinbutton' and text in {'sign in', 'se connecter'}) or

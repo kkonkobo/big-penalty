@@ -1,6 +1,7 @@
 import json
 import os
 from dataclasses import replace
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -63,8 +64,13 @@ def workday_flow(server, scenario):
     for action in ('draft', 'account', 'submit', 'attachments'):
         server.post_json[endpoint + action] = {'status': 'ok'}
     steps = [
-        ('', 'Posting', '<a data-automation-id="applyButton" href="' + path + '/apply">Apply</a>'),
-        ('/apply', 'Apply', '<a data-automation-id="applyManually" href="' + path + '/apply/signIn">Apply Manually</a>'),
+        # (as on live Workday career sites: the posting's "Apply" is an `adventureButton` link, then a three-way chooser)
+        ('', 'Posting', '<a role="button" data-automation-id="adventureButton" href="' + path + '/apply">Apply</a>'
+         if scenario != 'stuck' else '<a role="button" data-automation-id="shareButton" href="#">Share</a>'),
+        ('/apply', 'Start Your Application',
+         ''.join(f'<a role="button" data-automation-id="{marker}" href="{path}/apply/{target}">{label}</a>' for marker, target, label in (
+             ('autofillWithResume', 'autofillWithResume', 'Autofill with Resume'), ('applyManually', 'signIn', 'Apply Manually'),
+             ('useMyLastApplication', 'useMyLastApplication', 'Use My Last Application')))),
         ('/apply/signIn', 'Sign in', '<label>Email<input type="email" name="email" required></label>'
          '<label>Password<input type="password" name="password" required></label>'
          '<button data-automation-id="signInButton">Sign In</button>'),
@@ -112,7 +118,8 @@ def workday_flow(server, scenario):
     return path
 
 
-@pytest.mark.parametrize('scenario', ['success', 'candidate_home', 'otp', 'changed', 'missing', 'draft', 'next_step', 'metadata_mismatch'])
+@pytest.mark.parametrize('scenario', ['success', 'candidate_home', 'otp', 'changed', 'missing', 'draft', 'next_step', 'metadata_mismatch',
+                                      'stuck'])
 async def test_workday_browser_flow(scenario, adapter_pool, server, profile, tmp_path, fast, monkeypatch):
     install_adapter(monkeypatch, server, True)
     monkeypatch.setattr(service.accounts, 'create_password', lambda host, email: 'fixture-password')
@@ -126,6 +133,15 @@ async def test_workday_browser_flow(scenario, adapter_pool, server, profile, tmp
     result = await service.run(app.id, mode='submit', trigger='user', pool=adapter_pool)
     if scenario == 'metadata_mismatch':
         assert result.status in {'blocked', 'needs_human'} and not server.requests and not server.posts
+        return
+    if scenario == 'stuck':  # no usable control: the run stops, and its folder says what the page looked like
+        assert result.status == 'failed' and not server.posts, result.result
+        run_dir = Path(result.out_dir)
+        outline = json.loads((run_dir / 'failure-page.json').read_text(encoding='utf-8'))
+        record = json.loads((run_dir / 'failure-run.json').read_text(encoding='utf-8'))
+        assert (run_dir / 'failure.png').is_file() and record['page_outline'] == 'failure-page.json'
+        assert outline['url'] == server.base + path and [h['text'] for h in outline['headings']] == ['Posting']
+        assert {'kind': 'link', 'text': 'Share', 'automation_id': 'shareButton', 'disabled': False} in outline['controls']
         return
     assert result.status == {'success': 'submitted', 'candidate_home': 'submitted', 'otp': 'needs_email',
                              'changed': 'needs_human', 'missing': 'failed', 'draft': 'failed', 'next_step': 'failed'}[scenario], (

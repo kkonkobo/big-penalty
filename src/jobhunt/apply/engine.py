@@ -37,6 +37,7 @@ from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import IDENTITY, capture, exact_option, fact_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
+from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, save_failure_diagnostics
 from jobhunt.apply.prompt_rules import decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
@@ -1845,6 +1846,8 @@ class _Run:
                     res.diagnostic_code = self.diagnostics.exception_code(e)
                 if self.steps:
                     await self._shot(self.steps[-1])
+            if res.status in DIAGNOSED_STATUSES:  # before a dry run sends its pages to about:blank
+                await self._diagnose(res)
         finally:
             with contextlib.suppress(Exception):
                 ctx.remove_listener("page", on_page)
@@ -1864,6 +1867,18 @@ class _Run:
         res.finished_at = datetime.now()
         self._scrub(res)
         return res
+
+    async def _diagnose(self, res: RunResult) -> None:
+        """A run that stops short of sending leaves, in its own folder, a masked screenshot and a value-free page outline."""
+        try:
+            page = next((p for p in [self.page, *reversed(self.all_pages)] if not p.is_closed()), None)
+            if page is None:
+                return
+            await save_failure_diagnostics(page, self.out_dir, status=res.status, diagnostic_code=res.diagnostic_code or "",
+                                           step=len(self.steps),
+                                           screenshot=not self.secrets, redact=self._r)
+        except Exception:
+            pass
 
     async def _release(self) -> bool:
         """dry run, end of the run: every page of the run goes to about:blank (no network request, kills the timers of a page
