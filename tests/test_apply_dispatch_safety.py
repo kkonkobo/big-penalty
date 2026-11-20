@@ -50,6 +50,13 @@ def test_talentsoft_login_return_is_same_host_and_not_persisted(target, allowed)
     assert clean_url(f"{base}?ReturnUrl={target}", navigation=True) == (base if allowed else "")
 
 
+@pytest.mark.parametrize("target, allowed", [("%2fmon-compte%2fmon-cv-pour-ma-candidature-pour-stage-x_1306.aspx", True),
+                                             ("%2F%2Fother.example%2Fmon-compte", False)])
+def test_talentsoft_hyphenated_log_in_page_keeps_a_same_host_return(target, allowed):
+    base = "https://jobs.example.test/my-account/log-in.aspx"
+    assert clean_url(f"{base}?ReturnUrl={target}", navigation=True) == (base if allowed else "")
+
+
 @pytest.mark.parametrize("query, cleaned", [
     ("rx_ch=connector&rx_source=board&source=x", "https://example.test/job/42"),
     ("feedId=1&jobPipeline=LinkedIn&mode=apply&LCID=1040&trid=a-b", "https://example.test/job/42"),
