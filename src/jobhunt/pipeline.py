@@ -8,6 +8,8 @@ import importlib
 import inspect
 import json
 import logging
+import os
+import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -27,8 +29,15 @@ log = logging.getLogger("jobhunt.pipeline")
 
 QUERY_TIMEOUT_S = 420.0  # browser sources may wait for a human to solve a challenge
 MAX_CONSECUTIVE_ERRORS = 3
-SCORE_BATCH = 8
-SCORE_CONCURRENCY = 3
+MAX_CONSECUTIVE_BLOCKS = 2  # 429 / Cloudflare "Just a moment": the site is rate-limiting us, more queries only dig deeper
+MAX_TOTAL_ERRORS = 6
+SEARCH_BUDGET_S = 20 * 60.0  # sources stop starting new queries after this; what they found is already stored
+ORIGIN_BUDGET_S = 15 * 60.0  # jobs left unresolved are picked up by the next run (`_origin_due`)
+ORIGIN_CHUNK = 48
+ORIGIN_CHUNKS_IN_FLIGHT = 2
+SCORE_BATCH = 12
+SCORE_CONCURRENCY = 4
+STALE_RUN_AFTER = timedelta(hours=3)  # a "running" row without a live owner process older than this is dead
 DETAIL_LIMIT = 60
 DETAIL_CONCURRENCY = 4
 DETAIL_TIMEOUT_S = 45.0
@@ -84,6 +93,7 @@ class RunResult:
     linkedin_links: int = 0  # employer apply links recovered by them
     sources_ok: list[str] = field(default_factory=list)  # sources that completed with no error/challenge/block
     stage: str = "pending"
+    pid: int = field(default_factory=os.getpid)  # lets later runs tell a live run from one killed mid-way
 
     def stats_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -134,8 +144,20 @@ def applicable(source: Source, q: SearchQuery) -> bool:
     return ct is None or not q.contract_types or bool(ct & set(q.contract_types))
 
 
+FoundCb = Callable[[str, list[JobPosting]], Any]
+
+
+def _is_block(error: BaseException) -> bool:
+    """A rate limit or an anti-bot interstitial (not an ordinary failure of one query)."""
+    text = str(error)
+    return "429" in text or "Just a moment" in text or "Too Many Requests" in text or "challenge" in text.lower()
+
+
 async def _run_source(name: str, src: Source, queries: list[SearchQuery], ctx: SourceContext,
-                      result: RunResult, out: list[JobPosting], cb: ProgressCb | None) -> None:
+                      result: RunResult, out: list[JobPosting], cb: ProgressCb | None,
+                      on_found: FoundCb | None = None, deadline: float | None = None) -> None:
+    """Run one source's queries one after the other. Every query's postings go to `on_found` (which stores them)
+    as soon as the query returns, so an interrupted run keeps everything the finished queries found."""
     stat = result.sources[name]
     todo = [q for q in queries if applicable(src, q)]
     stat.queries_total = len(todo)
@@ -143,13 +165,22 @@ async def _run_source(name: str, src: Source, queries: list[SearchQuery], ctx: S
         stat.status, stat.skipped_reason = "skipped", "aucune requête compatible (type de contrat)"
         return
     stat.status = "running"
-    consecutive = 0
+    consecutive = blocks = 0
     for q in todo:
+        if deadline is not None and time.monotonic() >= deadline:
+            stat.errors.append(f"Budget de temps atteint ({stat.queries_done}/{stat.queries_total} requêtes)")
+            break
         try:
             found = await _bounded(src.search(q, ctx), QUERY_TIMEOUT_S)
-            consecutive = 0
+            consecutive = blocks = 0
             stat.postings += len(found)
             out.extend(found)
+            if on_found is not None and found:
+                try:
+                    await on_found(name, found)
+                except Exception as e:  # noqa: BLE001 - storing must never stop the search
+                    log.exception("storing postings of %s failed", name)
+                    result.errors.append(f"Enregistrement {name}: {type(e).__name__}: {e}")
         except (LoginRequired, ChallengeRequired) as e:
             stat.errors.append(f"{type(e).__name__}: {e}")
             stat.needs_login = isinstance(e, LoginRequired)
@@ -163,12 +194,17 @@ async def _run_source(name: str, src: Source, queries: list[SearchQuery], ctx: S
             consecutive += 1
         except Exception as e:  # noqa: BLE001 - one bad query must not kill the run
             log.warning("source %s failed on %r: %s", name, q.keywords, e)
-            stat.errors.append(f"« {q.keywords} »: {type(e).__name__}: {e}")
+            stat.errors.append(f"« {q.keywords} »: {type(e).__name__}: {e}"[:300])
             consecutive += 1
+            blocks = blocks + 1 if _is_block(e) else 0
         stat.queries_done += 1
         await _emit(cb, result, source=name, event="query_done", done=stat.queries_done, total=stat.queries_total)
-        if consecutive >= MAX_CONSECUTIVE_ERRORS:
-            stat.errors.append(f"Abandon après {MAX_CONSECUTIVE_ERRORS} erreurs consécutives")
+        if blocks >= MAX_CONSECUTIVE_BLOCKS:
+            stat.errors.append(f"Abandon : site bloquant ({blocks} blocages consécutifs)")
+            stat.status = "error"
+            return
+        if consecutive >= MAX_CONSECUTIVE_ERRORS or len(stat.errors) >= MAX_TOTAL_ERRORS:
+            stat.errors.append(f"Abandon après {len(stat.errors)} erreurs")
             stat.status = "error"
             return
     stat.status = "error" if stat.errors and stat.postings == 0 else "done"
@@ -243,7 +279,12 @@ def _origin_due(job: MergedJob) -> bool:
     return db.now() - attempted >= timedelta(days=3)
 
 
-async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: RunResult) -> list[MergedJob]:
+async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: RunResult, *,
+                           persist: Callable[[], Any] | None = None, profile: Any = None,
+                           deadline: float | None = None) -> list[MergedJob]:
+    """Resolve the origin of the jobs that need it, a chunk at a time; `persist` stores `jobs` after each chunk (it may
+    consolidate duplicates in place), so an interruption keeps every chunk done. Jobs the profile's prefilter already
+    drops are not worth a ladder run. Past `deadline` the remaining jobs wait for the next run."""
     try:
         mod = importlib.import_module("jobhunt.origin")
         resolve = getattr(mod, "resolve_origins", None)
@@ -264,24 +305,67 @@ async def _resolve_origins(jobs: list[MergedJob], ctx: SourceContext, result: Ru
             job.recompute_posted_at()
             job.changed = True
     todo = [j for j in jobs if _origin_due(j)]
-    if not todo:
-        return jobs
+    if profile is not None:
+        todo = [j for j in todo if j.origin_url or prefilter(profile, j) is None]
+        todo.sort(key=lambda j: -keyword_score(profile, j).fit)  # most promising first: best partial results
+    chunks = [todo[i:i + ORIGIN_CHUNK] for i in range(0, len(todo), ORIGIN_CHUNK)]
+    sem = asyncio.Semaphore(ORIGIN_CHUNKS_IN_FLIGHT)
+    skipped = 0
+
+    async def one(chunk: list[MergedJob]) -> None:
+        nonlocal skipped
+        async with sem:
+            if deadline is not None and time.monotonic() >= deadline:
+                skipped += len(chunk)
+                return
+            try:
+                resolved = await resolve([j.to_posting() for j in chunk], ctx)
+                for j, p in zip(chunk, resolved):
+                    j.apply_origin(p)
+                    j.recompute_posted_at()  # repairs rows where an old run folded the ATS date into posted_at
+                    if j.origin_url:
+                        j.extra["origin_date_checked"] = db.now().isoformat()
+                    j.extra["origin_attempted_at"] = db.now().isoformat()
+                    j.extra["origin_fingerprint"] = origin_fingerprint(j)
+                    j.extra.pop("origin_tried", None)
+                    j.changed = True
+            except Exception as e:  # noqa: BLE001
+                log.warning("origin resolution failed: %s", e)
+                result.errors.append(f"Résolution de l'origine: {type(e).__name__}: {e}")
+                return
+            if persist is not None:
+                persist()
+
     try:
-        resolved = await resolve([j.to_posting() for j in todo], ctx)
-        for j, p in zip(todo, resolved):
-            j.apply_origin(p)
-            j.recompute_posted_at()  # repairs rows where an old run folded the ATS date into posted_at
-            if j.origin_url:
-                j.extra["origin_date_checked"] = db.now().isoformat()
-            j.extra["origin_attempted_at"] = db.now().isoformat()
-            j.extra["origin_fingerprint"] = origin_fingerprint(j)
-            j.extra.pop("origin_tried", None)
-            j.changed = True
-    except Exception as e:  # noqa: BLE001
-        log.warning("origin resolution failed: %s", e)
-        result.errors.append(f"Résolution de l'origine: {type(e).__name__}: {e}")
-        return jobs
+        await asyncio.gather(*(one(c) for c in chunks))
+    finally:
+        if skipped:
+            result.errors.append(f"Résolution de l'origine : budget de temps atteint, {skipped} offre(s) reportée(s)")
     return jobs
+
+
+def reap_stale_runs() -> int:
+    """Mark as failed the runs still "running" whose process is gone (killed, host restart): they must not look alive.
+    A run without a recorded pid counts as dead after STALE_RUN_AFTER."""
+    from jobhunt.apply.store import pid_alive  # noqa: PLC0415
+
+    reaped = 0
+    with db.connect() as c:
+        rows = c.execute("SELECT id, started_at, stats FROM runs WHERE status='running'").fetchall()
+    for r in rows:
+        try:
+            pid = (json.loads(r["stats"]) if r["stats"] else {}).get("pid")
+        except (TypeError, ValueError):
+            pid = None
+        started = db._dt(r["started_at"])
+        if pid:
+            alive = pid == os.getpid() or pid_alive(int(pid))
+        else:
+            alive = started is not None and db.now() - started < STALE_RUN_AFTER
+        if not alive:
+            db.update_run(int(r["id"]), status="error", error="interrompu (processus arrêté avant la fin)", finished=True)
+            reaped += 1
+    return reaped
 
 
 async def run_search(
@@ -293,7 +377,12 @@ async def run_search(
     if profile is None:
         raise ValueError(f"profil {profile_id} introuvable")
     llm = llm or get_llm()
+    try:
+        reap_stale_runs()
+    except Exception:  # noqa: BLE001 - bookkeeping only
+        log.exception("could not reap stale runs")
     result = RunResult(run_id=db.create_run(profile_id), profile_id=profile_id, llm_enabled=llm.enabled)
+    db.update_run(result.run_id, stats=result.stats_dict())
     browser = None
     try:
         # 1. PLAN
@@ -316,30 +405,53 @@ async def run_search(
             log.info("browser unavailable: %s", e)
         ctx = SourceContext(profile_id=profile_id, browser=browser)
         postings: list[JobPosting] = []
+        jobs = db.load_jobs(profile_id)
+        n_before = len(jobs)
+        store_lock = asyncio.Lock()
+
+        async def store(name: str, found: list[JobPosting]) -> None:
+            """Dedupe `found` against everything known and write it now (one source query at a time)."""
+            async with store_lock:
+                merged, _ = merge_postings(found, jobs)
+                jobs[:] = merged
+                db.save_jobs(profile_id, jobs)
+                result.unique_jobs = len(jobs)
+                result.new_jobs = max(0, len(jobs) - n_before)
+                db.update_run(result.run_id, stats=result.stats_dict())
+
+        deadline = time.monotonic() + SEARCH_BUDGET_S
         await asyncio.gather(*(
-            _run_source(n, s, result.plan, ctx, result, postings, progress) for n, s in chosen.items()
+            _run_source(n, s, result.plan, ctx, result, postings, progress, store, deadline) for n, s in chosen.items()
         ))
         result.raw_postings = len(postings)
         result.sources_ok = sorted(n for n in chosen if _source_ok(result.sources[n]))
         db.update_run(result.run_id, stats=result.stats_dict())
+        before = list(postings)
         postings = await _enrich_details(postings, chosen, ctx, result)
+        enriched = [p for p, old in zip(postings, before) if p is not old]
+        if enriched:
+            await store("details", enriched)
 
-        # 3. DEDUPE (against this run and everything stored for the profile)
+        # 3. DEDUPE: done progressively by `store` (against this run and everything stored for the profile)
         result.stage = "dedupe"
         await _emit(progress, result, event="stage")
-        existing = db.load_jobs(profile_id)
-        n_before = len(existing)
-        jobs, _ = merge_postings(postings, existing)
-
-        # 4. ORIGIN
-        result.stage = "origin"
-        await _emit(progress, result, event="stage")
-        jobs = await _resolve_origins(jobs, ctx, result)
-        db.save_jobs(profile_id, jobs, consolidate_origins=True)
         result.unique_jobs = len(jobs)
         result.new_jobs = max(0, len(jobs) - n_before)
 
-        # 5. SCORE
+        # 4. ORIGIN (stored chunk by chunk)
+        result.stage = "origin"
+        await _emit(progress, result, event="stage")
+
+        def persist() -> None:
+            db.save_jobs(profile_id, jobs, consolidate_origins=True)
+            result.unique_jobs = len(jobs)
+            result.new_jobs = max(0, len(jobs) - n_before)
+
+        await _resolve_origins(jobs, ctx, result, persist=persist, profile=profile,
+                               deadline=time.monotonic() + ORIGIN_BUDGET_S)
+        persist()
+
+        # 5. SCORE (stored batch by batch)
         result.stage = "score"
         await _emit(progress, result, event="stage")
         await _score_jobs(profile, jobs, llm, result, progress)
@@ -408,6 +520,9 @@ async def _score_jobs(profile, jobs: list[MergedJob], llm: LLMClient, result: Ru
             result.prefiltered += 1
         else:
             to_llm.append(j)
+    if result.prefiltered:
+        db.save_scores(profile.id, jobs)
+    to_llm.sort(key=lambda j: -keyword_score(profile, j).fit)  # best candidates first: they are stored first
     batches = [to_llm[i:i + SCORE_BATCH] for i in range(0, len(to_llm), SCORE_BATCH)]
     sem = asyncio.Semaphore(SCORE_CONCURRENCY)
     done = 0
@@ -424,6 +539,7 @@ async def _score_jobs(profile, jobs: list[MergedJob], llm: LLMClient, result: Ru
             j.score, j.score_json, j.changed = s.fit, s.model_dump(), True
             j.extra["scoring_fingerprint"] = scoring_fingerprint(profile, j)
             result.scored += 1
+        db.save_scores(profile.id, batch)  # one batch lost on interruption, never the run
         done += 1
         result.llm_stats = getattr(llm, "stats", {})
         await _emit(cb, result, event="score_batch", done=done, total=len(batches))

@@ -1,4 +1,6 @@
 
+import pytest
+
 from jobhunt import db
 from jobhunt.llm import LLMClient
 from jobhunt.models import ContractType
@@ -98,8 +100,9 @@ async def test_origin_module_is_called_when_present(monkeypatch, profile):
     monkeypatch.setattr(origin, "resolve_origins", resolve_origins)
     await run_search(profile.id, llm=FakeLLM())
     jobs = db.load_jobs(profile.id)
-    assert seen and all(j.origin_url == "https://careers.airbus.test/jobs/1" for j in jobs)
-    assert len(jobs) == 1  # both postings now share an origin -> consolidated
+    assert seen == ["a1"]  # the senior CDI is prefiltered: no ladder run spent on it
+    resolved = [j for j in jobs if j.origin_url]
+    assert [j.origin_url for j in resolved] == ["https://careers.airbus.test/jobs/1"] and len(jobs) == 2
 
 
 async def test_origin_failure_does_not_kill_run(monkeypatch, profile):
@@ -368,3 +371,141 @@ async def test_a_query_whose_cancellation_hangs_is_abandoned(monkeypatch, profil
     assert res.stage == "done"
     assert res.sources["stuck"].status == "error" and any("délai" in e or "Abandon" in e for e in res.sources["stuck"].errors)
     assert res.sources["boarda"].status == "done"
+
+
+# ---------------------------------------------------------------- incremental / resumable discovery
+def _two_query_sources(monkeypatch, sources):
+    monkeypatch.setattr("jobhunt.pipeline.registry", lambda: {s.name: s for s in sources})
+
+    async def offline(postings, ctx):
+        return postings
+
+    monkeypatch.setattr("jobhunt.origin.resolve_origins", offline)
+
+
+async def test_interruption_keeps_jobs_from_finished_queries(monkeypatch, profile):
+    import asyncio
+    from jobhunt.sources.base import Source
+    from pipeline_fakes import posting
+
+    class Slow(Source):
+        name, label, kind = "slow", "Slow", "http"
+
+        async def search(self, query, ctx):
+            if query.keywords == "robotique":
+                await asyncio.sleep(3600)  # the process is killed here
+            return [posting("slow", "s1", title="Stage systèmes embarqués")]
+
+    _two_query_sources(monkeypatch, [Slow])
+    task = asyncio.ensure_future(run_search(profile.id, llm=FakeLLM()))
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if db.load_jobs(profile.id):
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [j.title for j in db.load_jobs(profile.id)] == ["Stage systèmes embarqués"]
+    assert db.latest_run(profile.id)["status"] == "cancelled"
+
+
+async def test_rerun_skips_scored_jobs_and_resolved_origins(monkeypatch, profile):
+    from jobhunt import origin
+    monkeypatch.setattr("jobhunt.pipeline.registry", lambda: {"boarda": BoardA})
+    resolved = []
+
+    async def resolve_origins(postings, ctx):
+        resolved.extend(p.source_id for p in postings)
+        return [p.model_copy(update={"origin_url": "https://careers.airbus.test/jobs/1", "origin_ats": "careers_site",
+                                     "origin_confidence": 0.9}) for p in postings]
+
+    monkeypatch.setattr(origin, "resolve_origins", resolve_origins)
+    llm = FakeLLM()
+    await run_search(profile.id, llm=llm)
+    n_scores, n_resolved = len(llm.score_calls), len(resolved)
+    assert n_scores and n_resolved
+    await run_search(profile.id, llm=llm)
+    assert len(llm.score_calls) == n_scores
+    assert len(resolved) == n_resolved  # origin already resolved and date-checked: no second ladder run
+
+
+async def test_scores_are_stored_batch_by_batch(monkeypatch, profile):
+    import asyncio
+    from jobhunt import pipeline
+    from pipeline_fakes import posting
+    from jobhunt.sources.base import Source
+
+    class Many(Source):
+        name, label, kind = "many", "Many", "http"
+
+        async def search(self, query, ctx):
+            return [posting("many", f"m{i}", title=f"Stage systèmes embarqués {i}", company=f"Firme {i}") for i in range(6)]
+
+    _two_query_sources(monkeypatch, [Many])
+    monkeypatch.setattr(pipeline, "SCORE_BATCH", 2)
+    monkeypatch.setattr(pipeline, "SCORE_CONCURRENCY", 1)
+
+    class DiesOnThirdBatch(FakeLLM):
+        async def score(self, profile, jobs):
+            if len(self.score_calls) == 2:
+                raise asyncio.CancelledError  # not an Exception: the run dies mid-scoring
+            return await super().score(profile, jobs)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_search(profile.id, llm=DiesOnThirdBatch())
+    jobs = db.load_jobs(profile.id)
+    assert len(jobs) == 6 and sum(j.score is not None for j in jobs) == 4
+
+
+async def test_source_abandoned_after_repeated_blocks(monkeypatch, profile):
+    from jobhunt.sources.base import Source, SourceError
+    calls = []
+
+    class Limited(Source):
+        name, label, kind = "limited", "Limited", "http"
+
+        async def search(self, query, ctx):
+            calls.append(query.keywords)
+            raise SourceError("HTTP 429: Just a moment...")
+
+    _two_query_sources(monkeypatch, [Limited])
+    monkeypatch.setattr("jobhunt.pipeline.MAX_CONSECUTIVE_ERRORS", 99)
+    res = await run_search(profile.id, max_queries=25, llm=FakeLLM())
+    stat = res.sources["limited"]
+    assert len(calls) == 2 and stat.status == "error" and "bloquant" in stat.errors[-1]
+
+
+async def test_source_stops_at_time_budget_and_keeps_partial(monkeypatch, profile):
+    from jobhunt import pipeline
+    from jobhunt.sources.base import Source
+    from pipeline_fakes import posting
+
+    class Quick(Source):
+        name, label, kind = "quick", "Quick", "http"
+
+        async def search(self, query, ctx):
+            return [posting("quick", "q1")]
+
+    _two_query_sources(monkeypatch, [Quick])
+    monkeypatch.setattr(pipeline, "SEARCH_BUDGET_S", -1.0)
+    res = await run_search(profile.id, llm=FakeLLM())
+    assert res.stage == "done" and res.sources["quick"].queries_done == 0
+    assert "quick" not in res.sources_ok and "Budget" in res.sources["quick"].errors[0]
+
+
+async def test_stale_running_rows_are_reaped_not_blocking(monkeypatch, profile):
+    import os
+    from jobhunt import pipeline
+    dead = db.create_run(profile.id)
+    db.update_run(dead, stats={"pid": 2 ** 22 + 12345})
+    mine = db.create_run(profile.id)
+    db.update_run(mine, stats={"pid": os.getpid()})
+    old_unknown = db.create_run(profile.id)
+    with db.connect() as c:
+        c.execute("UPDATE runs SET started_at='2020-01-01T00:00:00+00:00' WHERE id=?", (old_unknown,))
+    patch_registry(monkeypatch, ["boarda"])
+    res = await run_search(profile.id, llm=FakeLLM())
+    assert res.stage == "done"
+    assert db.get_run(dead)["status"] == "error" and db.get_run(old_unknown)["status"] == "error"
+    assert db.get_run(mine)["status"] == "running" and db.get_run(dead)["finished_at"]
+    assert pipeline.reap_stale_runs() == 0
