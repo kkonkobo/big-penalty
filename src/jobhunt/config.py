@@ -40,6 +40,9 @@ class Settings(BaseModel):
     cv_allow_failover: bool = True
     # Overall deadline of ONE structured() call (all retries + provider failover), seconds (JOBHUNT_LLM_DEADLINE_S).
     llm_deadline_s: float = 180.0
+    # One JSON line per LLM call (tokens, model, call site, estimated cost) in <data_dir>/logs/llm-usage.jsonl
+    # (JOBHUNT_LLM_USAGE_LOG=0 disables it). Counts only, never prompt text: `jobhunt llm-usage` sums it up.
+    llm_usage_log: bool = True
     # Milestone 2b: apply on the company's own ATS. apply_auto is the master switch of AUTOMATIC sending (off by default).
     apply_auto: bool = False  # JOBHUNT_APPLY_AUTO
     apply_daily: bool = False  # JOBHUNT_APPLY_DAILY: the daily run prepares CVs (and sends, if apply_auto) after the search
@@ -121,6 +124,7 @@ def get_settings() -> Settings:
         cv_effort=env("JOBHUNT_CV_EFFORT", "medium"),
         cv_allow_failover=env("JOBHUNT_CV_ALLOW_FAILOVER", "1").strip().lower() not in ("0", "false", "no", "off"),
         llm_deadline_s=float(env("JOBHUNT_LLM_DEADLINE_S") or 180),
+        llm_usage_log=env("JOBHUNT_LLM_USAGE_LOG", "1").strip().lower() not in ("0", "false", "no", "off"),
         apply_auto=env("JOBHUNT_APPLY_AUTO", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_daily=env("JOBHUNT_APPLY_DAILY", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_auto_min_score=float(env("JOBHUNT_APPLY_AUTO_MIN_SCORE") or 60),
