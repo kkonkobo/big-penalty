@@ -25,9 +25,15 @@ def technical_key(label: str, kind: str = "", *, group: str = "", autocomplete: 
         return "credentials"
     if label in {"confirmation", "confirm", "bestatigung", "wiederholen", "repeat", "confirmer"}:
         return "credentials"
-    if re.search(r"compte requis|creation de compte|connexion (?:impossible|requise)|login|log in|sign in|account (?:required|creation)|"
+    if re.search(r"compte (?:requis|obligatoire)|creation de compte|connexion (?:impossible|requise)|login|log in|sign in|account (?:is required|required|creation)|"
                  r"anmeldung|anmelden|konto (?:erstellen|erforderlich)", label):
         return "account"
+    if label == "cv personale":
+        return "cv_upload"
+    if label == "photo jpg":
+        return "photo_upload"
+    if label in {"lettre de motivation", "cover letter", "message"} and kind != "file":
+        return "application_material"
     if kind == "file" or re.search(r"depot du fichier|fichier a joindre|file upload|upload failed|datei hochladen", label) \
             or (kind in {"button", "link"} and re.search(r"joindre|televerser|upload|attach|hochladen", label)):
         if re.search(r"\bcv\b|lebenslauf|\bresume\b|curriculum", label):
@@ -56,6 +62,8 @@ def decision_key(label: str) -> str | None:
         if re.search(r"\b(?:opt in|consent\w*|agree|accept\w*|autorise\w*|zustimm\w*|einwillig\w*|yes|enable|allow)\b", label):
             return "ai_opt_in"
         return "ai_review"
+    if optional_recruiting(label):
+        return "recruiting"
     if requires_site_consent(label):
         return "consent"
     if re.search(r"conflict of interest|conflit d interet|interessenkonflikt", label):
@@ -76,6 +84,20 @@ def decision_key(label: str) -> str | None:
     return None
 
 
+def optional_recruiting(label: str) -> bool:
+    return bool(re.search(r"other job opportunities|receive update messages|(?:j accepte|je souhaite) d? ?etre sollicite|"
+                          r"j accepte de recevoir des messages|job alerts?|alertes? (?:emploi|offres?)|"
+                          r"talent pool|talent community|vivier|future opportunit|offres futures", norm_question(label)))
+
+
+def recruiter_ai_polarity(label: str) -> bool | None:
+    text = norm_question(label)
+    if not re.search(r"\b(?:recruiter|recruteur)\b", text) or not re.search(r"\b(?:assist\w*|aid\w*|help\w*|support\w*)\b", text):
+        return None
+    choice = decision_key(label)
+    return {"ai_opt_in": True, "ai_opt_out": False}.get(choice)
+
+
 def is_manual_choice(label: str) -> bool:
     return decision_key(label) is not None
 
@@ -91,6 +113,13 @@ def international_calling_code(phone: str) -> str | None:
         if digits.startswith(code) and re.fullmatch(national, digits[len(code):]):
             return "+" + code
     return None
+
+
+def french_phone(phone: str) -> str:
+    """Return the nine national digits of an unambiguous French-format phone."""
+    value = re.sub(r"[ .()-]", "", phone.strip())
+    match = re.fullmatch(r"(?:0|\+33|0033)([1-9][0-9]{8})", value)
+    return match[1] if match else ""
 
 
 def device_type(label: str) -> str | None:

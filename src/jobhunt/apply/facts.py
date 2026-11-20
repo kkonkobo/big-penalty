@@ -25,7 +25,7 @@ import yaml
 from pydantic import BaseModel
 
 from jobhunt.apply.errors import ApplyError
-from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, is_manual_choice, norm_question, technical_key
+from jobhunt.apply.prompt_rules import CREDENTIAL_ERROR, french_phone, international_calling_code, is_manual_choice, norm_question, technical_key
 from jobhunt.apply.types import Fact, FactSheet
 from jobhunt.config import get_settings
 from jobhunt.filelock import try_lock, unlock
@@ -241,11 +241,17 @@ ANSWER_FIELDS: tuple[AnswerField, ...] = (
     _F(path="race_ethnicity", label="Origine ethnique (auto-identification facultative)", section=S_ID, max_len=120,
        help="Renseignez cette réponse uniquement si vous souhaitez la communiquer aux employeurs qui posent explicitement cette question."),
     _F(path="address", label="Adresse (numéro et rue)", section=S_ID, placeholder="12 rue des Lilas"),
+    _F(path="address_line_2", label="Complément d’adresse", section=S_ID),
     _F(path="postal_code", label="Code postal", section=S_ID),
     _F(path="city", label="Ville", section=S_ID),
     _F(path="department", label="Département", section=S_ID, placeholder="Haute-Garonne"),
     _F(path="country", label="Pays de résidence", section=S_ID),
     _F(path="phone_device_type", label="Type de téléphone déclaré", widget="select", options=("", "Mobile", "Fixe"), section=S_ID),
+    _F(path="phone_calling_code", label="Indicatif téléphonique", section=S_ID, max_len=5),
+    _F(path="recruiter_ai", label="Accepter qu’un outil d’IA assiste le recruteur ?", widget="select", options=("", "Oui", "Non"), section=S_ADMIN),
+    _F(path="conflict_of_interest", label="Avez-vous un conflit d’intérêts avec un employé ou un client de l’employeur ?",
+       widget="select", options=("", "Oui", "Non"), section=S_ADMIN),
+    _F(path="politically_exposed", label="Êtes-vous une personne politiquement exposée ?", widget="select", options=("", "Oui", "Non"), section=S_ADMIN),
     _F(path="work_authorization", label="Autorisation de travail en France", widget="textarea", max_len=1000, section=S_ADMIN,
        help="Nationalité ou titre de séjour, et ce qui permet de travailler en France."),
     _F(path="needs_visa_sponsorship", label="Besoin d'un visa ou d'un permis de travail", widget="select",
@@ -275,6 +281,18 @@ ANSWER_FIELDS: tuple[AnswerField, ...] = (
 )
 ANSWER_BY_PATH: dict[str, AnswerField] = {f.path: f for f in ANSWER_FIELDS}
 COUNTRY_SUGGESTION = "France"
+
+
+def employer_path(company: str) -> str | None:
+    name = " ".join(company.casefold().split())
+    return "former_employer." + hashlib.sha256(name.encode()).hexdigest()[:32] if name else None
+
+
+def answer_field(path: str) -> AnswerField | None:
+    if re.fullmatch(r"former_employer\.[a-f0-9]{32}", path):
+        return _F(path=path, label="A déjà travaillé pour l’employeur (ou ses filiales)",
+                  widget="select", options=("", "Oui", "Non"), section=S_ADMIN)
+    return ANSWER_BY_PATH.get(path)
 
 _FR_MONTHS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre")
 _FR_MONTH_NUM = {unicodedata.normalize("NFKD", m).encode("ascii", "ignore").decode(): i for i, m in enumerate(_FR_MONTHS, 1)}
@@ -315,6 +333,8 @@ def _clean_value(f: AnswerField, raw: Any) -> str:
         return ""
     if f.widget == "select" and text not in f.options:
         raise ApplyError(f"Valeur non autorisée pour « {f.label} »")
+    if f.path == "phone_calling_code" and not re.fullmatch(r"\+[1-9][0-9]{0,2}", text):
+        raise ApplyError("Indicatif invalide (exemple : +33)")
     if f.widget == "date":
         iso = text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else from_french_date(text)
         try:
@@ -355,13 +375,14 @@ def save_answers(profile_id: int, values: dict[str, str]) -> None:
     "janvier 2027"): that text is kept unless a date is picked. Unknown keys, `custom` and `trusted_hosts` are preserved.
     Values are stripped and capped (500 characters, 1000 for textareas); a select value must be one of its options.
     Raises ApplyError (nothing written) for an unknown path, a value outside the options or an invalid date."""
-    unknown = [p for p in values if p not in ANSWER_BY_PATH]
+    fields = {path: answer_field(path) for path in values}
+    unknown = [path for path, field in fields.items() if field is None]
     if unknown:
         raise ApplyError("Réponse inconnue : " + ", ".join(unknown))
-    cleaned = {p: _clean_value(ANSWER_BY_PATH[p], v) for p, v in values.items()}
+    cleaned = {path: _clean_value(fields[path], value) for path, value in values.items()}
     data = load_answers(profile_id)
     for path, value in cleaned.items():
-        f = ANSWER_BY_PATH[path]
+        f = fields[path]
         if not value and f.widget == "date":
             stored = get_answer(data, path)
             if stored and from_french_date(stored) is None:
@@ -548,15 +569,65 @@ def identity_answers(profile: Profile, master: Master | None, answers: dict) -> 
     }
 
 
+def french_department(postal_code: str | None) -> str | None:
+    if not re.fullmatch(r"[0-9]{5}", postal_code or ""):
+        return None
+    prefix = postal_code[:3]
+    if prefix in {"200", "201"}:
+        return "2A"
+    if prefix in {"202", "206"}:
+        return "2B"
+    if prefix in {"971", "972", "973", "974", "976"}:
+        return prefix
+    department = postal_code[:2]
+    return department if department != "20" and 1 <= int(department) <= 95 else None
+
+
+def _graduation(master: Master | None) -> str | None:
+    education = _latest_education(master) if master else None
+    if not education:
+        return None
+    dates = education.dates.strip()
+    end = re.search(r"(?:\s[-–—]\s*|[–—]|\s+(?:à|to)\s+)(.+)$", dates, re.I)
+    if end is None and re.fullmatch(r"\d{4}-\d{4}", dates):
+        return dates[-4:]
+    if end is None:
+        return None
+    value = end[1].strip()
+    try:
+        return to_french_date(date.fromisoformat(value).isoformat())
+    except ValueError:
+        if from_french_date(value) or re.fullmatch(r"(?:[\wûé]+ )?(?:19|20)\d{2}", value):
+            return value
+        return None
+
+
+def candidate_answers(profile: Profile, master: Master | None, answers: dict) -> dict[str, str | None]:
+    identity = identity_answers(profile, master, answers)
+    phone = identity["phone"] or ""
+    national = french_phone(phone)
+    country = get_answer(answers, "country")
+    department = french_department(get_answer(answers, "postal_code")) if not country or norm_question(country) in {
+        "france", "fr", "fra", "frankreich"} else None
+    return {**{key: get_answer(answers, key) for key in ANSWER_BY_PATH}, **identity,
+            "country": country or ("France" if department else None),
+            "department": get_answer(answers, "department") or department,
+            "phone_calling_code": get_answer(answers, "phone_calling_code") or (
+                "+33" if national else international_calling_code(phone)),
+            "phone_device_type": (get_answer(answers, "phone_device_type") if get_answer(answers, "phone_device_type") in {"Mobile", "Fixe"}
+                                  else "Mobile" if national.startswith(("6", "7")) else None),
+            "graduation_date": get_answer(answers, "graduation_date") or _graduation(master)}
+
+
 def build_facts(profile: Profile, master: Master | None, answers: dict, job: MergedJob, *, account_email: str | None = None,
-                today: date | None = None) -> FactSheet:
+                today: date | None = None, employer: str | None = None) -> FactSheet:
     facts: list[Fact] = []
 
     def add(key: str, label: str, value: Any = None, **kw) -> None:
         facts.append(Fact(key=key, label=label, value=value if kw.get("secret") else _s(value), **kw))  # secret: "" placeholder
 
     ident = master.identity if master else None
-    identity = identity_answers(profile, master, answers)
+    identity = candidate_answers(profile, master, answers)
     email, phone = identity["email"], identity["phone"]
     linkedin = _s(ident.linkedin if ident else None)
     add("full_name", "Nom complet", identity["full_name"], exact=True, label_re=LABEL_RE["full_name"])
@@ -564,8 +635,10 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
     add("last_name", "Nom de famille", identity["last_name"], exact=True, label_re=LABEL_RE["last_name"])
     add("email", "Adresse e-mail", email, exact=True, label_re=LABEL_RE["email"])
     add("phone", "Téléphone", phone, exact=True, variants=phone_variants(phone), label_re=LABEL_RE["phone"])
-    add("phone_device_type", "Type de téléphone déclaré (Mobile ou Fixe)",
-        answers.get("phone_device_type") if answers.get("phone_device_type") in ("Mobile", "Fixe") else None)
+    add("phone_device_type", "Type de téléphone (Mobile ou Fixe)", identity["phone_device_type"], exact=True)
+    add("phone_calling_code", "Indicatif téléphonique", identity["phone_calling_code"], exact=True)
+    employer_key = employer_path(employer or "")
+    add("former_employer", "Emploi antérieur auprès de cet employeur", get_answer(answers, employer_key) if employer_key else None, exact=True)
     # Forms validate this field as a URL ("Veuillez entrer une url LinkedIn valide" on a real site when the scheme was
     # missing): the value typed is always the full https URL; the shorter spellings stay as accepted variants.
     full_linkedin = linkedin_full_url(linkedin)
@@ -574,7 +647,7 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
         label_re=LABEL_RE["linkedin"])
     for key, label in (("civility", "Civilité"), ("gender", "Genre"), ("birth_date", "Date de naissance"),
                        ("nationality", "Nationalité"), ("race_ethnicity", "Origine ethnique déclarée"),
-                       ("address", "Adresse postale"), ("postal_code", "Code postal"),
+                       ("address", "Adresse postale"), ("address_line_2", "Complément d’adresse"), ("postal_code", "Code postal"),
                        ("city", "Ville"), ("country", "Pays"), ("driving_licence", "Permis de conduire"),
                        ("disability", "Reconnaissance de travailleur handicapé (RQTH)"),
                        ("birth_place", "Lieu de naissance"), ("department", "Département de résidence"),
@@ -582,8 +655,11 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
                        ("vehicle", "Véhicule personnel"), ("criminal_record", "Casier judiciaire (déclaration)"),
                        ("notice_period", "Préavis"), ("current_salary", "Rémunération actuelle"),
                        ("graduation_date", "Date d'obtention du diplôme en cours (prévue) / graduation date"),
+                       ("politically_exposed", "Personne politiquement exposée"),
+                       ("recruiter_ai", "Assistance du recruteur par une IA"),
+                       ("conflict_of_interest", "Conflit d’intérêts avec un employé ou client"),
                        ("internship_agreement", "L'école fournit une convention de stage (internship agreement)")):
-        add(key, label, answers.get(key))
+        add(key, label, identity.get(key))
     add("work_authorization", "Autorisation de travail / situation administrative en France", answers.get("work_authorization"))
     add("mobility", "Mobilité géographique", answers.get("mobility"))
     add("languages_summary", "Langues parlées (résumé)", answers.get("languages"))

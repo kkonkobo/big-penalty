@@ -307,7 +307,9 @@ def load_view(portal: Portal, profile_id: int, now: float) -> PortalView:
                       intent_events={grant: work.event_id for grant, work in live.items()},
                       cancellable_intents={work.event_id for work in live.values() if work.can_cancel},
                       cancelling_intents={work.event_id for work in live.values() if work.cancelling},
-                      answered_questions={e.qid for e in events if e.kind == "question_answer"})
+                      answered_questions={e.qid for e in events if e.kind == "question_answer"} | {
+                          q.qid for q in (snapshot.questions if snapshot else [])
+                          if q.path and any(e.kind == "answer" and e.path == q.path for e in events)})
     if row["snapshot_at"] is not None:
         view.synced_at = _dt(row["snapshot_at"])
         view.synced_age_seconds = max(0.0, now - row["snapshot_at"])
@@ -480,7 +482,8 @@ def submit_answers(portal: Portal, profile_id: int | Session, edits: list[Answer
     return _mutate(portal, profile_id, now, plan)
 
 
-def answer_questions(portal: Portal, profile_id: int | Session, answers: list[tuple[str, str]], now: float) -> SubmitOutcome:
+def answer_questions(portal: Portal, profile_id: int | Session, answers: list[tuple[str, str]], now: float,
+                     *, tokens: dict[str, str] | None = None) -> SubmitOutcome:
     """Answers to the questions the engine is waiting on (`snapshot.questions`)."""
     def plan(ctx: _Ctx, out: SubmitOutcome) -> None:
         questions = {q.qid: q for q in ctx.snapshot.questions}
@@ -490,13 +493,22 @@ def answer_questions(portal: Portal, profile_id: int | Session, answers: list[tu
                 out.problems.append(Problem("refused", qid[:16], "", "Cette question a changé : rechargez la page."))
                 continue
             try:
-                value = _line(answer)
-                if q.options and value not in q.options:
-                    raise _Invalid("Choisissez l'une des propositions.")
+                if q.path:
+                    spec = next((field for field in ctx.snapshot.answer_schema.fields if field.path == q.path), None)
+                    state = _answer_state(ctx.snapshot, ctx.events, spec, None) if spec else None
+                    if state is None or state.pending or (tokens or {}).get(qid) != state.token:
+                        raise _Invalid(MSG_STALE)
+                    value = _clean(spec, answer)
+                    _check(spec, value)
+                    ctx.add(AnswerEvent, path=spec.path, value=value, base_ver=state.base_ver, after=None)
+                else:
+                    value = _line(answer)
+                    if q.options and value not in q.options:
+                        raise _Invalid("Choisissez l'une des propositions.")
+                    ctx.add(QuestionAnswerEvent, qid=qid, answer=value)
             except _Invalid as exc:
                 out.problems.append(Problem("invalid", qid, q.label, str(exc)))
                 continue
-            ctx.add(QuestionAnswerEvent, qid=qid, answer=value)
     return _mutate(portal, profile_id, now, plan)
 
 

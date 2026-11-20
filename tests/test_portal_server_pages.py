@@ -281,7 +281,7 @@ def test_pages_render_from_a_rich_snapshot(h, user, prof):
     r = user.get("/app/a-faire")
     assert r.status_code == 200
     t = r.text
-    for needle in ("Il manque une réponse", "Permis de conduire ?", "Votre mobilité", "Choisir…", "Vos réponses sont gardées pour tous les prochains formulaires.",
+    for needle in ("Il manque une réponse", "Permis de conduire ?", "Votre mobilité", "Choisir…", "À décider",
                    "Enregistrer mes réponses", "Code par e-mail", "Atelier Martin", "ats.example", "Lien reçu",
                    "Reprenez ensuite sur le Mac uniquement.", "À vérifier", "Maison Dupont", "9 janvier 2027",
                    "Vérifiez sur le site de l'entreprise (ou dans vos e-mails) si la candidature est bien partie.",
@@ -499,6 +499,22 @@ def test_answering_questions(h, user, prof):
     push(h, prof, rich_snapshot().model_copy(update={"questions": [protocol.PendingQuestion(qid="c3" * 8, label="Choix", options=["A", "B"])]}))
     page = follow(user, post(user, "/a-faire/questions", {"q_" + "c3" * 8: "Zorglub"})).text
     assert "Choisissez l'une des propositions." in page and "Zorglub" not in page
+
+
+def test_grouped_question_form_sends_a_versioned_standing_answer(h, user, prof):
+    question = protocol.PendingQuestion(qid=QID, label="Ville", path="identity.city", group="fact", application_count=6)
+    snap = rich_snapshot().model_copy(update={"questions": [question]})
+    push(h, prof, snap)
+    page = user.get("/app/a-faire").text
+    token = snap.answers[question.path].ver
+    assert "À compléter une fois" in page and "Ville · 6 candidatures" in page
+    assert f'name="v_{QID}" value="{token}"' in page
+    assert re.search(rf'<input[^>]*name="q_{QID}"[^>]*autocomplete="off"', page)
+    post(user, "/a-faire/questions", {f"q_{QID}": "Lyon", f"v_{QID}": "e" * 32})
+    assert not events(h, prof)
+    post(user, "/a-faire/questions", {f"q_{QID}": "Lyon", f"v_{QID}": token})
+    event, = events(h, prof)
+    assert (event.kind, event.path, event.value, event.base_ver) == ("answer", "identity.city", "Lyon", token)
 
 
 def test_two_step_intent_flow(h, user, prof):

@@ -21,7 +21,8 @@ from jobhunt.cv import store as cvstore
 from jobhunt.filelock import try_lock, unlock
 from jobhunt.portal import protocol
 from jobhunt.portal.journal import EventRow, Journal, ProfileRow
-from jobhunt.portal.snapshot import (answer_key, custom_entry, custom_key, field_version, question_id, settlement_binding,
+from jobhunt.apply import missing_answers, scoped_choices
+from jobhunt.portal.snapshot import (answer_key, custom_entry, custom_key, decision_id, field_version, settlement_binding,
                                      stored_answer, value_hash)
 
 TOO_LATE = "Trop tard : l'action avait déjà commencé."
@@ -32,6 +33,16 @@ TECHNICAL = "Erreur technique."
 UNVERIFIED = "L'enregistrement n'a pas pu être vérifié : réessayez."
 OPEN_STATES = ("received", "awaiting_review")
 LOCK_TIMEOUT_S = 5.0
+
+
+def _projection(profile_id):
+    profile = db.get_profile(profile_id)
+    return missing_answers.project_queue(profile, service.queue(profile_id), facts.load_answers(profile_id)) if profile else None
+
+
+def _match_decision(profile_id, qid):
+    projection = _projection(profile_id)
+    return next((decision for decision in projection.decisions if decision_id(decision) == qid), None) if projection else None
 
 
 class _LockBusy(Exception):
@@ -147,14 +158,14 @@ def _describe(ctx: _Ctx, ev: EventRow) -> tuple[str, str, str]:
     """(label, before_text, after_text) for the operator's local view."""
     p, pid = ev.payload, ctx.pid
     if ev.kind == "answer":
-        f = facts.ANSWER_BY_PATH.get(p.get("path", ""))
+        f = facts.answer_field(p.get("path", ""))
         return (f.label if f else str(p.get("path", ""))), stored_answer(pid, p["path"]) if f else "", str(p.get("value", ""))
     if ev.kind in ("custom_edit", "custom_delete"):
         e = custom_entry(pid, p.get("custom_id", ""))
         return (e["question"] if e else "Réponse enregistrée"), (e["answer"] if e else ""), (str(p.get("answer", "")) if ev.kind == "custom_edit" else "(supprimée)")
     if ev.kind == "question_answer":
-        q = next((q for _a, _r, q in service.pending_questions(pid) if question_id(q.label) == p.get("qid")), None)
-        return (q.label if q else "Question"), "", str(p.get("answer", ""))
+        decision = _match_decision(pid, p.get("qid"))
+        return (decision.question.label if decision else "Question"), "", str(p.get("answer", ""))
     if ev.kind == "intent":
         return _intent_label(ctx, p.get("grant", "")), "", ""
     return "", "", ""
@@ -211,7 +222,7 @@ def reconcile_write_plans(journal: Journal, profile_id: int, now: datetime) -> N
 
 def _answer(ctx: _Ctx, ev: EventRow) -> None:
     p, pid = ev.payload, ctx.pid
-    f = facts.ANSWER_BY_PATH.get(p["path"])
+    f = facts.answer_field(p["path"])
     if f is None:
         return ctx.finish(ev, "rejected", "Ce champ n'existe pas.", label=str(p["path"])[:500])
     label = f.label
@@ -221,6 +232,10 @@ def _answer(ctx: _Ctx, ev: EventRow) -> None:
     current = stored_answer(pid, f.path)
     if _planned_write(ctx, ev, key, current, label):
         return
+    if f.path.startswith("former_employer.") and current is None:
+        projection = _projection(pid)
+        if not projection or not any(group.fact_key == f.path for group in projection.groups):
+            return ctx.finish(ev, "rejected", NOT_PENDING, label=label)
     try:
         expected = _expected_text(f, p["value"], current)
     except ApplyError as e:
@@ -304,10 +319,34 @@ def _question(ctx: _Ctx, ev: EventRow) -> None:
         return ctx.finish(ev, "applied", "Enregistrée.", label=ev.label)
     if _planned_write(ctx, ev, key, current, ev.label):
         return
-    match = next((q for _a, _r, q in service.pending_questions(pid) if question_id(q.label) == qid), None)
-    if match is None:
+    decision = _match_decision(pid, qid)
+    if decision is None:
         return ctx.finish(ev, "rejected", NOT_PENDING)
+    match = decision.question
     label = match.label[:500]
+    if decision.options:
+        indices = [index for index, option in decision.options if option == answer]
+        if len(indices) != 1:
+            return ctx.finish(ev, "rejected", "Cette réponse ne fait pas partie des choix proposés.", label=label)
+        item = decision.item
+        with db.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            app = cvstore.get_application(item.app.id)
+            last = apply_store.last_run(item.app.id)
+            job = db.get_job(app.job_id) if app else None
+            if (not scoped_choices.run_current(app, last, item.origin_sha) or app.profile_id != pid
+                    or last.id != item.last_run.id or not job or job.profile_id != pid
+                    or item.origin_sha != service.origin_digest(job.origin_url)
+                    or apply_store.outstanding_attempt(app.id) is not None):
+                return ctx.finish(ev, "rejected", NOT_PENDING)
+            saved = scoped_choices.load(pid, app.id, app.current_rev, item.origin_sha).get(match.choice_binding)
+            if saved is None:
+                scoped_choices.save_once(pid, app.id, app.current_rev, item.origin_sha, match.choice_binding, indices[0])
+            elif saved != indices[0]:
+                return ctx.finish(ev, "conflict", CONFLICT, label=label)
+        ctx.report.applied_answers = True
+        ctx.finish(ev, "applied", "Enregistrée.", label=label)
+        return
     if match.options and answer not in match.options:
         return ctx.finish(ev, "rejected", "Cette réponse ne fait pas partie des choix proposés.", label=label)
     new_ver = _write_plan(ctx, ev, current, answer, label=label, after_text=answer)

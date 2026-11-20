@@ -269,13 +269,14 @@ def test_oversized_and_odd_inputs_still_validate(jp, profile, master, tmp_path):
     protocol.Snapshot.model_validate_json(snap.model_dump_json())
 
 
-def test_questions_use_the_engine_labels_and_ids(jp, profile, master, tmp_path):
+def test_questions_use_standing_fact_path_and_exclude_unbound_select(jp, profile, master, tmp_path):
     _, app = new_app(profile, master, tmp_path, 1, approve=True)
-    make_run(app, tmp_path, status="needs_input", questions=[Question(label="Permis B ?", options=["Oui", "Non"]), Question(label="Ville ?")])
+    make_run(app, tmp_path, status="needs_input", questions=[Question(label="Permis B ?", kind="select", options=["Oui", "Non"]),
+                                                           Question(label="Ville ?")])
     snap, _ = build(jp, profile)
-    q = {x.label: x for x in snap.questions}
-    assert q["Permis B ?"].qid == facts.custom_id("Permis B ?") and q["Permis B ?"].options == ["Oui", "Non"]
-    assert q["Permis B ?"].company == "Société 1"
+    question, = snap.questions
+    assert question.label == "Ville" and question.path == "city" and question.application_count == 1
+    assert any(item.kind == "technical" and item.company == "Société 1" for item in snap.info)
     assert snap.awaiting == []  # a paused application is not waiting for an OK
 
 

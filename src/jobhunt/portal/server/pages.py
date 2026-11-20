@@ -450,6 +450,9 @@ def a_faire(request: Request) -> Response:
         items = [i for i in snap.info if i.kind == kind]
         if items:
             groups.append((label, items))
+    technical = [item for item in snap.info if item.kind == "technical"]
+    groups.extend((category, [item for item in technical if item.category == category])
+                  for category in dict.fromkeys(item.category for item in technical))
     index = grant_index(snap)
     pending_rows = []
     for p in view.pending:
@@ -476,11 +479,14 @@ def _do_questions(c: Ctx) -> Response:
     snap = c.view.snapshot
     if snap is None:
         return c.redirect("a-faire", err=[ops.MSG_NO_SNAPSHOT])
-    answers = [(q.qid, c.form.get(f"q_{q.qid}").strip()) for q in snap.questions if q.qid not in c.view.answered_questions]
+    never_employed = c.form.get("never_employed") == "1"
+    answers = [(q.qid, c.form.get(f"q_{q.qid}").strip() or ("Non" if never_employed and q.group == "employer" else ""))
+               for q in snap.questions if q.qid not in c.view.answered_questions]
     answers = [(qid, text) for qid, text in answers if text]
     if not answers:
         return c.redirect("a-faire", ok=[MSG_NO_ANSWER])
-    out = ops.answer_questions(c.portal, c.session, answers, c.now)
+    out = ops.answer_questions(c.portal, c.session, answers, c.now,
+                               tokens={qid: c.form.get(f"v_{qid}") for qid, _ in answers})
     ok = [_count(out.stored, "1 réponse enregistrée, en attente du Mac.", "{n} réponses enregistrées, en attente du Mac.")] if out.stored else []
     return c.redirect("a-faire", ok=ok, err=out.messages())
 
