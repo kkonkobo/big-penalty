@@ -52,7 +52,7 @@ _POSTING = r"""() => {
       .filter(node => visible(node) && !node.matches(':disabled,[aria-disabled="true"],[download]')
         && !(node.form || node.closest('form'))?.querySelector('input[type="password"], input[type="file"], input[type="email"], input[autocomplete="given-name"]')
         && !node.closest(excluded) && (scope.contains(node) || (!node.closest('main, [role="main"]') && !!scope.querySelector('h1')))
-        && (/^(?:apply(?: now| for this job)?|(?:je )?postul(?:er|ez|e)(?: maintenant| à cette offre)?|candidater|(?:jetzt )?bewerben)$/iu.test(label(node))
+        && (/^(?:apply(?: now| for this (?:job|position|role)| online| here)?|start (?:your |my )?application|(?:commencer à |je )?postul(?:er|ez|e)(?: maintenant| à cette offre| en ligne| ici)?|candidat(?:er|ez)(?: maintenant| en ligne)?|je candidate|(?:jetzt )?(?:online )?bewerben)$/iu.test(label(node))
             || node.tagName === 'A' && (/\/talentcommunity\/apply\/\d+(?:\/|$)/i.test(node.pathname)
                 || /[?&](?:career_job_req_id|jobReqId)=\d+/i.test(node.search)) && /postul|apply|candidater|bewerben/i.test(label(node))));
     const smart = [...document.querySelectorAll('a[href]')].filter(node => visible(node) && !node.closest(excluded)
