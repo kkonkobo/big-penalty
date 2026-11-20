@@ -1976,6 +1976,9 @@ class _Run:
         if res.status == "needs_input":
             cats = sorted({q.category or q.reason or "other" for q in res.questions})
             parts.append(f"{len(res.questions)} unanswered question(s): {','.join(cats)}")
+            labels = [q.label.strip()[:40] for q in res.questions if q.kind != "password" and q.category != "credentials" and q.label.strip()]
+            if labels:  # the field LABELS only (never a value, never a password field's)
+                parts.append("fields: " + " | ".join(dict.fromkeys(labels)))
         elif last in sensitive or res.status == "needs_email" or contains_verification_code(res.message):
             parts.append("account / verification page (message withheld)")
         else:

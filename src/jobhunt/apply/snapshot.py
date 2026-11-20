@@ -363,11 +363,14 @@ _JS = r"""
       f.multiple = el.multiple;
       f.choice_options = [...el.options].map(o => [o.value, clean(o.label || o.textContent),
         o.matches(':disabled'), o.closest('optgroup')?.label || '']);
-      f.selected = [...el.selectedOptions].filter(o => o.value !== '').map(o => o.index);
+      // A first option that only says "choose a value" is the blank state even when it carries a value ("0", "-1"): Talentsoft's
+      // search-engine selects are "Veuillez sélectionner une valeur" = 0.
+      const blank = (o) => o.value === '' || (!el.multiple && o.index === 0 && /^[\s\-–—.]*(veuillez\s+|please\s+|merci de\s+)?(s[ée]lectionn\w*|choisi\w*|choose|select|pick)\b/i.test(clean(o.label || o.textContent)) && /^(0|-1|null|none|default)$/i.test(o.value));
+      f.selected = [...el.selectedOptions].filter(o => !blank(o)).map(o => o.index);
       f.options = [...el.options].filter((o) => o.value !== '' && !o.disabled && !o.closest('optgroup[disabled]'))
         .map((o) => ({value: o.value, label: clean(o.label || o.textContent)}));
       const s = el.selectedOptions[0];
-      f.value = s && s.value !== '' && !(s.disabled && s.index === 0) ? clean(s.label || s.textContent) : '';
+      f.value = s && !blank(s) && !(s.disabled && s.index === 0) ? clean(s.label || s.textContent) : '';
     } else if (kind === 'combobox') {
       const ids = (el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '').split(/\s+/).filter(Boolean);
       let lb = ids.map((i) => byId(el, i)).find(Boolean);
