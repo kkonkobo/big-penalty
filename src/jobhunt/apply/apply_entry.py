@@ -395,6 +395,50 @@ async def _click_through_overlay(page, button, cookie_reject) -> None:
     await button.evaluate("node => node.click()", isolated_context=True)
 
 
+async def await_landing(page, context, baseline, opened, probe, guard, audience, *, workday, before_url, was_ready):
+    """After a pre-data click or goto: wait for the page (or a new tab) to land on an admitted continuation of the posting.
+    Returns (tab, clean_url), (None, code) for a fixed diagnostic, or None when nothing landed in time."""
+    deadline = asyncio.get_running_loop().time() + (_WORKDAY_WAIT if workday else 5)
+    while not guard.refused and asyncio.get_running_loop().time() < deadline:
+        new = set(context.pages) - baseline
+        if len(opened) > 1 or len(new) > 1:
+            break
+        tab = next(iter(new), page)
+        if probe.next_url:
+            url, probe.next_url = probe.next_url, ""
+            await tab.goto(url, wait_until="domcontentloaded", timeout=35000 if workday else 5000)
+            continue
+        if not tab.is_closed() and tab.url not in {"", "about:blank"}:
+            with contextlib.suppress(Exception):
+                nonce = secrets.token_urlsafe(24)
+                landing_state = await tab.evaluate_handle(
+                    f"nonce => {{ document.__bp_apply_landing = nonce; return ({_POSTING})(); }}",
+                    nonce, isolated_context=True,
+                )
+                landing = await landing_state.get_properties()
+                ready = await landing["ready"].json_value()
+                marker = await landing["workday"].json_value()
+                target = await landing["url"].json_value()
+                ids = await landing["ids"].json_value()
+                if workday and await is_challenge(tab):
+                    return None, "challenge_or_rate_limited"
+                if ((probe.tab is None or tab == probe.tab)
+                        and (tab != page or target != before_url or (ready and not was_ready))
+                        and (not workday or marker or ready)
+                        and (binding := probe.landing(target, ids, ready=ready))):
+                    if tab != page:
+                        await page.close()
+                    if guard.refused or len(opened) > 1:
+                        return None, "apply_target_unverified"
+                    audience.recheck()
+                    audience.entry_nonce = nonce
+                    audience.entry_binding = binding
+                    audience.entry_ids = frozenset(probe.landing_ids(target, ids))
+                    return tab, clean_url(target, navigation=True)
+        await asyncio.sleep(0.1)
+    return None
+
+
 async def discover(page, guard, audience, *, requisition=None, require_posting=False, platform=None):
     """Return the admitted page, or a fixed diagnostic. Only a bound Talentsoft entry POST may be forwarded."""
     baseline = set(page.context.pages)
@@ -507,45 +551,11 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
             reject = await data["cookie"].get_properties()
             await _click_through_overlay(page, button, reject["0"].as_element() if len(reject) == 1 else None)
         workday = probe.source_ats == "workday" or bool(direct and ats_target(direct)[0] == "workday")
-        deadline = asyncio.get_running_loop().time() + (_WORKDAY_WAIT if workday else 5)
-        while not guard.refused and asyncio.get_running_loop().time() < deadline:
-            new = set(context.pages) - baseline
-            if len(opened) > 1 or len(new) > 1:
-                break
-            tab = next(iter(new), page)
-            if probe.next_url:
-                url, probe.next_url = probe.next_url, ""
-                await tab.goto(url, wait_until="domcontentloaded", timeout=35000 if workday else 5000)
-                continue
-            if not tab.is_closed() and tab.url not in {"", "about:blank"}:
-                with contextlib.suppress(Exception):
-                    nonce = secrets.token_urlsafe(24)
-                    landing_state = await tab.evaluate_handle(
-                        f"nonce => {{ document.__bp_apply_landing = nonce; return ({_POSTING})(); }}",
-                        nonce, isolated_context=True,
-                    )
-                    landing = await landing_state.get_properties()
-                    ready = await landing["ready"].json_value()
-                    marker = await landing["workday"].json_value()
-                    target = await landing["url"].json_value()
-                    ids = await landing["ids"].json_value()
-                    if workday and await is_challenge(tab):
-                        return None, "challenge_or_rate_limited"
-                    if ((probe.tab is None or tab == probe.tab)
-                            and (tab != page or target != audience.live_url or (ready and not was_ready))
-                            and (not workday or marker or ready)
-                            and (binding := probe.landing(target, ids, ready=ready))):
-                        if tab != page:
-                            await page.close()
-                        if guard.refused or len(opened) > 1:
-                            return None, "apply_target_unverified"
-                        audience.recheck()
-                        audience.entry_nonce = nonce
-                        audience.entry_binding = binding
-                        audience.entry_ids = frozenset(probe.landing_ids(target, ids))
-                        accepted = True
-                        return tab, clean_url(target, navigation=True)
-            await asyncio.sleep(0.1)
+        found = await await_landing(page, context, baseline, opened, probe, guard, audience, workday=workday,
+                                    before_url=audience.live_url, was_ready=was_ready)
+        if found is not None:
+            accepted = found[0] is not None
+            return found
     except PermissionError:
         return None, "challenge_or_rate_limited"
     except Exception as error:  # noqa: BLE001 - the run stops with a diagnostic; the cause goes to the log

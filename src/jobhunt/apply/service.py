@@ -25,6 +25,7 @@ from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Ma
 from jobhunt.apply.adapter_browser import AdapterAudience
 from jobhunt.apply.autonomous import Audience
 from jobhunt.apply.apply_entry import discover
+from jobhunt.apply.entry_llm import FALLBACK_CODES, advisor_for, discover_llm
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, save_run_record
@@ -637,6 +638,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         audience.follow_landing = follow_landing
 
     diagnostics.control = "navigation"
+    entry_advisor = None if browser_adapter else advisor_for(planner, llm)
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
         await guard.install(page)
         async def open_apply(tab, *, require_posting):
@@ -644,6 +646,14 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             try:
                 landing, target = await discover(tab, guard, audience, requisition=attempt.requisition_id,
                                                  require_posting=require_posting, platform=job.origin_ats)
+                if landing is None and target in FALLBACK_CODES and not guard.refused and entry_advisor is not None:
+                    # Nothing was entered and the deterministic patterns did not match: let the planner's LLM find the way
+                    # (close blockers, pick the apply control, follow it), under the same probe / guard / binding rules.
+                    guard.probe = None
+                    found = await discover_llm(tab, guard, audience, entry_advisor, requisition=attempt.requisition_id,
+                                               platform=job.origin_ats, job_title=job.title, company=job.company or "")
+                    if found is not None:
+                        landing, target = found
                 if landing is not None:
                     if clean_url(landing.url, navigation=True) != target or guard.refused:
                         return None, "apply_target_unverified"
