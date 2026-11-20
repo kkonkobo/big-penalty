@@ -130,7 +130,7 @@ def _static_asset(url: str) -> bool:
     return static_asset(url)
 
 
-_VENDOR_ASSET_HOST = re.compile(r"(?:\A|\.)(?:phenompeople\.com|rmkcdn\.successfactors\.(?:com|eu))\Z")
+_VENDOR_ASSET_HOST = re.compile(r"(?:\A|\.)(?:phenompeople\.com|ashbyprd\.com|myworkdaycdn\.com|rmkcdn\.successfactors\.(?:com|eu))\Z")
 _VENDOR_ASSET_PATH = re.compile(r"\.(?:m?js|css|woff2?|ttf|otf|eot|svg|png|jpe?g|gif|webp|ico)\Z", re.I)
 
 
@@ -178,6 +178,27 @@ async def cloudflare_edge_refusal(response) -> bool:
     except Exception:
         return False
     return any(marker in body for marker in _CLOUDFLARE_PAGE)
+
+
+_READ_SCHEMES = frozenset({"https"})
+_READ_TYPES = frozenset({"script", "stylesheet", "font", "image", "fetch", "xhr", "media"})
+
+
+def pre_data_read(url: str, method: str, resource_type: str, *, data_entered: bool) -> bool:
+    """A page's own background read (script, style, font, image, fetch) of any public host, made before any candidate data
+    was entered. Career sites build their page from CDN / API hosts that are not the employer's (job JSON in a cloud bucket, a
+    vendor API); aborting them leaves a blank page. Nothing candidate-related exists yet to leak, and no navigation, frame or
+    write is covered."""
+    try:
+        parts = urlsplit(url or "")
+        port = parts.port
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower().rstrip(".")
+    return (not data_entered and method in {"GET", "HEAD"} and resource_type in _READ_TYPES
+            and parts.scheme in _READ_SCHEMES and not parts.username and not parts.password and bool(host)
+            and port in {None, 443} and "." in host and not host.replace(".", "").isdigit() and ":" not in host
+            and not host.endswith((".local", ".internal", ".localhost")) and len(url) <= 2048)
 
 
 class RecipientGuard:
@@ -390,6 +411,11 @@ class RecipientGuard:
                     _static_asset(request.url)
                     or vendor_static_asset(request.url, data_entered=bool(getattr(self.audience, "data_entered", True)))):
                 permitted = True  # an ATS's own static code / fonts / UI strings: without them its pages render empty
+            if (not permitted and read and not navigation and self.audience is not None
+                    and not getattr(self.audience, "active", True)
+                    and pre_data_read(request.url, request.method, request.resource_type,
+                                      data_entered=bool(getattr(self.audience, "data_entered", True)))):
+                permitted = True  # pre-data page build (see pre_data_read): it cannot carry candidate data
             if not permitted and lenient and not self.probe:
                 if not top:
                     # A subresource, an iframe or another tab: aborting it cannot leak anything (rule 1).

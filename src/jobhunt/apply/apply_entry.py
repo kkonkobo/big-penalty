@@ -49,19 +49,25 @@ _POSTING = r"""() => {
       .filter(node => visible(node) && !node.matches(':disabled,[aria-disabled="true"],[download]')
         && !(node.form || node.closest('form'))?.querySelector('input[type="password"], input[type="file"], input[type="email"], input[autocomplete="given-name"]')
         && !node.closest(excluded) && (scope.contains(node) || (!node.closest('main, [role="main"]') && !!scope.querySelector('h1')))
-        && (/^(?:apply(?: now| for this job)?|(?:je )?postul(?:er|e)(?: maintenant| à cette offre)?|candidater|(?:jetzt )?bewerben)$/iu.test(label(node))
+        && (/^(?:apply(?: now| for this job)?|(?:je )?postul(?:er|ez|e)(?: maintenant| à cette offre)?|candidater|(?:jetzt )?bewerben)$/iu.test(label(node))
             || node.tagName === 'A' && (/\/talentcommunity\/apply\/\d+(?:\/|$)/i.test(node.pathname)
                 || /[?&](?:career_job_req_id|jobReqId)=\d+/i.test(node.search)) && /postul|apply|candidater|bewerben/i.test(label(node))));
+    const smart = [...document.querySelectorAll('a[href]')].filter(node => visible(node) && !node.closest(excluded)
+      && /^\/oneclick-ui\/company\/[^/]+\/publication\/[0-9a-f-]{36}\/?$/i.test(node.pathname)
+      && /^(?:je suis intéressé(?:\(e\))?|i['’]m interested|i am interested|ich bin interessiert|apply|postuler)$/iu.test(label(node))).map(node => node.href);
     const eligible = node => scope.contains(node);
     const within = controls.filter(eligible);
-    const cookie = [...document.querySelectorAll('button, [role="button"], a[href]')].filter(node =>
-      visible(node) && /^(?:tout refuser|refuser (?:tout|les cookies)|continuer sans accepter|reject all(?: cookies)?|decline all|necessary only|alle ablehnen|nur notwendige)$/iu.test(label(node))
-      && !!node.closest('[id*="cookie" i], [class*="cookie" i], [id*="consent" i], [role="dialog"]'));
+    const cookieBox = '[id*="cookie" i], [class*="cookie" i], [id*="consent" i], [class*="consent" i], [id*="gdpr" i], [class*="gdpr" i], '
+      + '[id*="rgpd" i], [class*="rgpd" i], [id*="cmp" i], [id*="onetrust" i], [id*="tarteaucitron" i], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
+    const reject = /^(?:tout refuser|refuser(?: tout| les cookies| et fermer)?|reject all(?: cookies)?|reject|decline(?: all)?|deny(?: all)?|refuse(?: all)?|continuer sans accepter|necessary only|only necessary|alle ablehnen|ablehnen|nur notwendige)$/iu;
+    const cookie = [...document.querySelectorAll('button, [role="button"], a[href], input[type="button"]')].filter(node =>
+      visible(node) && reject.test(label(node)) && !!node.closest(cookieBox)
+      && (/^(?:continuer sans accepter|tout refuser|reject all|alle ablehnen)/iu.test(label(node)) || /cookie|traceur|consent|cookies|tracking/iu.test((node.closest(cookieBox).innerText || '').slice(0, 4000))));
     const ready = [...document.querySelectorAll('input[type="file"], input[type="email"], input[type="password"], input[autocomplete="given-name"]')]
       .some(node => visible(node) && !node.closest(excluded));
     const workday = !!document.querySelector('[data-automation-id="applyManually"], [data-automation-id="adventureButton"], [data-automation-id="signInContent"], [data-automation-id="createAccountLink"]');
     const tiny = !document.querySelector('h1') && document.body.innerText.trim().length < 500;
-    return {ids, controls, within, cookie, ready, workday, tiny, jobs, posting: jobs.length === 1 || scope.matches('[itemtype$="/JobPosting"]'),
+    return {ids, controls, within, cookie, smart, ready, workday, tiny, jobs, posting: jobs.length === 1 || scope.matches('[itemtype$="/JobPosting"]'),
             url: location.href, nonce: document.__bp_autonomous_document};
 }"""
 
@@ -280,6 +286,32 @@ def _smart_entry(probe, record):
     return f"https://jobs.smartrecruiters.com/oneclick-ui/company/{quote(company, safe='')}/publication/{publication}"
 
 
+def _smart_link_entry(probe, links):
+    """The posting's own "I'm interested" link: its one-click publication must belong to this company (a SmartRecruiters
+    posting page has no 'Apply' wording and its API may be unreachable)."""
+    if not probe.source_identity or not isinstance(links, list):
+        return ""
+    found = set()
+    for link in links:
+        parts = urlsplit(link) if isinstance(link, str) else None
+        match = parts and parts.scheme == "https" and parts.hostname == "jobs.smartrecruiters.com" and re.fullmatch(
+            r"/oneclick-ui/company/([^/]+)/publication/([0-9a-fA-F-]{36})/?", parts.path)
+        if not match:
+            return ""
+        found.add((match[1], match[2].lower()))
+    if len(found) != 1:
+        return ""
+    company, publication = next(iter(found))
+    try:
+        publication = str(UUID(publication))
+    except ValueError:
+        return ""
+    if company.casefold() != probe.source_identity[0]:
+        return ""
+    probe.alias = probe.source_identity[0], publication
+    return f"https://jobs.smartrecruiters.com/oneclick-ui/company/{quote(company, safe='')}/publication/{publication}"
+
+
 async def _smart_public_entry(probe):
     if not probe.source_identity or urlsplit(probe.source).hostname != "jobs.smartrecruiters.com":
         return ""
@@ -372,6 +404,8 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
         if probe.source_ats not in {"successfactors", "talentsoft"} and within:
             controls = within
         if not direct and probe.source_ats == "smartrecruiters" and not controls:
+            direct = _smart_link_entry(probe, await data["smart"].json_value())
+        if not direct and probe.source_ats == "smartrecruiters" and not controls:
             jobs = await data["jobs"].json_value()
             if len(jobs) == 1:
                 direct = _smart_entry(probe, jobs[0])
@@ -406,6 +440,13 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
                 elif within:
                     scoped = [item.as_element() for item in within.values()]
                     candidates = [(element, await page.evaluate(_CONTROL, element, isolated_context=True)) for element in scoped]
+            unique, seen = [], set()
+            for element, details in candidates:  # the same link twice (header and footer of the posting) is one control
+                key = json.dumps([details["href"], details["post"]]) if details["href"] or details["post"] else None
+                if key is None or key not in seen:
+                    unique.append((element, details))
+                    seen.add(key)
+            candidates = unique
             button, details = candidates[0]
             if len(candidates) > 1 and probe.source_ats != "successfactors" and (
                     probe.source_ats != "talentsoft" or not details["post"] or
