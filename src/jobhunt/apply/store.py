@@ -448,7 +448,7 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
 # guard and page-reading code that has since been fixed: they no longer pause their host, and the automatic pass retries
 # their engine-caused pauses (ENGINE_PAUSE_CODES) once. Move it forward when a change is expected to clear such outcomes.
 # A run that may have sent the application (submit clicked, uncertain receipt) is never affected.
-ENGINE_RETRY_EPOCH = "2026-11-20T17:50:00+00:00"
+ENGINE_RETRY_EPOCH = "2026-11-20T18:10:00+00:00"
 
 # Pause codes the engine produced on its own (its guard refused a request, it could not read the page or find the apply
 # control): unlike a CAPTCHA, an e-mail or a login, nothing the candidate must do. Posting conflicts are not in this list.
@@ -739,6 +739,10 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
 
 def stale_engine_pause(run: ApplyRun | None) -> bool:
     """`run` is an engine-caused pause judged by code older than ENGINE_RETRY_EPOCH, and it cannot have sent anything."""
+    if (run is not None and run.status == "needs_input" and run.result is not None
+            and run.result.diagnostic_code == "credential_page" and not run.result.submit_clicked
+            and run.submit_clicked_at is None and run.nav_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH):
+        return True  # an account page the older engine could not get through (it now creates accounts): retry once
     return bool(run is not None and run.status == "needs_human" and run.result is not None
                 and run.result.diagnostic_code in ENGINE_PAUSE_CODES and not run.result.submit_clicked
                 and run.submit_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH)

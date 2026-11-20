@@ -904,3 +904,15 @@ async def test_a_generic_site_draft_below_the_threshold_stays_a_draft(env, profi
     s, _ = await daily(profile)
     app = store.find_application(profile.id, job.id)
     assert s.sent == 0 and app.status == "draft" and not env.runs
+
+
+async def test_an_account_page_stop_from_before_the_epoch_is_retried_once(env, profile):
+    job = env.job(1)
+    env.run_status = "needs_input"
+    await daily(profile)
+    assert len(env.runs) == 1
+    with db.connect() as conn:  # an account page the old engine could not get through, before the engine change
+        conn.execute("UPDATE application_runs SET started_at=?, result_json=json_set(result_json, '$.diagnostic_code', "
+                     "'credential_page')", (OLD,))
+    s, _ = await daily(profile)
+    assert len(env.runs) == 2
