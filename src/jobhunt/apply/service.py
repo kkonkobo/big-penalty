@@ -616,6 +616,15 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 posting_url=target,
             )
 
+    def live_known():
+        """The (refreshable) account check handed to the engine, with its `unconfirm` hook."""
+        if not account_known:
+            return None
+        known = lambda url: account_known(url)  # noqa: E731
+        known.unconfirm = lambda url: getattr(account_known, "unconfirm", lambda _url: None)(url)  # type: ignore[attr-defined]
+        known.confirm = lambda url: getattr(account_known, "confirm", lambda _url: None)(url)  # type: ignore[attr-defined]
+        return known
+
     def bind_landing(target, method):
         """Bind the recipient to a landing reached before any input. The first landing is reserved durably (landing dedupe
         included); once one is reserved, later landings must stay on its registrable domain."""
@@ -702,7 +711,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 supervised_widgets=browser_adapter,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
                 password=(lambda url: password(url)) if password else None,
-                account_known=(lambda url: account_known(url)) if account_known else None,
+                account_known=live_known(),
                 email_verification=mail_flow,
                 diagnostics=diagnostics, apply_entry=None if browser_adapter else open_apply,
                 host_allowed=lambda host: host == _host(audience.document), max_steps=min(12, get_settings().apply_max_steps),

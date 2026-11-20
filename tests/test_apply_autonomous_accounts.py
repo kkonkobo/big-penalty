@@ -149,3 +149,137 @@ async def test_signup_with_an_unfillable_required_field_names_the_reason(server,
     assert result.status == "needs_input"
     assert result.result.diagnostic_code == "account_signup_field_unfilled"
     assert not server.posts
+
+
+TALENTSOFT_HEADER = ('<header><form method="post" action="/my-account/log-in.aspx"><label>Identifiant (email)<input type="text" name="Login"></label>'
+                     '<label>Mot de passe<input type="password" name="Password"></label><label>Rester connecté<input type="checkbox" name="StayConnected"></label>'
+                     '<button type="submit">Se connecter</button></form></header>')
+TALENTSOFT_REAL = (TALENTSOFT_HEADER + TALENTSOFT.replace('name="Login"', 'name="ctl00$corps$tbxIdentifiant"')
+                   .replace('name="Password"', 'name="ctl00$corps$tbxPassword"')
+                   .replace("CreationControl$", "ctl00$corps$CreationControl$"))
+
+
+def two_step_site(server, state):
+    """The site rejects a login (the page comes back) and accepts the creation box."""
+    server.html["/my-account/log-in.aspx"] = TALENTSOFT_REAL
+    server.post_redirects["/my-account/log-in.aspx"] = "/my-account/log-in.aspx"
+    real = server.post_redirects
+
+    class Redirects(dict):
+        def __contains__(self, path):
+            return path.startswith("/my-account/log-in.aspx")
+
+        def __getitem__(self, path):
+            body = server.posts[-1]["body"].decode()
+            return "/jobs/100/apply" if "CreationControl%24txtNouveauIdentifiant=camille" in body.replace("%40", "@") else "/my-account/log-in.aspx"
+
+    server.post_redirects = Redirects(real)
+
+
+@pytest.mark.parametrize("known", [False, True])
+async def test_talentsoft_duplicated_login_boxes(known, server, profile, tmp_path, fast, monkeypatch):
+    """Header + body login boxes and the creation box; `known` is the stale credential of a signup that never completed."""
+    app = setup(server, profile, tmp_path, monkeypatch, known=known)
+    unconfirmed = []
+    live = {"known": known}
+    monkeypatch.setattr(service.accounts, "account_known", lambda host, email: live["known"])
+    real_callbacks = service.accounts.guarded_account_callbacks
+
+    def callbacks(*args, **kw):
+        password, known_cb = real_callbacks(*args, **kw)
+        known_cb.unconfirm = lambda url: (unconfirmed.append(url), live.update(known=False))[0]
+        return password, known_cb
+
+    monkeypatch.setattr(service.accounts, "guarded_account_callbacks", callbacks)
+    two_step_site(server, known)
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(planner()))
+    posts = [parse_qs(p["body"].decode(), keep_blank_values=True) for p in server.posts_to("/my-account/log-in.aspx")]
+    created = [b for b in posts if b.get("ctl00$corps$CreationControl$txtNouveauIdentifiant") == ["camille@example.test"]]
+    assert len(created) == 1, (result.status, result.result.diagnostic_code, result.message, posts)
+    assert created[0]["ctl00$corps$CreationControl$txtNouveauMotDePasse"] == ["fixture-password"]
+    assert len(unconfirmed) == (1 if known else 0)
+    assert "fixture-password" not in repr(result.result.model_dump())
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message)
+
+
+POSTBACK = TALENTSOFT_REAL.replace('action="/my-account/log-in.aspx"', 'action=""')  # ASP.NET posts back to the current URL, query included
+
+
+class AccountSite:
+    """A stateful synthetic Talentsoft site on top of the fixture server: creation makes the account, a login only works once it exists."""
+
+    def __init__(self, server, *, exists=False):
+        self.server, self.exists, self.next, self.created, self.logins = server, exists, "/jobs/100/apply", 0, 0
+        server.html["/my-account/log-in.aspx"] = POSTBACK
+        site = self
+
+        class Redirects(dict):
+            def __contains__(self, path):
+                return path.startswith("/my-account/log-in.aspx")
+
+            def __getitem__(self, path):
+                body = parse_qs(server.posts[-1]["body"].decode(), keep_blank_values=True)
+                server.html["/my-account/log-in.aspx"] = POSTBACK
+                if body.get("ctl00$corps$CreationControl$txtNouveauIdentifiant", [""])[0]:
+                    site.created += 1
+                    if site.exists:
+                        server.html["/my-account/log-in.aspx"] = POSTBACK + "<p>Cette adresse e-mail est déjà utilisée.</p>"
+                        return path
+                    site.exists = True
+                    return site.next
+                site.logins += 1
+                return site.next if site.exists else path
+
+        server.post_redirects = Redirects()
+
+
+def store_accounts(monkeypatch, *, state):
+    """The credential store for the host: `state` None (nothing), "pending" or "active"; set_state records what the engine confirms."""
+    store = {"state": state, "calls": []}
+    monkeypatch.setattr(service.accounts, "account_known", lambda host, email: store["state"] == "active")
+    monkeypatch.setattr(service.accounts, "set_state", lambda host, email, new, site=None: (store["calls"].append(new), store.update(state=new))[0])
+    return store
+
+
+async def run_posting(app, plan_fn):
+    return await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan_fn))
+
+
+async def test_account_is_active_after_the_first_signup_so_the_next_posting_logs_in(server, profile, tmp_path, fast, monkeypatch):
+    app = setup(server, profile, tmp_path, monkeypatch)
+    store = store_accounts(monkeypatch, state=None)
+    _, app2 = approved_fixture(profile, tmp_path, server.url("jobs/200"), title="Autre poste")
+    server.html["/jobs/200"] = '<main><h1>Offre</h1><a href="/entry2">Postuler</a></main>'
+    server.redirects["/entry"] = "/my-account/log-in.aspx?ReturnUrl=%2Fmon-compte%2Fmon-cv-pour-ma-candidature-pour-stage-x_100.aspx"
+    server.redirects["/entry2"] = "/my-account/log-in.aspx?ReturnUrl=%2Fmon-compte%2Fmon-cv-pour-ma-candidature-pour-stage-y_200.aspx"
+    server.html["/jobs/200/apply"] = posting_form("/jobs/200/apply").replace("Ingénieur systèmes embarqués", "Autre poste")
+    server.html["/mon-compte/mon-cv-pour-ma-candidature-pour-stage-x_100.aspx"] = posting_form("/jobs/100/apply")
+    server.html["/mon-compte/mon-cv-pour-ma-candidature-pour-stage-y_200.aspx"] = posting_form("/jobs/200/apply").replace("Ingénieur systèmes embarqués", "Autre poste")
+    site = AccountSite(server)
+    site.next = "/mon-compte/mon-cv-pour-ma-candidature-pour-stage-x_100.aspx"
+    base = planner()
+
+    def two_postings(snap):
+        if urlsplit(snap.url).path in ("/jobs/100", "/jobs/200"):
+            return StepPlan(page_kind="job_page")
+        return base(snap)
+
+    first = await run_posting(app, two_postings)
+    assert first.status == "submitted", (first.status, first.result.diagnostic_code, first.message)
+    assert (site.created, site.logins, store["calls"]) == (1, 0, ["active"])
+    site.next = "/mon-compte/mon-cv-pour-ma-candidature-pour-stage-y_200.aspx"
+    second = await run_posting(app2, two_postings)
+    assert second.status == "submitted", (second.status, second.result.diagnostic_code, second.message, [(x.page_kind, x.note, x.clicked) for x in second.result.steps], server.requests)
+    assert (site.created, site.logins) == (1, 1)  # no second signup
+    assert len(server.posts_to("/jobs/100/apply")) == 1 and len(server.posts_to("/jobs/200/apply")) == 1
+
+
+async def test_signup_answered_account_exists_logs_in_with_the_stored_credential(server, profile, tmp_path, fast, monkeypatch):
+    app = setup(server, profile, tmp_path, monkeypatch)
+    store_accounts(monkeypatch, state="pending")
+    site = AccountSite(server, exists=True)
+    result = await run_posting(app, planner())
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message)
+    assert (site.created, site.logins) == (1, 1)  # one signup attempt, answered "already used", then one login
+    assert len(server.posts_to("/jobs/100/apply")) == 1
+    assert "fixture-password" not in repr(result.result.model_dump())

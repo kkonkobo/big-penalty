@@ -128,6 +128,8 @@ SIGNUP_LINK_RE = re.compile(r"cre(?:er|ez|e) (?:un |une |mon |ma |votre )?(?:com
                             r"register|new user|konto erstellen|registrieren|nouvel utilisateur|premiere visite")
 # "Inscription avec Google" and the like create nothing on the employer's site: never taken for the account-creation control.
 SOCIAL_RE = re.compile(r"google|linkedin|facebook|apple|microsoft|github|twitter|france ?connect|\bsso\b|\bavec (?:un |une )?autre")
+ACCOUNT_EXISTS_RE = re.compile(r"existe deja|deja (?:utilis|inscrit|existant|enregistr|cree|un compte)|already (?:exists?|in use|registered|taken|been (?:used|registered))|"
+                               r"is already|deja associe|bereits (?:registriert|vorhanden|verwendet)")
 LOGIN_BUTTON_RE = re.compile(r"se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden|identifier")
 CREATION_NAME_RE = re.compile(r"creation|creer|create|nouveau|nouvelle|\bnew|register|signup|sign up|inscri")
 EMAIL_FIELD_RE = re.compile(r"e-?mail|courriel|identifiant|login|username|adresse mail")
@@ -576,6 +578,10 @@ class _Run:
         self.signup_scope: set[str] | None = None   # refs of the account-creation form when it shares its <form> with the login box
         self.signup_link_clicks = 0          # signup LINK clicks of this run (a link that only reloads the login page must not loop)
         self.login_unknown_try = False       # a login was attempted on a host without a known account
+        self.known_login_try = False         # a login was attempted with the stored credential of a host believed to hold the account
+        self.account_try: tuple[str, str] | None = None  # (login | signup, host) of the account click whose outcome the next page tells
+        self.account_exists_hosts: set[str] = set()      # hosts whose signup answered "account already exists": log in with the stored credential
+        self.login_failed: set[str] = set()  # hosts where that login led back to a password page: the account is not confirmed there
         self.uploaded = False                # a file was set by the engine in this run
         self.uploaded_files: list[tuple[str, str, str]] = []  # (host, normalized label, file name stem in lowercase) of every upload done
         self.attach_done = False             # an upload-confirm click was made
@@ -788,11 +794,32 @@ class _Run:
         if self.account_known is None:
             return FactSheet(facts=facts)
         try:
-            known = bool(self.account_known(self._account_address(self.page.url)))
+            known = self._account_exists()
         except Exception:
             return FactSheet(facts=facts)
         extra = Fact(key="account_exists", label="Un compte existe déjà sur ce site pour le candidat", value="oui" if known else "non")
         return FactSheet(facts=[*facts, extra])
+
+    def _account_exists(self) -> bool:
+        """Does the candidate have an account on the CURRENT page host: the store says so and no login with it failed in this run."""
+        address = self._account_address(self.page.url)
+        if address in self.account_exists_hosts and address not in self.login_failed:
+            return True
+        return bool(self.account_known and self.account_known(address) and address not in self.login_failed)
+
+    async def _says_account_exists(self) -> bool:
+        """The page (any frame) says the e-mail / identifier is already registered."""
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                text = await fr.evaluate("() => (document.body && document.body.innerText || '').slice(0, 20000)")
+                if isinstance(text, str) and ACCOUNT_EXISTS_RE.search(fold(text)):
+                    return True
+        return False
+
+    def _confirm_account(self, address: str) -> None:
+        with contextlib.suppress(Exception):
+            if confirm := getattr(self.account_known, "confirm", None):
+                confirm(address)
 
     def _autonomous_decision(self, field: FormField):
         fact = self.facts.get("race_ethnicity")
@@ -2405,6 +2432,21 @@ class _Run:
                     q = Question(label=f"Compte requis sur {host} : créer le compte à la main ou donner les identifiants", kind="text")
                     return self._end("needs_input", q.label + ".", [q])
 
+            if self.account_try:  # what the last login / signup click led to
+                role, address = self.account_try
+                self.account_try = None
+                if address == self._account_address(self.page.url):
+                    has_password = any(field.kind == "password" for field in snap.fields)
+                    if (kind not in (*ACCOUNT_KINDS, "email_verification", "captcha", "error", "closed", "other") and not has_password
+                            and not errors):
+                        self._confirm_account(address)   # past the account pages: the account exists on the site
+                    elif role == "signup" and (kind in ACCOUNT_KINDS or has_password) and await self._says_account_exists():
+                        if address in self.login_failed:  # logging in with the stored credential already failed here
+                            await self._shot(log)
+                            q = Question(label=f"Compte déjà existant sur {self._host()} : donner les identifiants ou se connecter à la main", kind="text")
+                            return self._end("needs_input", q.label + ".", [q])
+                        self.account_exists_hosts.add(address)
+
             if kind == "captcha":
                 await self._shot(log)
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
@@ -2440,7 +2482,15 @@ class _Run:
             if bound_account:
                 if self.app_touched or any(field.kind == "file" for field in snap.fields):
                     return self._end("needs_human", SUPERVISED_REQUIRED)
-                known_account = self.account_known and self.account_known(self._account_address(self.page.url))
+                if self.known_login_try:  # the stored credential was just tried and the site shows a password page again: no such account
+                    self.known_login_try = False
+                    if any(field.kind == "password" for field in snap.fields):
+                        address = self._account_address(self.page.url)
+                        self.login_failed.add(address)
+                        with contextlib.suppress(Exception):
+                            if unconfirm := getattr(self.account_known, "unconfirm", None):
+                                unconfirm(address)
+                known_account = self._account_exists()
                 inline = None if known_account else self._inline_signup(plan, snap)
                 if kind not in ACCOUNT_KINDS:  # the planner called it otherwise: the page itself says what it is
                     login_form = any(f.kind == "button" and LOGIN_BUTTON_RE.search(fold(f.label)) for f in snap.fields)
@@ -2831,9 +2881,13 @@ class _Run:
                 self.attach_done = True
             else:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
+            if bound_account and role in ("login", "signup"):
+                self.account_try = (role, self._account_address(self.page.url))
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
                 with contextlib.suppress(Exception):
-                    self.login_unknown_try = not self.account_known(self._account_address(self.page.url))
+                    known = self._account_exists()
+                    self.login_unknown_try = not known
+                    self.known_login_try = known and bool(self.autonomous and self.autonomous.entry_binding)
             self.diagnostics.control = ("final_submit" if final else "login_otp" if role == "login" else
                                         "account_creation" if role == "signup" else "navigation")
             try:
