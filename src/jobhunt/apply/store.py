@@ -452,7 +452,22 @@ def finish_and_settle(run_id: int, result: RunResult, *, sent_origin_url: str | 
 # guard and page-reading code that has since been fixed: they no longer pause their host, and the automatic pass retries
 # their engine-caused pauses (ENGINE_PAUSE_CODES) once. Move it forward when a change is expected to clear such outcomes.
 # A run that may have sent the application (submit clicked, uncertain receipt) is never affected.
-ENGINE_RETRY_EPOCH = "2026-11-20T21:05:00+00:00"
+def _retry_epoch(default: str, override: str | None) -> str:
+    """JOBHUNT_ENGINE_RETRY_EPOCH moves the epoch forward without a code change (set it to the end of the last batch when
+    the engine changed): only a valid UTC instant later than the built-in one and not in the future is accepted."""
+    try:
+        moved = datetime.fromisoformat((override or "").strip())
+    except ValueError:
+        return default
+    if moved.tzinfo is None or moved.utcoffset() != timedelta(0):
+        return default
+    moved = moved.astimezone(UTC)
+    if not (datetime.fromisoformat(default) < moved <= datetime.now(UTC)):
+        return default
+    return moved.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
+ENGINE_RETRY_EPOCH = _retry_epoch("2026-11-20T21:05:00+00:00", os.environ.get("JOBHUNT_ENGINE_RETRY_EPOCH"))
 
 # Pause codes the engine produced on its own (its guard refused a request, it could not read the page or find the apply
 # control): unlike a CAPTCHA, an e-mail or a login, nothing the candidate must do. Posting conflicts are not in this list.
