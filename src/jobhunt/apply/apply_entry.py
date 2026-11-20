@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
 import secrets
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
@@ -18,6 +19,8 @@ from jobhunt.apply.identity import ats_target
 from jobhunt.apply.supervised import _url_posting_ids
 from jobhunt.browser import is_challenge
 from jobhunt.origin import _identity, workday_requisition
+
+log = logging.getLogger("jobhunt.apply.entry")
 
 
 _POSTING = r"""() => {
@@ -58,16 +61,26 @@ _POSTING = r"""() => {
     const eligible = node => scope.contains(node);
     const within = controls.filter(eligible);
     const cookieBox = '[id*="cookie" i], [class*="cookie" i], [id*="consent" i], [class*="consent" i], [id*="gdpr" i], [class*="gdpr" i], '
-      + '[id*="rgpd" i], [class*="rgpd" i], [id*="cmp" i], [id*="onetrust" i], [id*="tarteaucitron" i], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
+      + '[id*="rgpd" i], [class*="rgpd" i], [id*="cmp" i], [id*="onetrust" i], [id*="tarteaucitron" i], [role="dialog"], [role="alertdialog"], [aria-modal="true"], '
+      // consent-management platforms that name their dialogs after themselves
+      + '[id*="didomi" i], [class*="didomi" i], [id*="axeptio" i], [class*="axeptio" i], [id*="usercentrics" i], [id*="sp_message" i], '
+      + '[class*="qc-cmp" i], [id*="truste" i], [class*="truste" i], [id*="iubenda" i], [class*="iubenda" i], [id*="privacy" i], [class*="privacy" i]';
+    const consentText = node => {  // the text of the OUTERMOST consent container: the nearest one may be just the button row
+      let box = null;
+      for (let at = node.closest(cookieBox); at; at = at.parentElement && at.parentElement.closest(cookieBox)) box = at;
+      return box ? (box.innerText || '').slice(0, 4000) : '';
+    };
     const reject = /^(?:tout refuser|refuser(?: tout| les cookies| et fermer)?|reject all(?: cookies)?|reject|decline(?: all)?|deny(?: all)?|refuse(?: all)?|continuer sans accepter|necessary only|only necessary|alle ablehnen|ablehnen|nur notwendige)$/iu;
     const cookie = [...document.querySelectorAll('button, [role="button"], a[href], input[type="button"]')].filter(node =>
       visible(node) && reject.test(label(node)) && !!node.closest(cookieBox)
-      && (/^(?:continuer sans accepter|tout refuser|reject all|alle ablehnen)/iu.test(label(node)) || /cookie|traceur|consent|cookies|tracking/iu.test((node.closest(cookieBox).innerText || '').slice(0, 4000))));
+      && (/^(?:continuer sans accepter|tout refuser|reject all|alle ablehnen)/iu.test(label(node)) || /cookie|traceur|consent|cookies|tracking/iu.test(consentText(node))));
     const ready = [...document.querySelectorAll('input[type="file"], input[type="email"], input[type="password"], input[autocomplete="given-name"]')]
       .some(node => visible(node) && !node.closest(excluded));
     const workday = !!document.querySelector('[data-automation-id="applyManually"], [data-automation-id="adventureButton"], [data-automation-id="signInContent"], [data-automation-id="createAccountLink"]');
     const tiny = !document.querySelector('h1') && document.body.innerText.trim().length < 500;
-    return {ids, controls, within, cookie, smart, ready, workday, tiny, jobs, posting: jobs.length === 1 || scope.matches('[itemtype$="/JobPosting"]'),
+    const greenhouse = [...new Set([...document.querySelectorAll('script[src*="greenhouse.io/embed/job_board/js"], iframe[src*="greenhouse.io/embed/job_app"]')]
+      .map(node => { try { return new URL(node.src).searchParams.get('for') || ''; } catch (_) { return ''; } }).filter(Boolean))];
+    return {ids, controls, within, cookie, smart, greenhouse, ready, workday, tiny, jobs, posting: jobs.length === 1 || scope.matches('[itemtype$="/JobPosting"]'),
             url: location.href, nonce: document.__bp_autonomous_document};
 }"""
 
@@ -354,6 +367,34 @@ async def _phenom_entry(page, probe):
     return _workday_entry(target) or target
 
 
+def _greenhouse_embed_entry(probe, boards) -> str:
+    """A career page embedding Greenhouse's job board (`?gh_jid=<id>`, embed script `for=<board>`): the posting on
+    Greenhouse itself. probe.navigation() still has to accept it (recognized ATS, same requisition)."""
+    if not isinstance(boards, list) or len(boards) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", str(boards[0])):
+        return ""
+    job = dict(parse_qsl(urlsplit(probe.source).query)).get("gh_jid", "")
+    if not re.fullmatch(r"[0-9]{1,18}", job):
+        return ""
+    return f"https://job-boards.greenhouse.io/{boards[0]}/jobs/{job}"
+
+
+async def _click_through_overlay(page, button, cookie_reject) -> None:
+    """Click the apply control. If something covers it (a consent dialog the scan could not dismiss), dismiss a consent
+    dialog when one is identifiable, then click the control itself through script, as a user scrolling to it would."""
+    try:
+        await button.click(timeout=2500, no_wait_after=True)
+        return
+    except Exception as error:  # noqa: BLE001 - intercepted / not visible / detached
+        log.info("apply control click failed (%s): retrying past the overlay", type(error).__name__)
+    if cookie_reject is not None:
+        with contextlib.suppress(Exception):
+            await cookie_reject.click(timeout=2500, no_wait_after=True)
+            await asyncio.sleep(0.3)
+            await button.click(timeout=2500, no_wait_after=True)
+            return
+    await button.evaluate("node => node.click()", isolated_context=True)
+
+
 async def discover(page, guard, audience, *, requisition=None, require_posting=False, platform=None):
     """Return the admitted page, or a fixed diagnostic. Only a bound Talentsoft entry POST may be forwarded."""
     baseline = set(page.context.pages)
@@ -403,6 +444,8 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
             return None, "job_page_no_apply_control"
         if probe.source_ats not in {"successfactors", "talentsoft"} and within:
             controls = within
+        if not direct and not probe.source_ats:
+            direct = _greenhouse_embed_entry(probe, await data["greenhouse"].json_value())
         if not direct and probe.source_ats == "smartrecruiters" and not controls:
             direct = _smart_link_entry(probe, await data["smart"].json_value())
         if not direct and probe.source_ats == "smartrecruiters" and not controls:
@@ -461,7 +504,8 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
             audience.recheck()
             probe.clicked = True
             probe.control_origin = origin(details["href"] or (details["post"][0] if details["post"] else ""))
-            await button.click(timeout=2500, no_wait_after=True)
+            reject = await data["cookie"].get_properties()
+            await _click_through_overlay(page, button, reject["0"].as_element() if len(reject) == 1 else None)
         workday = probe.source_ats == "workday" or bool(direct and ats_target(direct)[0] == "workday")
         deadline = asyncio.get_running_loop().time() + (_WORKDAY_WAIT if workday else 5)
         while not guard.refused and asyncio.get_running_loop().time() < deadline:
@@ -504,8 +548,8 @@ async def discover(page, guard, audience, *, requisition=None, require_posting=F
             await asyncio.sleep(0.1)
     except PermissionError:
         return None, "challenge_or_rate_limited"
-    except Exception:
-        pass
+    except Exception as error:  # noqa: BLE001 - the run stops with a diagnostic; the cause goes to the log
+        log.info("apply entry stopped: %s: %s", type(error).__name__, str(error)[:200])
     finally:
         context.remove_listener("page", on_page)
         if not accepted:
