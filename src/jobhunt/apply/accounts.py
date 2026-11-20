@@ -502,6 +502,14 @@ def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *
             host, site = target
             set_state(host, email, "pending", site=site)
 
+    def confirm(url):
+        """A signup / login got past the account pages: the account exists on the site (an e-mail link is no longer awaited)."""
+        target = scope(url)
+        if target:
+            host, site = target
+            set_state(host, email, "active", site=site)
+
+    known.confirm = confirm  # type: ignore[attr-defined]
     known.unconfirm = unconfirm  # type: ignore[attr-defined]
     return password, known
 

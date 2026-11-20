@@ -197,6 +197,9 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
     return RunResult.model_validate(scrub(payload))
 
 
+ACCOUNT_LANDING_RE = re.compile(r"/(?:log-?in|sign-?in|connexion|my-account|mon-compte|account|authentification)\b", re.I)
+
+
 def _url_key(url: str) -> str:
     return "sha256:" + hashlib.sha256(url.encode()).hexdigest()
 
@@ -725,9 +728,12 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
         if not run or not _binding_current(conn, run, attempt) or _host_paused(conn, host):
             raise ApplyError(NOT_ACTIVE)
         digest = _url_key(target)
+        # An account page is the landing of EVERY posting of that employer: its address says nothing about which posting this is
+        # (job identity, origin URL and role similarity still do), so it must not make one posting a duplicate of another.
+        generic = bool(ACCOUNT_LANDING_RE.search(urlsplit(target).path))
         duplicates = _potential_duplicates(conn, attempt.profile_id, attempt.application_id,
                                            canonical or canonical_identity(attempt.tenant, attempt.requisition_id),
-                                           target_digests=(digest,))
+                                           target_digests=() if generic else (digest,))
         if any(exact or app_id not in confirmed_distinct for app_id, exact in duplicates.items()):
             raise ApplyError(NOT_ACTIVE)
         updated = replace(attempt, landing_host=host, landing_digest=digest, landing_binding=method,

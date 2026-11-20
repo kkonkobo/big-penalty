@@ -622,6 +622,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             return None
         known = lambda url: account_known(url)  # noqa: E731
         known.unconfirm = lambda url: getattr(account_known, "unconfirm", lambda _url: None)(url)  # type: ignore[attr-defined]
+        known.confirm = lambda url: getattr(account_known, "confirm", lambda _url: None)(url)  # type: ignore[attr-defined]
         return known
 
     def bind_landing(target, method):
