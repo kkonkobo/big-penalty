@@ -32,6 +32,26 @@ SCORE_CONCURRENCY = 3
 DETAIL_LIMIT = 60
 DETAIL_CONCURRENCY = 4
 DETAIL_TIMEOUT_S = 45.0
+CANCEL_GRACE_S = 20.0  # a timed-out call gets this long to unwind; then it is abandoned, never awaited forever
+
+
+async def _bounded(coro, timeout: float):
+    """`asyncio.wait_for` that cannot hang: wait_for waits for the cancelled call to finish, so a call whose cleanup is
+    stuck (a browser tab that never closes) blocked the whole run for hours. Raises TimeoutError after `timeout` (+ grace)."""
+    task = asyncio.ensure_future(coro)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    if done:
+        return task.result()
+    task.cancel()
+    await asyncio.wait({task}, timeout=CANCEL_GRACE_S)
+    if not task.done():
+        log.warning("abandoning a call that did not stop %.0fs after its timeout", CANCEL_GRACE_S)
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())  # no "exception never retrieved" noise
+    raise TimeoutError
 
 
 @dataclass
@@ -126,7 +146,7 @@ async def _run_source(name: str, src: Source, queries: list[SearchQuery], ctx: S
     consecutive = 0
     for q in todo:
         try:
-            found = await asyncio.wait_for(src.search(q, ctx), QUERY_TIMEOUT_S)
+            found = await _bounded(src.search(q, ctx), QUERY_TIMEOUT_S)
             consecutive = 0
             stat.postings += len(found)
             out.extend(found)
@@ -190,7 +210,7 @@ async def _enrich_details(postings: list[JobPosting], chosen: dict[str, Source],
                 await asyncio.sleep(source.detail_delay_s)
             try:
                 async with semaphore:
-                    enriched = await asyncio.wait_for(source.fetch_details(posting.model_copy(deep=True), ctx), DETAIL_TIMEOUT_S)
+                    enriched = await _bounded(source.fetch_details(posting.model_copy(deep=True), ctx), DETAIL_TIMEOUT_S)
                 updates = {key: getattr(enriched, key) for key in JobPosting.model_fields
                            if key not in {"source", "source_id", "url", "raw"}
                            and getattr(enriched, key) not in (None, "", "unknown")}
@@ -507,7 +527,7 @@ async def _refetch_apply_urls(jobs: list[MergedJob], ctx: SourceContext, report:
             base = job.to_posting().model_copy(update={"source": sighting.source, "source_id": sighting.source_id,
                                                       "url": sighting.url, "apply_url": None, "origin_url": None})
             try:
-                enriched = await asyncio.wait_for(src.fetch_details(base.model_copy(deep=True), ctx), DETAIL_TIMEOUT_S)
+                enriched = await _bounded(src.fetch_details(base.model_copy(deep=True), ctx), DETAIL_TIMEOUT_S)
             except Exception as error:  # noqa: BLE001
                 report.errors.append(f"Détails {name}: {type(error).__name__}")
                 continue

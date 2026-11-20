@@ -330,3 +330,41 @@ async def test_run_search_headless_is_explicit_and_leaves_settings_alone(monkeyp
     await run_search(profile.id, llm=FakeLLM(), headless=True)
     await run_search(profile.id, llm=FakeLLM())
     assert seen[0] is True and seen[-1] is False and get_settings().headless is False
+
+
+async def test_a_query_whose_cancellation_hangs_is_abandoned(monkeypatch, profile):
+    """A source stuck in its cleanup (a browser tab that never closes) must not block the run: it is abandoned."""
+    import asyncio
+    from typing import ClassVar
+
+    from jobhunt import pipeline
+    from jobhunt.sources.base import Source
+
+    release = asyncio.Event()
+
+    class Stuck(Source):
+        name: ClassVar[str] = "stuck"
+        label: ClassVar[str] = "Stuck"
+        kind: ClassVar[str] = "browser"
+
+        async def search(self, query, ctx):
+            try:
+                await asyncio.sleep(3600)
+            finally:  # the cleanup ignores cancellation, as a hung page.close() does
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        continue
+
+    reg = patch_registry(monkeypatch, ["boarda"])
+    reg["stuck"] = Stuck
+    monkeypatch.setattr(pipeline, "QUERY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(pipeline, "CANCEL_GRACE_S", 0.05)
+    try:
+        res = await asyncio.wait_for(run_search(profile.id, llm=FakeLLM()), 20)
+    finally:
+        release.set()  # let the abandoned call end so the test's event loop can close
+    assert res.stage == "done"
+    assert res.sources["stuck"].status == "error" and any("délai" in e or "Abandon" in e for e in res.sources["stuck"].errors)
+    assert res.sources["boarda"].status == "done"
