@@ -188,6 +188,9 @@ def safe_reason(text: str, redact: Callable[[str], str] = lambda t: t, limit: in
         text = redact(text or "")
     except Exception:
         text = ""
+    # A browser error quotes its call log, and that log quotes the typed value (`fill("...")`) and the element's HTML:
+    # only the first line of the error is a reason.
+    text = re.split(r"\bCall log:|={5,} logs ={5,}", text, maxsplit=1)[0]
     text = _URL.sub(lambda m: bare_url(m.group(0)), " ".join(text.split()))
     text = _EMAIL.sub("<email>", text)
     text = _TOKEN.sub("<token>", text)

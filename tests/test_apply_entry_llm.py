@@ -142,3 +142,42 @@ def test_iframe_form_of_a_recognized_ats_must_name_this_posting(src, expected):
     probe = Probe("https://careers.exemple.test/offres/stage-1234", None, [])
     probe.lenient = True
     assert embed_target(probe, [src]) == expected
+
+
+async def test_each_hop_may_open_its_own_new_tab(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = job_page('<a target="_blank" href="/jobs/100/start">Déposer ma candidature</a>')
+    server.html["/jobs/100/start"] = job_page('<a target="_blank" href="/jobs/100/apply">Candidature : continuer</a>')
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    result = await run(app, Advisor([StepPlan(page_kind="job_page"), form]))
+    assert result.status == "submitted", result.result.diagnostic_code
+    assert [post["path"] for post in server.posts] == ["/jobs/100/apply"]
+
+
+async def test_an_apply_control_of_a_similar_job_is_never_taken(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = job_page('<div class="similar-jobs"><a href="/offre/autre/apply">Postuler</a></div>')
+    server.html["/offre/autre/apply"] = posting_form("/offre/autre/apply")
+    result = await run(app, Advisor([StepPlan(page_kind="job_page"), form]))
+    assert result.status != "submitted"
+    assert "/offre/autre/apply" not in server.requests and not server.posts
+
+
+def test_a_link_to_another_site_must_itself_say_apply():
+    from types import SimpleNamespace
+
+    from jobhunt.apply.entry_llm import _apply_allowed, _Item
+
+    probe = Probe("https://careers.employer.example/jobs/embedded-intern", None, [])
+    probe.lenient = True
+    frame = SimpleNamespace(parent_frame=None)
+
+    def link(label, href, region="main"):
+        return _Item(1, frame, None, {"label": label, "href": href, "region": region, "hint": "", "tag": "a", "covered": False})
+
+    other = "https://boards.greenhouse.io/partnerco/jobs/7654321"
+    assert probe.navigation(other)  # the probe alone admits any recognized ATS from a career site
+    assert not _apply_allowed(link("Voir l'offre de notre partenaire", other), probe)
+    assert _apply_allowed(link("Postuler", other), probe)
+    assert not _apply_allowed(link("Postuler", other, region="related"), probe)
+    assert _apply_allowed(link("Continuer", "https://careers.employer.example/jobs/embedded-intern/start"), probe)

@@ -65,6 +65,7 @@ _SCAN = r"""
     + '[id*="zendesk" i], [id*="drift" i], [id*="livechat" i], [id*="messenger" i], [id*="support-widget" i], [class*="support-widget" i], '
     + '[id*="helpdesk" i], [class*="helpdesk" i], [id*="chatbot" i], [class*="chatbot" i], [id*="botpress" i], [id*="hubspot-messages" i], '
     + '[class*="launcher" i]';
+  const RELATED = '[id*="similar" i], [class*="similar" i], [id*="recommend" i], [class*="recommend" i], [id*="related" i], [class*="related" i]';
   const fixed = el => { for (let n = el; n && n.nodeType === 1; n = n.parentElement || (n.getRootNode() && n.getRootNode().host)) {
       if (getComputedStyle(n).position === 'fixed') return true; } return false; };
   const scopes = [...document.querySelectorAll('[itemtype$="/JobPosting"], main, [role="main"]')];
@@ -81,6 +82,7 @@ _SCAN = r"""
     let region = 'page';
     if (consent) region = 'consent'; else if (chat) region = 'chat'; else if (overlay) region = 'overlay';
     else if (pinned) region = 'floating';
+    else if (el.closest(RELATED)) region = 'related';
     else if (el.closest('nav, [role="navigation"]')) region = 'nav';
     else if (el.closest('header, [role="banner"]')) region = 'header';
     else if (el.closest('footer, [role="contentinfo"]')) region = 'footer';
@@ -274,7 +276,8 @@ async def _scan(page, probe: Probe) -> _View:
 
 def _apply_allowed(item: _Item, probe: Probe) -> bool:
     meta = item.meta
-    if item.region in {"chat", "embedded", "consent"} or item.frame.parent_frame is not None:
+    # `related`: "similar jobs" / recommendations, as in `discover`: their apply controls belong to OTHER postings.
+    if item.region in {"chat", "embedded", "consent", "related"} or item.frame.parent_frame is not None:
         return False
     if _NOT_BLOCKER.search(meta["label"]) and not _APPLY.search(meta["label"]):
         return False
@@ -285,6 +288,10 @@ def _apply_allowed(item: _Item, probe: Probe) -> bool:
             return False
         href = clean_url(meta["href"], navigation=True)
         if not href or not probe.navigation(href):
+            return False
+        # A link that leaves the posting's site (to an ATS, possibly another employer's tenant on a shared host) must
+        # itself say "apply": the advisor is untrusted and the page may list partner / promoted jobs.
+        if not probe.same_site(href) and not _APPLY.search(meta["label"]):
             return False
     return True
 
@@ -400,6 +407,7 @@ async def discover_llm(page, guard, audience, advisor: EntryAdvisor, *, requisit
                 probe.tab, probe.hops, probe.chain, probe.next_url = None, 0, "", ""
                 audience.recheck()
                 before = set(context.pages)
+                del opened[:]
                 await current.goto(direct, wait_until="domcontentloaded", timeout=35000)
                 found = await await_landing(current, context, before, opened, probe, guard, audience, workday=False,
                                             before_url=before_url, was_ready=was_ready)
@@ -438,14 +446,17 @@ async def discover_llm(page, guard, audience, advisor: EntryAdvisor, *, requisit
                     continue
                 break
             item = _prefer_main(view, item, probe)
-            if acted and not await _still_usable(item):
-                continue  # the page re-rendered after the blockers closed: ask again on the new view
+            if not await _still_usable(item):
+                # The page re-rendered since the scan (blockers closed, or simply the advisor's answer took its 10-20 s
+                # through a CLI): a click on a detached node does nothing, so ask again on the new view.
+                continue
             href = clean_url(item.meta["href"], navigation=True) if item.meta["href"] else ""
             probe.clicked = True
             probe.control_origin = origin(href) if href and (probe.same_site(href) or ats_target(href)[0]) else ""
             probe.tab, probe.hops, probe.chain, probe.next_url = None, 0, "", ""  # a fresh click: its own chain of redirects
             audience.recheck()
             before = set(context.pages)
+            del opened[:]  # tabs of earlier hops / dismissed blockers are in `before`: only THIS click's tabs count
             await _click(item)
             found = await await_landing(current, context, before, opened, probe, guard, audience, workday=False,
                                         before_url=before_url, was_ready=was_ready)
