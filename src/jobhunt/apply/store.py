@@ -20,7 +20,7 @@ from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
 from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, posting_fingerprint, resolved_identity, similar_role
-from jobhunt.apply.types import Mode, RunResult, RunStatus
+from jobhunt.apply.types import ACCOUNT_REASONS, Mode, RunResult, RunStatus
 from jobhunt.db import _dt, _iso, connect, now
 from jobhunt.dedupe import canonical_url
 
@@ -32,6 +32,7 @@ _DIAGNOSTICS = {
     "failed": "La tentative a échoué.",
     "blocked": "L’action a été bloquée.",
     "credential_page": "Vérification ou connexion manuelle requise (credential_page).",
+    **ACCOUNT_REASONS,
     "recipient_refused": RECIPIENT_REFUSED,
     "posting_mismatch": "Identité du poste non vérifiée : saisie annulée.",
     "dry_untested": "Simulation non testée : inspection hors ligne, sans saisie, fichier ni envoi de candidature.",
@@ -191,7 +192,7 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
         if step["page_kind"] in sensitive or contains_verification_code(step["note"] or ""):
             credential_page = True
             step.update(note="credential_page", filled=[], clicked="", screenshot="")
-    if credential_page or result.status == "needs_email":
+    if (credential_page or result.status == "needs_email") and result.diagnostic_code not in ACCOUNT_REASONS:
         payload.update(message="Vérification ou connexion manuelle requise (credential_page).", questions=[])
     return RunResult.model_validate(scrub(payload))
 
