@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import re
@@ -16,7 +17,7 @@ _REQUISITION = {"gh_jid", "jobid", "job_id", "reqid", "requisitionid", "jobreqid
 # (the posting is still reached from its path or requisition key). Any other key fails the link closed.
 _TRACKING = {"source", "ref", "lang", "locale", "from", "gclid", "fbclid", "lcid", "partner", "trid", "rs", "feedid",
              "jobpipeline", "idorigine", "id_origin", "applicant_source_welcome", "in_iframe", "mode", "apply", "mapping"}
-_TRACKING_PREFIXES = ("utm_", "rx_")  # rx_*: Radancy job-ad attribution on Workday links
+_TRACKING_PREFIXES = ("utm_", "rx_", "__cf_chl")  # rx_*: Radancy job-ad attribution on Workday links; __cf_chl*: Cloudflare check tokens
 _ID = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 _CODE = re.compile(
@@ -150,6 +151,35 @@ def vendor_static_asset(url: str, *, data_entered: bool) -> bool:
             and _VENDOR_ASSET_PATH.search(parts.path) is not None and ".." not in parts.path and "%" not in parts.path)
 
 
+def cloudflare_check(url: str) -> bool:
+    """Cloudflare's own bot-check traffic on a protected site (its challenge scripts, beacons and answers)."""
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return False
+    return parts.scheme == "https" and parts.path.startswith("/cdn-cgi/challenge-platform/")
+
+
+_CLOUDFLARE_PAGE = (b"cf-error-details", b"Attention Required! | Cloudflare", b"/cdn-cgi/challenge-platform/", b"cf_chl_opt")
+
+
+async def cloudflare_edge_refusal(response) -> bool:
+    """Cloudflare itself refused or challenged the request at its edge, so the site never received it: a `cf-mitigated`
+    header, or Cloudflare's own block / check page. A site's own 403 merely relayed by Cloudflare is not one."""
+    try:
+        if response.status not in {403, 429, 503}:
+            return False
+        headers = {key.lower(): value for key, value in response.headers.items()}
+        if headers.get("cf-mitigated"):
+            return True
+        if headers.get("server", "").lower() != "cloudflare" or not headers.get("cf-ray"):
+            return False
+        body = (await response.body())[:50_000]
+    except Exception:
+        return False
+    return any(marker in body for marker in _CLOUDFLARE_PAGE)
+
+
 class RecipientGuard:
     def __init__(self, allowed: frozenset[str], *, audience=None, read_only: frozenset[str] = frozenset(),
                  inspection_only: bool = False,
@@ -170,6 +200,9 @@ class RecipientGuard:
         self._allow_write = allow_write
         self._initial_url = ""
         self._next_url = ""
+        # Origins found behind Cloudflare: their plain reads go through the browser's own network stack, because Cloudflare
+        # blocks the guard's re-sent copies (another TLS fingerprint than the Chrome the page runs in).
+        self.browser_transport: set[str] = set()
         self.probe = None
         self.page = None
         # Autonomous (unattended) runs abort an unauthorized request and keep going instead of closing the window: an
@@ -214,6 +247,20 @@ class RecipientGuard:
             await page.close()
         finally:
             self._initial_url = self._next_url = ""
+
+    async def _browser_final_response(self, request) -> None:
+        """The final request was sent by the browser itself (Cloudflare): its own response stands in for the guard's."""
+        try:
+            response = await asyncio.wait_for(request.response(), 60)
+        except Exception:
+            return
+        if response is None or not 200 <= response.status < 300 or self.refused:
+            return  # a redirect or an error: the landing page decides, as for any unconfirmed send
+        with contextlib.suppress(Exception):
+            if request.resource_type in {"xhr", "fetch"}:
+                await self.audience.inspect_receipt(request, response)
+        self.final_response = True
+        self.audience.record_response()
 
     def allows(self, url: str) -> bool:
         return not self.refused and origin(url) in self.allowed
@@ -274,9 +321,23 @@ class RecipientGuard:
             self.record_abort(url)
             await route.abort()
 
+        def own_site(url: str) -> bool:
+            """`url` is on the site being applied to (the page's own origin, or one the guard already admits)."""
+            target = origin(url)
+            with contextlib.suppress(Exception):
+                return bool(target) and (target == origin(page.url) or self.allows(url)
+                                         or bool(self.probe and self.probe.same_site(url))
+                                         or bool(self.audience and self.audience.write_recipient(url)))
+            return False
+
         async def guard(route, request):
             if self.refused:
                 await route.abort()
+                return
+            if not request.is_navigation_request() and cloudflare_check(request.url) and own_site(request.url):
+                # Cloudflare's bot check on the employer's own site: browser signals computed by Cloudflare's script, sent
+                # to that same site. Aborting it (or re-sending it from outside the browser) turns the check into a block.
+                await route.continue_()
                 return
             navigation = request.is_navigation_request()
             read = request.method in {"GET", "HEAD"}
@@ -384,7 +445,25 @@ class RecipientGuard:
                             self.non_account_transmitted = True
                 final_request = self.final_started and write and self.audience.click_write is request
                 fetching = True
+                # Navigations only before any input: the browser follows their redirects without this guard vetting each hop.
+                browser_sendable = read and not final_request and not (
+                    navigation and bool(getattr(self.audience, "data_entered", False)))
+                if browser_sendable and origin(request.url) in self.browser_transport:
+                    await route.continue_()  # a Cloudflare-fronted site: the browser fetches it itself (see browser_transport)
+                    return
                 response = await route.fetch(max_redirects=0, max_retries=0)
+                if ((browser_sendable or write) and (target_origin := origin(request.url))
+                        and await cloudflare_edge_refusal(response)):
+                    # Cloudflare refused, at its edge, the guard's copy of a request the guard had already admitted (the
+                    # site never received it, so sending it once more cannot duplicate anything): the browser sends it
+                    # itself, and from now on this site's reads too. Writes are still tried through the guard first.
+                    self.browser_transport.add(target_origin)
+                    await response.dispose()
+                    response = None
+                    await route.continue_()
+                    if final_request:
+                        await self._browser_final_response(request)
+                    return
                 if final_request and request.is_navigation_request() and response.status in {301, 302, 303} and response.headers.get("location"):
                     target = self.audience.confirmation_redirect(urljoin(request.url, response.headers["location"]))
                     if not target:

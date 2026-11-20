@@ -144,6 +144,10 @@ class FixtureServer:
         self.redirects: dict[str, str] = {}
         self.post_redirects: dict[str, str] = {}
         self.html: dict[str, str] = {}
+        # Behave like a Cloudflare-fronted site: a request not sent by the browser itself (no Sec-Fetch-Mode header, as the
+        # request guard's re-sent copies) gets Cloudflare's edge block page and never reaches the site.
+        self.cloudflare = False
+        self.edge_blocked: list[str] = []
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -161,7 +165,23 @@ class FixtureServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _edge_block(self) -> bool:
+                if not outer.cloudflare or self.headers.get("Sec-Fetch-Mode"):
+                    return False
+                outer.edge_blocked.append(f"{self.command} {self.path}")
+                body = b'<title>Attention Required! | Cloudflare</title><div id="cf-error-details">blocked</div>'
+                self.server_version, self.sys_version = "cloudflare", ""  # the one Server header, as Cloudflare sends it
+                self.send_response(403)
+                self.send_header("CF-RAY", "0000000000000000-CDG")
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return True
+
             def do_GET(self):
+                if self._edge_block():
+                    return
                 path = self.path.split("?")[0]
                 outer.requests.append(self.path)
                 if path in outer.redirects:
@@ -192,6 +212,8 @@ class FixtureServer:
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(n)
+                if self._edge_block():
+                    return
                 outer.posts.append({"path": self.path, "body": body})
                 outer.sent.append({"method": "POST", "path": self.path, "body": body})
                 if self.path in outer.post_redirects:
@@ -422,6 +444,7 @@ def fast(monkeypatch):
     async def nop(*a, **k):
         return None
     monkeypatch.setattr(engine, "human_pause", nop)
+    monkeypatch.setattr("jobhunt.browser.CHALLENGE_AUTO_CLEAR_S", 0.5)
     monkeypatch.setattr(engine, "IDLE_TIMEOUT_MS", 100)
     monkeypatch.setattr(engine, "CLICK_WAIT_S", 0.15)
     monkeypatch.setattr(engine, "TYPE_DELAY_MS", (0, 1))
