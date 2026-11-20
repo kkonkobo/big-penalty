@@ -425,3 +425,38 @@ async def test_language_picker_widget_is_dropped_from_the_snapshot(page):
         'English</button></header><form><label for=a>Prénom</label><input id=a name=a></form>')
     snap, _ = await take_snapshot(page)
     assert [f.label for f in snap.fields] == ["Prénom"]
+
+
+async def test_radiogroup_named_by_a_label_for_its_id_beats_the_enclosing_fieldset_legend(page, server):
+    await page.route("**/rg", lambda r: r.fulfill(content_type="text/html; charset=utf-8", body=(
+        '<form><fieldset><legend>Questions de candidature</legend>'
+        '<label id="q_label" for="q">Avez-vous des connaissances travaillant chez nous ?</label>'
+        '<div role="radiogroup" id="q" aria-labelledby="q_legend">'
+        '<input type="radio" id="q-y" name="q" value="Yes" aria-label="Yes, Do you know people here?" required><label for="q-y">Oui</label>'
+        '<input type="radio" id="q-n" name="q" value="No" aria-label="No, Do you know people here?" required><label for="q-n">Non</label>'
+        '</div></fieldset><button type="submit">Envoyer</button></form>')))
+    await page.goto(server.url("rg"))
+    snap, _ = await take_snapshot(page)
+    radio = next(f for f in snap.fields if f.kind == "radio")
+    assert radio.label == "Avez-vous des connaissances travaillant chez nous ?" and radio.group == "Questions de candidature"
+    assert [o.label for o in radio.options] == ["Oui", "Non"] and radio.required
+
+
+def _radio(label, options, required=True):
+    from jobhunt.apply.types import FieldOption
+    return FormField(ref="f1", kind="radio", label=label, required=required, options=[FieldOption(value=o, label=o) for o in options],
+                     choice_options=[(o, o, False, "") for o in options])
+
+
+@pytest.mark.parametrize("label,options,expected", [
+    ("Acceptez-vous une vérification obligatoire de vos antécédents auprès du gouvernement ?", ["Oui, je consens", "Non"], 0),
+    ("Do you consent to an obligatory background check?", ["No", "Yes, I consent"], 1),
+    ("Do you consent to an obligatory background check?", ["Yes", "Yes, I consent", "No"], None),   # two affirmative options
+    ("Avez-vous des connaissances travaillant chez nous ?", ["Oui", "Non"], None),                      # not a consent
+])
+def test_a_required_background_check_consent_radio_is_ticked_only_on_its_single_yes_option(label, options, expected):
+    from jobhunt.apply.autonomous import decision
+    from jobhunt.apply.answer_check import fold
+    got = decision(_radio(label, options), fold)
+    assert (got[1] if got else None) == expected and (got is None or got[0] == "application_background_check")
+    assert decision(_radio(label, options, required=False), fold) is None

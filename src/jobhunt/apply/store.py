@@ -163,7 +163,7 @@ _RESULT_FIELDS = {"status": True, "message": True, "final_url": True, "submit_cl
 
 
 def _safe_consents(result: RunResult) -> list[str]:
-    return sorted(set(result.consent_codes) & {"application_privacy", "application_terms"})
+    return sorted(set(result.consent_codes) & {"application_privacy", "application_terms", "application_background_check"})
 
 
 def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:

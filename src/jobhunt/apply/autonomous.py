@@ -543,6 +543,8 @@ _PRIVACY = re.compile(r"privacy (?:policy|notice)|politique de confidentialite|p
 _DATA = re.compile(r"processing|retention|traitement|conservation", re.I)
 _TERMS = re.compile(r"conditions|terms", re.I)
 _ACCEPT = re.compile(r"accept|agree|acknowledge|consent|lu et|prise de connaissance", re.I)
+_BACKGROUND_CHECK = re.compile(r"background (?:check|screening)|criminal record|verification\w* (?:\w+ ){0,3}antecedents|antecedents|casier judiciaire", re.I)
+_YES_OPTION = re.compile(r"(?:oui|yes|ja)(?: (?:\w+ ){0,2}(?:consens\w*|consent\w*|accept\w*|agree\w*|autoris\w*|d accord))?")
 _RACE = re.compile(r"\b(?:race|racial|ethnic\w*|ethniqu\w*|ethnisch\w*|ethnie)\b", re.I)
 _OTHER_EEO = re.compile(r"disabilit|handicap|gender|genre|veteran|geschlecht|behinder", re.I)
 _SELF_ID = re.compile(r"(?:self|auto)[ -]?identif", re.I)
@@ -591,6 +593,13 @@ def decision(field, fold, *, race_ethnicity=None):
             return "application_privacy", -1
         if _TERMS.search(text) and (_APPLICATION.search(text) or re.fullmatch(r"j['’ ]?accepte les conditions[ .]*", text.strip())):
             return "application_terms", -1
+    if (field.kind in {"select", "radio"} and field.required and not field.multiple and _BACKGROUND_CHECK.search(text)
+            and _ACCEPT.search(text) and not blocked_consent(text) and not eeo_field(text)):
+        # a REQUIRED yes / no consent to the employer's own screening of this application: the owner allows ticking it
+        yes = [index for index, option in enumerate(field.options)
+               if _YES_OPTION.fullmatch(_option_text(option.label, fold)) and _live_option(field, index)]
+        if len(yes) == 1:
+            return "application_background_check", yes[0]
     if field.kind in {"select", "radio"} and not field.multiple and eeo_field(text):
         declared = _option_text(race_ethnicity or "", fold)
         if declared and race_ethnicity_field(field, fold):
