@@ -81,7 +81,7 @@
           <li><a href="/apply?profile={{ p.id }}"><svg class="ic"><use href="#i-alert"/></svg>
             <span><span class="pick-title">{{ i.app.job_title or 'Offre ' ~ i.app.job_id }}</span>
             <span class="muted small">{{ i.app.company or 'Entreprise non précisée' }} ·
-              <span class="t-warn">{{ {'input': 'une réponse est attendue', 'email': 'e-mail à confirmer', 'human': 'CAPTCHA à résoudre'}.get(i.pause_reason, 'en pause') }}</span></span></span></a></li>
+              <span class="t-warn">{{ {'input': 'une réponse est attendue', 'email': 'e-mail à confirmer', 'human': 'intervention requise'}.get(i.pause_reason, 'en pause') }}</span></span></span></a></li>
           {% endfor %}
           {% if sd.to_validate %}
           <li><a href="/apply?profile={{ p.id }}"><svg class="ic"><use href="#i-doc"/></svg>

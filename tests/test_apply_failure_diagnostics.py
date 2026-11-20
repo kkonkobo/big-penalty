@@ -187,6 +187,9 @@ class _NoReads:
     def write_recipient(self, url):
         return False
 
+    def pre_data_write(self, url):
+        return False
+
 
 CDN = "https://wd3.myworkdaycdn.com/wday/asset/candidate-experience-jobs/cx-jobs.min.js"
 VENDORS = "https://wd3.myworkday.com/wday/asset/uic-shared-vendors/shared-vendors.min.js"
@@ -204,8 +207,10 @@ VERSIONED = "https://wd3.myworkday.com/wday/asset/uic-shared-vendors/2.0/shared-
      "aborted", False, ["https://wd3.myworkday.com/wday/asset/a.js"]),
     (_Request(CDN + "?q=1"), [], [], "aborted", False, []),
     (_Request("https://cdn.example.test/wday/asset/x.js"), [], [], "aborted", False, []),
-    (_Request(CDN, method="POST"), [], [], "aborted", True, []),
-    (_Request(CDN, navigation=True), [], [], "aborted", True, []),
+    # A write or a sub-frame navigation is not a static read: under the lenient guard it is dropped
+    # (and counted) rather than closing the run.
+    (_Request(CDN, method="POST"), [], [], "aborted", False, []),
+    (_Request(CDN, navigation=True), [], [], "aborted", False, []),
 ])
 async def test_guard_admits_only_workday_static_reads(request_, responses, hops, outcome, refused, fetched):
     page = _Page(hops)
@@ -215,3 +220,5 @@ async def test_guard_admits_only_workday_static_reads(request_, responses, hops,
     await page.context.handler(route, request_)
     assert (route.outcome, guard.refused, page.context.fetched) == (outcome, refused, fetched)
     assert guard.refused_request == (f"{request_.method} {bare_url(request_.url)}" if refused else "")
+    if request_.method == "POST" or request_.navigation:
+        assert guard.aborted_hosts == {"wd3.myworkdaycdn.com": 1}

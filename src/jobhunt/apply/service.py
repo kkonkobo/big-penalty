@@ -545,6 +545,12 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         planner = match.adapter.browser_planner(attempt)
     else:
         audience = Audience(attempt.url, verified, check, pdf_bytes=request.pdf)
+        expected = resolved_identity(job.extra)
+        if expected and isinstance(metadata, dict) and isinstance(metadata.get("submit_ats"), str):
+            from jobhunt.origin import workday_requisition
+
+            ats = metadata["submit_ats"]
+            audience.expected_identity = ats, (expected[0], workday_requisition(expected[1]) if ats == "workday" else expected[1])
     guard = RecipientGuard(frozenset({origin(attempt.url), *(match.requisition.write_origins if browser_adapter else ())}),
                            audience=audience)
     browser.append((attempt, guard))
@@ -590,6 +596,46 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     mail_flow = mail.BrowserVerification(verify_mail, follow_mail) if mail.provider(email) and (
         not browser_adapter or match.adapter.boundaries.get('account_creation') == 'auto') else None
 
+    def refresh_accounts(target):
+        nonlocal password, account_known
+        if email and (not browser_adapter or match.adapter.boundaries.get("account_creation") == "auto"):
+            password, account_known = accounts.guarded_account_callbacks(
+                email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
+                posting_url=target,
+            )
+
+    def bind_landing(target, method):
+        """Bind the recipient to a landing reached before any input. The first landing is reserved durably (landing dedupe
+        included); once one is reserved, later landings must stay on its registrable domain."""
+        nonlocal attempt
+        if attempt.landing_digest:
+            if not audience.write_recipient(target):
+                raise ApplyError(SUPERVISED_ONLY)
+        else:
+            attempt = apply_store.bind_apply_landing(attempt, target, method=method, confirmed_distinct=confirmed_distinct)
+            browser[-1] = (attempt, guard)
+        audience.bind_recipient(target)
+        refresh_accounts(target)
+
+    async def follow_landing(tab):
+        """The page moved before any candidate data was entered (redirect, script, pre-data click): rebind the recipient
+        to the landing when it is the same site or a recognized ATS with no conflicting posting identity."""
+        target = clean_url(tab.url, navigation=True)
+        if guard.refused or not target or not audience.landing_allowed(target):
+            return False
+        try:
+            if not audience.write_recipient(target):
+                bind_landing(target, "continuity")
+        except ApplyError:
+            return False
+        audience.document = target
+        await audience.bind_document(tab)
+        guard.page = tab
+        return True
+
+    if not browser_adapter:
+        audience.follow_landing = follow_landing
+
     diagnostics.control = "navigation"
     async with pool.page(app.profile_id, f"apply-auto-{attempt.host}") as page:
         await guard.install(page)
@@ -601,18 +647,10 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 if landing is not None:
                     if clean_url(landing.url, navigation=True) != target or guard.refused:
                         return None, "apply_target_unverified"
-                    attempt = apply_store.bind_apply_landing(attempt, target, method=audience.entry_binding,
-                                                             confirmed_distinct=confirmed_distinct)
-                    browser[-1] = (attempt, guard)
-                    audience.bind_recipient(target)
+                    bind_landing(target, audience.entry_binding)
                     await audience.bind_document(landing, entry=True)
                     if clean_url(audience.live_url, navigation=True) != target or guard.refused:
                         return None, "apply_target_unverified"
-                    if email:
-                        password, account_known = accounts.guarded_account_callbacks(
-                            email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
-                            posting_url=target,
-                        )
                     guard.page = landing
                 return landing, target
             except ApplyError:
@@ -622,12 +660,14 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
 
         try:
             await guard.navigate(page, attempt.url, lambda tab, url: pool.goto(tab, url, challenge_timeout_s=0))
-            if guard.refused or not audience.write_recipient(page.url):
+            if guard.refused:
                 raise ApplyError(SUPERVISED_ONLY)
-            audience.document = clean_url(page.url, navigation=True)
-            if not audience.initial_redirect(attempt.url, audience.document):
-                raise ApplyError(SUPERVISED_ONLY)
-            await audience.bind_document(page)
+            landed = clean_url(page.url, navigation=True)
+            if audience.write_recipient(page.url) and audience.initial_redirect(attempt.url, landed):
+                audience.document = landed
+                await audience.bind_document(page)
+            elif browser_adapter or not await follow_landing(page):
+                raise ApplyError(SUPERVISED_ONLY if browser_adapter or guard.refused else "Destination de candidature non vérifiée.")
             result = await run_application(
                 page, url=attempt.url, facts=facts, planner=planner if planner is not None else LLMPlanner(llm.get()),
                 verifier=verifier if verifier is not None or planner is not None else _default_verifier(llm),
@@ -654,6 +694,12 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             result = result.model_copy(update={"status": "needs_human", "message": RECIPIENT_REFUSED + " " + SUPERVISED_ONLY,
                                                "diagnostic_code": guard.refusal_code,
                                                "dispatch_diagnostics": diagnostics})
+        if guard.aborted_hosts:
+            aborted = sorted(guard.aborted_hosts, key=lambda host: (-guard.aborted_hosts[host], host))[:20]
+            diagnostics.aborted_hosts = aborted
+            diagnostics.aborted_requests = min(sum(guard.aborted_hosts.values()), 100000)
+            result = result.model_copy(update={"dispatch_diagnostics": result.dispatch_diagnostics.model_copy(
+                update={"aborted_hosts": aborted, "aborted_requests": diagnostics.aborted_requests})})
         if out is not None:
             out.append(result)
     return result
@@ -1423,18 +1469,42 @@ def _print_now(line: str) -> None:
     print(line, flush=True)
 
 
+_LINK_CODES = frozenset({"apply_target_unverified", "job_page_no_apply_control", "apply_control_ambiguous",
+                         "cross_domain_apply_target", "public_page_shell", "posting_mismatch", "destination_unverified"})
+_PAUSE_DETAIL = {
+    "destination": "destination ou transmission non autorisée",
+    "lien de candidature": "lien de candidature non vérifié",
+    "anti-robot": "défi anti-robot ou accès limité",
+    "CAPTCHA": "CAPTCHA à résoudre",
+    "compte": "compte à créer ou connexion requise",
+    "intervention": "intervention humaine requise",
+}
+
+
 def pause_reason_label(res: ApplyRun) -> str:
-    """Why a run paused, in one word: question / e-mail / CAPTCHA / compte / site non approuvé."""
+    """Why a run paused, in one word or two, from its diagnostic code: question / e-mail / destination /
+    lien de candidature / anti-robot / CAPTCHA / compte / intervention / site non approuvé."""
     if untrusted_host_of(res):
         return "site non approuvé"
     if res.status == "needs_input":
         return "question"
     if res.status == "needs_email":
         return "e-mail"
+    code = res.result.diagnostic_code if res.result else ""
     steps = res.result.steps if res.result else []
-    if "compte" in res.message.lower() or (steps and steps[-1].page_kind in ("account_login", "account_signup")):
+    message = res.message.lower()
+    if code.startswith("recipient_refused"):
+        return "destination"
+    if code in _LINK_CODES:
+        return "lien de candidature"
+    if code == "challenge_or_rate_limited" or "anti-robot" in message:
+        return "anti-robot"
+    if code == "challenge" or "captcha" in message or (steps and steps[-1].page_kind == "captcha"):
+        return "CAPTCHA"
+    if (code == "credential_page" or "compte" in message
+            or (steps and steps[-1].page_kind in ("account_login", "account_signup"))):
         return "compte"
-    return "CAPTCHA"
+    return "intervention"
 
 
 def _pause_detail(res: ApplyRun) -> str:
@@ -1443,7 +1513,11 @@ def _pause_detail(res: ApplyRun) -> str:
     if res.status == "needs_input":
         labels = [q.label for q in (res.result.questions if res.result else [])]
         return "question : " + " ; ".join(labels[:3]) if labels else "question sans réponse"
-    return {"needs_email": "e-mail à confirmer", "needs_human": "CAPTCHA à résoudre"}.get(res.status, res.message)
+    if res.status == "needs_email":
+        return "e-mail à confirmer"
+    if res.status == "needs_human":
+        return _PAUSE_DETAIL[pause_reason_label(res)]
+    return res.message
 
 
 async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_now, llm=None, pool=None, planner=None,

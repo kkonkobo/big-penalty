@@ -650,9 +650,9 @@ async def test_the_summary_breaks_down_pauses_and_lists_the_most_frequent_questi
 
     monkeypatch.setattr(service, "run", run)
     s, lines = await daily(profile)
-    assert s.paused_by == {"question": 2, "e-mail": 1, "CAPTCHA": 1} and s.sent == 1
+    assert s.paused_by == {"question": 2, "e-mail": 1, "intervention": 1} and s.sent == 1
     assert s.top_questions() == [("date de naissance", 2), ("permis b", 1)]
-    assert "Détail : 1 envoyée(s) · 4 en pause (CAPTCHA 1, e-mail 1, question 2)" in " ".join(lines)
+    assert "Détail : 1 envoyée(s) · 4 en pause (e-mail 1, intervention 1, question 2)" in " ".join(lines)
     i = lines.index("Questions les plus fréquentes (à renseigner d'abord sur la page « Réponses aux formulaires ») :")
     assert lines[i + 1:i + 3] == ["  1. date de naissance (×2)", "  2. permis b (×1)"]
 
@@ -665,6 +665,22 @@ def test_pause_reason_labels():
     assert service.pause_reason_label(ApplyRun(**base, status="needs_human", message="Un CAPTCHA")) == "CAPTCHA"
     assert service.pause_reason_label(ApplyRun(**base, status="needs_human", message="Création de compte impossible")) == "compte"
     assert service.pause_reason_label(ApplyRun(**base, status="blocked", result=RunResult(status="blocked", untrusted_host="x.test"))) == "site non approuvé"
+
+
+@pytest.mark.parametrize("code, label", [
+    ("recipient_refused_other_navigation", "destination"), ("recipient_refused_response", "destination"),
+    ("apply_target_unverified", "lien de candidature"), ("job_page_no_apply_control", "lien de candidature"),
+    ("posting_mismatch", "lien de candidature"), ("challenge", "CAPTCHA"), ("challenge_or_rate_limited", "anti-robot"),
+    ("credential_page", "compte"), ("human_required", "intervention"),
+])
+def test_pause_reason_labels_follow_the_diagnostic_code(code, label):
+    """A paused run is labelled by its diagnostic code: a refused destination is not a CAPTCHA."""
+    from jobhunt.apply.store import ApplyRun
+    base = dict(id=1, application_id=1, rev=1, mode="submit", trigger="auto", started_at=datetime.now(UTC))
+    run = ApplyRun(**base, status="needs_human", message="Destination ou transmission non autorisée : fenêtre fermée.",
+                   result=RunResult(status="needs_human", diagnostic_code=code))
+    assert service.pause_reason_label(run) == label
+    assert "CAPTCHA" not in service._pause_detail(run) or label == "CAPTCHA"
 
 
 # ------------------------------------------------------------------ automatic CV regeneration

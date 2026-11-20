@@ -146,6 +146,26 @@ class RecipientGuard:
         self._next_url = ""
         self.probe = None
         self.page = None
+        # Autonomous (unattended) runs abort an unauthorized request and keep going instead of closing the window: an
+        # aborted request can only prevent a leak. Dry inspection and supervised windows keep the fail-closed rule.
+        self.lenient = audience is not None and not inspection_only
+        self.aborted_hosts: dict[str, int] = {}
+
+    def record_abort(self, url: str) -> None:
+        with contextlib.suppress(ValueError):
+            host = (urlsplit(url).hostname or "").lower()
+            if not re.fullmatch(r"[a-z0-9.\-\[\]:]{1,253}", host):
+                host = "invalid-host"
+            if host in self.aborted_hosts or len(self.aborted_hosts) < 50:
+                self.aborted_hosts[host] = self.aborted_hosts.get(host, 0) + 1
+
+    def _top_level(self, request) -> bool:
+        """A navigation of the bound tab's main frame (not an iframe, not another tab)."""
+        try:
+            frame = request.frame
+            return frame.parent_frame is None and self.page is not None and frame == self.page.main_frame
+        except Exception:
+            return False
 
     async def navigate(self, page, url, goto) -> None:
         """Follow initial redirects explicitly, preserving the actual document URL."""
@@ -224,6 +244,10 @@ class RecipientGuard:
                 with contextlib.suppress(Exception):
                     await opened.close()
 
+        async def drop(route, url):
+            self.record_abort(url)
+            await route.abort()
+
         async def guard(route, request):
             if self.refused:
                 await route.abort()
@@ -231,11 +255,14 @@ class RecipientGuard:
             navigation = request.is_navigation_request()
             read = request.method in {"GET", "HEAD"}
             write = not read
+            lenient = self.lenient
+            top = lenient and navigation and self._top_level(request)
             entry_post = False
+            pre_data = False  # admitted only because no candidate data was entered yet: it cannot carry any
             if self.probe and navigation and read:
                 with contextlib.suppress(Exception):
                     if request.frame.parent_frame is not None:
-                        await route.abort()
+                        await (drop(route, request.url) if lenient else route.abort())
                         return
             if self.probe and write:
                 try:
@@ -243,11 +270,24 @@ class RecipientGuard:
                 except Exception:
                     pass
                 if not entry_post:
-                    if self.probe.same_site(request.url):
+                    if lenient and self.probe.same_site(request.url) and not self.audience.data_entered:
+                        # Before any input, a same-site write cannot carry candidate data (rule 2): a top-level form post
+                        # is followed like a navigation (its redirect is never replayed), a background write passes.
+                        if navigation:
+                            entry_post = top and self.probe.admit_navigation(request)
+                            if not entry_post:
+                                await drop(route, request.url)
+                                return
+                        pre_data = True
+                    elif lenient:
+                        await drop(route, request.url)
+                        return
+                    elif self.probe.same_site(request.url):
                         await route.abort()
+                        return
                     else:
                         await refuse(route, "apply_target_unverified")
-                    return
+                        return
             if self.inspection_only and write and not entry_post:
                 await route.abort()
                 return
@@ -261,8 +301,25 @@ class RecipientGuard:
                     permitted = False
             if not permitted and read and not navigation and _static_asset(request.url):
                 permitted = True  # an ATS's own static code / fonts / UI strings: without them its pages render empty
+            if not permitted and lenient and not self.probe:
+                if not top:
+                    # A subresource, an iframe or another tab: aborting it cannot leak anything (rule 1).
+                    if write and self.audience.pre_data_write(request.url):
+                        permitted = pre_data = True
+                    else:
+                        await drop(route, request.url)
+                        return
+                else:
+                    verdict = self.audience.navigation_verdict(request.url, write=write)
+                    if verdict == "allow":
+                        permitted = pre_data = True
+                    elif verdict == "abort":
+                        await drop(route, request.url)
+                        return
             if not permitted:
-                if write or navigation:
+                if lenient and not top:
+                    await drop(route, request.url)
+                elif write or navigation:
                     from jobhunt.origin import classify_ats
 
                     category = ("same_site" if self.allows(request.url) or
@@ -280,20 +337,25 @@ class RecipientGuard:
                     await route.abort()
                 return
             if navigation and not clean_url(request.url, navigation=True):
-                await refuse(route)
+                if lenient and not top:
+                    await drop(route, request.url)
+                else:
+                    await refuse(route)
                 return
             response = None
+            fetching = final_request = False
             try:
                 if not read and self._allow_write and not await self._allow_write(request):
                     await refuse(route)
                     return
                 if self.audience and (write or (self.audience.active and urlsplit(request.url).query)):
                     self.audience.recheck()
-                    if not entry_post:
+                    if not entry_post and not pre_data:
                         self.transmitted = True
                         if not getattr(self.audience, 'account_only_request', lambda _: False)(request):
                             self.non_account_transmitted = True
                 final_request = self.final_started and write and self.audience.click_write is request
+                fetching = True
                 response = await route.fetch(max_redirects=0, max_retries=0)
                 if final_request and request.is_navigation_request() and response.status in {301, 302, 303} and response.headers.get("location"):
                     target = self.audience.confirmation_redirect(urljoin(request.url, response.headers["location"]))
@@ -307,8 +369,10 @@ class RecipientGuard:
                         self.audience.final_receipt_url = target
                 if self.refusal_status(response.status):
                     target = urljoin(request.url, response.headers.get("location", ""))
-                    if (read and not navigation and 300 <= response.status < 400 and response.headers.get("location")
-                            and _static_asset(request.url) and _static_asset(target)):
+                    redirect = 300 <= response.status < 400 and bool(response.headers.get("location"))
+                    initial = (redirect and request.method in {"GET", "HEAD"} and _navigation_matches(request.url, self._initial_url)
+                               and request.is_navigation_request() and request.frame == page.main_frame)
+                    if (read and not navigation and redirect and _static_asset(request.url) and _static_asset(target)):
                         await response.dispose()
                         response = await self._static_redirect(page, request.method, target)
                         if response is None:
@@ -324,13 +388,27 @@ class RecipientGuard:
                             and request.is_navigation_request() and request.frame == self.page.main_frame
                             and self.audience.account_redirect(target)):
                         await route.fulfill(status=200, content_type="text/plain", body="")
-                    elif (300 <= response.status < 400 and response.headers.get("location")
-                            and request.method in {"GET", "HEAD"} and _navigation_matches(request.url, self._initial_url)
-                            and request.is_navigation_request() and request.frame == page.main_frame
-                            and (self.audience.initial_redirect(request.url, target) if self.audience else self.allows(target))
+                    elif (initial
+                            and (self.audience.initial_redirect(request.url, target) or
+                                 (lenient and self.audience.navigation_verdict(target) == "allow")
+                                 if self.audience else self.allows(target))
                             and (safe_target := clean_url(target, navigation=True))):
                         self._next_url = safe_target
                         await route.fulfill(status=200, content_type="text/plain", body="")
+                    elif top and redirect and read and not initial and not self.probe and not self.audience.data_entered and (
+                            verdict := self.audience.navigation_verdict(target)) != "refuse":
+                        # Before any input, a top-level GET redirect to the same site or a recognized ATS is followed by
+                        # the browser (the next hop goes through this guard again and is bound before any input).
+                        if verdict == "allow":
+                            await route.fulfill(response=response)
+                        else:
+                            await drop(route, target)
+                    elif (top and not redirect and not self.audience.data_entered
+                          and self.audience.navigation_verdict(request.url) != "refuse"):
+                        # A refusal page (403/429) on the document before any input: show it, the challenge checks decide.
+                        await route.fulfill(response=response)
+                    elif lenient and not top and not final_request:
+                        await drop(route, request.url)
                     elif (self.audience and not self.audience.active and not write
                           and not request.is_navigation_request()):
                         await route.abort()
@@ -351,7 +429,10 @@ class RecipientGuard:
             except Exception:
                 if not self.refused:
                     with contextlib.suppress(Exception):
-                        await refuse(route)
+                        if lenient and not top and fetching and not final_request:
+                            await route.abort()  # a failed subresource fetch: the page sees a network error
+                        else:
+                            await refuse(route)
             finally:
                 if response is not None:
                     with contextlib.suppress(Exception):

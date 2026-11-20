@@ -106,6 +106,68 @@ class Audience:
         self.live_url = ""
         self.pdf_bytes = pdf_bytes
         self.final_actions = set()
+        # Candidate data (a value, a file or a credential) has been entered in the page. Before that, nothing the page sends
+        # can carry it, so navigation and same-site writes are allowed (see `navigation_verdict` / `pre_data_write`).
+        self.filled = False
+        # (ats, (tenant, requisition)) from verified origin metadata, compared with any landing on that ATS.
+        self.expected_identity = None
+        # Set by the service: `await follow_landing(page)` rebinds the recipient to a page reached before any input.
+        self.follow_landing = None
+
+    @property
+    def data_entered(self):
+        return self.filled or self.final_started
+
+    def ats_host(self, url):
+        """The recognized ATS vendor serving `url`, if any."""
+        ats, _ = ats_target(url)
+        return ats or ats_of_host(urlsplit(url).hostname or "")
+
+    def ats_infrastructure(self, url):
+        """An upload/API host of the bound recipient's own ATS vendor (another registrable domain of the same ATS)."""
+        vendor = ats_of_host(self.host or "")
+        return bool(vendor and origin(url) and ats_of_host(urlsplit(url).hostname or "") == vendor)
+
+    def posting_conflict(self, url):
+        """Real evidence that `url` belongs to another employer or posting: another tenant or requisition on the bound
+        ATS, an ATS requisition that the verified data contradicts, or only other posting identifiers on the same site."""
+        if not origin(url):
+            return False
+        ats, identity = ats_target(url)
+        reference_ats, reference = ats_target(self.entry_recipient or self.reserved_url)
+        if ats and ats == reference_ats and identity and reference and identity != reference:
+            return True
+        if identity and self.expected_identity and ats == self.expected_identity[0] and identity != self.expected_identity[1]:
+            return True
+        found = _url_posting_ids(url) | _url_posting_ids(login_return(url))
+        current = _url_posting_ids(self.document) | _url_posting_ids(self.entry_recipient or self.reserved_url)
+        return bool(self.write_recipient(url) and not identity and found and current and not found & current)
+
+    def navigation_verdict(self, url, *, write=False):
+        """A top-level navigation that no click or redirect rule admitted: "allow", "abort" or "refuse".
+
+        Only evidence of another employer or posting refuses. Before any candidate data is entered, a navigation to the
+        same registrable domain or to a recognized ATS is allowed (the landing is bound by continuity before any input);
+        a write there only on the same registrable domain. Anything else is aborted and the run continues."""
+        if self.posting_conflict(url):
+            return "refuse"
+        if self.data_entered or not clean_url(url, navigation=True):
+            return "abort"
+        if self.write_recipient(url):
+            return "allow"
+        if not write and self.ats_host(url):
+            return "allow"
+        return "abort"
+
+    def pre_data_write(self, url):
+        """A subresource write before any candidate data: same registrable domain or the recipient's ATS infrastructure."""
+        return (not self.data_entered and (self.write_recipient(url) or self.ats_infrastructure(url))
+                and not self.posting_conflict(url))
+
+    def landing_allowed(self, target):
+        """May the recipient be (re)bound to `target`, reached before any candidate data was entered?"""
+        return bool(not self.data_entered and clean_url(target, navigation=True) == target and origin(target)
+                    and not self.posting_conflict(target) and (self.write_recipient(target) or self.ats_host(target)))
 
     def write_recipient(self, url):
         recipient = origin(url)
@@ -175,9 +237,10 @@ class Audience:
     def request_allowed(self, request, page, *, initial):
         if initial and request.method in {"GET", "HEAD"} and request.is_navigation_request():
             return request.frame == page.main_frame and bool(origin(request.url))
-        if not self.write_recipient(request.url):
-            return False
         writing = request.method not in {"GET", "HEAD"}
+        if not self.write_recipient(request.url) and not (
+                writing and not request.is_navigation_request() and self.ats_infrastructure(request.url)):
+            return False
         if request.is_navigation_request() and request.frame == page.main_frame:
             if self.entry_binding and self.account_click and not writing and request.url == self.account_next:
                 self.account_next = ""
@@ -336,6 +399,7 @@ class Audience:
         if not live or live != self.document or value[0] != self.live_url or value[3] != self.document_nonce or not self.write_recipient(live):
             raise ApplyError(SUPERVISED_REQUIRED)
         if not button:
+            self.filled = True
             for action in (value[2], *value[1][2]):
                 self.final_actions.add((origin(action), urlsplit(action).path))
         if button:

