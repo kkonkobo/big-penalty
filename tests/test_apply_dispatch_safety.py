@@ -306,7 +306,7 @@ def test_workday_alias_and_smartrecruiters_publication_require_exact_binding():
     assert not probe.navigation(entry.replace("R0341251", "R0341252"))
     assert not probe.navigation(entry.replace("-1/", "-123/"))
     smart = apply_entry.Probe("https://jobs.smartrecruiters.com/Example/123456-Engineer", None, [])
-    uuid = "aea65468-b6ed-4f80-9d0d-60ee2cd01f22"
+    uuid = "11111111-2222-4333-8444-555555555555"
     assert not apply_entry._smart_entry(smart, {"id": "123457", "publicationId": uuid})
     target = apply_entry._smart_entry(smart, {"id": "123456", "publicationId": uuid})
     assert smart.navigation(target) and not smart.navigation(target.replace("/example/", "/other/"))
@@ -1664,3 +1664,80 @@ def test_cloudflare_check_path_rule():
     assert not cloudflare_check("http://jobs.example.test/cdn-cgi/challenge-platform/x")
     assert not cloudflare_check("https://jobs.example.test/apply/cdn-cgi/challenge-platform/x")
     assert not cloudflare_check("https://jobs.example.test/cdn-cgi/rum")
+
+async def test_dry_entry_dismisses_bare_refuser_cookie_dialog_that_covers_the_apply_link(server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = '''<main><h1>Offre</h1><a href="/jobs/100/apply">Postuler</a></main>
+        <div id="banner" role="dialog" style="position:fixed;inset:0;background:#789;z-index:99">
+          <p>Nous utilisons des cookies pour mesurer l'audience.</p>
+          <button onclick="document.getElementById('banner').remove()">Refuser</button>
+          <button onclick="document.getElementById('banner').remove(); fetch('/accepted', {method:'POST'})">Accepter &amp; Fermer</button></div>'''
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == "dry_apply_form_found"
+    assert "/accepted" not in server.requests and not server.posts
+
+
+@pytest.mark.parametrize("second", ["/jobs/100/apply", "/jobs/100/apply?jobId=200"])
+async def test_dry_entry_treats_the_same_postulez_link_twice_as_one_control(second, server, profile, tmp_path, fast):
+    _, app = approved_fixture(profile, tmp_path, server.url("jobs/100"))
+    server.html["/jobs/100"] = f'''<main><h1>Offre</h1><a href="/jobs/100/apply">Postulez maintenant</a>
+        <p>Description</p><a href="{second}">Postulez maintenant</a></main>'''
+    server.html["/jobs/100/apply"] = posting_form("/jobs/100/apply")
+    result = await service.run(app.id, mode="dry_run", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.result.diagnostic_code == ("dry_apply_form_found" if second == "/jobs/100/apply" else "apply_control_ambiguous")
+    assert not server.posts
+
+
+def test_smartrecruiters_interested_link_binds_only_its_own_company_publication():
+    posting = "https://jobs.smartrecruiters.com/Example/744000000001-stage"
+    uuid = "11111111-2222-4333-8444-555555555555"
+    link = f"https://jobs.smartrecruiters.com/oneclick-ui/company/Example/publication/{uuid}?dcr_ci=Example"
+    probe = apply_entry.Probe(posting, None, [])
+    entry = apply_entry._smart_link_entry(probe, [link, link])
+    assert entry.endswith(f"/company/Example/publication/{uuid}") and probe.navigation(entry)
+    for bad in ([], [link, link.replace(uuid, uuid[:-1] + "0")], [link.replace("/Example/", "/Other/")],
+                [link.replace("jobs.smartrecruiters.com", "evil.example")]):
+        assert not apply_entry._smart_link_entry(apply_entry.Probe(posting, None, []), bad)
+
+
+@pytest.mark.parametrize("url, method, kind, data_entered, allowed", [
+    ("https://data.example-cdn.com/jobs/1.json", "GET", "fetch", False, True),
+    ("https://api.example-cloud.net/v1/job?id=3", "GET", "xhr", False, True),
+    ("https://bucket.s3.amazonaws.com/app.js", "GET", "script", False, True),
+    ("https://data.example-cdn.com/jobs/1.json", "GET", "fetch", True, False),      # candidate data may exist
+    ("https://api.example-cloud.net/collect", "POST", "fetch", False, False),       # never a write
+    ("https://api.example-cloud.net/collect", "GET", "document", False, False),     # never a navigation / frame
+    ("https://api.example-cloud.net/ping", "GET", "ping", False, False),
+    ("http://api.example-cloud.net/x.js", "GET", "script", False, False),           # clear text
+    ("https://127.0.0.1/x.js", "GET", "script", False, False),
+    ("https://intranet/x.js", "GET", "script", False, False),
+    ("https://user:pw@api.example-cloud.net/x.js", "GET", "script", False, False),
+])
+def test_pre_data_read_is_only_a_public_https_background_read_before_any_data(url, method, kind, data_entered, allowed):
+    from jobhunt.apply.destination import pre_data_read
+
+    assert pre_data_read(url, method, kind, data_entered=data_entered) is allowed
+
+
+def test_vendor_static_assets_include_ashby_and_workday_cdns():
+    from jobhunt.apply.destination import vendor_static_asset
+
+    assert vendor_static_asset("https://cdn.ashbyprd.com/assets/app.js", data_entered=True)
+    assert vendor_static_asset("https://wd3-media.myworkdaycdn.com/x/logo.png", data_entered=True)
+    assert not vendor_static_asset("https://evil.example/app.js", data_entered=True)
+
+
+
+async def test_posting_scan_reports_smartrecruiters_interested_links_and_ignores_other_buttons(page):
+    uuid = "11111111-2222-4333-8444-555555555555"
+    await page.set_content(f'''<main><h1>Stage</h1>
+        <a href="https://jobs.smartrecruiters.com/oneclick-ui/company/Example/publication/{uuid}?dcr_ci=Example">Je suis intéressé(e)</a>
+        <a href="https://jobs.smartrecruiters.com/oneclick-ui/company/Example/publication/{uuid}">Partager</a>
+        <button>Je suis intéressé(e)</button><a href="/elsewhere">Je suis intéressé(e)</a></main>''')
+    state = await page.evaluate(apply_entry._POSTING)
+    assert [link.split("?")[0] for link in state["smart"]] == [
+        f"https://jobs.smartrecruiters.com/oneclick-ui/company/Example/publication/{uuid}"]
+    assert state["controls"] == []
