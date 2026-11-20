@@ -28,8 +28,9 @@ from jobhunt.apply.apply_entry import discover
 from jobhunt.apply.entry_llm import FALLBACK_CODES, advisor_for, discover_llm
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
-from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, save_run_record
-from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url, is_bound_pdf
+from jobhunt.apply.page_outline import (DIAGNOSED_STATUSES, OUTLINE_FILE, note_stop_reason, save_failure_diagnostics,
+                                        save_run_record)
+from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url, contains_verification_code, is_bound_pdf
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, resolved_identity
 from jobhunt.apply.facts import answers_path as facts_answers_path
@@ -509,6 +510,16 @@ async def fill_step(app_id: int, token: str, *, run_id: int | None = None) -> Ru
     return await _fill_session(app_id, run_id).run(token)
 
 
+async def _early_diagnose(page, run_, status: str, reason: str = "", code: str = "") -> None:
+    """Outline + screenshot + run record for a stop the engine never saw (entry navigation, guard refusal, crash); best effort."""
+    try:
+        out_dir = Path(run_.out_dir) if run_.out_dir else None
+        if out_dir is not None and not (out_dir / OUTLINE_FILE).is_file():
+            await save_failure_diagnostics(page, out_dir, status=status, diagnostic_code=code, reason=reason)
+    except Exception:
+        pass
+
+
 async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifier, browser, out, match,
                          confirmed_distinct, duplicate_confirmations, diagnostics, browser_adapter=False):
     if not (_unattended(job) if browser_adapter else _generic_enabled(job)):
@@ -663,7 +674,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                         return None, "apply_target_unverified"
                     guard.page = landing
                 return landing, target
-            except ApplyError:
+            except ApplyError as exc:
+                note_stop_reason(run_.out_dir, f"entry step: {type(exc).__name__}: {exc}")
                 return None, "apply_target_unverified"
             finally:
                 guard.probe = None
@@ -698,10 +710,13 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         except ChallengeRequired:
             result = handoff_result("human", diagnostics=diagnostics).model_copy(
                 update={"message": "Un défi anti-robot doit être résolu à la main."})
-        except Exception:
+            note_stop_reason(run_.out_dir, "bot challenge (ChallengeRequired)")
+        except Exception as exc:
+            await _early_diagnose(page, run_, "failed", f"{type(exc).__name__}: {exc}")
             if not guard.refused and not page.is_closed():
                 raise
             result = handoff_result("human", diagnostics=diagnostics)
+            note_stop_reason(run_.out_dir, f"{type(exc).__name__}: {exc}")
         if guard.refused:
             diagnostics.receipt_kind = "none"
             diagnostics.receipt_reason = "recipient_refused"
@@ -714,6 +729,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             diagnostics.aborted_requests = min(sum(guard.aborted_hosts.values()), 100000)
             result = result.model_copy(update={"dispatch_diagnostics": result.dispatch_diagnostics.model_copy(
                 update={"aborted_hosts": aborted, "aborted_requests": diagnostics.aborted_requests})})
+        if result.status in DIAGNOSED_STATUSES:  # the run ended before / outside the engine's own record: leave one anyway
+            await _early_diagnose(page, run_, result.status, result.message if not result.steps else "", result.diagnostic_code)
         if out is not None:
             out.append(result)
     return result
@@ -1056,7 +1073,7 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
     own_pool = pool is None
     shared_llm = _Llm(llm)
     reraise: BaseException | None = None
-    crashed = False
+    crashed, crash_reason = False, ""
     diagnostics = DispatchDiagnostics()
     returned: list[RunResult] = []  # the engine's own result, as soon as it exists
     receipts: list[Receipt] = []
@@ -1072,6 +1089,7 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
         except ApplyError as e:
             result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
+            crash_reason = f"{type(e).__name__}: {e}"
             result, crashed = RunResult(status="failed", message="Erreur technique.",
                                         diagnostic_code=diagnostics.exception_code(e)), True
         except asyncio.CancelledError as e:  # the row must not stay `running`: settle it, then let the cancellation through
@@ -1086,7 +1104,9 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
                 save_run_record(Path(run_.out_dir), status=result.status, diagnostic_code=result.diagnostic_code,
                                 final_url=result.final_url, step=trace.step, control=trace.control,
                                 receipt_reason=trace.receipt_reason,
-                                refused_request=getattr(browser[0][1], "refused_request", "") if browser else "")
+                                refused_request=getattr(browser[0][1], "refused_request", "") if browser else "",
+                                reason=crash_reason or ("" if result.steps or result.diagnostic_code == "credential_page"
+                                                        or contains_verification_code(result.message) else result.message))
         # Settlement is synchronous (no await): a cancellation arriving during the cleanup below cannot strand the run.
         try:
             done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None,
