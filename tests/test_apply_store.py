@@ -595,3 +595,20 @@ def test_engine_retry_epoch_is_a_past_utc_instant():
     epoch = datetime.fromisoformat(apply_store.ENGINE_RETRY_EPOCH)
     assert epoch.tzinfo is not None and epoch.utcoffset().total_seconds() == 0
     assert epoch <= datetime.now(UTC)
+
+
+@pytest.mark.parametrize("override, moved", [
+    ("2026-11-20T21:06:00+00:00", True),          # a later, past UTC instant moves it
+    ("2026-11-20T22:15:00", False),               # no timezone
+    ("2026-11-20T23:15:00+01:00", False),         # not UTC
+    ("2026-11-20T09:00:00+00:00", False),         # earlier than the built-in epoch
+    ("2999-01-01T00:00:00+00:00", False),         # in the future
+    ("not a date", False), ("", False), (None, False),
+])
+def test_engine_retry_epoch_override_accepts_only_a_later_past_utc_instant(override, moved):
+    from jobhunt.apply import store as apply_store
+
+    default = "2026-11-20T21:05:00+00:00"
+    assert (apply_store._retry_epoch(default, override) != default) is moved
+    if moved:
+        assert apply_store._retry_epoch(default, override) == "2026-11-20T21:06:00+00:00"
