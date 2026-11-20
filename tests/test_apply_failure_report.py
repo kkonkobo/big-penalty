@@ -97,3 +97,10 @@ def test_apply_report_does_not_create_a_missing_database(tmp_path):
     missing = tmp_path / "nope.sqlite3"
     result = CliRunner().invoke(app, ["apply", "report", "--db", str(missing)])
     assert result.exit_code == 1 and not missing.exists()
+
+
+def test_safe_reason_drops_the_browser_call_log_and_its_typed_value():
+    error = ('TimeoutError: Locator.fill: Timeout 800ms exceeded.\nCall log:\n  - waiting for locator("#a")\n'
+             '  - fill("Tr0ub4dor-zebra-Kite")\n  - locator resolved to <input id="a" value="Jeanne"/>')
+    text = safe_reason(error)
+    assert text.startswith("TimeoutError: Locator.fill: Timeout") and "zebra" not in text and "Jeanne" not in text
