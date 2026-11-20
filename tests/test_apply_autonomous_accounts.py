@@ -52,7 +52,9 @@ def planner(login_kind="account_login"):
     return plan
 
 
-async def test_talentsoft_inline_creation_form_is_used(server, profile, tmp_path, fast, monkeypatch):
+@pytest.mark.parametrize("guard_mode", ["strict", "core"])
+async def test_talentsoft_inline_creation_form_is_used(guard_mode, server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_guard_mode", guard_mode)  # core: the account page needs no entry binding
     app = setup(server, profile, tmp_path, monkeypatch)
     server.html["/my-account/log-in.aspx"] = TALENTSOFT
     server.post_redirects["/my-account/log-in.aspx"] = "/jobs/100/apply"

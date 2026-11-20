@@ -6,19 +6,20 @@ import json
 import re
 import secrets
 import time
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 import tldextract
 
-from jobhunt.apply.destination import clean_url, login_return, origin
+from jobhunt.apply.destination import clean_url, core_guard, login_return, origin
 from jobhunt.apply.errors import ApplyError, ManualField
 from jobhunt.apply.identity import ats_target
 from jobhunt.apply.prompt_rules import optional_recruiting, recruiter_ai_polarity
 from jobhunt.apply.supervised import _FORM_TARGETS_JS, _generic_action_allowed, _posting_ids, _target_allowed, _url_posting_ids
-from jobhunt.origin import ats_of_host, workday_requisition
+from jobhunt.origin import ats_of_host, is_aggregator, workday_requisition
 
 
 SUPERVISED_REQUIRED = "À envoyer en mode supervisé"
+UNTRUSTED_HOST = "Site non reconnu : aucune donnée du candidat n’y est envoyée."
 POSTING_IDS_JS = """() => {
     const ids = [...document.querySelectorAll('main, h1, [itemtype$="/JobPosting"]')].flatMap(node =>
         ['data-job-id', 'data-requisition-id', 'data-job-requisition-id'].map(key => node.getAttribute(key)).filter(Boolean));
@@ -113,6 +114,65 @@ class Audience:
         self.expected_identity = None
         # Set by the service: `await follow_landing(page)` rebinds the recipient to a page reached before any input.
         self.follow_landing = None
+        # Guard mode "core" (see `core_guard`): the browser browses freely, only the two core rules are enforced here:
+        # candidate data goes only to a trusted site, and nothing is sent twice. `chain` holds the sites the run reached by
+        # top-level navigation from a trusted one; `typed` the values entered (a GET carrying one is a write).
+        self.core = core_guard()
+        self.chain: set[str] = set()
+        self.typed: set[str] = set()
+
+    # ------------------------------------------------------------ core mode: trusted sites
+    @staticmethod
+    def site_key(url):
+        parts = urlsplit(url or "")
+        host = (parts.hostname or "").lower()
+        return (_domain(host) or parts.netloc.lower()) if host else ""
+
+    def trusted(self, url):
+        """May candidate data go to `url`? The employer's site (the posting's registrable domain, or the bound recipient's),
+        any recognized ATS, or a site this run reached by top-level navigation from those."""
+        if urlsplit(url or "").scheme not in {"http", "https"}:
+            return False
+        key = self.site_key(url)
+        return bool(key) and (key in {self.site_key(self.reserved_url), self.site_key(self.recipient_url)}
+                              or key in self.chain or bool(self.ats_host(url)))
+
+    def trusted_host(self, host):
+        return self.trusted(f"https://{host}/")
+
+    def extend_chain(self, url):
+        """A top-level navigation made from a trusted page: its destination is part of the employer's flow (not a job board)."""
+        if urlsplit(url or "").scheme in {"http", "https"} and not is_aggregator(url):
+            self.chain.add(self.site_key(url))
+
+    def note_value(self, text):
+        text = " ".join(str(text or "").split()).casefold()
+        if len(text) >= 3:
+            self.typed.add(text)
+
+    def carries_data(self, url):
+        """A GET whose query holds a value the candidate entered."""
+        query = " ".join(unquote_plus(urlsplit(url or "").query).split()).casefold()
+        return bool(query) and any(value in query for value in self.typed)
+
+    async def rebind(self, page):
+        """The page may move at any time (redirect, script, click, new tab): follow it, never refuse it."""
+        try:
+            live = await page.evaluate("() => [location.href, document.__bp_autonomous_document || '']", isolated_context=True)
+        except Exception:
+            return
+        if live[0] == self.live_url and live[1] and live[1] == self.document_nonce:
+            return
+        self.document = clean_url(live[0], navigation=True) or live[0].split("#", 1)[0]
+        await self.bind_document(page)
+
+    async def sync(self, page):
+        if page.is_closed():
+            return
+        if self.follow_landing is not None and not self.data_entered:
+            await self.follow_landing(page)  # binds a new landing (store dedupe); ApplyError: the reservation refuses it
+        else:
+            await self.rebind(page)
 
     @property
     def data_entered(self):
@@ -334,6 +394,13 @@ class Audience:
         self.live_url = live_url
 
     async def after_click(self, page, *, observing=False):
+        if self.core:
+            if observing and self.scriptable:
+                return  # the final / continuation click is still being observed
+            self.clicking = self.account_click = False
+            self.next_document = self.account_next = ""
+            self.account_hops = 0
+            return
         if self.account_click and self.entry_binding and self.account_hops:
             while self.account_next:
                 target = self.account_next
@@ -369,9 +436,58 @@ class Audience:
                         and self.posting_matches(endpoint))
         return _target_allowed(document, endpoint)
 
+    async def _core_target(self, target, *, button, final):
+        """Core mode: any element of a trusted page (or trusted frame) may be typed in / clicked. Nothing proves the posting."""
+        try:
+            handle = target if hasattr(target, "owner_frame") else await target.element_handle(timeout=2000)
+            frame = await handle.owner_frame()
+        except Exception:
+            raise ManualField() from None
+        while frame is not None:
+            if (frame.parent_frame is None or frame.url not in {"", "about:blank", "about:srcdoc"}) and not self.trusted(frame.url):
+                raise ApplyError(UNTRUSTED_HOST)
+            frame = frame.parent_frame
+        try:
+            value = await target.evaluate(f"""(node, button) => {{
+                const doc = node.ownerDocument, win = doc.defaultView;
+                if (!node.isConnected || !win || doc !== document) return null;
+                if (button && node.matches('a[href]') && (!node.target || node.target === '_self'))
+                    return [win.location.href, [node.getAttribute('href'), node.href, []], node.href, '', 'GET'];
+                const form = node.form;
+                const targets = ({_FORM_TARGETS_JS})(node);
+                const override = button ? node.getAttribute('formaction') : null;
+                if (override !== null && override !== '') targets[2].push(node.formAction ?? new URL(override, doc.baseURI).href);
+                const action = override !== null ? (override === '' ? doc.URL : node.formAction) : (targets[1] ?? doc.URL);
+                const nativePost = form
+                    && (node.getAttribute('formmethod') || form.getAttribute('method') || 'get').toLowerCase() === 'post';
+                return [win.location.href, targets, action, '', nativePost ? 'POST' : ''];
+            }}""", button, isolated_context=True)
+        except Exception:
+            raise ManualField() from None
+        if not value:
+            raise ManualField()
+        live = value[0].split("#", 1)[0]
+        if not button:
+            self.filled = True
+            for action in (value[2], *value[1][2]):
+                self.final_actions.add((origin(action), urlsplit(action).path))
+        else:
+            if final and value[4] == "GET":
+                raise ApplyError(SUPERVISED_REQUIRED)  # the receipt of a plain navigation cannot be told from any other page
+            endpoint = urlsplit(value[2] or live)._replace(fragment="").geturl()
+            for url in (endpoint, *value[1][2]):
+                if (final or self.data_entered) and urlsplit(url).scheme in {"http", "https"} and not self.trusted(url):
+                    raise ApplyError(UNTRUSTED_HOST)  # the form would send the candidate's data to an unrecognized site
+            self.endpoint = endpoint
+            self.method = value[4]
+        self.recheck()
+        self.active = True
+
     async def target(self, target, *, button=False, final=False):
         if target is None:
             raise ManualField()
+        if self.core:
+            return await self._core_target(target, button=button, final=final)
         try:
             value = await target.evaluate(f"""(node, button) => {{
                 const doc = node.ownerDocument, win = doc.defaultView;

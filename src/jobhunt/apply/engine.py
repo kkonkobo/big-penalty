@@ -139,7 +139,8 @@ SIGNUP_CONSENT_RE = re.compile(r"conditions|\bcgu\b|\bcgv\b|terms|politique|priv
 SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer")
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
-PRE_STEP_CAP = 8         # pure pre-data steps (cookie banner, open_form, account pages) that do not use the max_steps budget
+ENTRY_TRIES_CORE = 3     # core guard mode: entry discoveries per run (one per page)
+PRE_STEP_CAP = 8        # pure pre-data steps (cookie banner, open_form, account pages) that do not use the max_steps budget
 SECRET_LOG = "•••"
 AUTO_SUBMIT_NOTE = "soumission automatique bloquée"
 NO_SHOT_NOTE = "capture désactivée après saisie du mot de passe"
@@ -563,6 +564,8 @@ class _Run:
         self.apply_navigation = None
         self.apply_entry = None
         self.discovering_apply_entry = False
+        self.entry_tried: set[str] = set()  # core guard mode: pages where the entry discovery already ran (once each, capped)
+        self.entry_tries = 0
         self.apply_link_followed = False
         self.inspection_offline = False
         self.consent_codes = set()
@@ -1673,6 +1676,8 @@ class _Run:
 
     async def _type(self, loc: Locator, f: FormField, text: str) -> None:
         T = ACTION_TIMEOUT_MS
+        if note_value := getattr(self.autonomous, "note_value", None):
+            note_value(text)  # a GET carrying it to an untrusted site is a write (core guard mode)
         if f.kind != "textarea":
             text = text.replace("\r", " ").replace("\n", " ")  # never a stray Enter in a single-line field
         if self.autonomous or self.mode == "supervised" or f.kind in ("date", "number") or len(text) > 120:
@@ -2319,7 +2324,16 @@ class _Run:
                 self.diagnostics.control = "scan"
             if self.current_step:
                 await self._supervised_checkpoint()
-            follow = getattr(self.autonomous, "follow_landing", None)
+            if getattr(self.autonomous, "core", False):
+                # Core guard mode: the page may have moved at any time; follow it, never refuse it (the reservation can).
+                try:
+                    if not self.final_awaiting:
+                        await self.autonomous.sync(self.page)
+                except ApplyError:
+                    result = self._end("needs_human", SUPERVISED_REQUIRED)
+                    result.diagnostic_code = "reservation_refused"
+                    return result
+            follow = None if getattr(self.autonomous, "core", False) else getattr(self.autonomous, "follow_landing", None)
             if (follow and not self.final_awaiting and not self.autonomous.data_entered and not self.page.is_closed()
                     and clean_url(self.page.url, navigation=True) != self.autonomous.document):
                 # The page moved before any input (redirect, script, pre-data click): bind the landing or stop here.
@@ -2335,7 +2349,8 @@ class _Run:
                 await asyncio.sleep(RENDER_WAIT_S)
                 await self._settle()
                 snap, resolve = await self._snapshot()
-            if self.autonomous and self.autonomous.entry_binding and not self.final_awaiting:
+            if (self.autonomous and self.autonomous.entry_binding and not self.final_awaiting
+                    and not getattr(self.autonomous, "core", False)):
                 from jobhunt.apply.autonomous import POSTING_IDS_JS
 
                 ids = await self.page.evaluate(POSTING_IDS_JS, isolated_context=True)
@@ -2390,8 +2405,13 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
-            if self.apply_entry and not self.touched and not self.app_touched and not self.apply_link_followed:
+            core = bool(getattr(self.autonomous, "core", False))
+            if (self.apply_entry and not self.touched and not self.app_touched and not self.apply_link_followed
+                    and not (core and (self.entry_tries >= ENTRY_TRIES_CORE
+                                       or urldefrag(self.page.url).url in self.entry_tried))):
                 required = kind == "job_page"
+                self.entry_tried.add(urldefrag(self.page.url).url)
+                self.entry_tries += 1
                 self.inspection_offline = False
                 self.discovering_apply_entry = True
                 try:
@@ -2405,7 +2425,14 @@ class _Run:
                     self.page = landing
                     self.apply_link_followed = True
                     continue
-                if required or code != "job_page_no_apply_control":
+                if core:
+                    # Core guard mode: no entry proof is required. Without one the run goes on from the current page and the
+                    # planner acts on it (it can click "apply" on a job page). Only the reservation refuses.
+                    if code == "reservation_refused":
+                        result = self._end("needs_human", SUPERVISED_REQUIRED)
+                        result.diagnostic_code = code
+                        return result
+                elif required or code != "job_page_no_apply_control":
                     result = self._end("needs_human", "Accès au formulaire de candidature non vérifié.")
                     result.diagnostic_code = code
                     return result
@@ -2415,7 +2442,7 @@ class _Run:
                     return result
                 if navigated:
                     continue
-            if self.autonomous and self.apply_entry and kind == "job_page":
+            if self.autonomous and self.apply_entry and kind == "job_page" and not getattr(self.autonomous, "core", False):
                 result = self._end("needs_human", "Page d’offre, pas de formulaire de candidature vérifié.")
                 result.diagnostic_code = "job_page_no_apply_control"
                 return result
@@ -2482,7 +2509,11 @@ class _Run:
 
             if self.current_step:
                 await self._supervised_checkpoint()
-            bound_account = bool(self.autonomous and self.autonomous.entry_binding and
+            # Core guard mode: the entry step may not have bound the landing, but an account page on a trusted host (the
+            # employer, its ATS, or reached from them) is the same case: create / use the candidate account there.
+            account_host_ok = bool(self.autonomous and (self.autonomous.entry_binding or (
+                getattr(self.autonomous, "core", False) and self.autonomous.trusted(self.page.url))))
+            bound_account = bool(account_host_ok and
                                  (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields)))
             signup_page, inline = False, None
             if bound_account:
