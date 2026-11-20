@@ -56,6 +56,7 @@ def test_talentsoft_login_return_is_same_host_and_not_persisted(target, allowed)
     ("jobId=R123&partner=45", "https://example.test/job/42?jobId=R123"),
     ("jobSeqNo=EXR123FR&source=ATS&apply", "https://example.test/job/42?jobSeqNo=EXR123FR"),
     ("locale=fr_FR&extJobId=V_123&mapping=", "https://example.test/job/42?extJobId=V_123"),
+    ("__cf_chl_tk=abc-123&__cf_chl_rt_tk=x", "https://example.test/job/42"),  # Cloudflare check tokens
     ("digest=abc", ""),                      # an unknown key still fails the link closed
     ("next=https%3A%2F%2Fother.example", ""),
 ])
@@ -1624,3 +1625,42 @@ def test_released_attempt_that_may_have_sent_still_requires_a_manual_retry(profi
     retry = _auto_attempt(profile, tmp_path, app, url)
     with pytest.raises(ApplyError, match="Nouvel essai manuel requis"):
         _reserve_auto(profile, retry)
+
+
+@pytest.mark.parametrize("cloudflare", [False, True])
+async def test_cloudflare_fronted_site_is_reached_and_sent_by_the_browser_itself(cloudflare, server, profile, tmp_path, fast,
+                                                                               monkeypatch):
+    """Cloudflare blocks the guard's re-sent copies of requests (another TLS stack than the page's Chrome) at its edge:
+    such a site is reached and sent through the browser's own requests, still only to the bound site."""
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    server.cloudflare = cloudflare
+    _, app = approved_fixture(profile, tmp_path, server.url("careers/100"))
+    server.html["/careers/100"] = '<main><h1>Offre</h1><a href="/careers/100/apply">Postuler</a></main>'
+    server.html["/careers/100/apply"] = posting_form("/careers/100/apply")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.status == "submitted", (result.message, server.edge_blocked)
+    assert [post["path"] for post in server.posts] == ["/careers/100/apply"]  # sent once, to the bound site
+    assert bool(server.edge_blocked) is cloudflare
+
+
+async def test_cloudflare_check_traffic_on_the_site_is_not_aborted(server, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
+    _, app = approved_fixture(profile, tmp_path, server.url("careers/100"))
+    server.post_json["/cdn-cgi/challenge-platform/h/b/jsd/oneshot/abc"] = {}
+    server.html["/careers/100"] = '''<main><h1>Offre</h1><a href="/careers/100/apply">Postuler</a></main>
+        <script>fetch('/cdn-cgi/challenge-platform/h/b/jsd/oneshot/abc', {method: 'POST', body: 'signals'})</script>'''
+    server.html["/careers/100/apply"] = posting_form("/careers/100/apply")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True,
+                               planner=ScriptedPlanner([StepPlan(page_kind="job_page"), form]))
+    assert result.status == "submitted", result.message
+    assert "/cdn-cgi/challenge-platform/h/b/jsd/oneshot/abc" in [post["path"] for post in server.posts]
+
+
+def test_cloudflare_check_path_rule():
+    from jobhunt.apply.destination import cloudflare_check
+
+    assert cloudflare_check("https://jobs.example.test/cdn-cgi/challenge-platform/h/b/jsd/oneshot/x")
+    assert not cloudflare_check("http://jobs.example.test/cdn-cgi/challenge-platform/x")
+    assert not cloudflare_check("https://jobs.example.test/apply/cdn-cgi/challenge-platform/x")
+    assert not cloudflare_check("https://jobs.example.test/cdn-cgi/rum")

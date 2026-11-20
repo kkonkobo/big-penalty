@@ -33,6 +33,8 @@ from jobhunt.sources.base import ChallengeRequired
 
 log = logging.getLogger("jobhunt.browser")
 
+CHALLENGE_AUTO_CLEAR_S = 15.0  # how long an automatic (non-interactive) bot check gets before a human is needed
+
 CHALLENGE_MARKERS = (
     "captcha-delivery.com",  # DataDome
     "geo.captcha-delivery",
@@ -186,6 +188,13 @@ class BrowserPool:
         await page.goto(url, wait_until=wait_until, timeout=60_000)
         await human_pause(0.6, 1.8)
         if await is_challenge(page):
+            # A non-interactive check ("Just a moment...") clears by itself within seconds in a real browser.
+            deadline = time.monotonic() + CHALLENGE_AUTO_CLEAR_S
+            while time.monotonic() < deadline:
+                await asyncio.sleep(1)
+                if not await is_challenge(page):
+                    await human_pause(1, 2)
+                    return
             if self.headless:
                 raise ChallengeRequired(f"bot challenge on {url}; rerun with JOBHUNT_HEADLESS=0 and solve it")
             log.warning("Challenge on %s — solve it in the browser window (waiting %ss)", url, challenge_timeout_s)
