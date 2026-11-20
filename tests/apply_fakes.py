@@ -240,6 +240,12 @@ class FixtureServer:
     def posts_to(self, path: str) -> list[dict]:
         return [p for p in self.posts if p["path"] == path]
 
+    @property
+    def page_requests(self) -> list[str]:
+        """Requests a page made, ignoring a bare `GET /`: a local tool watching new localhost ports sometimes probes
+        the fixture server's root. Any path a page could send data to still counts; POSTs are tracked separately."""
+        return [path for path in self.requests if path != "/"]
+
     def close(self) -> None:
         self.httpd.shutdown()
         self.httpd.server_close()

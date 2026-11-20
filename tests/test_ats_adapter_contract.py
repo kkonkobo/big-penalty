@@ -210,7 +210,7 @@ async def test_adapter_transport_does_not_replay_post_on_307(server, profile, tm
         monkeypatch.setattr(service, "registry", registry)
         server.redirects["/adapter-contract/fixture-tenant/req-1"] = foreign.url("collect")
         result = await service.run(app.id, mode="submit", trigger="user")
-        assert len(server.posts) == 1 and not foreign.posts and not real_requests(foreign)
+        assert len(server.posts) == 1 and not foreign.posts and not foreign.page_requests
         assert store.outstanding_attempt(app.id).id == result.id and result.status != "submitted"
     finally:
         foreign.close()
@@ -717,7 +717,7 @@ async def test_smartrecruiters_browser_upload_boundary(smart_adapter, scenario, 
             assert store.active_reservations(profile.id) and len(posts) == 1 and expected in posts[0]["body"]
             await page.close()
         result = await asyncio.wait_for(task, timeout=8)
-        assert not real_requests(foreign) and not foreign.posts and not server.posts
+        assert not foreign.page_requests and not foreign.posts and not server.posts
         if scenario != "approved":
             assert page.is_closed() and not upload.posts
         assert store.outstanding_attempt(app.id).id == result.id
@@ -829,10 +829,3 @@ async def test_adapter_fill_step_identity(platform, change, request, server, pag
             await page.close()
         result = await asyncio.wait_for(task, timeout=8)
     assert not server.posts and store.outstanding_attempt(app.id).id == result.id
-
-
-def real_requests(fixture):
-    """Requests the page made, ignoring a bare `GET /`: something outside the test process (a local tool watching new
-    localhost ports) sometimes probes the fixture server's root. Any path a page could send data to is still counted,
-    and every POST is checked separately."""
-    return [path for path in fixture.requests if path != "/"]

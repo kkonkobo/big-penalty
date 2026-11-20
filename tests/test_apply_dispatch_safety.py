@@ -1178,7 +1178,7 @@ async def test_production_supervised_non_http_is_inert_in_pages_frames_and_popup
         finally:
             await opened.close()
             result = await asyncio.wait_for(task, timeout=10)
-        assert not foreign.requests and not foreign.posts
+        assert not foreign.page_requests and not foreign.posts
         assert store.outstanding_attempt(app.id).id == result.id and not production_pool._contexts
     finally:
         foreign.close()
@@ -1214,7 +1214,7 @@ async def test_production_transport_inert_in_fresh_realms(kind, production_pool,
                 await loaded;
                 return [before, inert(frame.contentWindow.WebSocket, target)];
             }""", [kind, target], isolated_context=False)
-            assert all(checks) and not foreign.requests and not foreign.posts
+            assert all(checks) and not foreign.page_requests and not foreign.posts
     finally:
         foreign.close()
 
@@ -1242,7 +1242,7 @@ async def test_production_initial_redirects_are_bounded_and_validated(scenario, 
                 assert await opened.locator("input").count() > 0
             else:
                 assert guard.refused and opened.is_closed() and "/hop-6" not in server.requests
-            assert not foreign.requests
+            assert not foreign.page_requests
     finally:
         foreign.close()
 
@@ -1316,7 +1316,7 @@ async def test_supervised_recipient_refusal_closes_and_holds(egress, page, serve
             await confirm_step(app.id)
         result = await asyncio.wait_for(task, timeout=12)
         assert page.is_closed() and store.outstanding_attempt(app.id).id == result.id
-        assert "fenêtre fermée" in result.message and not foreign.requests and not foreign.posts
+        assert "fenêtre fermée" in result.message and not foreign.page_requests and not foreign.posts
     finally:
         foreign.close()
 
