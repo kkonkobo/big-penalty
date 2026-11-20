@@ -134,3 +134,37 @@ async def test_cache_break_gives_the_shared_rules_their_own_breakpoint_and_never
     await OpenAIProvider(get_settings(), SimpleNamespace(responses=Responses()), retry_base_s=0).structured(
         Plan, system_text="RULES" + CACHE_BREAK + "FACTS", user_text="page")
     assert seen["instructions"] == "RULESFACTS"
+
+
+def response_for(parsed):
+    return SimpleNamespace(parsed_output=parsed, stop_reason="end_turn",
+                           usage=SimpleNamespace(input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
+                                                 cache_creation_input_tokens=0))
+
+
+async def test_planner_and_cv_calls_default_to_sonnet_and_keep_their_own_settings(monkeypatch):
+    from jobhunt.config import Settings
+
+    assert Settings.model_fields["apply_planner_model"].default == "claude-sonnet-5-5"
+    assert Settings.model_fields["cv_model"].default == "claude-sonnet-5-5"
+    settings = get_settings()
+    monkeypatch.setattr(settings, "apply_planner_model", "planner-model")
+    monkeypatch.setattr(settings, "apply_planner_effort", "low")
+    monkeypatch.setattr(settings, "cv_model", "cv-model")
+    parsed = Plan(queries=[PlannedQuery(keywords="firmware")])
+    messages = FakeMessages(response_for(parsed))
+    provider = AnthropicProvider(settings, SimpleNamespace(beta=SimpleNamespace(messages=messages)), retry_base_s=0)
+    for site in ("apply.planner", "apply.planner.inspect", "TailorDraft"):
+        with llm_site(site):
+            await provider.structured(Plan, system_text="s", user_text="u")
+    assert [(c["model"], c["output_config"]) for c in messages.calls] == [
+        ("planner-model", {"effort": "low"}), ("planner-model", {"effort": "low"}), ("cv-model", {"effort": "medium"})]
+    llm = LLMClient(client=SimpleNamespace(beta=SimpleNamespace(messages=messages)))
+    with llm_site("apply.planner"):
+        info, _ = await llm.structured_ex(Plan, system_text="s", user_text="u")
+    assert info == {"provider": "anthropic", "model": "planner-model"}
+
+
+def test_openai_planner_calls_never_receive_a_claude_model_name():
+    provider = OpenAIProvider(get_settings(), SimpleNamespace(responses=None))
+    assert provider.model_for("apply.planner") == (get_settings().openai_planner_model, get_settings().openai_planner_effort)

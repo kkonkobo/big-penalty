@@ -135,3 +135,46 @@ def test_system_prompt_states_the_account_upload_dial_and_aggregator_rules():
 def test_system_prompt_states_the_imported_profile_rule():
     flat = " ".join(SYSTEM.split())
     assert "imported from the CV" in flat and "fill them, do not click again" in flat
+
+
+async def test_rehearsal_reuses_the_plan_of_an_identical_inspection_prompt(monkeypatch):
+    import os
+    from jobhunt.config import get_settings
+    from jobhunt.llm import USAGE_FILE, read_usage
+
+    plan = StepPlan(page_kind="form", actions=[Action(ref="f1", op="fill", fact="first_name")])
+    llm, provider = fake_llm({"StepPlan": plan})
+    planner = LLMPlanner(llm)
+    args = dict(job_title="", company="", history=[], mode="dry_run")
+    assert await planner.plan(snapshot(), sample_facts(), **args) == plan
+    assert await planner.plan(snapshot(), sample_facts(), **args) == plan
+    assert len(provider.calls) == 1  # second rehearsal of the same page: no LLM call
+    rows = read_usage(get_settings().data_dir / "logs" / USAGE_FILE)
+    assert [(r["site"], r["model"], r["cost_usd"]) for r in rows] == [("apply.planner.inspect", "plan-cache", None)]
+
+    changed = snapshot()
+    changed.fields[0].label = "Nom de famille"
+    await planner.plan(changed, sample_facts(), **args)  # another page: another prompt
+    monkeypatch.setattr(get_settings(), "apply_planner_model", "another-model")
+    await planner.plan(snapshot(), sample_facts(), **args)  # another model: another key
+    assert len(provider.calls) == 3
+
+    monkeypatch.setattr(get_settings(), "apply_planner_model", "claude-sonnet-5-5")
+    for path in (get_settings().data_dir / "cache" / "plans").iterdir():  # older than the window: called again
+        os.utime(path, (1, 1))
+    await planner.plan(snapshot(), sample_facts(), **args)
+    assert len(provider.calls) == 4
+
+
+async def test_real_runs_and_disabled_cache_always_call_the_planner(monkeypatch):
+    from jobhunt.config import get_settings
+
+    llm, provider = fake_llm({"StepPlan": StepPlan(page_kind="form")})
+    planner = LLMPlanner(llm)
+    for _ in range(2):
+        await planner.plan(snapshot(), sample_facts(), job_title="T", company="C", history=[], mode="submit")
+    monkeypatch.setattr(get_settings(), "apply_plan_cache_days", 0)
+    for _ in range(2):
+        await planner.plan(snapshot(), sample_facts(), job_title="", company="", history=[], mode="dry_run")
+    assert len(provider.calls) == 4
+    assert not (get_settings().data_dir / "cache" / "plans").exists()

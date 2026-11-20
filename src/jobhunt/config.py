@@ -33,8 +33,16 @@ class Settings(BaseModel):
     planner_model: str = "claude-opus-5-5"
     scoring_model: str = "claude-opus-5-5"
     writer_model: str = "claude-opus-5-5"
-    cv_model: str = "claude-opus-5-5"  # CV import + tailoring (JOBHUNT_CV_MODEL, defaults to the planner model)
+    # CV import + tailoring + cover letters (JOBHUNT_CV_MODEL, else JOBHUNT_PLANNER_MODEL, else Sonnet 5.5: half the Opus price)
+    cv_model: str = "claude-sonnet-5-5"
     cv_effort: str = "medium"
+    # Apply-form planner, one call per form step (JOBHUNT_APPLY_PLANNER_MODEL / _EFFORT). Sonnet 5.5 costs about half of
+    # Opus 5.5 per step; the engine still validates every action and the answer verifier re-checks every deduction.
+    apply_planner_model: str = "claude-sonnet-5-5"
+    apply_planner_effort: str = "medium"
+    # Rehearsals (dry runs) reuse the plan of an identical inspection prompt for this many days (0 = never).
+    # Inspection prompts hold field labels and fact keys only; a change of page, facts, rules or model is a new prompt.
+    apply_plan_cache_days: float = 7
     # CV data (master CV, job ad, tailored text) may be sent to the next provider when the first one fails.
     # JOBHUNT_CV_ALLOW_FAILOVER=0 keeps it with the FIRST enabled provider only (the verifier then uses it too).
     cv_allow_failover: bool = True
@@ -120,7 +128,10 @@ def get_settings() -> Settings:
         planner_model=env("JOBHUNT_PLANNER_MODEL", "claude-opus-5-5"),
         scoring_model=env("JOBHUNT_SCORING_MODEL", "claude-opus-5-5"),
         writer_model=env("JOBHUNT_WRITER_MODEL", "claude-opus-5-5"),
-        cv_model=env("JOBHUNT_CV_MODEL") or env("JOBHUNT_PLANNER_MODEL", "claude-opus-5-5"),
+        cv_model=env("JOBHUNT_CV_MODEL") or env("JOBHUNT_PLANNER_MODEL", "claude-sonnet-5-5"),
+        apply_planner_model=env("JOBHUNT_APPLY_PLANNER_MODEL") or "claude-sonnet-5-5",
+        apply_planner_effort=env("JOBHUNT_APPLY_PLANNER_EFFORT") or "medium",
+        apply_plan_cache_days=float(env("JOBHUNT_APPLY_PLAN_CACHE_DAYS") or 7),
         cv_effort=env("JOBHUNT_CV_EFFORT", "medium"),
         cv_allow_failover=env("JOBHUNT_CV_ALLOW_FAILOVER", "1").strip().lower() not in ("0", "false", "no", "off"),
         llm_deadline_s=float(env("JOBHUNT_LLM_DEADLINE_S") or 180),

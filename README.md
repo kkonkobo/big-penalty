@@ -56,6 +56,10 @@ Set an empty provider list to force offline rule-based operation.
 | `JOBHUNT_OPENAI_PLANNER_MODEL` / `JOBHUNT_OPENAI_SCORING_MODEL` | OpenAI planning/scoring aliases |
 | `JOBHUNT_PLANNER_EFFORT` / `JOBHUNT_SCORING_EFFORT` | Anthropic effort (medium / medium) |
 | `JOBHUNT_OPENAI_PLANNER_EFFORT` / `JOBHUNT_OPENAI_SCORING_EFFORT` | OpenAI effort (low / low) |
+| `JOBHUNT_APPLY_PLANNER_MODEL` / `JOBHUNT_APPLY_PLANNER_EFFORT` | Apply-form planner, one call per form step (`claude-sonnet-5-5` / medium) |
+| `JOBHUNT_CV_MODEL` / `JOBHUNT_CV_EFFORT` | CV import, tailoring and cover letters (`claude-sonnet-5-5` / medium) |
+| `JOBHUNT_APPLY_PLAN_CACHE_DAYS` | Rehearsals reuse the plan of an identical inspection prompt for this many days (7; 0 = off) |
+| `JOBHUNT_LLM_USAGE_LOG` | One line per LLM call in `data/logs/llm-usage.jsonl` (1; 0 = off); `jobhunt llm-usage` sums it |
 
 An empty OpenAI effort omits reasoning options for models that do not support
 them. OpenAI requests use Responses structured outputs and `store=False`.
@@ -69,7 +73,8 @@ token usage in `stats.llm_stats`; individual job scores store `scored_by`.
 The run page and shortlist show provider badges.
 
 Measured defaults keep Anthropic first: `claude-opus-5-5` with medium effort
-for both tasks. OpenAI fallback uses `gpt-6-luna` for planning and `gpt-6.1-sol`
+for search planning and scoring; the apply-form planner and the CV writer use
+`claude-sonnet-5-5` (about half the cost per call). OpenAI fallback uses `gpt-6-luna` for planning and `gpt-6.1-sol`
 for scoring, both at low effort. The benchmark favors Opus medium for avoiding
 high-ranked bad jobs, not for raw accuracy on the imbalanced dataset.
 

@@ -446,8 +446,15 @@ class AnthropicProvider:
     async def structured(self, model_cls: type[T], *, system_text: str, user_text: str, max_tokens: int = 8000) -> T:
         if not self.enabled:
             raise LLMError(f"{self.name}: clé absente")
-        return await self._parse(model_cls, model=self.settings.cv_model, system_text=system_text, user_text=user_text,
-                                 effort=self.settings.cv_effort, max_tokens=max_tokens)
+        model, effort = self.model_for(current_site())
+        return await self._parse(model_cls, model=model, system_text=system_text, user_text=user_text, effort=effort,
+                                 max_tokens=max_tokens)
+
+    def model_for(self, site: str) -> tuple[str, str]:
+        """(model, effort) of a structured call: the apply-form planner has its own pair, every other call uses the CV pair."""
+        if site.startswith("apply.planner"):
+            return self.settings.apply_planner_model, self.settings.apply_planner_effort
+        return self.settings.cv_model, self.settings.cv_effort
 
     # ---- scorer
     async def score(self, profile: Profile, jobs: list[MergedJob]) -> ScoreBatch:
@@ -499,6 +506,7 @@ class OpenAIProvider(AnthropicProvider):
             "planner_model": settings.openai_planner_model, "scoring_model": settings.openai_scoring_model,
             "planner_effort": settings.openai_planner_effort, "scoring_effort": settings.openai_scoring_effort,
             "cv_model": settings.openai_planner_model, "cv_effort": settings.openai_planner_effort,
+            "apply_planner_model": settings.openai_planner_model, "apply_planner_effort": settings.openai_planner_effort,
         })
         super().__init__(provider_settings, client, **kwargs)
 
@@ -688,7 +696,9 @@ class FailoverLLM:
                         continue
                     self.calls.append({"task": "structured", "provider": provider.name, "status": "ok",
                                        "latency_s": round(perf_counter() - started, 4)})
-                    model = getattr(getattr(provider, "settings", None), "cv_model", "") or ""
+                    model_for = getattr(provider, "model_for", None)
+                    model = model_for(current_site())[0] if model_for else getattr(
+                        getattr(provider, "settings", None), "cv_model", "") or ""
                     return {"provider": provider.name, "model": model}, output
         except TimeoutError:
             self.errors.append("deadline")
