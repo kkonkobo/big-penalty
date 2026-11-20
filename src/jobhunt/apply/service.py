@@ -27,6 +27,7 @@ from jobhunt.apply.autonomous import Audience
 from jobhunt.apply.apply_entry import discover
 from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
+from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, save_run_record
 from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url, is_bound_pdf
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, resolved_identity
@@ -1019,6 +1020,13 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
             result, crashed = returned[0], False
         if result.dispatch_diagnostics == DispatchDiagnostics():
             result = result.model_copy(update={"dispatch_diagnostics": diagnostics})
+        if run_.out_dir and result.status in DIAGNOSED_STATUSES:  # local failure record (never values), next to the page outline
+            with contextlib.suppress(Exception):
+                trace = result.dispatch_diagnostics
+                save_run_record(Path(run_.out_dir), status=result.status, diagnostic_code=result.diagnostic_code,
+                                final_url=result.final_url, step=trace.step, control=trace.control,
+                                receipt_reason=trace.receipt_reason,
+                                refused_request=getattr(browser[0][1], "refused_request", "") if browser else "")
         # Settlement is synchronous (no await): a cancellation arriving during the cleanup below cannot strand the run.
         try:
             done = _settle(run_, mode, result, crashed, receipt=receipts[0] if receipts else None,
