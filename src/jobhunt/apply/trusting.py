@@ -949,7 +949,8 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         # fullest list seen stands: what a typed query narrows it to (or its "no result" line) does not replace it.
         labels = list(dict.fromkeys(text for _, text in found))
         key = norm(field.label)
-        if labels and len(labels) <= 60 and key and not _PLACEHOLDER_LABEL.search(key) and len(labels) > len(run.combo_options.get(key, ())):
+        # (a long list - languages, regions - is kept too: the answer the planner words differently is one of its entries)
+        if labels and len(labels) <= 250 and key and not _PLACEHOLDER_LABEL.search(key) and len(labels) > len(run.combo_options.get(key, ())):
             run.combo_options[key] = labels
 
     async def open_list():
