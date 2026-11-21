@@ -972,7 +972,7 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         found = await _popup_options(run)
     if found and not await found[0][0].evaluate(_WAS_SHOWN_JS):
         remember(found)
-    index = pick(found)
+    index = pick(found, loose=not typed)  # (a list nothing can be typed in: the entry closest to the answer, now)
     if index >= 0 and (len(found) <= 40 or not typed):
         if done := await choose(found, index):
             return done
