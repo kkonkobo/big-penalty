@@ -143,6 +143,7 @@ SIGNUP_CONSENT_RE = re.compile(r"conditions|\bcgu\b|\bcgv\b|terms|politique|priv
 ACCEPT_BOX_RE = re.compile(r"^\s*(?:validation|valider|certifie|je certifie|confirmation)\b")  # a lone required "Validation" box
 SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer")
+ERROR_TITLE_RE = re.compile(r"(?:erreur|error|errore|fehler|fout)\b")  # folded page title of a form sent back with errors
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
 ACCOUNT_CLICKS_MAX = 3   # login / signup clicks per run before the account step is reported as not accepted
 ENTRY_TRIES_CORE = 3     # core guard mode: entry discoveries per run (one per page)
@@ -2327,6 +2328,10 @@ class _Run:
         intact = bool(sent.fields & present) and any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
         errors = any(f.error for f in snap.fields if f.kind not in ("button", "link"))
+        if not errors and intact and not silent:
+            # The same form came back under an error banner or an "Erreur ..." page title (a server-side validation that
+            # lists the missing fields in a banner instead of marking them).
+            errors = bool(ERROR_TITLE_RE.match(fold(snap.title).strip())) or await self._banner_error()
         nothing_left = (silent and getattr(self.autonomous, "click_write", object()) is None and not self.autonomous.final_response
                         and not getattr(self.autonomous, "foreign_writes", 1))
         if not intact or not (nothing_left or (errors and self.rejected_submits < 2)):
