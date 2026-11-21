@@ -460,3 +460,15 @@ def test_a_required_background_check_consent_radio_is_ticked_only_on_its_single_
     got = decision(_radio(label, options), fold)
     assert (got[1] if got else None) == expected and (got is None or got[0] == "application_background_check")
     assert decision(_radio(label, options, required=False), fold) is None
+
+
+async def test_cookie_preference_center_switches_are_not_fields(page):
+    await page.set_content("""
+      <div id="evidon-prefdiag-overlay" role="dialog"><h2>Privacy preferences</h2>
+        <label><input type=checkbox role=switch> Analytique</label>
+        <label><input type=checkbox role=switch> Fonctionnel et performances</label></div>
+      <div id="x"><label><input type=checkbox> Marketing et personnalisation category</label></div>
+      <label for=e>Votre email *</label><input id=e type=email required>
+    """)
+    snap, _ = await take_snapshot(page)
+    assert [f.label for f in snap.fields] == ["Votre email"]

@@ -1481,7 +1481,7 @@ async def test_dry_labels_value_dependent_fields_untested(page, server, cv_pdf, 
     result = await run_application(page, url=server.url("dry_egress"), facts=sample_facts(),
                                    planner=ScriptedPlanner([StepPlan(page_kind="form")]), uploads=Uploads(cv_pdf=cv_pdf),
                                    mode="dry_run", out_dir=tmp_path / "shots")
-    assert "Champs non testés : Prénom" in result.steps[0].note
+    assert "Champs non testés : CV" in result.steps[0].note  # (the first name is mapped by code, never typed in a rehearsal)
     assert not server.sent
 
 

@@ -36,7 +36,7 @@ from jobhunt.apply.destination import clean_text, clean_url, contains_verificati
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.consent import dismiss_consent
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
-from jobhunt.apply.missing_answers import IDENTITY, capture, exact_option, fact_key
+from jobhunt.apply.missing_answers import IDENTITY, ambiguous_name, capture, exact_option, fact_key, standing_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
 from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, safe_reason, save_failure_diagnostics
 from jobhunt.apply.prompt_rules import DIAL_COUNTRY_NAMES, decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
@@ -138,6 +138,7 @@ CREATION_NAME_RE = re.compile(r"creation|creer|create|nouveau|nouvelle|\bnew|reg
 EMAIL_FIELD_RE = re.compile(r"e-?mail|courriel|identifiant|login|username|adresse mail")
 SIGNUP_CONSENT_RE = re.compile(r"conditions|\bcgu\b|\bcgv\b|terms|politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement|"
                                r"j'?ai lu|lu et|accepte|agree|consent")
+ACCEPT_BOX_RE = re.compile(r"^\s*(?:validation|valider|certifie|je certifie|confirmation)\b")  # a lone required "Validation" box
 SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer")
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
@@ -879,6 +880,32 @@ class _Run:
                 return None
         return _Item(Action(ref=field.ref, op="fill", fact=key), field, fact, value=value, used=key)
 
+    def _identity_item(self, field: FormField, snap: PageSnapshot, planned: Action | None = None) -> _Item | None:
+        """A name / e-mail / phone field the candidate's own facts answer: filled by code, whatever the planner proposed (a
+        low-effort plan often leaves "Votre nom", "Enter email address" or "Votre prénom" alone). Only the exact wording of the
+        label counts (third parties - referee, company, school... - are refused by the fact's `label_re`)."""
+        if field.kind not in {"text", "email", "tel"} or not _is_empty(field) or not field.label.strip():
+            return None
+        key = standing_key(field.label)
+        if key not in IDENTITY:
+            return None
+        if ambiguous_name(field.label):  # "Votre nom": the surname beside a first-name field, the full name when it stands alone
+            key = "last_name" if self._has_first_name(snap) else "full_name"
+        if (key == "email" and field.kind == "tel") or (key == "phone" and field.kind == "email"):
+            return None
+        if planned is not None and planned.fact == key:  # the plan already cites this very fact: its (formatted) answer stands
+            return None
+        fact = self.facts.get(key)
+        if fact is None or not fact.value or not self.facts.known(key) or fact.secret:
+            return None
+        if not (self._label_matches(f=field, fact=fact) or (ambiguous_name(field.label) and key in {"last_name", "full_name"})):
+            return None
+        return _Item(Action(ref=field.ref, op="fill", fact=key), field, fact, value=fact.value, used=key)
+
+    @staticmethod
+    def _has_first_name(snap: PageSnapshot) -> bool:
+        return any(f.kind == "text" and standing_key(f.label) == "first_name" for f in snap.fields)
+
     def _identity_needles(self) -> dict[str, list[str]]:
         """What identifies the candidate's own data in a field value: his names, e-mail addresses and phone digits. A page
         "holds candidate data" when a visible field contains one of them (a saved draft, a logged-in profile) — not when a
@@ -1029,6 +1056,12 @@ class _Run:
                 seen.add(field.ref)
                 v.items.append(standing)
                 continue
+            if (plan.page_kind == "form" and not dismissing_cookies and field.ref not in manual_refs
+                    and (action is None or (action.op == "fill" and action.fact in IDENTITY | {"account_email"}))
+                    and (ident := self._identity_item(field, snap, action))):
+                seen.add(field.ref)
+                v.items.append(ident)
+                continue
             entry = self.choice_fields.get(field.ref)
             if field.ref in manual_refs or not entry or entry[0] != _question(field) or field_choices(self.page.url, field) != entry[1:]:
                 continue
@@ -1056,11 +1089,15 @@ class _Run:
                 v.items.append(item)
         pw = self.facts.get("account_password")
         if plan.page_kind == "account_signup" and self.mode == "submit" and pw is not None and pw.secret and self.facts.known(pw.key):
-            for f in snap.fields:  # a password / confirmation field the planner left alone gets the same secret
-                if f.kind == "password" and f.ref not in seen and _is_empty(f) and (self.signup_scope is None or f.ref in self.signup_scope):
+            # a password / confirmation field ("Password" + "Verify New Password") the planner left alone, or whose action was dropped
+            # (wrong fact cited for it), gets the same secret: on a sign-up page a password box is never a question
+            filled = {item.field.ref for item in v.items}
+            for f in snap.fields:
+                if f.kind == "password" and f.ref not in filled and _is_empty(f) and (self.signup_scope is None or f.ref in self.signup_scope):
                     frame_url = self._frame_url(resolve, f.ref) if resolve else self.page.url
                     if self._secret(frame_url) is not None:
                         seen.add(f.ref)
+                        v.questions = [q for q in v.questions if q.ref != f.ref]
                         v.items.append(_Item(Action(ref=f.ref, op="fill", fact=pw.key), f, pw, used=pw.key, frame_url=frame_url))
         if clicks:
             v.click = clicks[-1]
@@ -2676,6 +2713,17 @@ class _Run:
                                 and recruiter_ai_polarity(text) is None):
                             code = "application_privacy" if SIGNUP_PRIVACY_RE.search(text) else "application_terms"
                             v.items.append(_Item(Action(ref=field.ref, op="check"), field, used=code))
+            if self.autonomous and kind == "form" and not bound_account:  # the owner authorizes ticking the REQUIRED privacy / terms box
+                taken = {item.field.ref for item in v.items}
+                target = v.click[0].form if v.click else ""
+                for field in snap.fields:
+                    text = fold(f"{field.label} {field.group}")
+                    if (field.kind == "checkbox" and field.required and _is_empty(field) and field.ref not in taken
+                            and (not target or not field.form or field.form == target)
+                            and (_site_consent(field) or SIGNUP_CONSENT_RE.search(text) or ACCEPT_BOX_RE.search(text))
+                            and not blocked_consent(text) and not MARKETING_RE.search(text) and recruiter_ai_polarity(text) is None):
+                        code = "application_privacy" if SIGNUP_PRIVACY_RE.search(text) else "application_terms"
+                        v.items.append(_Item(Action(ref=field.ref, op="check"), field, used=code))
             if not self._inspection_only:
                 await self._verify(v)
             if self.current_step:
@@ -2881,7 +2929,10 @@ class _Run:
                 # application form) are not ours to fill: only the clicked button's form (and fields outside any form) count.
                 target = v.click[0].form if v.click else ""
                 mine = [f for f in snap.fields if not target or not f.form or f.form == target]
-                questions += [_question(f) for f in mine if f.required and f.kind not in ("button", "link")
+                # The ad itself has no application form: its required inputs are the site's own widgets (job-alert box, newsletter,
+                # rating, search), never questions of the candidacy.
+                ad = plan.page_kind == "job_page"
+                questions += [_question(f) for f in mine if not ad and f.required and f.kind not in ("button", "link")
                               and f.ref not in handled and _is_empty(f) and not (self.mode == "dry_run" and f.kind == "password")
                               and not self._file_satisfied(f, snap)]
                 questions += [_question(f) for f in mine if f.ref not in handled and self._open_decision(f, snap)]

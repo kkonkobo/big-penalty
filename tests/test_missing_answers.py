@@ -202,3 +202,15 @@ def test_relatives_at_the_employer_is_a_standing_no(label, relatives):
     if relatives:
         assert exact_option('relatives_at_employer', 'Non', ['Oui', 'Non'], label) == 1
         assert exact_option('relatives_at_employer', 'Non', ['Yes', 'No'], label) == 1
+
+
+@pytest.mark.parametrize("label,key", [
+    ("Votre nom", "last_name"), ("Nom", "last_name"), ("Votre prénom", "first_name"), ("Votre email", "email"),
+    ("Enter Email address", "email"), ("Please enter your email address", "email"), ("E-mail address", "email"),
+    ("Nom de famille *", "last_name"), ("Surname", "last_name"), ("Given name", "first_name"), ("Your first name", "first_name"),
+    ("Votre téléphone", "phone"), ("Name", "full_name"), ("Votre adresse e-mail", "email"), ("Ihre E-Mail-Adresse", "email"),
+    ("Company name", None), ("Votre nom de société", None), ("Nom du manager", None)])
+def test_common_identity_wordings_map_to_the_candidate_fact(label, key):
+    from jobhunt.apply.missing_answers import standing_key
+
+    assert standing_key(label) == key

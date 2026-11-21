@@ -191,3 +191,43 @@ def test_guard_mode_defaults_to_core_and_reads_the_environment(monkeypatch, tmp_
     for value, expected in (("Strict", "strict"), ("strict", "strict"), ("core", "core"), ("anything-else", "core")):
         monkeypatch.setenv("JOBHUNT_APPLY_GUARD_MODE", value)
         assert fresh().apply_guard_mode == expected
+
+
+def basic_fields_page(action, extra=""):
+    return ('<title>Ingénieur</title><main><h1>Ingénieur systèmes embarqués</h1>'
+            f'<form action="{action}" method="post">'
+            '<label for="n">Votre nom *</label><input id="n" name="field_surname" required>'
+            '<label for="p">Votre prénom *</label><input id="p" name="field_name" required>'
+            '<label for="e">Votre email *</label><input id="e" type="email" name="field_email" required>'
+            '<label for="cv">CV</label><input id="cv" type="file" name="cv">'
+            '<label><input type="checkbox" name="field_accept" required> Validation</label>'
+            '<button>Envoyer</button></form></main>' + extra)
+
+
+async def test_basic_identity_fields_are_filled_by_code_even_when_the_plan_leaves_them_alone(core, profile, tmp_path, fast):
+    core.html["/site/jobs/100"] = basic_fields_page("/jobs/100")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+
+    def plan(snapshot):  # a low-effort plan: only the CV and the click
+        if not any(field.kind == "file" for field in snapshot.fields):
+            return StepPlan(page_kind="job_page")
+        return StepPlan(page_kind="form", actions=[act(snapshot, "CV", "upload_cv", kind="file"),
+                                                   act(snapshot, "Envoyer", "click", role="submit")])
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code, result.result.questions)
+    body = core.posts_to("/site/jobs/100")[0]["body"]
+    for name in (b"field_surname=", b"field_name=", b"field_email=", b"field_accept="):
+        assert name in body
+    assert b"field_surname=&" not in body and b"field_name=&" not in body and b"field_email=&" not in body
+
+
+async def test_a_job_alert_box_of_the_ad_is_not_a_question_of_the_application(core, profile, tmp_path, fast):
+    core.html["/site/jobs/100"] = ('<title>Ingénieur</title><main><h1>Ingénieur systèmes embarqués</h1>'
+                                   '<aside><h2>Get notified for similar jobs</h2>'
+                                   '<input type="email" required aria-label="Enter Email address"></aside></main>')
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True,
+                               planner=ScriptedPlanner(lambda snapshot: StepPlan(page_kind="job_page")))
+    assert not any("mail" in question.label for question in result.result.questions)
+    assert not core.posts

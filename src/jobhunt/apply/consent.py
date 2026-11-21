@@ -22,6 +22,7 @@ _DISMISS = r"""() => {
   const TOPIC = /cookie|traceur|consent|tracking|privacy|confidentialit|données personnelles|datenschutz/i;
   const REJECT = /^(?:tout refuser|refuser(?: tout| les cookies| et fermer)?|continuer sans accepter|reject all(?: cookies)?|reject|decline(?: all)?|deny(?: all)?|refuse(?: all)?|necessary only|only necessary|use necessary cookies only|alle ablehnen|ablehnen|nur notwendige)$/iu;
   const ACCEPT = /^(?:tout accepter|accepter(?: et fermer| & fermer| tout| les cookies)?|j['’]accepte|ok(?:,? j['’]ai compris)?|accept all(?: cookies)?|accept(?: cookies)?|allow all(?: cookies)?|i agree|agree|got it|alle akzeptieren|akzeptieren|zustimmen)$/iu;
+  const SAVE = /^(?:enregistrer(?: mes| les)? (?:choix|pr[ée]f[ée]rences|param[èe]tres)|confirmer(?: mes| les)? (?:choix|pr[ée]f[ée]rences)|valider(?: mes| les)? (?:choix|pr[ée]f[ée]rences)|confirm(?: my)? choices|save(?: my)? (?:choices|preferences|settings)|confirm(?: my)? preferences|allow selection|auswahl (?:speichern|best[äa]tigen)|einstellungen speichern)$/iu;
   const label = node => (node.getAttribute('aria-label') || node.innerText || node.value || '').normalize('NFKC').trim().replace(/\s+/g, ' ');
   const visible = node => { const r = node.getBoundingClientRect(), s = getComputedStyle(node);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
@@ -29,7 +30,7 @@ _DISMISS = r"""() => {
   const buttons = [...document.querySelectorAll('button, [role="button"], a[href], input[type="button"]')]
     .filter(node => visible(node) && !node.closest('form') && node.closest(BOX));
   const inTopic = node => { const box = outer(node); return !!box && TOPIC.test((box.innerText || '').slice(0, 4000)); };
-  for (const pattern of [REJECT, ACCEPT]) {
+  for (const pattern of [REJECT, ACCEPT, SAVE]) {
     const found = buttons.filter(node => pattern.test(label(node)) && inTopic(node));
     if (found.length) { found[0].click(); return label(found[0]); }
   }
