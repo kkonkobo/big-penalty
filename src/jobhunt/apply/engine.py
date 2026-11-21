@@ -3473,6 +3473,15 @@ class _Run:
                      self.final_awaiting) = before
                 return hold.result
             except _Dispatched as e:  # the click may have fired: after data / final it is "possibly sent", never retried
+                if trust and not final:
+                    # Not the send click: it was dispatched and the page moved or reloaded under it (an upload-confirm button,
+                    # a "next" that navigates). Read the page that follows instead of failing the run.
+                    log.clicked = self._r(field.label)
+                    log.note += "; clic interrompu par la page : relecture"
+                    await self._after_click()
+                    with contextlib.suppress(Exception):
+                        await self.autonomous.after_click(self.page, observing=False)
+                    continue
                 if self.mode == "submit" and (final or post_data):
                     return self._unconfirmed()
                 if self.autonomous and not self.app_touched and not post_data and GONE_PATH_RE.search(urlparse(self.page.url).path.lower()):
