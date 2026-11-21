@@ -139,6 +139,46 @@ ACCOUNT_EXISTS_RE = re.compile(r"existe deja|deja (?:utilis|inscrit|existant|enr
                                r"is already|deja associe|bereits (?:registriert|vorhanden|verwendet)")
 
 
+def account_key(address: str) -> str:
+    """One candidate account = one host, or one Workday career site: its sign-in, creation and application pages do not
+    share a URL, so the address of a Workday account page (a URL) is reduced to its host and career site."""
+    from jobhunt.apply.accounts import is_workday_host, workday_site  # noqa: PLC0415
+
+    host = (urlparse(address).hostname or "") if "://" in address else address
+    if host and is_workday_host(host):
+        site = workday_site(address.split("?", 1)[0].split("#", 1)[0])
+        return f"{host}|{site}" if site else address
+    return address
+
+
+class _Accounts(set):
+    """Account addresses of one run, compared by `account_key`."""
+
+    def add(self, address):
+        super().add(account_key(address))
+
+    def discard(self, address):
+        super().discard(account_key(address))
+
+    def __contains__(self, address):
+        return super().__contains__(account_key(address))
+
+
+_SIGNAL_RE = re.compile(r"erreur|error|incorrect|invalide|invalid|non valide|verifi|verify|deja|already|locked|verrouill|bloque|echec|failed|"
+                        r"not recognized|non reconnu|unavailable|indisponible|expire")
+
+
+def page_signals(text: str) -> list[str]:
+    """The sentences of a page excerpt that carry an error / account wording (e-mail addresses masked), for the local
+    failure record: what the site itself said at a step."""
+    out = []
+    for part in re.split(r"(?<=[.!?])\s+|\s{2,}|\n", text):
+        part = part.strip()
+        if 8 <= len(part) <= 400 and _SIGNAL_RE.search(fold(part)):
+            out.append(re.sub(r"[\w.+-]+@[\w.-]+", "<e-mail>", part)[:240])
+    return out[:6]
+
+
 def says_account_exists(text: str) -> bool:
     """The page STATES that the e-mail already has an account ("Un compte existe déjà avec cette adresse"). The prompt every
     creation form carries ("Vous avez déjà un compte ? Connexion", "Already registered? Sign in") is a question, not that."""
@@ -635,8 +675,8 @@ class _Run:
         self.known_login_try = False         # a login was attempted with the stored credential of a host believed to hold the account
         self.account_clicks = 0  # login / signup clicks made on candidate-account pages (a site that keeps refusing is not retried forever)
         self.account_try: tuple[str, str] | None = None  # (login | signup, host) of the account click whose outcome the next page tells
-        self.account_exists_hosts: set[str] = set()      # hosts whose signup answered "account already exists": log in with the stored credential
-        self.login_failed: set[str] = set()  # hosts where that login led back to a password page: the account is not confirmed there
+        self.account_exists_hosts: set[str] = _Accounts()      # hosts whose signup answered "account already exists": log in with the stored credential
+        self.login_failed: set[str] = _Accounts()  # hosts where that login led back to a password page: the account is not confirmed there
         self.uploaded = False                # a file was set by the engine in this run
         self.uploaded_files: list[tuple[str, str, str]] = []  # (host, normalized label, file name stem in lowercase) of every upload done
         self.attach_done = False             # an upload-confirm click was made
@@ -679,7 +719,7 @@ class _Run:
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
-        self.signed_up: set[str] = set()     # account addresses where an account-creation click was made in this run
+        self.signed_up: set[str] = _Accounts()     # account addresses where an account-creation click was made in this run
         self.form_hints: dict[str, int] = {}  # trusting mode: page URLs read again as the application form (twice each at most)
         self.plan_trace: list[dict] = []     # trusting mode: what the planner saw / answered at the latest steps (no value)
         self.no_shot_noted = False
@@ -2190,6 +2230,7 @@ class _Run:
         by_ref = {f.ref: f for f in seen.fields}
         self.plan_trace.append({
             "step": len(self.steps), "url": bare_url(seen.url), "title": seen.title[:120], "text": seen.text[:700],
+            "signals": page_signals(seen.text),
             "fields": [{"ref": f.ref, "kind": f.kind, "label": f.label[:80], "required": f.required, "filled": not _is_empty(f),
                         "error": f.error[:80], "options": len(f.options),
                         # (the option a choice control shows - a country, a level, yes / no - never free text)
@@ -2434,7 +2475,8 @@ class _Run:
             # The form is still there with a required field empty - one knowingly left so, or one a choice brought with it -
             # while what was filled still holds its values (a form emptied after a send does not): the site's own
             # validation kept it (some mark the field only with a colour or a message we cannot tie to it).
-            empty = [f for f in snap.fields if f.required and _is_empty(f) and f.kind not in ("button", "link", "file")]
+            empty = [f for f in snap.fields if f.required and _is_empty(f) and f.kind not in ("button", "link")
+                     and not (f.kind == "file" and self._file_satisfied(f, snap))]
             kept = any(not _is_empty(f) for f in snap.fields
                        if f.kind not in ("button", "link") and (_norm(_label(f)), f.kind) in sent.fields)
             errors = bool(empty) and (kept or any((_norm(_label(f)), f.kind) in self.sent_empty for f in empty))
@@ -2891,7 +2933,7 @@ class _Run:
             if self.account_try:  # what the last login / signup click led to
                 role, address = self.account_try
                 self.account_try = None
-                if address == self._account_address(self.page.url):
+                if account_key(address) == account_key(self._account_address(self.page.url)):
                     has_password = any(field.kind == "password" for field in snap.fields)
                     if (kind not in (*ACCOUNT_KINDS, "email_verification", "captcha", "error", "closed", "other") and not has_password
                             and not errors and not (self.trusting and any(
@@ -2903,7 +2945,9 @@ class _Run:
                             q = Question(label=f"Compte déjà existant sur {self._host()} : donner les identifiants ou se connecter à la main", kind="text")
                             return self._end("needs_input", q.label + ".", [q])
                         self.account_exists_hosts.add(address)
-                    elif self.trusting and role == "signup" and kind == "account_login" and not errors:
+                    elif self.trusting and role == "signup" and not errors and (kind == "account_login" or (
+                            not has_password and any(f.kind in ("button", "link") and SIGN_IN_WITH_RE.search(fold(f.label))
+                                                     for f in snap.fields))):
                         # The creation form is gone and the site shows its sign-in page: the account was created (it may
                         # still await an e-mail verification). Sign in with it instead of creating it again.
                         self.account_exists_hosts.add(address)
