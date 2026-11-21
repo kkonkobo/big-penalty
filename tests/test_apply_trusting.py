@@ -1295,7 +1295,7 @@ def test_a_password_refused_by_the_sites_policy_is_replaced_once():
     assert calls == ["careers.example.test"] and any("nouveau mot de passe" in note for note in v.notes)
 
 
-def _after_final_click(snap: PageSnapshot, *, sent_empty) -> SimpleNamespace:
+def _after_final_click(snap: PageSnapshot, *, sent_empty, exists=False) -> SimpleNamespace:
     withdrawn = []
 
     async def unmark():
@@ -1304,8 +1304,13 @@ def _after_final_click(snap: PageSnapshot, *, sent_empty) -> SimpleNamespace:
     async def no_banner():
         return False
 
+    async def says_exists():
+        return exists
+
     return SimpleNamespace(
         last_sent=engine._Sent(final=True, fields={("prenom", "text")}, button="envoyer"), page=SimpleNamespace(url=snap.url),
+        _says_account_exists=says_exists, _account_address=lambda url: "careers.example.test",
+        account_exists_hosts=engine._Accounts(), login_failed=engine._Accounts(),
         sent_url=snap.url, trusting=True, sent_empty=sent_empty, _banner_error=no_banner, rejected_submits=0, final_awaiting=True,
         final_clicked=True, submit_clicks=1, pending=None, last_click_rec=None, replans={}, diagnostics=SimpleNamespace(receipt_reason=""),
         autonomous=SimpleNamespace(unmark_submit=unmark, final_response=True, foreign_writes=1), withdrawn=withdrawn)
@@ -1530,3 +1535,25 @@ async def test_a_list_that_takes_its_choice_a_moment_later_is_not_pressed_again(
     item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Non")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Non"
     assert await page.title() == "picks 1"
+
+
+async def test_an_apply_and_create_form_that_says_the_account_exists_was_not_sent():
+    name = field(ref="f1", label="Prénom", required=True)   # (the site emptied the form)
+    secret = field(ref="f2", kind="password", label="Choisir un mot de passe", required=True)
+    send = field(ref="b1", kind="button", label="Envoyer")
+    snap = snap_of(name, secret, send)
+    run = _after_final_click(snap, sent_empty=set(), exists=True)
+    assert await engine._Run._submit_rejected(run, snap) and run.withdrawn and "careers.example.test" in run.account_exists_hosts
+    run = _after_final_click(snap, sent_empty=set(), exists=False)
+    assert not await engine._Run._submit_rejected(run, snap) and not run.withdrawn
+
+
+@pytest.mark.parametrize(("text", "received"), [
+    ("Vos données personnelles ont été sauvegardées. Votre candidature pour l'offre 2026-1 STAGE – Test H/F a été envoyée", True),
+    ("Your application for the Test Engineer internship has been submitted.", True),
+    ("Votre candidature pour l'offre 2026-1 STAGE – Test H/F n'a pas été envoyée", False),
+    ("Une fois votre candidature pour l'offre 2026-1 envoyée, vous recevrez un e-mail.", False),
+    ("Déposer une candidature à une offre. Les données ont été sauvegardées.", False),
+])
+def test_a_receipt_that_names_the_posting_between_its_words_is_a_receipt(text, received):
+    assert engine.confirmation_evidence(text) is received
