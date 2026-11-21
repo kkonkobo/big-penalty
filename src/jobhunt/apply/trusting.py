@@ -291,7 +291,7 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
             v.notes.append(f"action ignorée : référence inconnue ({action.op})")
             continue
         if action.op == "click":
-            if field.kind not in ("button", "link") or action.click_role in (None, "other"):
+            if field.kind not in ("button", "link") or action.click_role is None:  # ("other": closing a dialog, opening a section)
                 v.notes.append(f"clic ignoré sur « {engine._label(field)} »")
             else:
                 clicks.append((field, action.click_role))
