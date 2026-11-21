@@ -2175,7 +2175,7 @@ class _Run:
                      "actions": [{"ref": a.ref, "label": _label(by_ref[a.ref])[:60] if a.ref in by_ref else "?", "op": a.op, "fact": a.fact,
                                   "click_role": a.click_role, "has_value": bool(a.value), "inferred": a.inferred} for a in plan.actions][:80],
                      "unknown": [q.label[:80] for q in plan.unknown][:20]}})
-        del self.plan_trace[:-6]
+        del self.plan_trace[:-14]
 
     def _stop_reason(self, res: RunResult) -> str:
         """Why the run stopped, for the local failure record: no secret, no typed value (the message is cut when it may quote one)."""
@@ -3267,6 +3267,11 @@ class _Run:
                 bad = await self._dest_result(resolve, [], v.click[0])
                 if bad is not None:
                     return bad
+            if trust and final and (foreign := trusting.foreign_dial(self, snap)):
+                # The page about to be sent shows another country's calling code in front of the candidate's number.
+                result = self._end("needs_input", f"Indicatif téléphonique affiché ({foreign}) différent de celui du candidat : envoi retenu.")
+                result.diagnostic_code = "foreign_dial"
+                return result
             if trust:
                 # Stop only for what nobody could answer: the planner's own unknowns and the answers that failed. Required
                 # fields it left alone are the site's to judge (its validation is the truth, not our reading of "required").

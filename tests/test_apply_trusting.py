@@ -1044,3 +1044,83 @@ async def test_another_countrys_calling_code_is_taken_out_of_the_search_box(page
     assert made is not None and made.dial_code == "+33"
     assert await (await resolve.element(box.ref)).evaluate(trusting._REMOVE_CHOSEN_JS, "(+33)") == 1
     assert await page.locator("li[role=option]").count() == 0
+
+
+SEARCH_PROMPT = '''<form><label for="school">Établissement ou université</label>
+  <div data-automation-id="multiSelectContainer"><input id="school" type="text" data-uxi-widget-type="selectinput" REQUIRED>
+    <ul role="listbox" data-automation-id="selectedItemList"></ul></div>
+  <div id="pop"></div></form>
+  <script>
+    const ALL = ['École Centrale de Testville', 'Institut Polytechnique de Testville', 'Université de Testville', 'Université de Fauxbourg', 'Autre'];
+    const fold = (t) => t.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+    school.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      const hits = ALL.filter((name) => fold(name).includes(fold(school.value)));
+      pop.innerHTML = '<div role="listbox">' + hits.map((name) => `<div role="option">${name}</div>`).join('') + '</div>';
+      for (const row of pop.querySelectorAll('[role=option]')) row.onclick = () => {
+        document.querySelector('[data-automation-id=selectedItemList]').innerHTML = `<li role="option">${row.textContent}</li>`;
+        school.value = ''; pop.innerHTML = ''; };
+    });
+  </script>'''
+
+
+@pytest.mark.parametrize(("labels", "want", "query", "index"), [
+    (["Université de Testville", "École Centrale de Testville"], "École Centrale de Testville", "x", 1),
+    (["Institut Polytechnique de Testville (IPT)"], "Polytechnique Testville", "Polytechnique", 0),  # the one result of a query
+    (["Université de Testville", "Institut Polytechnique de Testville", "Université de Fauxbourg"], "Polytechnique Testville", "Testville", 1),
+    (["Université de Testville", "Université de Fauxbourg"], "École des Mines de Nullepart", "Université", -1),
+    ([], "École Centrale", "École Centrale", -1),
+])
+def test_the_search_result_that_means_the_answer(labels, want, query, index):
+    assert trusting.search_choice(labels, want, query) == index
+
+
+@pytest.mark.parametrize(("required", "want", "chosen"), [
+    ("required", "Ecole centrale de Testville", "École Centrale de Testville"),
+    ("required", "Institut Polytechnique Testville (IPT)", "Institut Polytechnique de Testville"),  # found by its telling words
+    ("required", "École des Mines de Nullepart", "Autre"),  # unknown to a required prompt: its "other" entry
+    ("", "École des Mines de Nullepart", None),  # optional: left empty
+])
+async def test_a_search_prompt_takes_the_result_that_means_the_answer(page, required, want, chosen):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(SEARCH_PROMPT.replace("REQUIRED", required))
+    snap, resolve = await take_snapshot(page)
+    box = next(f for f in snap.fields if f.kind == "text")
+    target = await resolve.element(box.ref)
+    assert await trusting.is_search_prompt(target)
+    run = SimpleNamespace(page=page)
+    if chosen is None:
+        with pytest.raises(engine._Skip):
+            await trusting._search_pick(run, target, box, want)
+        assert await page.locator("li[role=option]").count() == 0 and await page.input_value("#school") == ""
+        return
+    assert await trusting._search_pick(run, target, box, want) == chosen
+    snap, _ = await take_snapshot(page)
+    assert next(f for f in snap.fields if f.kind == "text").value == chosen
+
+
+async def test_a_plain_text_box_is_not_a_search_prompt(page):  # noqa: F811
+    await page.set_content('<label>Ville <input id="city" type="text"></label>')
+    assert not await trusting.is_search_prompt(await page.query_selector("#city"))
+
+
+def test_a_page_showing_another_countrys_calling_code_is_not_sent():
+    code = field(ref="c1", kind="text", label="Indicatif de pays", value="Belgique (+32)")
+    assert trusting.foreign_dial(run_of(), snap_of(code)) == "+32"
+    assert trusting.foreign_dial(run_of(), snap_of(code.model_copy(update={"value": "France (+33)"}))) == ""
+    assert trusting.foreign_dial(run_of(), snap_of(field(ref="t1", label="Ville", value="Testville"))) == ""
+    review = PageSnapshot(url="https://ats.example.test/review", text="Téléphone Mobile Belgique (+32) 06 00 00 00 00", fields=[])
+    assert trusting.foreign_dial(run_of(), review) == "+32"
+    both = PageSnapshot(url="https://ats.example.test/review", text="France (+33) 06 00 00 00 00 — siège : Belgique (+32)", fields=[])
+    assert trusting.foreign_dial(run_of(), both) == ""
+
+
+def test_a_calling_code_box_the_plan_left_with_another_code_is_corrected():
+    code = field(ref="c1", kind="text", label="Indicatif de pays", required=True, value="Belgique (+32)")
+    phone = field(ref="p1", kind="text", label="Nº de téléphone", required=True, value="06 00 00 00 00")
+    made = trusting.validate(run_of(), StepPlan(page_kind="form", actions=[]), snap_of(code, phone), None)
+    assert [(item.field.ref, item.dial_code) for item in made.items if item.field.ref == "c1"] == [("c1", "+33")]
+    right = snap_of(code.model_copy(update={"value": "France (+33)"}), phone)
+    assert not [item for item in trusting.validate(run_of(), StepPlan(page_kind="form", actions=[]), right, None).items if item.field.ref == "c1"]
