@@ -701,3 +701,18 @@ def test_a_plain_yes_no_question_is_not_taken_for_an_agreement():
     question = field(ref="q1", kind="select", required=True, label="Will you now or in the future require sponsorship for an employment visa?",
                      options=opts("No", "Yes"))
     assert trusting.owner_item(run_of(), question) is None
+
+
+def test_a_one_time_passcode_mailed_from_the_ats_vendor_domain_is_read():
+    from jobhunt.apply import mail
+
+    text = ("One-Time Password for Candidate Account Verification. Dear Camille Durand, your passcode for account verification is 482913 "
+            "Enter this passcode on the Create Account page. This passcode is valid for 30 minutes.")
+    found = mail.extract(text, "https://careers7.successfactors.eu/careers", sender_domain="successfactors.eu")
+    assert found is not None and found.kind == "code" and found.value == "482913"
+    assert mail.extract(text, "https://careers7.successfactors.eu/careers", sender_domain="mailer.example.test") is None
+
+
+def test_former_employer_question_is_a_declaration_answered_from_its_fact():
+    asked = field(ref="q1", kind="select", required=True, label="Avez-vous déjà travaillé pour notre entreprise ?", options=opts("Oui", "Non"))
+    assert trusting.declaration_key(asked) == "former_employer"
