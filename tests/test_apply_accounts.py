@@ -80,13 +80,13 @@ def test_registrable_host_only_names_the_browser_profile(host, expected):
 def test_generated_passwords_differ_and_meet_the_policy():
     pws = {A.generate_password() for _ in range(50)}
     assert len(pws) == 50
-    assert all(len(p) == 20 and any(c in A.SPECIALS for c in p) and any(c.isdigit() for c in p) for p in pws)
+    assert all(len(p) == A.PASSWORD_LENGTH and any(c in A.SPECIALS for c in p) and any(c.isdigit() for c in p) for p in pws)
 
 
 def test_create_password_stores_and_reads_back(mem):
     pw = A.create_password("boards.greenhouse.io", "camille@example.test")
-    assert len(pw) == 20 and any(c in string.ascii_uppercase for c in pw) and any(c in string.ascii_lowercase for c in pw)
-    assert re.fullmatch(r"[A-Za-z0-9+._-]{20}", pw)
+    assert len(pw) == A.PASSWORD_LENGTH <= 18 and any(c in string.ascii_uppercase for c in pw) and any(c in string.ascii_lowercase for c in pw)
+    assert re.fullmatch(r"[A-Za-z0-9+._-]{16}", pw)
     assert mem.items == {("big-penalty:boards.greenhouse.io", "camille@example.test"): pw}
     assert ("set", "big-penalty:boards.greenhouse.io", "camille@example.test", "Big Penalty \u2014 boards.greenhouse.io") in mem.calls
     assert A.get_password("boards.greenhouse.io", "camille@example.test") == pw

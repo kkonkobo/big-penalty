@@ -235,6 +235,8 @@ ANSWER_FIELDS: tuple[AnswerField, ...] = (
        help="À remplir seulement si le découpage automatique du nom est faux."),
     _F(path="last_name", label="Nom de famille", section=S_ID,
        help="À remplir seulement si le découpage automatique du nom est faux."),
+    _F(path="gender", label="Genre", widget="select", options=("", "Homme", "Femme"), section=S_ID,
+       help="Utilisé seulement quand un formulaire l'exige."),
     _F(path="birth_date", label="Date de naissance", widget="date", section=S_ID),
     _F(path="birth_place", label="Lieu de naissance", section=S_ID, placeholder="Toulouse"),
     _F(path="nationality", label="Nationalité", section=S_ID, placeholder="Française"),
@@ -638,7 +640,10 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
     add("phone_device_type", "Type de téléphone (Mobile ou Fixe)", identity["phone_device_type"], exact=True)
     add("phone_calling_code", "Indicatif téléphonique", identity["phone_calling_code"], exact=True)
     employer_key = employer_path(employer or "")
-    add("former_employer", "Emploi antérieur auprès de cet employeur", get_answer(answers, employer_key) if employer_key else None, exact=True)
+    # Owner rule (2026-11-21): "have you already worked for this employer?" is answered "No" unless an answer was recorded
+    # for that employer.
+    add("former_employer", "Emploi antérieur auprès de cet employeur",
+        (get_answer(answers, employer_key) if employer_key else None) or "Non", exact=True)
     # Owner rule (2026-11-20): "do you or a family member / relative work at <employer>?" is always answered "No".
     add("relatives_at_employer", "Proche ou membre de la famille employé chez cet employeur", "Non", exact=True)
     # Forms validate this field as a URL ("Veuillez entrer une url LinkedIn valide" on a real site when the scheme was

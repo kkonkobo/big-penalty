@@ -36,7 +36,7 @@ CODE_LABEL = re.compile(r'code|one.time.password|\botp\b|verif|vérifi|bestätig
 VERIFY_ENDPOINT = re.compile(r'(?:^|/)(?:verify(?:[-_]?email|[-_]?code)?|confirm(?:[-_]?email|[-_]?code)?|'
                              r'email[-_]?(?:verification|confirmation)|verification|otp|activate)/?$', re.I)
 MAX_MESSAGES = 10
-_CODE = re.compile(r'(?:(?:verification|security|confirmation|one.time)\s+code|code(?:\s+(?:de\s+)?(?:v[ée]rification|confirmation|s[ée]curit[ée]))?|(?:bestätigungs|verifizierungs)[ -]?code|bestätigung|v[ée]rification|\botp\b)'
+_CODE = re.compile(r'(?:(?:verification|security|confirmation|one.time)\s+(?:pass)?code|pass(?:code|word)(?:\s+for\s+[a-z ]{3,40})?|code(?:\s+(?:de\s+)?(?:v[ée]rification|confirmation|s[ée]curit[ée]))?|(?:bestätigungs|verifizierungs)[ -]?code|bestätigung|v[ée]rification|\botp\b)'
                    r'(?:\s+(?:is|est|ist|lautet))?[\s:=–—-]{1,12}([A-Z0-9]{4,8})\b', re.I)
 _PLAIN_URL = re.compile(r'https://[^\s<>"\']+', re.I)
 _TOKEN = re.compile(rb'\s*(\(|\)|"(?:[^"\\]|\\.)*"|[^()\s"{}]+)')
@@ -250,7 +250,9 @@ def extract(text, bound_url, *, html=False, links_only=False, sender_domain=None
         host = urlsplit(bound_url).hostname
         bound_domain = accounts.registrable_host(host)
         if any(_under(host, domain) for domain in ATS_DOMAINS):
-            if not _under(sender_domain, host) and not any(same_recipient(bound_url, link) for link, _ in links):
+            # (an ATS mails from its own domain, not from the tenant's host: "noreply@<ats>" for "<tenant>.<ats>")
+            vendor = any(_under(host, domain) and _under(sender_domain, domain) for domain in ATS_DOMAINS)
+            if not vendor and not _under(sender_domain, host) and not any(same_recipient(bound_url, link) for link, _ in links):
                 return None
         elif not _under(sender_domain, bound_domain):
             return None

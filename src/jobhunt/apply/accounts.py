@@ -29,7 +29,7 @@ from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.facts import replace_file
 
 SPECIALS = "-_+."
-PASSWORD_LENGTH = 20
+PASSWORD_LENGTH = 16  # some sites cap a password at 18 characters (SuccessFactors: 8-18)
 _SECOND_LEVEL = {"co", "com", "org", "net", "gov", "ac", "edu"}  # co.uk, com.au ... (heuristic for 2-letter ccTLDs)
 # Suffixes treated as PUBLIC (the registrable domain is the suffix + one more label): common ccSLDs and multi-tenant hosting
 # domains where unrelated tenants share a suffix. Built in: no public-suffix-list dependency.

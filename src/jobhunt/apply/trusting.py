@@ -171,6 +171,8 @@ def declaration_key(field: FormField) -> str | None:
         return "relatives_at_employer"
     if "conflict" in kinds:
         return "conflict_of_interest"
+    if "former_employer" in kinds:
+        return "former_employer"
     return None
 
 
@@ -391,7 +393,7 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
         if action.ref in seen:
             continue
         seen.add(action.ref)
-        if scope is not None and field.kind == "password" and field.ref not in scope:
+        if scope is not None and ((field.kind == "password" and field.ref not in scope) or field.ref in run.login_box):
             continue  # the login box next to an inline account-creation form
         made = check(run, action, field, v, snap, resolve)
         if made is not None:
@@ -402,7 +404,7 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
             if field.ref in seen:
                 continue
             made = None
-            if scope is not None and field.kind == "password" and field.ref not in scope:
+            if scope is not None and ((field.kind == "password" and field.ref not in scope) or field.ref in run.login_box):
                 continue
             if field.kind == "password" and plan.page_kind == "account_signup" and password is not None and engine._is_empty(field):
                 made = check(run, Action(ref=field.ref, op="fill", fact=password.key), field, v, snap, resolve)
@@ -600,6 +602,11 @@ async def blocker_hint(run: _Run) -> str:
             f"{' | '.join(label for label in found['buttons'] if label)[:200]}. This step is ONLY the click that closes or accepts it.] ")
 
 
+def stuck_hint(labels: list[str]) -> str:
+    return (f"[The program could NOT set these fields (no matching option / refused value): {' | '.join(labels)}. Do not try them again: leave "
+            "them as they are and answer with ONLY the click that moves on (`next` or `submit`), unless a field it did not list is still empty.] ")
+
+
 async def _popup_options(run: _Run) -> list[tuple[object, str]]:
     """(element, text) of every option the open list shows, in any frame. Elements, not positions: a virtualized list
     recycles its rows, so "the n-th option" is another one a moment later."""
@@ -710,6 +717,53 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     with contextlib.suppress(Exception):
         await run.page.keyboard.press("Escape")
     raise engine._Skip("option introuvable dans la liste")
+
+
+_CODE_FIELD_NOT = re.compile(r"postal|zip|pays|country|promo|parrain|referral|indicatif|naf|ape|siret|iban|bic")
+_CODE_BUTTON = re.compile(r"verif|valid|confirm|continu|suivant|soumettre|submit|next|envoyer|postuler|activ|bestatig|weiter|\bok\b")
+
+
+async def enter_emailed_code(run: _Run, snap: PageSnapshot, resolve) -> bool:
+    """The site e-mailed a one-time code and shows the field for it (account creation on a combined signup + application
+    form asks for it AFTER the send click): read the code from the mailbox, type it, click the button that validates it.
+    Twice per run at most. False when there is no such field, no code, or nothing to click."""
+    from jobhunt.apply import mail  # noqa: PLC0415
+
+    engine = _engine()
+    flow = run.email_verification
+    if flow is None or run.code_entries >= 2:
+        return False
+    fields = [field for field in snap.fields if field.kind in ("text", "number", "tel", "password") and engine._is_empty(field)
+              and (field.autocomplete == "one-time-code" or mail.CODE_LABEL.search(field.label))
+              and not _CODE_FIELD_NOT.search(fold(field.label))]
+    if len(fields) != 1 or any(other.kind == "password" and other is not fields[0] for other in snap.fields):
+        return False  # (a password + code login box is a login, not a lone code prompt)
+    run.code_entries += 1
+    verification, code = await flow.poll()
+    if code:
+        run.diagnostics.email = code
+    if not verification or verification.kind != "code":
+        return False
+    target = await run._el(resolve, fields[0].ref)
+    if target is None:
+        return False
+    await run._before_mutation("fill", target)
+    run.secrets.add(verification.value)
+    await target.fill(verification.value, timeout=engine.ACTION_TIMEOUT_MS)
+    run.diagnostics.email = "email_code_used"
+    buttons = [field for field in snap.fields if field.kind == "button" and _CODE_BUTTON.search(fold(field.label))]
+    scoped = [field for field in buttons if fields[0].form and field.form == fields[0].form] or buttons
+    control = await run._el(resolve, scoped[-1].ref) if scoped else None
+    try:
+        if control is not None:
+            await run.autonomous.target(control, button=True)
+            await control.click(timeout=engine.ACTION_TIMEOUT_MS)
+        else:
+            await target.press("Enter", timeout=engine.ACTION_TIMEOUT_MS)
+    except Exception:
+        return False
+    await asyncio.sleep(2.0)
+    return True
 
 
 _FILE_SOURCE = re.compile(r"appareil|device|ordinateur|computer|poste de travail|fichier|file|parcourir|browse|local|disque|upload|televers|importer")
