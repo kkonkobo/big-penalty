@@ -1573,6 +1573,11 @@ class _Run:
         """submit mode: does this click possibly send the application? (everything but pure navigation after data entry)"""
         if role == "submit":
             return True
+        if self.trusting:
+            # The planner's role stands (`trusting.effective_role` already upgraded a navigation-looking click whose label
+            # says it sends). A "Nächste" / "Continuer" / dialog opener is not a send; a receipt page reached through one
+            # still records the send (see the `confirmation` branch of the loop).
+            return False
         if self.mode != "submit" or not self.app_touched:
             return False
         if role == "cookies":

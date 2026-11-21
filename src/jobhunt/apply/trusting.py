@@ -332,10 +332,17 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
     return v
 
 
+_SENDS = re.compile(r"\b(?:absenden|abschicken|einreichen|bewerbung (?:ab)?senden|jetzt bewerben|inviare|invia candidatura|enviar|"
+                    r"solicitar|verzenden|solliciteren|valider (?:ma|la|et envoyer)|deposer ma candidature|envoyer)\b")
+_MOVES = re.compile(r"\b(?:weiter|nachste[rs]?|zuruck|avanti|siguiente|seguinte|volgende|suivante?|precedent|vorherige|back|previous)\b")
+
+
 def effective_role(run: _Run, field: FormField, role: str, snap: PageSnapshot) -> str:
     """The planner's role stands, except a navigation-looking click whose label says it sends the application."""
     engine = _engine()
-    if role in ("next", "open_form") and run.app_touched and engine.SUBMIT_RE.search(field.label) and not engine.NAV_RE.search(field.label):
+    label = fold(field.label)
+    if role in ("next", "open_form", "other") and run.app_touched and (engine.SUBMIT_RE.search(field.label) or _SENDS.search(label)) \
+            and not engine.NAV_RE.search(field.label) and not _MOVES.search(label):
         return "submit"
     if role in ("signup", "login") and any(entry.kind == "file" and entry.value.strip() for entry in snap.fields):
         return "submit"
