@@ -974,6 +974,16 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                     break
                 if done := await choose(found, index):
                     return done
+    if field.required and not code:
+        # A required list that offers nothing like the answer: its "other" entry is the honest "none of these".
+        with contextlib.suppress(Exception):
+            if typed:
+                await loc.fill("", timeout=3000)
+            await open_list()
+            found = await _popup_options(run)
+            others = [index for index, (_, text) in enumerate(found) if _OTHER_OPTION.search(norm(text))]
+            if len(others) == 1 and (done := await choose(found, others[0])):
+                return done
     await run._abandon_combobox(loc)
     with contextlib.suppress(Exception):
         await run.page.keyboard.press("Escape")
