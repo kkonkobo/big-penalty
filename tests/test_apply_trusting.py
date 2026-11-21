@@ -1437,3 +1437,11 @@ def test_a_photo_nobody_has_does_not_stop_the_send():
     plan = plan_of(unknown=[Question(ref="f2", label=letter.label, kind="file")])
     blocking, _ = trusting.open_questions(run_of(), plan, snap_of(letter), engine._Validated(), set(), None)
     assert [q.ref for q in blocking] == ["f2"]
+
+
+@pytest.mark.parametrize(("text", "placeholder"), [
+    ("Il n’y a aucun résultat.", True), ("Chargement en cours…", True), ("Loading...", True), ("Aucune sélection", True),
+    ("No results found", True), ("Normandie", False), ("Other", False), ("Aucun diplôme", False),
+])
+def test_what_an_empty_or_loading_list_says_is_not_an_option(text, placeholder):
+    assert bool(trusting._NO_RESULT.search(trusting.norm(text))) is placeholder
