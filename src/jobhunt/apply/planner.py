@@ -112,6 +112,7 @@ nothing re-checks it. The goal is to get this application SENT, complete and tru
 A. Fill EVERY required field and every field a fact answers. Required questions no fact answers directly: deduce the most
    plausible, favourable and truthful answer from `candidate_profile` and the other facts (`inferred: true`, short French
    `basis`). Only an unknown HARD FACT (rule 2 list) goes to `unknown`. Leave optional fields that no fact answers alone.
+   A CV dropdown is not a file input: use its associated upload control and attach the CV before selecting the newly uploaded file.
 B. Consents: TICK every REQUIRED box about the privacy policy, data processing, terms of use, "I certify that the
    information is accurate" (op `check`, `inferred: true`, basis "consentement obligatoire"). Never tick optional marketing,
    newsletter, job-alert, talent-pool or partner-sharing boxes. A required yes / no about keeping the application on file

@@ -610,6 +610,7 @@ class _Run:
         self.uploaded = False                # a file was set by the engine in this run
         self.uploaded_files: list[tuple[str, str, str]] = []  # (host, normalized label, file name stem in lowercase) of every upload done
         self.attach_done = False             # an upload-confirm click was made
+        self.uploaded_cv_names: dict[str | None, set[str]] = {}
         self.consumed = 0                    # steps used against max_steps (pure pre-data steps are free within PRE_STEP_CAP)
         self.pre_steps = 0
         self.attach_pending = False          # an "Ajouter"-style upload-confirm button was just clicked
@@ -638,7 +639,7 @@ class _Run:
         self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
         self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
-        self.email_login_tried = False       # trusting mode: signed in after an e-mail verification that never came
+        self.email_login_tried = False       # trusting mode: at most one sign-in fallback from email verification
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
         self.sent_url = ""                   # page URL of the last final click
         self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
@@ -2009,14 +2010,17 @@ class _Run:
                         for f in snap.fields)
             scope = [f for f in members if not mixed or CREATION_NAME_RE.search(fold(f"{f.name} {f.group}"))]
             passwords = [f for f in scope if f.kind == "password" and _is_empty(f)]
-            emails = [f for f in scope if f.kind in {"text", "email"} and _is_empty(f)
+            emails = [f for f in scope if f.kind in {"text", "email"} and (self.trusting or _is_empty(f))
                       and (f.kind == "email" or EMAIL_FIELD_RE.search(fold(f"{f.label} {f.name}")))]
             if not passwords or not emails:
                 continue
             refs = {f.ref for f in scope}
-            actions = [Action(ref=emails[0].ref, op="fill", fact="account_email")]
+            email_fields = emails[:1]
+            if self.trusting:
+                email_fields += [f for f in emails[1:] if re.search(r"confirm|repeat|wiederhol", fold(f"{f.label} {f.name}"))]
+            actions = [Action(ref=f.ref, op="fill", fact="account_email") for f in email_fields]
             actions += [Action(ref=f.ref, op="fill", fact="account_password") for f in passwords]
-            used = {emails[0].ref, *(f.ref for f in passwords)}
+            used = {action.ref for action in actions}
             actions += [a for a in plan.actions if a.op in ("fill", "select") and a.fact in ACCOUNT_FACTS - {"account_email", "account_password"}
                         and a.ref in refs and a.ref not in used]
             used |= {a.ref for a in actions}
@@ -2291,6 +2295,9 @@ class _Run:
                                                history=self.steps[:-1], mode=self.mode)
                 log.page_kind = plan.page_kind
                 if plan.page_kind == "email_verification":
+                    if self.trusting and self._account_only_pending():
+                        self._release_account_click()
+                        return snap, resolve
                     if await self._verify_email(snap, resolve):
                         return await self._snapshot()
                     return await self._email_hold(log, plan.note if not self.email_verification else '')
@@ -2609,6 +2616,9 @@ class _Run:
             log = StepLog(index=n, url=pub.url, page_kind="other", note=f"hôte {host}"
                           + ("" if self.host_allowed is None or not self._bad_host(self.page.url) else " (hors hôte de l'offre)"))
             self.steps.append(log)
+            if self.trusting and n == 1 and not self.touched and not self.final_clicked and trusting.posting_to_home(self.url, snap.url):
+                await self._shot(log)
+                return self._gone_result()
             sent, self.pending = self.pending, None
             if sent is not None and not sent.final and not self.autonomous and not self._has_form(snap):
                 self.final_clicked = True  # a click made with application data: the form is gone, it may have been sent
@@ -2699,16 +2709,32 @@ class _Run:
             if plan.note and not (self._inspection_only or self.mode == "supervised" or self.autonomous):
                 log.note = f"{log.note}; {self._r(plan.note[:300])}"
             errors = any(f.error for f in snap.fields)
+            account_outcome = self.account_try if self.trusting and not self.app_touched and not self.final_clicked else None
+            if account_outcome and account_outcome[1] != self._account_address(snap.url):
+                account_outcome = None
+            account_text = fold("\n".join((snap.title, snap.text, *(field.error for field in snap.fields if field.error)))) if account_outcome else ""
+            rejected_login = bool(account_outcome and account_outcome[0] == "login" and trusting.LOGIN_REJECTED.search(account_text))
+            if (kind == "email_verification" and account_outcome and account_outcome[0] == "signup"
+                    and trusting.EMAIL_CONFIRM_ERROR.search(account_text) and self._inline_signup(plan, snap)):
+                kind = log.page_kind = "account_signup"
+                plan = plan.model_copy(update={"page_kind": kind})
+            if rejected_login:
+                kind = log.page_kind = "account_login"
+                plan = plan.model_copy(update={"page_kind": kind})
+            retry_signup = False
             if kind in ("other", "closed", "error") and not self.touched and AGGREGATOR_RE.search(fold(plan.note or "")):
                 await self._shot(log)  # not the employer's posting at all: the service clears the origin and looks it up again
                 return self._end("blocked", f"Lien de l'offre inexploitable : {self._host()}")
             if self.login_unknown_try:  # a login was tried on a site where the candidate has no known account
                 self.login_unknown_try = False
-                if kind == "account_login" and (errors or await self._banner_error()):
-                    await self._shot(log)
-                    host = self._host()
-                    q = Question(label=f"Compte requis sur {host} : créer le compte à la main ou donner les identifiants", kind="text")
-                    return self._end("needs_input", q.label + ".", [q])
+                if kind == "account_login" and (rejected_login or errors or await self._banner_error()):
+                    if self.trusting:
+                        retry_signup = True
+                    else:
+                        await self._shot(log)
+                        host = self._host()
+                        q = Question(label=f"Compte requis sur {host} : créer le compte à la main ou donner les identifiants", kind="text")
+                        return self._end("needs_input", q.label + ".", [q])
 
             if self.account_try:  # what the last login / signup click led to
                 role, address = self.account_try
@@ -2735,7 +2761,11 @@ class _Run:
                 await self._shot(log)
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if kind == "email_verification":
-                if await self._verify_email(snap, resolve):
+                explicit_verification = self.trusting and trusting.offers_verification(snap)
+                login_first = bool(account_outcome and account_outcome[0] == "signup" and not errors
+                                   and not explicit_verification and trusting.login_actions(snap))
+                if not (login_first or (self.trusting and self.email_login_tried and not explicit_verification)) \
+                        and await self._verify_email(snap, resolve):
                     continue
                 if self.trusting and not self.email_login_tried and not self.app_touched and not self.final_clicked:
                     # No verification link or code came (many sites only send a "your account was created" notice): the
@@ -2744,11 +2774,14 @@ class _Run:
                     address = self._account_address(self.page.url)
                     self.account_exists_hosts.add(address)
                     self.login_failed.discard(address)
-                    log.note += "; aucun lien de vérification reçu : connexion avec le compte créé"
+                    log.note += "; connexion avec le compte créé" if login_first else "; aucun lien de vérification reçu : connexion avec le compte créé"
                     with contextlib.suppress(Exception):
                         await self.page.goto(self.url, wait_until="domcontentloaded", timeout=30_000)
                     continue
                 return await self._email_hold(log)
+            if rejected_login and self.email_login_tried:
+                await self._shot(log)
+                return self._account_stop("account_login_failed")
             if (kind == "closed" or self._error_page_gone(kind, snap)
                     or (kind in (*ACCOUNT_KINDS, "other", "error", "job_page") and self._offer_gone(snap))):
                 # (also: an account step the site bounced to its home with a "this offer no longer exists" banner)
@@ -2814,12 +2847,24 @@ class _Run:
                         kind = log.page_kind = "account_signup" if inline is not None else "account_login"
                         plan = plan.model_copy(update={"page_kind": kind})
                 signup = [field for field in snap.fields if field.kind in {"button", "link"} and not SOCIAL_RE.search(fold(field.label)) and
-                          SIGNUP_LINK_RE.search(fold(field.label)) and (field.kind == "link" or not field.form)]
+                          (SIGNUP_LINK_RE.search(fold(field.label)) or (trust and trusting.norm(field.label) == "inscrivez vous"))
+                          and (field.kind == "link" or not field.form)]
                 signin = [field for field in snap.fields if field.kind == "link" and re.fullmatch(
                     r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
                 # The same control twice (header + body) is one control; two different ones are ambiguous.
                 one_signup = len({fold(field.label).strip() for field in signup}) == 1
-                if inline is not None:
+                login = trusting.login_actions(snap) if trust and known_account and not self.app_touched else []
+                if login and not rejected_login:
+                    kind = log.page_kind = "account_login"
+                    plan = plan.model_copy(update={"page_kind": kind, "actions": login, "unknown": []})
+                elif retry_signup and inline is None and one_signup and self.signup_link_clicks < 2:
+                    self.signup_link_clicks += 1
+                    signup.sort(key=lambda field: field.kind != "link")
+                    plan = plan.model_copy(update={"actions": [Action(ref=signup[0].ref, op="click", click_role="open_form")], "unknown": []})
+                elif retry_signup and inline is None:
+                    await self._shot(log)
+                    return self._account_stop("account_signup_missing_link")
+                elif inline is not None:
                     signup_page = True
                     extra = [action for action in plan.actions if action.op != "click"
                              and action.ref not in {a.ref for a in inline[1]}] if trust else []
@@ -3011,6 +3056,8 @@ class _Run:
                         return self._end("blocked", "Impossible de vérifier la sélection appliquée.")
                     if it.act.op in ("upload_cv", "upload_letter"):
                         self.uploaded_files.append((self._host(), _norm(_label(it.field)), fold(Path(shown).stem)))
+                        if trust and it.act.op == "upload_cv":
+                            self.uploaded_cv_names.setdefault(self._host(), set()).add(trusting.norm(Path(shown).name))
                     handled.add(it.field.ref)
                     log.filled.append(FilledField(label=self._r(_label(it.field)), op=it.act.op, fact=it.used or it.act.fact,
                                                   value="Choix confirmé" if it.used in {"confirmed_form_choice", "eeo_race_ethnicity"}
@@ -3260,7 +3307,7 @@ class _Run:
             if bound_account and role in ("login", "signup"):
                 self.account_try = (role, self._account_address(self.page.url))
                 self.account_clicks += 1
-            if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
+            if plan.page_kind == "account_login" and role == "login" and (self.account_known is not None or (trust and bound_account)):
                 with contextlib.suppress(Exception):
                     known = self._account_exists()
                     self.login_unknown_try = not known
