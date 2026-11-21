@@ -277,6 +277,21 @@ async def test_signup_with_secret_password_never_leaks(page, server, fast, cv_pd
     assert not apply_posts(server)
 
 
+async def test_signup_password_and_verify_fields_are_filled_even_when_the_planner_cited_the_wrong_fact(page, server, fast, cv_pdf, tmp_path):
+    def signup(snap):  # both password boxes get a non-secret fact (dropped as incompatible): the code still fills them
+        pw = [f for f in snap.fields if f.kind == "password"]
+        assert len(pw) == 2
+        return StepPlan(page_kind="account_signup", actions=[
+            act(snap, r"e-mail", "fill", "account_email"),
+            Action(ref=pw[0].ref, op="fill", fact="company"), Action(ref=pw[1].ref, op="fill", fact="company"),
+            act(snap, r"Créer mon compte", "click", role="signup")])
+    res = await go(page, server, ScriptedPlanner([signup, StepPlan(page_kind="email_verification")]), tmp_path, cv_pdf,
+                   start="signup", mode="submit")
+    posts = server.posts_to("/signup")
+    assert res.status == "needs_email" and len(posts) == 1 and posts[0]["body"].count(TEST_PASSWORD.encode()) == 2
+    assert TEST_PASSWORD not in res.model_dump_json()
+
+
 async def test_password_unavailable_is_a_question(page, server, fast, cv_pdf, tmp_path):
     def signup(snap):
         return StepPlan(page_kind="account_signup", actions=[
@@ -756,7 +771,7 @@ async def test_cv_upload_is_accepted_by_code_without_the_llm(page, server, fast,
     for verifier in (None, FakeVerifier(lambda i: False)):
         res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="form", verifier=verifier)
         assert await page.evaluate("document.getElementById('cv').files.length") == 1
-        assert {f.fact for f in res.steps[0].filled} == {"cv"}
+        assert {f.fact for f in res.steps[0].filled} == {"cv", "first_name", "last_name", "email", "phone"}  # identity fields: by code
 
 
 async def test_upload_cv_on_a_letter_field_needs_the_verifier(page, server, fast, cv_pdf, tmp_path):
@@ -1459,7 +1474,7 @@ async def test_dry_run_keeps_the_request_guard_when_a_page_cannot_be_sent_to_abo
 
 # ------------------------------------------------------------------ 2. unanswered questions before any final / post-data click
 PARTIAL_FORM = ('<form method="post" action="/apply"><label for=a>Prénom *</label><input id=a name=first_name required>'
-                '<label for=b>Nom *</label><input id=b name=last_name required><button type="submit">Continuer</button></form>')
+                '<label for=b>Matricule *</label><input id=b name=badge required><button type="submit">Continuer</button></form>')
 
 
 @pytest.mark.parametrize("role", ["open_form", "next"])
@@ -1468,7 +1483,7 @@ async def test_required_questions_are_checked_before_a_post_data_click_whatever_
     plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"^Prénom", "fill", "first_name"),  # noqa: E731
                                                             act(snap, r"Continuer", "click", role=role)])
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="partial", mode="submit")
-    assert res.status == "needs_input" and [q.label for q in res.questions] == ["Nom"]
+    assert res.status == "needs_input" and [q.label for q in res.questions] == ["Matricule"]
     assert not server.posts and not res.submit_clicked and res.steps[-1].clicked == ""
 
 
@@ -2615,7 +2630,7 @@ async def test_a_filter_value_on_the_ad_page_does_not_make_postuler_a_send(page,
         return StepPlan(page_kind="job_page", actions=[act(snap, r"^Postuler$", "click", role="open_form")])
     res = await go(page, server, ScriptedPlanner([plan, StepPlan(page_kind="form")]), tmp_path, cv_pdf, mode="submit",
                    start="adpage", before_submit=gate, on_submit_click=on_submit, on_nav_click=on_nav, max_steps=2)
-    assert res.steps[0].clicked == "Postuler" and calls == [] and res.submit_clicked is False
+    assert res.steps[0].clicked == "Postuler" and not set(calls) - {"gate"} and res.submit_clicked is False  # (the gate: step 2's own form)
 
 
 # ================================================================== first real automatic batch
@@ -3078,12 +3093,12 @@ async def test_pre_data_steps_do_not_use_the_application_budget_within_their_cap
 
 # ------------------------------------------------------------------ 6. the loop question names every field in error
 async def test_the_loop_question_names_all_the_fields_in_error(page, server, fast, cv_pdf, tmp_path):
-    await serve(page, "twoerr", '<form onsubmit="return false"><label for=a>Prénom</label><input id=a name=a><span class="error" id=ea style="display:none">Requis</span>'
-                                '<label for=b>Nom</label><input id=b name=b><span class="error" id=eb style="display:none">Requis</span>'
+    await serve(page, "twoerr", '<form onsubmit="return false"><label for=a>Matricule</label><input id=a name=a><span class="error" id=ea style="display:none">Requis</span>'
+                                '<label for=b>Service</label><input id=b name=b><span class="error" id=eb style="display:none">Requis</span>'
                                 '<button type="button" onclick="document.getElementById(\'ea\').style.display=\'inline\';document.getElementById(\'eb\').style.display=\'inline\'">SUIVANT</button></form>')
     plan = lambda snap: StepPlan(page_kind="form", actions=[act(snap, r"SUIVANT", "click", role="next")])  # noqa: E731
     res = await go(page, server, ScriptedPlanner([plan]), tmp_path, cv_pdf, start="twoerr", mode="submit", max_steps=8)
-    assert res.status == "needs_input" and {q.label for q in res.questions} == {"Prénom", "Nom"} and "Prénom" in res.message and "Nom" in res.message
+    assert res.status == "needs_input" and {q.label for q in res.questions} == {"Matricule", "Service"} and "Matricule" in res.message and "Service" in res.message
 
 
 async def test_script_built_page_is_given_time_to_render(page, server, fast, cv_pdf, tmp_path, monkeypatch):

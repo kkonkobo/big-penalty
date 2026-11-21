@@ -179,6 +179,34 @@ _KINDS = {
 }
 
 
+_WORDING_LEAD = re.compile(r"^(?:(?:please|veuillez|bitte|merci de)\s+)?(?:(?:enter|entrez|saisissez|indiquez|renseignez|geben sie|type|insert)\s+)?"
+                           r"(?:(?:your|votre|vos|ihre|ihren|ihr|mon|ma|my|the|le|la|l|der|die|das)\s+)?")
+_WORDING_TRAIL = re.compile(r"\s+(?:here|ici|ein|required|obligatoire|erforderlich|pflichtfeld)$")
+_WORDING_KEYS = {
+    "email": {"email", "e mail", "mail", "email address", "e mail address", "adresse email", "adresse e mail", "adresse mail",
+              "mail address", "email adresse", "e mail adresse", "adresse de messagerie", "courriel", "email id", "email or username"},
+    "first_name": {"prenom", "first name", "firstname", "given name", "forename", "vorname", "given names"},
+    "last_name": {"nom de famille", "last name", "lastname", "family name", "surname", "nachname", "familienname"},
+    "phone": {"telephone", "numero de telephone", "phone", "phone number", "mobile", "mobile phone", "mobile number", "numero de portable",
+              "telephone portable", "portable", "telefon", "handynummer", "mobiltelefon"},
+}
+# "Votre nom" / "Nom" / "Your name" / "Name": the surname when the form also has a first-name field, the full name otherwise
+# (the engine decides with the siblings of the field).
+AMBIGUOUS_NAME = frozenset({"nom", "name"})
+
+
+def wording(label: str) -> str:
+    """The label without its "Enter / Votre / Please enter your ... here" frame, normalized."""
+    text = norm_question(label)
+    for _ in range(2):
+        text = _WORDING_TRAIL.sub("", _WORDING_LEAD.sub("", text, count=1)).strip() or text
+    return text
+
+
+def ambiguous_name(label: str) -> bool:
+    return wording(label) in AMBIGUOUS_NAME
+
+
 def standing_key(label: str) -> str | None:
     normalized = norm_question(label)
     if recruiter_ai_polarity(label) is not None:
@@ -192,7 +220,17 @@ def standing_key(label: str) -> str | None:
         return "conflict_of_interest"
     if decision_key(label) == "relatives":  # owner rule: the candidate has no relative at the employer -> always "No"
         return "relatives_at_employer"
-    return _LABEL_KEYS.get(normalized)
+    if normalized in _LABEL_KEYS:
+        return _LABEL_KEYS[normalized]
+    framed = wording(label)
+    for key, words in _WORDING_KEYS.items():
+        if framed in words:
+            return key
+    if framed in _LABEL_KEYS and _LABEL_KEYS[framed] in IDENTITY:
+        return _LABEL_KEYS[framed]
+    if ambiguous_name(label):
+        return "last_name" if framed == "nom" else "full_name"
+    return None
 
 
 def fact_key(question: Question) -> str | None:

@@ -553,3 +553,12 @@ def test_accounts_command_shows_the_state(mem):
     A.set_state("boards.greenhouse.io", "camille@example.test", "active")
     r = CliRunner().invoke(app, ["apply", "accounts"])
     assert r.exit_code == 0 and "état" in r.output and "en attente" in r.output and "actif" in r.output
+
+
+def test_workday_site_accepts_a_long_posting_slug():
+    slug = "STAGE-2027-Commande-Controle-de-platine-motorises-et-des-hexapodes-du-service-de-metrologie--h-f-_JR10445537"
+    url = f"https://tenant.wd3.myworkdayjobs.com/en-US/Career/job/Toulouse-Area/{slug}/apply/applyManually"
+    assert len(slug) > 64
+    assert A.workday_site(url) == "Career"
+    assert A.workday_site(url.rsplit("/apply", 1)[0], posting=True) == "Career"
+    assert A.workday_site("https://tenant.wd3.myworkdayjobs.com/en-US/" + "x" * 65 + "/job/a/b_1") is None

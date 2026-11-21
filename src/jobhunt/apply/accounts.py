@@ -128,6 +128,7 @@ def is_workday_host(host: str) -> bool:
 
 
 _WORKDAY_SEGMENT = r'[A-Za-z0-9_-]{1,64}'
+_WORKDAY_SLUG = r'[A-Za-z0-9_-]{1,255}'  # a posting's title slug ("STAGE-...-_JR123") is often longer than a namespace
 _WORKDAY_LOCALE = r'[a-z]{2}-[A-Z]{2}'
 
 
@@ -143,11 +144,11 @@ def workday_site(url: str, *, posting: bool = False) -> str | None:
     except ValueError:
         return None
     parts = parsed.path.removeprefix('/').removesuffix('/').split('/')
-    if not all(re.fullmatch(_WORKDAY_SEGMENT, part) for part in parts):
+    if not all(re.fullmatch(_WORKDAY_SLUG, part) for part in parts):
         return None
     if parts[:1] == ['recruiting']:
         scope, rest = parts[:3], parts[3:]
-        if len(scope) != 3:
+        if len(scope) != 3 or not all(re.fullmatch(_WORKDAY_SEGMENT, part) for part in scope):
             return None
     elif host.endswith('.myworkdayjobs.com') and not re.fullmatch(r'wd\d+\.myworkdayjobs\.com', host):
         if re.fullmatch(_WORKDAY_LOCALE, parts[0], re.I):
@@ -155,6 +156,8 @@ def workday_site(url: str, *, posting: bool = False) -> str | None:
         if not parts or parts[0].casefold() in {'job', 'login', 'signin', 'account', 'apply', 'wday'}:
             return None
         scope, rest = parts[:1], parts[1:]
+        if not re.fullmatch(_WORKDAY_SEGMENT, scope[0]):
+            return None
     else:
         return None
     if rest and re.fullmatch(_WORKDAY_LOCALE, rest[0], re.I):

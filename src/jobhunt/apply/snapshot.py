@@ -238,6 +238,13 @@ _JS = r"""
     }
     return formDestinations.get(form);
   };
+  // The page's own cookie / consent-preference center (OneTrust, Evidon, Didomi, Axeptio, Usercentrics, Cookiebot, Drupal...):
+  // its category switches are never questions of the application.
+  const CMP_BOX = '#onetrust-consent-sdk, #ot-sdk-container, .ot-sdk-container, [id^="ot-"], [id*="evidon" i], [class*="evidon" i], '
+    + '#CybotCookiebotDialog, [id*="didomi" i], [class*="didomi" i], [id*="axeptio" i], [class*="axeptio" i], [id*="usercentrics" i], '
+    + '[id*="tarteaucitron" i], .qc-cmp2-container, [id*="sp_message" i], [id*="truste" i], [class*="truste" i], [id*="iubenda" i], '
+    + '#sliding-popup, [id*="cookie-preference" i], [class*="cookie-preference" i], [id*="cookiepref" i], [id*="cookie-banner" i], '
+    + '[class*="cookie-banner" i], [id*="cookie-consent" i], [class*="cookie-consent" i], [id*="cookie-settings" i], [id*="cookie-law" i]';
   const base = (ref, kind, el) => {
     const oldRef = el.getAttribute('data-bp-ref');
     const owningForm = el.form || (kind === 'combobox' ? el.closest('form') : null);
@@ -246,7 +253,7 @@ _JS = r"""
       try { destination = [new URL(el.getAttribute('href'), document.baseURI).href, 'GET']; }
       catch (_) { destination = null; }
     }
-    return {ref, kind, label: '', name: el.getAttribute('name') || (kind === 'combobox' ? el.id : ''), placeholder: el.getAttribute('placeholder') || '',
+    return {ref, kind, cmp: !!el.closest(CMP_BOX), label: '', name: el.getAttribute('name') || (kind === 'combobox' ? el.id : ''), placeholder: el.getAttribute('placeholder') || '',
       automation_id: (el.getAttribute('data-automation-id') || '').slice(0, 120),
       widget_candidate: kind === 'combobox' && !!el.closest('form') && !el.closest('button,a,[role=button],[role=link]'),
       required: false, options: [], value: '', accept: '', group: '', error: '', prio: false, form: formKey(el),
@@ -628,6 +635,25 @@ _LOCALE_PICKER = re.compile(
 _LOCALE_PICKER_ID = re.compile(r"(?:language|lang|locale)[ _-]?(?:selector|switcher|picker|chooser|menu|toggle|dropdown)\w*", re.I)
 
 
+# A cookie-preference category switch ("Analytique", "Fonctionnel et performances category", "All vendor categories"...).
+_COOKIE_CATEGORY = re.compile(
+    r"(?:all vendor categories|all categories|toutes les cat[ée]gories|(?:strictly |strictement )?(?:necessary|n[ée]cessaires?)|"
+    r"analy(?:tics?|tique)s?|(?:functional|fonctionnel(?:le)?s?)(?: (?:and|et) performances?)?|performances?|statistics?|statistiques?|"
+    r"(?:marketing|targeting|advertising|publicit[ée]|ciblage)(?: (?:and|et) personali[sz]ation| (?:and|et) personnalisation)?|"
+    r"personali[sz]ation|personnalisation|social media|r[ée]seaux sociaux)(?: category| cat[ée]gorie| cookies?)?", re.I)
+_COOKIE_CATEGORY_SUFFIX = re.compile(r"\b(?:category|cat[ée]gorie|cookies?)$", re.I)
+
+
+def consent_center(d: dict) -> bool:
+    """A switch of the site's cookie-preference center: inside a known consent-management container, or a bare category switch
+    ("<category> category"). Never a question of the application."""
+    if d.pop("cmp", False):
+        return True
+    label = " ".join(str(d.get("label") or "").split()).strip(" :*")
+    return (d.get("kind") in {"checkbox", "switch"} and not d.get("form") and bool(_COOKIE_CATEGORY_SUFFIX.search(label))
+            and bool(_COOKIE_CATEGORY.fullmatch(label)))
+
+
 def locale_picker(d: dict) -> bool:
     """A language / locale switcher of the site itself (by its automation id, or a bare 'Language' combobox / button label)."""
     if any(_LOCALE_PICKER_ID.fullmatch(str(d.get(key) or "").strip()) for key in ("automation_id", "name")):  # (a combobox's name is its id)
@@ -660,7 +686,7 @@ async def take_snapshot(page: Page, *, read_only: bool = False) -> tuple[PageSna
                 prio.add(d["ref"])
             if d.get("form"):  # unique across frames
                 d["form"] = f"{page.frames.index(frame)}:{d['form']}"
-            if locale_picker(d):
+            if locale_picker(d) or consent_center(d):
                 continue
             fields.append(FormField(**d))
             owners[d["ref"]] = frame
