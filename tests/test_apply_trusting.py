@@ -1124,3 +1124,37 @@ def test_a_calling_code_box_the_plan_left_with_another_code_is_corrected():
     assert [(item.field.ref, item.dial_code) for item in made.items if item.field.ref == "c1"] == [("c1", "+33")]
     right = snap_of(code.model_copy(update={"value": "France (+33)"}), phone)
     assert not [item for item in trusting.validate(run_of(), StepPlan(page_kind="form", actions=[]), right, None).items if item.field.ref == "c1"]
+
+
+LIST_BUTTONS = '''<form>
+  <fieldset><legend><div><p>Dans quel cadre cherchez-vous un stage ?</p></div></legend>
+    <div><button type="button" id="q1" aria-haspopup="listbox" aria-label="Select One Required">Select One</button></div></fieldset>
+  <fieldset><legend>Rythme du stage</legend>
+    <div><button type="button" id="q2" aria-haspopup="listbox" aria-label="Une seule période Required">Une seule période</button></div></fieldset>
+  <div><p>Niveau visé ?</p><div><button type="button" id="q3" aria-haspopup="listbox" aria-label="Select One">Select One</button></div></div>
+  <label for="q4">Pays</label><button type="button" id="q4" aria-haspopup="listbox" aria-label="Select One Required">Select One</button>
+</form>'''
+
+
+async def test_a_list_button_named_after_its_value_takes_its_question_as_label(page):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(LIST_BUTTONS)
+    snap, _ = await take_snapshot(page)
+    lists = [f for f in snap.fields if f.kind == "combobox"]
+    assert [f.label for f in lists] == ["Dans quel cadre cherchez-vous un stage ?", "Rythme du stage", "Niveau visé ?", "Pays"]
+    assert [f.value for f in lists] == ["", "Une seule période", "", ""]
+
+
+async def test_options_of_a_list_named_after_its_placeholder_are_not_remembered(page):  # noqa: F811
+    await page.set_content('''<button id="b" aria-haspopup="listbox" aria-label="Select One" onclick="pop.innerHTML = '<ul role=listbox><li role=option>Un</li><li role=option>Deux</li></ul>'">Select One</button>
+      <div id="pop"></div>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    assert combo.label == "Select One"
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    with pytest.raises(engine._Skip):
+        await trusting._combobox(run, await resolve.element(combo.ref), combo, engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Trois"))
+    assert run.combo_options == {}

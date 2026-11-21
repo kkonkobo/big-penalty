@@ -132,6 +132,19 @@ _JS = r"""
     if (!t) { const l = el.closest('label'); if (l) t = textOf(l); }
     if (!t) t = idsText(el, 'aria-labelledby');
     if (!t) t = clean(el.getAttribute('aria-label'));
+    if (t && el.matches('button, [role=combobox]:not(input), [aria-haspopup=listbox]:not(input)')) {
+      // A list button named after what it shows ("Select One Required", then the chosen option): that is its value, not
+      // its question. The question is the legend of its fieldset, or the text right before it.
+      const own = clean(el.innerText || el.textContent);
+      if (own && (t === own || t.startsWith(own + ' '))) {
+        const fs = el.closest('fieldset');
+        const lg = fs && fs.querySelector('legend');
+        const alone = fs && fs.querySelectorAll('button[aria-haspopup=listbox], [role=combobox], select, textarea, input:not([type=hidden])').length === 1;
+        const legend = lg ? clean(lg.textContent) : '';
+        const question = (alone && legend) || preceding(el) || legend;
+        if (question && question !== own) t = question.slice(0, 300);
+      }
+    }
     if (!t) t = hostLabelOf(el);
     if (!t && el.matches('input[type=checkbox],input[type=radio]')) t = adjacentOf(el);
     if (!t) t = legendOf(el);
