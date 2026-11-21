@@ -562,3 +562,22 @@ def test_workday_site_accepts_a_long_posting_slug():
     assert A.workday_site(url) == "Career"
     assert A.workday_site(url.rsplit("/apply", 1)[0], posting=True) == "Career"
     assert A.workday_site("https://tenant.wd3.myworkdayjobs.com/en-US/" + "x" * 65 + "/job/a/b_1") is None
+
+
+def test_rotate_password_replaces_only_the_password_of_an_account_never_created(mem):
+    first = A.create_password("careers.example.test", "camille@example.org")
+    assert A.account_state("careers.example.test", "camille@example.org") == "pending"
+    second = A.rotate_password("careers.example.test", "camille@example.org")
+    assert second and second != first and A.get_password("careers.example.test", "camille@example.org") == second
+    A.set_state("careers.example.test", "camille@example.org", "active")
+    assert A.rotate_password("careers.example.test", "camille@example.org") is None  # an existing account keeps its password
+    assert A.get_password("careers.example.test", "camille@example.org") == second
+    assert A.rotate_password("unknown.example.test", "camille@example.org") is None
+
+
+def test_guarded_password_callback_rotates_within_its_scope(mem):
+    password, known = A.guarded_account_callbacks("camille@example.org", lambda host: host == "careers.example.test")
+    first = password("https://careers.example.test/apply")
+    assert password.rotate("https://elsewhere.example.test/apply") is None
+    second = password.rotate("https://careers.example.test/apply")
+    assert second and second != first and password("https://careers.example.test/apply") == second

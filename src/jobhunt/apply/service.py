@@ -577,8 +577,15 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     if email and password_fact:
         password_fact.value = "disponible"
 
+    def account_host(host):
+        """May an account be created / used on `host`: the live document's own host, or (planner-trusting mode) any host of
+        the employer's flow - the page the form really stands on, whatever the redirects that led to it."""
+        if host == _host(audience.document) and audience.write_recipient(audience.document):
+            return True
+        return bool(getattr(audience, "trusting", False) and audience.trusted_host(host))
+
     password, account_known = accounts.guarded_account_callbacks(
-        email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
+        email, account_host,
         posting_url=attempt.url,
     ) if email and (not browser_adapter or match.adapter.boundaries.get("account_creation") == "auto") else (None, None)
 
@@ -637,9 +644,17 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         nonlocal password, account_known
         if email and (not browser_adapter or match.adapter.boundaries.get("account_creation") == "auto"):
             password, account_known = accounts.guarded_account_callbacks(
-                email, lambda host: host == _host(audience.document) and audience.write_recipient(audience.document),
+                email, account_host,
                 posting_url=target,
             )
+
+    def live_password():
+        """The (refreshable) password source handed to the engine, with its `rotate` hook."""
+        if not password:
+            return None
+        source = lambda url: password(url)  # noqa: E731
+        source.rotate = lambda url: getattr(password, "rotate", lambda _url: None)(url)  # type: ignore[attr-defined]
+        return source
 
     def live_known():
         """The (refreshable) account check handed to the engine, with its `unconfirm` hook."""
@@ -790,7 +805,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
                 supervised_widgets=browser_adapter,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
-                password=(lambda url: password(url)) if password else None,
+                password=live_password(),
                 account_known=live_known(),
                 email_verification=mail_flow,
                 diagnostics=diagnostics, apply_entry=None if browser_adapter else open_apply,
