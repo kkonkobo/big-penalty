@@ -563,6 +563,8 @@ def open_questions(run: _Run, plan: StepPlan, snap: PageSnapshot, v: _Validated,
     blocking = [question for question in v.questions if question.ref not in handled]
     for question in plan.unknown:
         field = by_ref.get(question.ref)
+        if field is not None and not field.required and not field.error:
+            continue  # a question the page does not require is left unanswered: the site's own validation decides
         if question.required and question.ref not in handled and (field is None or engine._is_empty(field)) and not (
                 field is not None and (field.kind in ("button", "link") or owner_item(run, field) is True)):
             blocking.append(engine._question(field) if field is not None else question)

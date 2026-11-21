@@ -1158,3 +1158,15 @@ async def test_options_of_a_list_named_after_its_placeholder_are_not_remembered(
     with pytest.raises(engine._Skip):
         await trusting._combobox(run, await resolve.element(combo.ref), combo, engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Trois"))
     assert run.combo_options == {}
+
+
+def test_an_unknown_the_page_does_not_require_is_left_to_the_site():
+    optional = field(ref="f1", kind="combobox", label="Bénéficiaire de l'obligation d'emploi ?")
+    plan = plan_of(unknown=[Question(ref="f1", label=optional.label, kind="combobox")])
+    assert trusting.open_questions(run_of(), plan, snap_of(optional), engine._Validated(), set(), None) == ([], [])
+    refused = optional.model_copy(update={"error": "Ce champ est obligatoire"})
+    blocking, _ = trusting.open_questions(run_of(), plan, snap_of(refused), engine._Validated(), set(), None)
+    assert [q.ref for q in blocking] == ["f1"]
+    required = optional.model_copy(update={"required": True})
+    blocking, _ = trusting.open_questions(run_of(), plan, snap_of(required), engine._Validated(), set(), None)
+    assert [q.ref for q in blocking] == ["f1"]
