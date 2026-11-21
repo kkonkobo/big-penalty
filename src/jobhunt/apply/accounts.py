@@ -28,7 +28,7 @@ from jobhunt.apply.destination import clean_url
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.facts import replace_file
 
-SPECIALS = "-_+."
+SPECIALS = "-_."  # ("+" is not a special character everywhere: one site lists what it accepts, without it)
 PASSWORD_LENGTH = 16  # some sites cap a password at 18 characters (SuccessFactors: 8-18)
 _SECOND_LEVEL = {"co", "com", "org", "net", "gov", "ac", "edu"}  # co.uk, com.au ... (heuristic for 2-letter ccTLDs)
 # Suffixes treated as PUBLIC (the registrable domain is the suffix + one more label): common ccSLDs and multi-tenant hosting

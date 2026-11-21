@@ -21,7 +21,7 @@ import difflib
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
+from urllib.parse import urldefrag, urlsplit
 
 from jobhunt.apply.answer_check import fold, is_hard_fact
 from jobhunt.apply.autonomous import blocked_consent
@@ -270,6 +270,17 @@ def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
     return None
 
 
+def _creation_bounced(run: _Run, field: FormField, snap: PageSnapshot) -> bool:
+    """The account-creation button was just clicked and the same creation form is back with its password emptied and no
+    error on any field: the site refused the password without saying so (its criteria list only changes colour)."""
+    engine = _engine()
+    last = getattr(run, "last_click_rec", None)
+    if not last or not engine._is_empty(field) or any(f.error for f in snap.fields if f.kind not in ("button", "link")):
+        return False
+    create = engine._Run._signup_submit(snap)
+    return create is not None and last == (urldefrag(run.page.url).url, norm(create.label))
+
+
 def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: PageSnapshot, resolve) -> _Item | None:
     """One planner action -> an executable item. Dropped (with a note, and a question when the field is required) only when
     it cannot be carried out at all or would invent a hard fact."""
@@ -301,7 +312,8 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         if kind != "password" or secret is None or run.mode != "submit":
             return drop("mot de passe et champ incompatibles")
         frame_url = run._frame_url(resolve, field.ref) if resolve else run.page.url
-        if field.error and _PASSWORD_REFUSED.search(fold(field.error)) and not getattr(run, "password_rotated", False):
+        if (not getattr(run, "password_rotated", False) and (
+                (field.error and _PASSWORD_REFUSED.search(fold(field.error))) or _creation_bounced(run, field, snap))):
             # The site's own password policy refuses the stored password of an account that was never created: a new one,
             # once per run (an existing account keeps its password: `rotate` answers nothing for it).
             rotate = getattr(getattr(run, "password", None), "rotate", None)

@@ -1377,3 +1377,25 @@ async def test_a_posting_said_gone_on_a_disabled_button_is_found_on_the_whole_pa
     assert await engine._Run._page_says_gone(SimpleNamespace(page=page))
     await page.set_content('<main><h1>Stage test</h1><button>Postuler</button></main>')
     assert not await engine._Run._page_says_gone(SimpleNamespace(page=page))
+
+
+def test_a_creation_form_that_comes_back_with_its_password_emptied_gets_a_new_password():
+    email = field(ref="e1", kind="email", label="Email", required=True, value="camille@example.org", form="0:signup")
+    secret = field(ref="p1", kind="password", label="Créez votre mot de passe", required=True, form="0:signup")
+    create = field(ref="b1", kind="button", label="Inscription", form="0:signup")
+    snap = snap_of(email, secret, create)
+    calls = []
+
+    def bounced(last):
+        run = run_of()
+        run.mode = "submit"
+        run.password = SimpleNamespace(rotate=lambda address: calls.append(address) or "new")
+        run._account_address = lambda url: "careers.example.test"
+        run.last_click_rec = last
+        v = engine._Validated()
+        assert trusting.check(run, Action(ref="p1", op="fill", fact="account_password"), secret, v, snap, None) is not None
+        return v
+
+    assert not bounced(None).notes and not calls                              # first visit of the form
+    assert not bounced((URL, "connectez vous")).notes and not calls           # another click led here
+    assert any("nouveau mot de passe" in note for note in bounced((URL, "inscription")).notes) and calls == ["careers.example.test"]
