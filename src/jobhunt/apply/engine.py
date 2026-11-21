@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import hashlib
 import html
+import json
 import os
 import random
 import re
@@ -38,7 +39,7 @@ from jobhunt.apply.consent import dismiss_consent
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import IDENTITY, ambiguous_name, capture, exact_option, fact_key, standing_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
-from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, safe_reason, save_failure_diagnostics
+from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, bare_url, safe_reason, save_failure_diagnostics
 from jobhunt.apply.prompt_rules import DIAL_COUNTRY_NAMES, decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
@@ -1912,6 +1913,10 @@ class _Run:
         for p in self.opened:  # a popup / new tab is followed only when it is an http(s) page
             with contextlib.suppress(Exception):
                 await p.wait_for_load_state("domcontentloaded", timeout=5000)
+            for _ in range(24 if self.trusting else 0):  # a new tab that is still on about:blank (slow redirect chain to the ATS)
+                if p.is_closed() or urlparse(p.url).scheme in ("http", "https"):
+                    break
+                await asyncio.sleep(0.5)
             if not p.is_closed() and urlparse(p.url).scheme in ("http", "https"):
                 usable.append(p)
             else:
@@ -2124,13 +2129,16 @@ class _Run:
             labels = [q.label.strip()[:40] for q in res.questions if q.kind != "password" and q.category != "credentials" and q.label.strip()]
             if labels:  # the field LABELS only (never a value, never a password field's)
                 parts.append("fields: " + " | ".join(dict.fromkeys(labels)))
+            note = "; ".join(self.steps[-1].note.split("; ")[1:]) if self.trusting and self.steps else ""
+            if note and not contains_verification_code(note):  # why each answer failed ("label : reason"), no value
+                parts.append("notes: " + note[:500])
         elif last in sensitive or res.status == "needs_email" or contains_verification_code(res.message):
             parts.append("account / verification page (message withheld)")
         else:
             parts.append(res.message)
         if res.diagnostic_code:
             parts.append(f"code={res.diagnostic_code}")
-        return safe_reason(" ; ".join(parts), self._r, limit=400)
+        return safe_reason(" ; ".join(parts), self._r, limit=1000 if self.trusting else 400)
 
     async def _diagnose(self, res: RunResult) -> None:
         """A run that stops short of sending leaves, in its own folder, a masked screenshot and a value-free page outline."""
@@ -2141,6 +2149,11 @@ class _Run:
             await save_failure_diagnostics(page, self.out_dir, status=res.status, diagnostic_code=res.diagnostic_code or "",
                                            step=len(self.steps), reason=self._stop_reason(res),
                                            screenshot=not self.secrets, redact=self._r)
+            if self.trusting:  # the step trace (kinds, clicked labels, what failed and why; never a value), local only
+                trace = [{"step": s.index, "page_kind": s.page_kind, "url": bare_url(s.url), "clicked": safe_reason(s.clicked, self._r, 80),
+                          "filled": [safe_reason(f.label, self._r, 60) for f in s.filled][:60],
+                          "note": "" if contains_verification_code(s.note) else safe_reason(s.note, self._r, 900)} for s in self.steps]
+                (self.out_dir / "failure-steps.json").write_text(json.dumps(trace, ensure_ascii=False, indent=1), encoding="utf-8")
         except Exception:
             pass
 
@@ -2597,7 +2610,8 @@ class _Run:
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if self.attach_pending:  # an upload-confirm click ("Ajouter"): an error now is an UPLOAD problem, nothing was sent
                 self.attach_pending = False
-                if any(f.error for f in snap.fields if f.kind not in ("button", "link")) or await self._banner_error():
+                # (trusting mode: the planner reads what the page says after the attach click; a "saved" banner is not an error)
+                if not self.trusting and (any(f.error for f in snap.fields if f.kind not in ("button", "link")) or await self._banner_error()):
                     files = [f for f in snap.fields if f.kind == "file"]
                     q = _question(files[0]) if files else Question(label="Fichier à joindre", kind="file")
                     await self._shot(log)

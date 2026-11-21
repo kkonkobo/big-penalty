@@ -119,6 +119,11 @@ def declaration_key(field: FormField) -> str | None:
     return None
 
 
+def declared_answer(run: _Run, key: str) -> str:
+    fact = run.facts.get(key)
+    return fact.value if fact is not None and fact.value else "Non"
+
+
 def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
     """The owner's standing rule for this field: an item to execute, True when the field is settled as it stands (nothing to
     do, the planner's own action is ignored), None when no rule covers it."""
@@ -145,9 +150,12 @@ def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
             return item(Action(ref=field.ref, op="check"), field, used=code)
         return None
     key = declaration_key(field)
+    if key and field.kind == "combobox" and not field.options and not field.multiple:
+        if field.value.strip():
+            return True  # already answered (its list is only readable once opened)
+        return item(Action(ref=field.ref, op="select", fact=key), field, value=declared_answer(run, key), used=key)
     if key and field.kind in ("select", "radio", "combobox") and field.options and not field.multiple:
-        fact = run.facts.get(key)
-        index = best_option([option.label for option in field.options], fact.value if fact is not None and fact.value else "Non")
+        index = best_option([option.label for option in field.options], declared_answer(run, key))
         if index >= 0:
             if field.value and norm(field.value) == norm(field.options[index].label):
                 return True
@@ -192,7 +200,10 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         return item(Action(ref=field.ref, op="fill", fact=secret.key), field, secret, used=secret.key, frame_url=frame_url)
     known = fact if fact is not None and fact.value not in (None, "") else None
     answer = (action.value or "").strip()
-    if is_hard_fact(f"{field.label} {field.group}", field.name, field.placeholder) and known is None:
+    declared = declaration_key(field)
+    if declared and known is None:  # (choice controls are settled by `owner_item`; this covers a free-text declaration)
+        answer = declared_answer(run, declared)
+    if not declared and is_hard_fact(f"{field.label} {field.group}", field.name, field.placeholder) and known is None:
         return drop("fait dur (état civil, adresse, permis, casier...) : jamais deviné")
     inferred = known is None or action.inferred
     basis = (action.basis.strip() or ("déduit du profil" if known is None else f"déduit du fait « {known.label} »"))[:200] if inferred else ""
