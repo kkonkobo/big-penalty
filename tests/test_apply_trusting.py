@@ -1511,3 +1511,22 @@ async def test_a_choice_that_makes_the_page_replace_the_control_was_taken(page):
     item = engine._Item(Action(ref=combo.ref, op="select", fact="country"), combo, None, value="France")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "France"
     assert await page.inner_text("#b2") == "France"
+
+
+async def test_a_list_that_takes_its_choice_a_moment_later_is_not_pressed_again(page):  # noqa: F811
+    await page.set_content('''<label for="a">Mobile ?</label><input id="a" role="combobox"><div id="pop"></div>
+      <script>
+        window.picks = 0;
+        const show = () => { pop.innerHTML = '<ul role="listbox"><li role="option">Oui</li><li role="option">Non</li></ul>';
+          for (const li of pop.querySelectorAll('li')) li.onclick = () => { window.picks++; document.title = 'picks ' + window.picks;
+            setTimeout(() => { a.value = li.textContent; pop.innerHTML = ''; }, 1100); }; };
+        a.addEventListener('click', show);
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Non")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Non"
+    assert await page.title() == "picks 1"
