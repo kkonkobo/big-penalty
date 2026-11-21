@@ -1293,3 +1293,70 @@ def test_a_password_refused_by_the_sites_policy_is_replaced_once():
     for f in (refused, confirm, refused):
         assert trusting.check(run, Action(ref=f.ref, op="fill", fact="account_password"), f, v, snap_of(refused, confirm), None) is not None
     assert calls == ["careers.example.test"] and any("nouveau mot de passe" in note for note in v.notes)
+
+
+def _after_final_click(snap: PageSnapshot, *, sent_empty) -> SimpleNamespace:
+    withdrawn = []
+
+    async def unmark():
+        withdrawn.append(True)
+
+    async def no_banner():
+        return False
+
+    return SimpleNamespace(
+        last_sent=engine._Sent(final=True, fields={("prenom", "text")}, button="envoyer"), page=SimpleNamespace(url=snap.url),
+        sent_url=snap.url, trusting=True, sent_empty=sent_empty, _banner_error=no_banner, rejected_submits=0, final_awaiting=True,
+        final_clicked=True, submit_clicks=1, pending=None, last_click_rec=None, replans={}, diagnostics=SimpleNamespace(receipt_reason=""),
+        autonomous=SimpleNamespace(unmark_submit=unmark, final_response=True, foreign_writes=1), withdrawn=withdrawn)
+
+
+async def test_a_form_still_there_with_its_required_field_empty_was_not_sent():
+    name = field(ref="f1", label="Prénom", required=True, value="Camille")
+    status = field(ref="f2", kind="combobox", label="Situation RQTH ?", required=True)
+    send = field(ref="b1", kind="button", label="Envoyer")
+    snap = snap_of(name, status, send)
+    run = _after_final_click(snap, sent_empty={("situation rqth", "combobox")})
+    assert await engine._Run._submit_rejected(run, snap) and run.withdrawn and run.rejected_submits == 1 and not run.final_clicked
+    # nothing was knowingly left empty: the same page proves nothing (the send stays recorded)
+    run = _after_final_click(snap, sent_empty=set())
+    assert not await engine._Run._submit_rejected(run, snap) and not run.withdrawn
+    # the field got its answer in the meantime, or the form is gone: no evidence of a refusal
+    answered = snap_of(name, status.model_copy(update={"value": "Non"}), send)
+    run = _after_final_click(answered, sent_empty={("situation rqth", "combobox")})
+    assert not await engine._Run._submit_rejected(run, answered)
+
+
+async def test_the_fullest_list_seen_is_what_the_planner_is_shown(page):  # noqa: F811
+    await page.set_content('''<label for="a">Situation ?</label><input id="a" role="combobox"><div id="pop"></div>
+      <script>
+        const ALL = ['Je souhaite en faire part', 'Je ne souhaite pas en faire part', 'Non concerné'];
+        const show = () => { const hits = ALL.filter((t) => t.toLowerCase().includes(a.value.toLowerCase()));
+          pop.innerHTML = '<ul role="listbox">' + (hits.length ? hits : ['Aucun résultat trouvé']).map((t) => `<li role="option">${t}</li>`).join('') + '</ul>'; };
+        a.addEventListener('click', show); a.addEventListener('input', show);
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    with pytest.raises(engine._Skip, match="options proposées : Je souhaite en faire part"):
+        await trusting._combobox(run, await resolve.element(combo.ref), combo, engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Zzz"))
+    assert run.combo_options[trusting.norm(combo.label)] == ['Je souhaite en faire part', 'Je ne souhaite pas en faire part', 'Non concerné']
+
+
+STATEMENT_WITH_COOKIES = '''<main><form><input name="email"><button type="button">Postuler</button></form></main>
+  <div role="dialog" style="position:fixed;inset:10%;background:#fff"><h2>Déclaration de confidentialité des données</h2>
+  <p>Nous utilisons des cookies pour le fonctionnement du site. Nous traitons vos données pour le recrutement.</p>
+  <button onclick="this.closest('[role=dialog]').remove()">Accepter</button>
+  <button onclick="document.title = 'refused'">Refuser</button><button>Imprimer</button><button>Fermer</button></div>'''
+
+
+async def test_a_privacy_statement_that_opens_on_cookies_is_still_accepted_by_both_dismissers(page):  # noqa: F811
+    from jobhunt.apply.consent import dismiss_consent
+
+    await page.set_content(STATEMENT_WITH_COOKIES)
+    assert await dismiss_consent(page) == "Accepter"
+    await page.set_content(STATEMENT_WITH_COOKIES)
+    assert await trusting.dismiss_blocker(SimpleNamespace(page=page)) == "Accepter"
+    assert await page.title() != "refused" and await page.locator("[role=dialog]").count() == 0
