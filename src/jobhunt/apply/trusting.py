@@ -891,11 +891,19 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         except Exception:
             await option.evaluate(_PRESS_JS)  # covered or off-screen: the events a list listens to, in order
         await asyncio.sleep(0.4)
-        if await _shown(option) and not field.multiple:  # the list did not take it: Enter picks the highlighted row
+
+        async def taken() -> bool:
+            return not await _shown(option) or (await run._combo_value(loc)) != before
+
+        for _ in range(4):  # (a list that closes, or shows the choice, a moment after the click: pressing again would undo it)
+            if await taken():
+                break
+            await asyncio.sleep(0.4)
+        if not await taken() and not field.multiple:  # the list did not take it: Enter picks the highlighted row
             with contextlib.suppress(Exception):
                 await option.evaluate(_PRESS_JS)
                 await asyncio.sleep(0.3)
-            if await _shown(option):
+            if not await taken():
                 with contextlib.suppress(Exception):
                     await loc.press("Enter", timeout=2000)
                     await asyncio.sleep(0.3)
