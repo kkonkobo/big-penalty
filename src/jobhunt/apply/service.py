@@ -614,6 +614,18 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         await audience.bind_document(tab)
         return True
 
+    async def make_letter():
+        """The cover letter of this revision, written only when a form requires one (rule-checked and verified; None = unavailable)."""
+        from jobhunt.apply.letter import ensure_letter  # noqa: PLC0415 - letter imports the engine
+
+        try:
+            master = load_master(app.profile_id)
+        except MasterError:
+            return None
+        if master is None or not master.is_confirmed:
+            return None
+        return await ensure_letter(cvstore.get_application(app.id) or app, job, master, llm.get())
+
     mail_flow = mail.BrowserVerification(verify_mail, follow_mail) if mail.provider(email) and (
         not browser_adapter or match.adapter.boundaries.get('account_creation') == 'auto') else None
 
@@ -768,7 +780,9 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 page, url=attempt.url, facts=facts,
                 planner=planner if planner is not None else LLMPlanner(llm.get(), autonomy=bool(getattr(audience, "trusting", False))),
                 verifier=verifier if verifier is not None or planner is not None else _default_verifier(llm),
-                uploads=Uploads(cv_pdf=cvs.safe_pdf(app), cv_bytes=request.pdf), mode="submit", current_step=True,
+                uploads=Uploads(cv_pdf=cvs.safe_pdf(app), cv_bytes=request.pdf,
+                                letter=make_letter if getattr(audience, "trusting", False) else None),
+                mode="submit", current_step=True,
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
                 supervised_widgets=browser_adapter,
                 job_title=job.title, company=job.company or "", out_dir=Path(run_.out_dir),
