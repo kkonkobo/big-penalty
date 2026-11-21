@@ -19,7 +19,9 @@ import asyncio
 import contextlib
 import difflib
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from jobhunt.apply.answer_check import fold, is_hard_fact
 from jobhunt.apply.autonomous import blocked_consent
@@ -55,6 +57,55 @@ def _engine():
 
 def norm(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", fold(text or "")).strip()
+
+
+def posting_to_home(posting: str, landed: str) -> bool:
+    source, target = urlsplit(posting), urlsplit(landed)
+    return (source.hostname == target.hostname and target.path.lower() == "/accueil.aspx"
+            and re.fullmatch(r"/(?:offre-de-emploi|job)/(?:offre|job)-[^/]+_\d+\.aspx", source.path, re.I) is not None)
+
+
+def login_actions(snap: PageSnapshot) -> list[Action]:
+    engine = _engine()
+    for button in snap.fields:
+        if (button.kind != "button" or not button.form or not engine.LOGIN_BUTTON_RE.fullmatch(norm(button.label))
+                or engine.SOCIAL_RE.search(norm(button.label))):
+            continue
+        members = [field for field in snap.fields if field.form == button.form]
+        if "$" in button.name:
+            prefix = button.name.rpartition("$")[0]
+            members = [field for field in members if field.name.rpartition("$")[0] == prefix]
+        emails = [field for field in members if field.kind == "email" or (field.kind == "text"
+                  and engine.EMAIL_FIELD_RE.search(fold(f"{field.label} {field.name}")))]
+        passwords = [field for field in members if field.kind == "password"]
+        if len(emails) == len(passwords) == 1:
+            return [Action(ref=emails[0].ref, op="fill", fact="account_email"),
+                    Action(ref=passwords[0].ref, op="fill", fact="account_password"),
+                    Action(ref=button.ref, op="click", click_role="login")]
+    return []
+
+
+LOGIN_REJECTED = re.compile(r"(?:login et le mot de passe n.ont pas ete reconnus|username and password not recognized|"
+                            r"(?:e.?mail|identifiant).{0,45}mot de passe (?:sont )?incorrects)")
+EMAIL_CONFIRM_ERROR = re.compile(r"\b(?:l.)?e.?mail doit etre confirme\b")
+VERIFY_INSTRUCTION = re.compile(r"\b(?:lien|link|code)\b.{0,100}\b(?:activation|verification|confirmation|verify|confirm|envoye|sent)\b|"
+                                r"\b(?:activation|verification|confirmation|verify|confirm)\b.{0,40}\b(?:lien|link|code)\b")
+
+
+def offers_verification(snap: PageSnapshot) -> bool:
+    return bool(VERIFY_INSTRUCTION.search(fold(f"{snap.title}\n{snap.text}")) or any(
+        field.autocomplete == "one-time-code" or _engine().mail.CODE_LABEL.search(field.label) for field in snap.fields))
+
+
+def attached_cv(run: _Run, field: FormField, snap: PageSnapshot) -> _Item | None:
+    if field.kind != "select" or field.multiple or norm(field.label) not in {"mon cv", "my cv", "my resume"}:
+        return None
+    names = getattr(run, "uploaded_cv_names", {}).get(urlsplit(snap.url).hostname, set())
+    matches = [index for index, option in enumerate(field.options) if option.value and norm(Path(option.label.strip()).name) in names]
+    if len(matches) != 1:
+        return None
+    index = matches[0]
+    return _engine()._Item(Action(ref=field.ref, op="select"), field, option_index=index, value=field.options[index].label, used="cv")
 
 
 def best_option(labels: list[str], want: str | None) -> int:
@@ -316,6 +367,11 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
     fillable = plan.page_kind in ("form", "account_signup", "account_login", "other")
     if fillable:
         for field in snap.fields:
+            if plan.page_kind == "form" and (cv := attached_cv(run, field, snap)) is not None:
+                seen.add(field.ref)
+                if field.value != cv.value:
+                    v.items.append(cv)
+                continue
             ruled = owner_item(run, field)
             if ruled is None:
                 continue
@@ -337,7 +393,7 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
         if action.ref in seen:
             continue
         seen.add(action.ref)
-        if scope is not None and field.kind == "password" and field.ref not in scope:
+        if scope is not None and ((field.kind == "password" and field.ref not in scope) or field.ref in run.login_box):
             continue  # the login box next to an inline account-creation form
         made = check(run, action, field, v, snap, resolve)
         if made is not None:
@@ -348,7 +404,7 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
             if field.ref in seen:
                 continue
             made = None
-            if scope is not None and field.kind == "password" and field.ref not in scope:
+            if scope is not None and ((field.kind == "password" and field.ref not in scope) or field.ref in run.login_box):
                 continue
             if field.kind == "password" and plan.page_kind == "account_signup" and password is not None and engine._is_empty(field):
                 made = check(run, Action(ref=field.ref, op="fill", fact=password.key), field, v, snap, resolve)
@@ -373,12 +429,16 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
 _SENDS = re.compile(r"\b(?:absenden|abschicken|einreichen|bewerbung (?:ab)?senden|jetzt bewerben|inviare|invia candidatura|enviar|"
                     r"solicitar|verzenden|solliciteren|valider (?:ma|la|et envoyer)|deposer ma candidature|envoyer)\b")
 _MOVES = re.compile(r"\b(?:weiter|nachste[rs]?|zuruck|avanti|siguiente|seguinte|volgende|suivante?|precedent|vorherige|back|previous)\b")
+_PURE_MOVE = re.compile(r"(?:continuer|continue|next|next step|etape suivante|save and continue|enregistrer et continuer|"
+                        + _MOVES.pattern + r")")
 
 
 def effective_role(run: _Run, field: FormField, role: str, snap: PageSnapshot) -> str:
-    """The planner's role stands, except a navigation-looking click whose label says it sends the application."""
+    """Resolve explicit send and pure navigation labels before dispatching the planner's click."""
     engine = _engine()
     label = fold(field.label)
+    if role == "submit" and _PURE_MOVE.fullmatch(norm(label)) and not (engine.SUBMIT_RE.search(field.label) or _SENDS.search(label)):
+        return "next"
     if role in ("next", "open_form", "other") and run.app_touched and (engine.SUBMIT_RE.search(field.label) or _SENDS.search(label)) \
             and not engine.NAV_RE.search(field.label) and not _MOVES.search(label):
         return "submit"

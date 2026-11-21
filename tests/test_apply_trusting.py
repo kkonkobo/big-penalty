@@ -23,6 +23,7 @@ class FakeRun:
 
     mode = "submit"
     signup_scope = None
+    login_box: set = set()
     _drop = engine._Run._drop
     _identity_item = engine._Run._identity_item
     _autonomous_decision = engine._Run._autonomous_decision
@@ -559,6 +560,76 @@ def test_signup_click_with_an_uploaded_file_is_a_submit():
     upload = field(ref="f1", kind="file", label="CV", value="cv.pdf")
     assert trusting.effective_role(run_of(), button, "signup", snap_of(button, upload)) == "submit"
     assert trusting.effective_role(run_of(), button, "signup", snap_of(button)) == "signup"
+
+
+@pytest.mark.parametrize("label", ["Continue", "Continuer →", "Suivant", "Next", "Weiter", "Nächste"])
+def test_pure_navigation_is_not_a_final_click_even_if_the_planner_says_submit(label):
+    button = field(kind="button", label=label)
+    assert trusting.effective_role(run_of(app_touched=True), button, "submit", snap_of(button)) == "next"
+
+
+def test_send_wording_is_not_downgraded():
+    button = field(kind="button", label="Continuer et envoyer ma candidature")
+    assert trusting.effective_role(run_of(app_touched=True), button, "submit", snap_of(button)) == "submit"
+
+
+def test_required_cv_selector_uses_only_the_cv_uploaded_to_this_host():
+    resume = field(kind="select", label="Mon CV*", required=True, options=opts("Choisir", "Ancien CV.pdf", "CV.pdf"))
+    plan = plan_of(Action(ref=resume.ref, op="upload_cv"), unknown=[Question(ref=resume.ref, label="Mon CV", required=True, kind="select")])
+    run = run_of()
+    run.uploaded_cv_names = {"elsewhere.example.test": {"cv pdf"}}
+    snap = snap_of(resume)
+    assert not trusting.validate(run, plan, snap, None).items
+    run.uploaded_cv_names["careers.example.test"] = {"cv pdf"}
+    validated = trusting.validate(run, plan, snap, None)
+    assert [(item.act.op, item.option_index) for item in validated.items] == [("select", 2)]
+    assert trusting.open_questions(run, plan, snap, validated, {resume.ref}, None) == ([], [])
+
+
+def test_inline_signup_fills_existing_confirmation_with_the_same_account_email():
+    run = run_of()
+    run.trusting = True
+    snap = snap_of(field("login", "password", "Mot de passe", name="page$pw", form="0"),
+                   field("login_button", "button", "Se connecter", form="0"),
+                   field("email", "text", "Identifiant", name="page$CreationControl$email", form="0"),
+                   field("confirm", "text", "Confirmer l’identifiant", name="page$CreationControl$confirmEmail", form="0", value="stale"),
+                   field("pw", "password", "Mot de passe", name="page$CreationControl$pw", form="0"),
+                   field("create", "button", "Je me crée un espace candidat", form="0"))
+    _, actions = engine._Run._inline_signup(run, plan_of(kind="account_signup"), snap)
+    assert [(action.ref, action.fact) for action in actions if action.op == "fill"] == [
+        ("email", "account_email"), ("confirm", "account_email"), ("pw", "account_password")]
+
+
+async def test_scoped_login_ignores_header_and_inline_signup(page):
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content('''
+      <label>Email<input name="Login"></label><label>Password<input type="password" name="Password"></label>
+      <button>Log in</button>
+      <form><label>Email<input name="page$Email"></label><label>Password<input type="password" name="page$Password"></label>
+      <button name="page$Login">Log in</button>
+      <label>Email<input name="page$CreationControl$Email"></label>
+      <label>Password<input type="password" name="page$CreationControl$Password"></label>
+      <button name="page$CreationControl$Create">Create an account</button></form>''')
+    snap, _ = await take_snapshot(page)
+    names = {field.ref: field.name for field in snap.fields}
+    assert [names[action.ref] for action in trusting.login_actions(snap)] == ["page$Email", "page$Password", "page$Login"]
+
+
+def test_numbered_posting_redirect_to_home_is_not_a_generic_homepage_rule():
+    posting = "https://careers.example.test/job/job-internship_123.aspx"
+    home = "https://careers.example.test/accueil.aspx?LCID=1036"
+    assert trusting.posting_to_home(posting, home)
+    assert not trusting.posting_to_home(URL, home)
+    assert not trusting.posting_to_home(posting, home.replace("careers.", "another."))
+    assert not trusting.posting_to_home(posting, URL)
+
+
+def test_account_notice_is_not_a_link_or_code_challenge():
+    notice = PageSnapshot(url=URL, text="Votre espace candidat a été créé. Un e-mail vous a été envoyé.")
+    assert not trusting.offers_verification(notice)
+    assert trusting.offers_verification(notice.model_copy(update={"text": "Cliquez sur le lien d’activation."}))
+    assert trusting.offers_verification(snap_of(field(label="Code", autocomplete="one-time-code")))
 
 
 # ------------------------------------------------------------------ browser: _toggle
