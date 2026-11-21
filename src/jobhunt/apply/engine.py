@@ -141,7 +141,12 @@ SIGNUP_CONSENT_RE = re.compile(r"conditions|\bcgu\b|\bcgv\b|terms|politique|priv
 SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer")
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
+ACCOUNT_CLICKS_MAX = 3   # login / signup clicks per run before the account step is reported as not accepted
 ENTRY_TRIES_CORE = 3     # core guard mode: entry discoveries per run (one per page)
+MISSING_OFFER_RE = re.compile(
+    r"(?:offre|annonce|poste|job|position|posting)[^.!\n]{0,60}(?:n.?existe (?:pas|plus)|n'est plus (?:disponible|en ligne|active)|"
+    r"est (?:expiree|cloturee|pourvue)|no longer (?:exists?|available)|does not exist|has (?:expired|been (?:closed|removed|filled)))")
+CHANGED_RETRY_S = 0.8  # one re-read of a decision scope that changed under the action (async option lists, dependent fields)
 PRE_STEP_CAP = 8        # pure pre-data steps (cookie banner, open_form, account pages) that do not use the max_steps budget
 SECRET_LOG = "•••"
 AUTO_SUBMIT_NOTE = "soumission automatique bloquée"
@@ -594,6 +599,7 @@ class _Run:
         self.signup_link_clicks = 0          # signup LINK clicks of this run (a link that only reloads the login page must not loop)
         self.login_unknown_try = False       # a login was attempted on a host without a known account
         self.known_login_try = False         # a login was attempted with the stored credential of a host believed to hold the account
+        self.account_clicks = 0  # login / signup clicks made on candidate-account pages (a site that keeps refusing is not retried forever)
         self.account_try: tuple[str, str] | None = None  # (login | signup, host) of the account click whose outcome the next page tells
         self.account_exists_hosts: set[str] = set()      # hosts whose signup answered "account already exists": log in with the stored credential
         self.login_failed: set[str] = set()  # hosts where that login led back to a password page: the account is not confirmed there
@@ -905,6 +911,33 @@ class _Run:
         except Exception:
             return True
 
+    @staticmethod
+    def _combined_form(kind: str, snap: PageSnapshot) -> bool:
+        """A one-page form that holds the account fields AND the application questions (SuccessFactors "Please sign in" +
+        profile + questionnaire): the planner called it a form, so it is filled as the application, not as an account box."""
+        if kind != "form":
+            return False
+        account = re.compile(r"e-?mail|mot de passe|password|passwort|prenom|first name|^nom\b|last name|surname|identifiant", re.I)
+        others = [f for f in snap.fields if f.kind in {"text", "textarea", "select", "combobox", "radiogroup", "tel", "number", "date"}
+                  and not account.search(fold(f.label))]
+        return len(others) >= 5
+
+    def _error_page_gone(self, kind: str, snap: PageSnapshot) -> bool:
+        """The site answered the posting with its own error / not-found page (no form on it): the ad is gone."""
+        return bool(self.autonomous and kind == "error" and not self.app_touched
+                    and re.search(r"/(?:error-?page|not-?found|page-?not-?found|404|oops)(?:/|\.\w+)?$", urlparse(snap.url).path.lower())
+                    and not any(f.kind not in {"button", "link"} for f in snap.fields))
+
+    def _gone_result(self) -> RunResult:
+        result = self._end("blocked", "Offre clôturée")
+        result.diagnostic_code = "job_closed"
+        return result
+
+    def _offer_gone(self, snap: PageSnapshot) -> bool:
+        """Before any application data: the page itself says the posting no longer exists (and has no file field to fill)."""
+        return bool(self.autonomous and not self.app_touched
+                    and not any(f.kind == "file" for f in snap.fields) and MISSING_OFFER_RE.search(fold(snap.text)))
+
     async def _banner_error(self) -> bool:
         """A form-level error banner is visible somewhere on the page (any frame)."""
         for fr in self.page.frames:
@@ -1092,8 +1125,12 @@ class _Run:
 
     def _confirmed_dial_selection(self, field: FormField, snap: PageSnapshot) -> bool:
         phone = self.facts.get("phone")
-        if not phone or field.kind != "select" or field.multiple or not _dial_selector(field, snap):
+        if not phone or field.kind not in {"select", "combobox"} or field.multiple or not _dial_selector(field, snap):
             return False
+        if field.kind == "combobox":  # an intl-tel-input flag picker: the selected dial code is shown as its value (its list repeats countries)
+            code = "+33" if french_phone(phone.value or "") else international_calling_code(phone.value or "")
+            return bool(phone.exact and code and re.findall(r"\+\s*[0-9]+", field.value or "") == [code]
+                        and not re.sub(r"[+\s0-9]", "", field.value or ""))
         index = self._dial_option(field, phone)
         return index >= 0 and self._selection_matches(field, field.options[index])
 
@@ -1132,7 +1169,7 @@ class _Run:
         return not target.form or not field.form or field.form == target.form
 
     async def _live_decisions(self, snap: PageSnapshot, target: FormField, approved: dict[str, tuple], *,
-                              pending: set[str] = frozenset(), applying: _Item | None = None) -> None:
+                              pending: set[str] = frozenset(), applying: _Item | None = None, retry: bool = True) -> None:
         """Read the whole live decision scope without retagging the original dispatch target."""
         fresh, _ = await take_snapshot(self.page, read_only=True)
         current = next((field for field in fresh.fields if field.live_ref == target.ref), None)
@@ -1166,8 +1203,15 @@ class _Run:
                 expected = approved.get(field.live_ref)
                 if expected is not None and expected == _choice_state(field):
                     continue
-                if ((original and _choice_state(original) != _choice_state(field)) or expected is not None
-                        or (not original and (field.required or not _is_empty(field)))):
+                # Benign re-renders: an unanswered question whose option list loaded / re-rendered, or a dependent question that
+                # appeared still empty (the open-decision pass below asks it). A different question or selection is refused.
+                rerendered = bool(original) and _is_empty(original) and _is_empty(field) and expected is None
+                appeared = not original and _is_empty(field)
+                if not rerendered and not appeared and (
+                        (original and _choice_state(original) != _choice_state(field)) or expected is not None or not original):
+                    if retry:  # the page may still be settling: read it once more before giving up
+                        await asyncio.sleep(CHANGED_RETRY_S)
+                        return await self._live_decisions(snap, target, approved, pending=pending, applying=applying, retry=False)
                     raise _DecisionHold(self._end("blocked", "Une question ou sa sélection a changé : action annulée."))
             awaiting_action = field.live_ref in pending and (_is_empty(field) or field.live_ref == current.live_ref)
             if not awaiting_action and self._open_decision(field, fresh):
@@ -2152,7 +2196,13 @@ class _Run:
                         and self._confirmed(snap, self.last_sent)):
                     await self._shot(log)
                     return self._end("submitted", "Candidature envoyée.")
+            if self._offer_gone(snap):  # an account step the site bounced to its home with a "no such offer" banner: nothing was sent
+                await self._shot(log)
+                return self._gone_result()
             if loop.time() >= deadline:
+                if self._account_only_pending():  # the account page came back (or did not move): the main loop reads what it says
+                    self._release_account_click()
+                    return snap, resolve
                 await self._shot(log)
                 return self._end("failed", FIELD_ERROR_MSG) if errors_seen else self._unconfirmed()
             await asyncio.sleep(OBSERVE_POLL_S)
@@ -2189,6 +2239,16 @@ class _Run:
             return self._end("blocked", "Envoi bloqué : " + " ; ".join(reasons))
         self.gated_step = n
         return None
+
+    def _account_only_pending(self) -> bool:
+        """The unresolved click was a candidate-account login / signup (no application data entered, nothing final sent): its
+        outcome is judged by the account logic of the main loop, not reported as an unconfirmed send."""
+        return bool(self.autonomous and self.mode == "submit" and self.account_try and not self.app_touched
+                    and not self.final_clicked and not self.final_awaiting)
+
+    def _release_account_click(self) -> None:
+        self.nav_pending = False
+        self.pending = self.last_sent = self.nav_ref = None
 
     def _unconfirmed(self) -> RunResult:
         return self._end("failed", UNCONFIRMED_MSG)
@@ -2523,9 +2583,11 @@ class _Run:
                 if await self._verify_email(snap, resolve):
                     continue
                 return await self._email_hold(log)
-            if kind == "closed":
+            if (kind == "closed" or self._error_page_gone(kind, snap)
+                    or (kind in (*ACCOUNT_KINDS, "other", "error", "job_page") and self._offer_gone(snap))):
+                # (also: an account step the site bounced to its home with a "this offer no longer exists" banner)
                 await self._shot(log)
-                return self._end("blocked", "Offre clôturée")
+                return self._gone_result()
             if kind == "confirmation":
                 await self._shot(log)
                 if self.mode == "submit" and self.final_clicked:
@@ -2550,7 +2612,8 @@ class _Run:
             account_host_ok = bool(self.autonomous and (self.autonomous.entry_binding or (
                 getattr(self.autonomous, "core", False) and self.autonomous.trusted(self.page.url))))
             bound_account = bool(account_host_ok and
-                                 (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields)))
+                                 (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields))
+                                 and not self._combined_form(kind, snap))
             signup_page, inline = False, None
             if bound_account:
                 if self.app_touched or any(field.kind == "file" for field in snap.fields):
@@ -2868,6 +2931,9 @@ class _Run:
                     if bound_account:
                         result.diagnostic_code = "account_login_failed" if kind == "account_login" else "account_signup_field_unfilled"
                     return result
+            if bound_account and role in ("login", "signup") and self.account_clicks >= ACCOUNT_CLICKS_MAX:
+                await self._shot(log)  # the site keeps sending the account page back: stop with a diagnosable reason
+                return self._account_stop("account_not_accepted")
             if self.mode == "dry_run" and not attach and not self._dry_may_click(field, role, snap):  # type: ignore[arg-type]
                 return self._dry_end(plan, field, role, planned)  # type: ignore[arg-type]
             if self.mode == "dry_run":  # "post-data" is decided from the PAGE too: a pre-filled form must not be submitted
@@ -2956,6 +3022,7 @@ class _Run:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
             if bound_account and role in ("login", "signup"):
                 self.account_try = (role, self._account_address(self.page.url))
+                self.account_clicks += 1
             if plan.page_kind == "account_login" and role == "login" and self.account_known is not None:
                 with contextlib.suppress(Exception):
                     known = self._account_exists()

@@ -192,4 +192,5 @@ ACCOUNT_REASONS = {
     "account_signup_field_unfilled": "Création de compte : un champ obligatoire n'a pas pu être rempli automatiquement.",
     "account_login_failed": "Connexion au compte impossible : le site refuse les identifiants.",
     "account_signup_loop": "Création de compte : le lien de création ramène à la même page.",
+    "account_not_accepted": "Compte : le site n'a pas accepté la connexion / création (la page revient sans changement).",
 }

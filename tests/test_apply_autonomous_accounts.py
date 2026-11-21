@@ -344,3 +344,145 @@ def test_stop_reason_names_the_unanswered_field_labels_but_no_passwords():
         Question(label="Mot de passe", kind="password", reason="unmapped")])
     reason = run._stop_reason(res)
     assert "2 unanswered question(s): unmapped" in reason and "Localisation du poste" in reason and "Mot de passe" not in reason
+
+
+CLOSED_HOME = '''<div id="didomi-host"><div role="dialog"><p>Nous utilisons des cookies.</p><button>En savoir plus</button>
+<button>Refuser</button><button>Accepter &amp; Fermer</button></div></div>
+<header><form method="post" action="/Account/Login"><label>Identifiant (email)<input type="text" name="Login"></label>
+<label>Mot de passe<input type="password" name="Password"></label><button type="submit">Se connecter</button></form></header>
+<div role="alert">L'offre que vous essayez d'afficher n'existe pas ou plus sur ce site.</div>
+<main><h1>Bienvenue</h1><form action="/search"><label>Contrat<select name="c"><option value="0">Veuillez sélectionner une valeur</option>
+<option value="1">Stage</option></select></label><button>Lancer ma recherche</button></form></main>'''
+
+
+@pytest.mark.parametrize("known", [False, True])
+async def test_login_that_lands_on_the_home_with_a_missing_offer_banner_is_a_closed_posting(known, server, profile, tmp_path, fast, monkeypatch):
+    """The offer was withdrawn: the site bounces the account step to its home page (login box still in the header)."""
+    app = setup(server, profile, tmp_path, monkeypatch, known=known)
+    server.html["/my-account/log-in.aspx"] = TALENTSOFT_REAL.replace('action="/my-account/log-in.aspx"', 'action="/Account/Login"', 1)
+    server.post_redirects["/Account/Login"] = "/accueil.aspx"
+    server.post_redirects["/my-account/log-in.aspx"] = "/accueil.aspx"
+    server.html["/accueil.aspx"] = CLOSED_HOME
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(planner()))
+    assert (result.status, result.result.diagnostic_code) == ("blocked", "job_closed"), (
+        result.status, result.result.diagnostic_code, result.result.dispatch_diagnostics, server.requests)
+
+
+SF_COMBINED = '''<title>Ingénieur systèmes embarqués</title><form action="/careers/apply" method="post"><h2>Please sign in</h2>
+<label>Email Address: *<input name="email" required></label><label>Choose Password: *<input type="password" name="pw" required></label>
+<label>Prénom<input name="first_name"></label><label>Ville<input name="city"></label><label>Adresse<input name="street"></label>
+<label>Code postal<input name="zip"></label><label>Délai de préavis<input name="notice"></label>
+<label>Prétentions salariales<input name="salary"></label><label>CV<input type="file" name="cv"></label>
+<button type="submit">Envoyer</button></form>'''
+
+
+async def test_one_page_account_plus_application_form_runs_unattended(server, profile, tmp_path, fast, monkeypatch):
+    """SuccessFactors-like: the sign-in / profile fields and the questionnaire share one page: it is the application, not an account stop."""
+    app = setup(server, profile, tmp_path, monkeypatch)
+    server.redirects["/entry"] = "/careers"
+    server.html["/careers"] = SF_COMBINED
+    server.post_redirects["/careers/apply"] = "/careers/done"
+    server.html["/careers/done"] = "<h1>Merci</h1><p>Votre candidature a bien été envoyée.</p>"
+
+    def plan(snap):
+        if urlsplit(snap.url).path == "/jobs/100":
+            return StepPlan(page_kind="job_page")
+        return StepPlan(page_kind="form", actions=[
+            act(snap, "Email", "fill", "account_email"), act(snap, "Password", "fill", "account_password"),
+            act(snap, "Prénom", "fill", "first_name"), act(snap, "CV", "upload_cv", kind="file"), act(snap, "Envoyer", "click", role="submit")])
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.result.diagnostic_code != "supervised_only" and result.message != service.SUPERVISED_ONLY, (
+        result.status, result.message, result.result.diagnostic_code)
+    assert server.posts_to("/careers/apply")
+
+
+ITI = '''<div class="iti"><div class="iti__selected-flag" role="combobox" aria-haspopup="listbox" aria-controls="lst" aria-expanded="false"
+ aria-label="Telephone country code" tabindex="0" title="France"><div class="iti__selected-dial-code">+33</div></div>
+<ul id="lst" role="listbox" aria-label="List of countries" style="display:none">
+<li role="option" data-dial-code="33">France<span>+33</span></li><li role="option" data-dial-code="1">United States<span>+1</span></li>
+<li role="option" data-dial-code="33">France<span>+33</span></li></ul></div>'''
+
+
+async def test_preselected_flag_picker_with_the_candidates_dial_code_is_not_a_question(server, profile, tmp_path, fast, monkeypatch):
+    """talentview-like signup: an intl-tel-input flag picker already on +33 (its list repeats France) matches the French phone."""
+    app = setup(server, profile, tmp_path, monkeypatch)
+    server.html["/my-account/log-in.aspx"] = f'''<h1>Inscription</h1><form method="post" action="/Account/Register">
+        <label>Email<input type="email" name="email" required></label>
+        <label>Créez votre mot de passe<input type="password" name="password" required></label>
+        {ITI}<label>Numéro de téléphone<input type="tel" name="phone"></label>
+        <label><input type="checkbox" name="legals" required> En postulant, j'accepte également les conditions générales d'utilisation. *</label>
+        <button>Inscription</button></form>'''
+    server.post_redirects["/Account/Register"] = "/jobs/100/apply"
+
+    def plan(snap):
+        if urlsplit(snap.url).path.startswith("/my-account"):
+            return StepPlan(page_kind="account_signup", actions=[act(snap, "Email", "fill", "account_email"),
+                                                                 act(snap, "mot de passe", "fill", "account_password"),
+                                                                 act(snap, "Inscription", "click", role="signup")])
+        return planner()(snap)
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert server.posts_to("/Account/Register"), (result.status, result.result.diagnostic_code, result.message, result.result.questions)
+
+
+async def test_site_error_page_after_the_posting_is_a_closed_offer(server, profile, tmp_path, fast, monkeypatch):
+    app = setup(server, profile, tmp_path, monkeypatch)
+    server.redirects["/entry"] = "/errorpage/"
+    server.html["/errorpage/"] = '<title>Jobs</title><h1>Oops</h1><a href="/jobs">Retour</a>'
+
+    def plan(snap):
+        if urlsplit(snap.url).path == "/jobs/100":
+            return StepPlan(page_kind="job_page")
+        return StepPlan(page_kind="error")
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert (result.status, result.result.diagnostic_code) == ("blocked", "job_closed"), (result.status, result.message, result.result.diagnostic_code)
+
+
+async def test_unanswered_option_list_re_rendered_after_typing_does_not_cancel_the_action(server, profile, tmp_path, fast, monkeypatch):
+    """Dynamic forms re-render (or lazy-load) the options of a question the candidate has not answered: not a changed question."""
+    app = setup(server, profile, tmp_path, monkeypatch)
+    server.redirects["/entry"] = "/jobs/100/apply"
+    server.html["/jobs/100/apply"] = ('<title>Ingénieur systèmes embarqués</title><form action="/jobs/100/apply" method="post">'
+        '<label for="name">Prénom</label><input id="name" name="first_name">'
+        '<label for="src">Comment avez-vous connu l\'offre ?</label><select id="src" name="src"><option value="">Choisir</option></select>'
+        '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form>'
+        '<script>document.getElementById("name").addEventListener("input", () => {'
+        'document.getElementById("src").innerHTML = "<option value=\\"\\">Choisir</option><option>Site</option><option>Ami</option>"; });</script>')
+    server.post_redirects["/jobs/100/apply"] = "/jobs/100/done"
+    server.html["/jobs/100/done"] = "<h1>Merci</h1><p>Votre candidature a bien été envoyée.</p>"
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(planner()))
+    assert "action annulée" not in result.message, (result.status, result.message)
+    assert server.posts_to("/jobs/100/apply")
+
+
+DIDOMI = ('<div id="didomi-host"><div id="didomi-popup" class="didomi-popup-backdrop" style="position:fixed;inset:0;z-index:9999;background:#8888">'
+          '<div style="background:#fff;margin:20% auto;width:60%"><p>Nous utilisons des cookies sur le site.</p>'
+          '<button>En savoir plus</button><button onclick="document.getElementById(\'didomi-popup\').remove()">Refuser</button>'
+          '<button onclick="document.getElementById(\'didomi-popup\').remove()">Accepter &amp; Fermer</button></div></div></div>')
+
+
+async def test_account_page_that_keeps_coming_back_stops_with_a_reason_not_a_failed_send(server, profile, tmp_path, fast, monkeypatch):
+    """Talentsoft-like: the ASP.NET postback re-renders the same page with an error (captcha / validation) and a consent popup is on top.
+    The account click must not end as an unconfirmed send (`failed`/credential_page): it is retried a bounded number of times, then
+    reported with a non-secret reason."""
+    app = setup(server, profile, tmp_path, monkeypatch)
+    scripted = (POSTBACK.replace('<button type="submit" name="go1">', '<button type="button" onclick="this.form.submit()" name="go1">')
+                .replace(f'<input type="submit" name="ctl00$corps$CreationControl$btnCreateAccount" value="{CREATE}">',
+                         f'<input type="button" onclick="this.form.submit()" name="ctl00$corps$CreationControl$btnCreateAccount" value="{CREATE}">'))
+    server.html["/my-account/log-in.aspx"] = scripted + DIDOMI + '<div role="alert">Une erreur est survenue, veuillez réessayer.</div>'
+
+    class SamePage(dict):
+        def __contains__(self, path):
+            return path.startswith("/my-account/log-in.aspx")
+
+        def __getitem__(self, path):
+            return "/my-account/log-in.aspx"
+
+    server.post_redirects = SamePage()
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(planner()))
+    assert (result.status, result.result.diagnostic_code) == ("needs_human", "account_not_accepted"), (
+        result.status, result.result.diagnostic_code, result.message)
+    assert 1 <= len(server.posts) <= 3
+    assert "fixture-password" not in repr(result.result.model_dump())

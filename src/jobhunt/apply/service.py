@@ -1233,7 +1233,9 @@ def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool, *, rec
         confirmed = guard.final_response and not guard.refused and not crashed
         account_only_email = (result.status == 'needs_email' and result.dispatch_diagnostics.email is not None
                               and not guard.non_account_transmitted)
-        clear = (not guard.transmitted or account_only_email) and not guard.final_started and not crashed
+        # only the candidate-account login / signup was posted (no application data): a stop after it is not "possibly sent"
+        account_only_stop = result.status in ('blocked', 'needs_human', 'needs_input') and not guard.non_account_transmitted
+        clear = (not guard.transmitted or account_only_email or account_only_stop) and not guard.final_started and not crashed
         return apply_store.finish_and_settle(run_.id, result, browser_attempt=attempt,
                                              browser_confirmed=confirmed, browser_clear=clear)
     return apply_store.finish_and_settle(run_.id, result, receipt=receipt)
