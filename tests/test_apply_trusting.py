@@ -687,3 +687,17 @@ async def test_a_cookie_dialog_is_still_refused_when_it_offers_that(page):  # no
     await page.set_content('''<div role="dialog" style="position:fixed;inset:10%;background:#fff"><p>Nous utilisons des cookies et traceurs.</p>
         <button onclick="window.choice='accept'">Tout accepter</button><button onclick="window.choice='refuse'">Tout refuser</button></div>''')
     assert await dismiss_consent(page) == "Tout refuser"
+
+
+def test_a_required_agreement_with_a_yes_i_agree_option_is_agreed_to():
+    undertaking = field(ref="a1", kind="select", required=True,
+                        label="I agree that I will not disclose or use any confidential information of others, including any former employer.",
+                        options=opts("Yes, I agree.", "No, I do not agree and I understand that this withdraws me from consideration."))
+    made = trusting.owner_item(run_of(), undertaking)
+    assert made is not None and made is not True and made.option_index == 0 and made.used == "application_terms"
+
+
+def test_a_plain_yes_no_question_is_not_taken_for_an_agreement():
+    question = field(ref="q1", kind="select", required=True, label="Will you now or in the future require sponsorship for an employment visa?",
+                     options=opts("No", "Yes"))
+    assert trusting.owner_item(run_of(), question) is None
