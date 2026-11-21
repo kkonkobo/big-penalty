@@ -384,15 +384,22 @@ def test_unknown_ref_is_noted_and_ignored():
     assert all(i.field.ref != "zz" for i in v.items)
 
 
-def test_only_the_last_click_is_kept_and_role_other_is_ignored():
+def test_only_the_last_click_is_kept_and_a_click_without_role_is_ignored():
     a = field(ref="b1", kind="button", label="Précédent")
     b = field(ref="b2", kind="button", label="Suivant")
     c = field(ref="b3", kind="button", label="Aide")
     plan = plan_of(Action(ref="b1", op="click", click_role="next"), Action(ref="b2", op="click", click_role="next"),
-                   Action(ref="b3", op="click", click_role="other"))
+                   Action(ref="b3", op="click"))
     v = trusting.validate(run_of(), plan, snap_of(a, b, c), None)
     assert v.click is not None and v.click[0].ref == "b2" and v.click[1] == "next"
     assert any("clic ignoré" in n and "Aide" in n for n in v.notes)
+
+
+def test_a_click_with_role_other_is_kept():
+    # (closing a dialog, opening a section: the planner's own click, never taken for a send unless its label says so)
+    close = field(ref="b1", kind="button", label="Annuler")
+    v = trusting.validate(run_of(), plan_of(Action(ref="b1", op="click", click_role="other")), snap_of(close), None)
+    assert v.click is not None and v.click == (close, "other")
 
 
 def test_click_on_a_non_button_is_ignored():

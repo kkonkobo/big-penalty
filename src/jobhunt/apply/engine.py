@@ -636,6 +636,7 @@ class _Run:
         self.email_verification = None
         self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
+        self.email_login_tried = False       # trusting mode: signed in after an e-mail verification that never came
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
         self.sent_url = ""                   # page URL of the last final click
         self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
@@ -2154,7 +2155,7 @@ class _Run:
                 return
             await save_failure_diagnostics(page, self.out_dir, status=res.status, diagnostic_code=res.diagnostic_code or "",
                                            step=len(self.steps), reason=self._stop_reason(res),
-                                           screenshot=not self.secrets, redact=self._r)
+                                           screenshot=not self.secrets or self.trusting, redact=self._r)  # (every input is masked in it)
             if self.trusting:  # the step trace (kinds, clicked labels, what failed and why; never a value), local only
                 trace = [{"step": s.index, "page_kind": s.page_kind, "url": bare_url(s.url), "clicked": safe_reason(s.clicked, self._r, 80),
                           "filled": [safe_reason(f.label, self._r, 60) for f in s.filled][:60],
@@ -2721,6 +2722,7 @@ class _Run:
                         # The creation form is gone and the site shows its sign-in page: the account was created (it may
                         # still await an e-mail verification). Sign in with it instead of creating it again.
                         self.account_exists_hosts.add(address)
+                        self.login_failed.discard(address)  # (a login tried before the account existed)
                         log.note += "; compte créé : connexion"
 
             if kind == "captcha":
@@ -2728,6 +2730,17 @@ class _Run:
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if kind == "email_verification":
                 if await self._verify_email(snap, resolve):
+                    continue
+                if self.trusting and not self.email_login_tried and not self.app_touched and not self.final_clicked:
+                    # No verification link or code came (many sites only send a "your account was created" notice): the
+                    # account exists, so start again from the posting and sign in with it. Once per run.
+                    self.email_login_tried = True
+                    address = self._account_address(self.page.url)
+                    self.account_exists_hosts.add(address)
+                    self.login_failed.discard(address)
+                    log.note += "; aucun lien de vérification reçu : connexion avec le compte créé"
+                    with contextlib.suppress(Exception):
+                        await self.page.goto(self.url, wait_until="domcontentloaded", timeout=30_000)
                     continue
                 return await self._email_hold(log)
             if (kind == "closed" or self._error_page_gone(kind, snap)
