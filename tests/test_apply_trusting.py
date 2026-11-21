@@ -1360,3 +1360,20 @@ async def test_a_privacy_statement_that_opens_on_cookies_is_still_accepted_by_bo
     await page.set_content(STATEMENT_WITH_COOKIES)
     assert await trusting.dismiss_blocker(SimpleNamespace(page=page)) == "Accepter"
     assert await page.title() != "refused" and await page.locator("[role=dialog]").count() == 0
+
+
+@pytest.mark.parametrize(("label", "offers"), [
+    ("Se connecter avec une adresse e-mail", True), ("Sign in with Google", True), ("Connexion avec LinkedIn", True),
+    ("Connexion", False), ("Postuler", False), ("Sign in", False),
+])
+def test_a_page_offering_ways_to_sign_in_is_not_past_the_account_pages(label, offers):
+    from jobhunt.apply.answer_check import fold
+
+    assert bool(engine.SIGN_IN_WITH_RE.search(fold(label))) is offers
+
+
+async def test_a_posting_said_gone_on_a_disabled_button_is_found_on_the_whole_page(page):  # noqa: F811
+    await page.set_content('<main><h1>Stage test</h1><button disabled>Désolé, cette offre a expiré</button></main>')
+    assert await engine._Run._page_says_gone(SimpleNamespace(page=page))
+    await page.set_content('<main><h1>Stage test</h1><button>Postuler</button></main>')
+    assert not await engine._Run._page_says_gone(SimpleNamespace(page=page))

@@ -132,6 +132,8 @@ SIGNUP_LINK_RE = re.compile(r"cre(?:er|ez|e) (?:un |une |mon |ma |votre )?(?:com
                             r"s'?inscrire|inscription|nouveau candidat|pas encore de compte|create (?:an )?(?:account|profile)|sign ?up|"
                             r"register|new user|konto erstellen|registrieren|nouvel utilisateur|premiere visite")
 # "Inscription avec Google" and the like create nothing on the employer's site: never taken for the account-creation control.
+# (a page that still offers the ways to sign in - "Se connecter avec une adresse e-mail" - is not past the account pages)
+SIGN_IN_WITH_RE = re.compile(r"(?:se connecter|connexion|s.identifier|sign[ -]?in|log[ -]?in|anmelden) (?:avec|with|mit)\b")
 SOCIAL_RE = re.compile(r"google|linkedin|facebook|apple|microsoft|github|twitter|france ?connect|\bsso\b|\bavec (?:un |une )?autre")
 ACCOUNT_EXISTS_RE = re.compile(r"existe deja|deja (?:utilis|inscrit|existant|enregistr|cree|un compte)|already (?:exists?|in use|registered|taken|been (?:used|registered))|"
                                r"is already|deja associe|bereits (?:registriert|vorhanden|verwendet)")
@@ -1025,6 +1027,15 @@ class _Run:
         """Before any application data: the page itself says the posting no longer exists (and has no file field to fill)."""
         return bool(self.autonomous and not self.app_touched
                     and not any(f.kind == "file" for f in snap.fields) and MISSING_OFFER_RE.search(fold(snap.text)))
+
+    async def _page_says_gone(self) -> bool:
+        """The whole page (any frame, disabled controls included) says the posting no longer exists."""
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                text = await fr.evaluate("() => (document.body && document.body.innerText || '').slice(0, 60000)")
+                if isinstance(text, str) and MISSING_OFFER_RE.search(fold(text)):
+                    return True
+        return False
 
     async def _banner_error(self) -> bool:
         """A form-level error banner is visible somewhere on the page (any frame)."""
@@ -2879,7 +2890,8 @@ class _Run:
                 if address == self._account_address(self.page.url):
                     has_password = any(field.kind == "password" for field in snap.fields)
                     if (kind not in (*ACCOUNT_KINDS, "email_verification", "captcha", "error", "closed", "other") and not has_password
-                            and not errors):
+                            and not errors and not (self.trusting and any(
+                                f.kind in ("button", "link") and SIGN_IN_WITH_RE.search(fold(f.label)) for f in snap.fields))):
                         self._confirm_account(address)   # past the account pages: the account exists on the site
                     elif role == "signup" and (kind in ACCOUNT_KINDS or has_password) and await self._says_account_exists():
                         if address in self.login_failed:  # logging in with the stored credential already failed here
@@ -3369,6 +3381,8 @@ class _Run:
                     idle = 0
                     continue
                 if idle >= 2:
+                    if trust and not self.app_touched and await self._page_says_gone():
+                        return self._gone_result()  # (said on a disabled apply button or below the excerpt the planner read)
                     return self._end("failed", "Aucune action possible sur cette page.")
                 continue
             idle = 0
@@ -3385,7 +3399,8 @@ class _Run:
                     if bound_account:
                         result.diagnostic_code = "account_login_failed" if kind == "account_login" else "account_signup_field_unfilled"
                     return result
-            if bound_account and role in ("login", "signup") and self.account_clicks >= ACCOUNT_CLICKS_MAX:
+            if bound_account and role in ("login", "signup") and self.account_clicks >= ACCOUNT_CLICKS_MAX + (3 if trust else 0):
+                # (trusting mode: a refused password, "this account exists", the way to the sign-in form, then the sign-in)
                 await self._shot(log)  # the site keeps sending the account page back: stop with a diagnosable reason
                 return self._account_stop("account_not_accepted")
             if self.mode == "dry_run" and not attach and not self._dry_may_click(field, role, snap):  # type: ignore[arg-type]
@@ -3488,7 +3503,7 @@ class _Run:
                 with contextlib.suppress(Exception):
                     known = self._account_exists()
                     self.login_unknown_try = not known
-                    self.known_login_try = known and bool(self.autonomous and self.autonomous.entry_binding)
+                    self.known_login_try = known and bool(self.autonomous and (self.autonomous.entry_binding or trust))
             self.diagnostics.control = ("final_submit" if final else "login_otp" if role == "login" else
                                         "account_creation" if role == "signup" else "navigation")
             try:
