@@ -1469,3 +1469,16 @@ async def test_a_required_list_without_the_answer_takes_its_other_entry(page, re
             await trusting._combobox(run, await resolve.element(combo.ref), combo, item)
     else:
         assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == taken
+
+
+@pytest.mark.parametrize(("want", "label"), [("Homme", "Masculin"), ("Femme", "Féminin"), ("Homme", "Male")])
+def test_a_gender_answer_finds_its_option_under_another_word(want, label):
+    labels = ["Select One", "Féminin", "Female", "Masculin", "Male", "Non déclaré"]
+    labels = [text for text in labels if text in ("Select One", "Non déclaré", label)]
+    assert labels[trusting.best_option(labels, want)] == label
+
+
+def test_the_autonomy_rules_tell_the_planner_to_send_from_a_review_page():
+    from jobhunt.apply import planner
+
+    assert "review / summary page" in planner.AUTONOMY and "month-first" in planner.AUTONOMY

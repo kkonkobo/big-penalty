@@ -125,6 +125,10 @@ def attached_cv(run: _Run, field: FormField, snap: PageSnapshot) -> _Item | None
     return _engine()._Item(Action(ref=field.ref, op="select"), field, option_index=index, value=field.options[index].label, used="cv")
 
 
+_GENDER_ALIASES = ({"homme", "masculin", "male", "man", "mann", "mannlich", "hombre", "uomo"},
+                   {"femme", "feminin", "female", "woman", "frau", "weiblich", "mujer", "donna"})
+
+
 def best_option(labels: list[str], want: str | None) -> int:
     """Index of the option an answer means, -1 when none: equality, yes / no and civility aliases, then the ONE option that
     starts with the answer, then the one that contains it (or that the answer contains)."""
@@ -135,7 +139,7 @@ def best_option(labels: list[str], want: str | None) -> int:
     for index, label in enumerate(folded):
         if label == target:
             return index
-    aliases = _engine()._ALIASES
+    aliases = (*_engine()._ALIASES, *_GENDER_ALIASES)
     for group in aliases:
         if target in group:
             hits = [index for index, label in enumerate(folded) if label in group]
