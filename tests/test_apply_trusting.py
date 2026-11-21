@@ -1258,3 +1258,38 @@ async def test_a_button_showing_text_slotted_into_its_component_is_read(page):  
     snap, resolve = await take_snapshot(page)
     assert [f.label for f in snap.fields if f.kind == "button"] == ["Suivant", "Ajouter"]
     await (await resolve.element(next(f.ref for f in snap.fields if f.label == "Suivant"))).click()
+
+
+async def test_a_slow_list_is_waited_for_and_another_lists_leftovers_are_not_its_options(page):  # noqa: F811
+    await page.set_content('''<label for="a">Pays de résidence</label><input id="a" role="combobox">
+      <ul role="listbox" id="left"><li role="option">Oui</li></ul>
+      <label for="b">Autorisé à travailler ?</label><input id="b" role="combobox"><div id="pop"></div>
+      <script>
+        b.addEventListener('input', () => setTimeout(() => {
+          pop.innerHTML = '<ul role="listbox">' + ['Oui', 'Non'].filter((t) => t.toLowerCase().startsWith(b.value.toLowerCase()))
+            .map((t) => `<li role="option">${t}</li>`).join('') + '</ul>';
+          for (const li of pop.querySelectorAll('li')) li.onclick = () => { b.value = li.textContent; pop.innerHTML = ''; };
+        }, 1800));
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox" and f.label.startswith("Autorisé"))
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Non")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Non"
+    assert await page.input_value("#b") == "Non" and run.combo_options[trusting.norm(combo.label)] == ["Non"]
+
+
+def test_a_password_refused_by_the_sites_policy_is_replaced_once():
+    run = run_of()
+    calls = []
+    run.password = SimpleNamespace(rotate=lambda address: calls.append(address) or "new")
+    run._account_address = lambda url: "careers.example.test"
+    refused = field(ref="p1", kind="password", label="Choisir un mot de passe", required=True, error="Mot de passe non valide Stratégie de mot de passe")
+    confirm = field(ref="p2", kind="password", label="Confirmer le mot de passe", required=True)
+    v = engine._Validated()
+    run.mode = "submit"
+    for f in (refused, confirm, refused):
+        assert trusting.check(run, Action(ref=f.ref, op="fill", fact="account_password"), f, v, snap_of(refused, confirm), None) is not None
+    assert calls == ["careers.example.test"] and any("nouveau mot de passe" in note for note in v.notes)

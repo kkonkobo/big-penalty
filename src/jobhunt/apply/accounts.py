@@ -469,6 +469,23 @@ def create_password(host: str, email: str, *, site: str | None = None) -> str:
     return pw
 
 
+def rotate_password(host: str, email: str, *, site: str | None = None) -> str | None:
+    """A NEW password for an account whose signup never completed (`pending`): the site refused the stored one (its own
+    password policy). None for an account that exists (`active`) or is not stored: a working password is never replaced."""
+    _check_name(host, email, site=site)
+    if account_state(host, email, site=site) != "pending":
+        return None
+    backend = get_backend()
+    service = service_name(host, site=site)
+    if not backend.get(service, email):
+        return None
+    pw = generate_password()
+    backend.set(service, email, pw, _label(host))
+    if backend.get(service, email) != pw:
+        raise ApplyError("Enregistrement dans le trousseau impossible")
+    return pw
+
+
 def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *, posting_url: str = "") -> tuple[Callable[[str], str], Callable[[str], bool]]:
     """For Workday, require a live URL matching the reserved host and explicit career-site path."""
     reserved_host = _hostname(posting_url)
@@ -512,8 +529,17 @@ def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *
             host, site = target
             set_state(host, email, "active", site=site)
 
+    def rotate(url):
+        """The site refused the stored password of an account that was never created: a new one (None otherwise)."""
+        target = scope(url)
+        if not target:
+            return None
+        host, site = target
+        return rotate_password(host, email, site=site) if site else rotate_password(host, email)
+
     known.confirm = confirm  # type: ignore[attr-defined]
     known.unconfirm = unconfirm  # type: ignore[attr-defined]
+    password.rotate = rotate  # type: ignore[attr-defined]
     return password, known
 
 

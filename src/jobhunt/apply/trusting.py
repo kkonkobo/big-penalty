@@ -301,6 +301,14 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         if kind != "password" or secret is None or run.mode != "submit":
             return drop("mot de passe et champ incompatibles")
         frame_url = run._frame_url(resolve, field.ref) if resolve else run.page.url
+        if field.error and _PASSWORD_REFUSED.search(fold(field.error)) and not getattr(run, "password_rotated", False):
+            # The site's own password policy refuses the stored password of an account that was never created: a new one,
+            # once per run (an existing account keeps its password: `rotate` answers nothing for it).
+            rotate = getattr(getattr(run, "password", None), "rotate", None)
+            with contextlib.suppress(Exception):
+                if rotate and rotate(run._account_address(frame_url)):
+                    run.password_rotated = True
+                    v.notes.append("mot de passe refusé par le site : nouveau mot de passe généré")
         if run._secret(frame_url) is None:
             return drop("mot de passe indisponible pour ce site")
         return item(Action(ref=field.ref, op="fill", fact=secret.key), field, secret, used=secret.key, frame_url=frame_url)
@@ -389,6 +397,8 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     return out
 
 
+_PASSWORD_REFUSED = re.compile(r"non valide|invalide|invalid|not valid|strategie|policy|politique de mot|exigence|requirement|"
+                               r"ne respecte|does not meet|trop long|too long|ungultig")
 _DIAL_LABEL = re.compile(r"indicatif|country code|calling code|dial(?:ing)? code|phone code|code (?:du |de )?pays|code pays|vorwahl|prefijo|prefisso")
 _DIAL_OPTION = re.compile(r"\(\+\d{1,4}\)|^\s*\+\d{1,4}\b")
 
@@ -751,6 +761,7 @@ _APPEARED_JS = r"""() => { const shown = window.__bpShown, out = [];
     if ([...el.children].some((child) => child.getClientRects().length && text(child))) continue;  // (only the text leaves)
     out.push(el); } };
   walk(document); return out; }"""
+_WAS_SHOWN_JS = "e => !!(window.__bpShown && window.__bpShown.has(e))"
 _CONTROL_SHAPE_JS = r"""e => { const parts = [];
   for (let n = e, i = 0; n && i < 4; i++) {
     parts.push(n.tagName.toLowerCase() + (n.getAttribute('role') ? '[' + n.getAttribute('role') + ']' : ''));
@@ -768,15 +779,16 @@ async def _popup_options(run: _Run) -> list[tuple[object, str]]:
     """(element, text) of every option the open list shows, in any frame. Elements, not positions: a virtualized list
     recycles its rows, so "the n-th option" is another one a moment later. A list without any option markup is read as
     what appeared on the page since `mark_shown`."""
-    found = []
+    found, stale = [], []
     for frame in run.page.frames:
         with contextlib.suppress(Exception):
             for handle in (await frame.locator(_POPUP_OPTIONS).element_handles())[:300]:
                 text = " ".join(str(await handle.evaluate(_OPTION_TEXT_JS)).split())
                 if text:
-                    found.append((handle, text))
-    if found:
-        return found
+                    # (an option already shown before this list was opened belongs to another list left open)
+                    (stale if await handle.evaluate(_WAS_SHOWN_JS) else found).append((handle, text))
+    if found or stale:
+        return found or stale
     for frame in run.page.frames:
         with contextlib.suppress(Exception):
             listed = await frame.evaluate_handle(_APPEARED_JS)
@@ -899,7 +911,8 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     await mark_shown(run)
     await open_list()
     found = await _popup_options(run)
-    remember(found)
+    if found and not await found[0][0].evaluate(_WAS_SHOWN_JS):
+        remember(found)
     index = pick(found)
     if index >= 0 and (len(found) <= 40 or not typed):
         if done := await choose(found, index):
@@ -916,7 +929,13 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
             await asyncio.sleep(1.0)
             for _ in range(2):
                 found = await _popup_options(run)
-                remember(found)
+                for _wait in range(5):  # a list fetched from the server: give it time before reading another list's leftovers
+                    if found and not await found[0][0].evaluate(_WAS_SHOWN_JS):
+                        break
+                    await asyncio.sleep(0.5)
+                    found = await _popup_options(run)
+                if found and not await found[0][0].evaluate(_WAS_SHOWN_JS):
+                    remember(found)
                 index = pick(found, loose=True)
                 if index < 0 and len(found) == 1 and not code and norm(text) and norm(text) in norm(found[0][1]):
                     index = 0
