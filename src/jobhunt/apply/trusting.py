@@ -781,8 +781,10 @@ _APPEARED_JS = r"""() => { const shown = window.__bpShown, out = [];
     if ([...el.children].some((child) => child.getClientRects().length && text(child))) continue;  // (only the text leaves)
     out.push(el); } };
   walk(document); return out; }"""
-_NO_RESULT = re.compile(r"^(?:aucun resultat|aucune (?:option|correspondance|donnee)|pas de resultat|no (?:results?|options?|matches|match|data)|"
-                        r"nothing found|keine (?:ergebnisse|treffer)|sin resultados|nessun risultato)\b")
+# (what a list says when it has nothing to offer, or nothing yet: never an option)
+_NO_RESULT = re.compile(r"^(?:(?:il n y a )?aucun resultat|aucune (?:option|correspondance|donnee|selection)|pas de resultat|"
+                        r"no (?:results?|options?|matches|match|data|selection)|nothing found|keine (?:ergebnisse|treffer|auswahl)|"
+                        r"sin resultados|nessun risultato|chargement|loading|recherche en cours|searching|wird geladen|laden)\b")
 _WAS_SHOWN_JS = "e => !!(window.__bpShown && window.__bpShown.has(e))"
 _CONTROL_SHAPE_JS = r"""e => { const parts = [];
   for (let n = e, i = 0; n && i < 4; i++) {
