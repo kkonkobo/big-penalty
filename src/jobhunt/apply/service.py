@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from jobhunt import db
-from jobhunt.apply import accounts, mail, policy
+from jobhunt.apply import accounts, mail, policy, trusting
 from jobhunt.apply.adapters import Attempt, CandidateFact, Dispatch, Handoff, Match, Receipt, WriteGate, clean_receipt, origin, registry
 from jobhunt.apply.adapter_browser import AdapterAudience
 from jobhunt.apply.autonomous import Audience
@@ -555,6 +555,10 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         gate = _write_gate(request, run_, job, "submit", trigger, match, confirmed_distinct=confirmed_distinct)
         audience = AdapterAudience(attempt, match, gate, check, pdf_bytes=request.pdf)
         planner = match.adapter.browser_planner(attempt)
+        if getattr(audience, "trusting", False):
+            # The adapter's scripted planner only knows the pages it was written for (it answered "job ad, nothing to do" on
+            # the application form itself): its entry / account clicks stand, every other page goes to the LLM planner.
+            planner = trusting.ScriptedThenLLM(planner, LLMPlanner(llm.get(), autonomy=True))
     else:
         audience = Audience(attempt.url, verified, check, pdf_bytes=request.pdf)
         expected = resolved_identity(job.extra)

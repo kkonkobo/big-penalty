@@ -49,6 +49,23 @@ _OPTION_JS = ("e => [...e.querySelectorAll('[role=option], option, li')].filter(
 _POPUP_OPTIONS = "[role=option]:visible, [role=listbox] li:visible, [role=menuitemradio]:visible, [role=menuitem]:visible"
 
 
+class ScriptedThenLLM:
+    """Planner of a trusting run on a site that has a scripted (adapter) planner. The scripted plan stands when it detects
+    a CAPTCHA / e-mail verification or when it ends with a click on a page that is not an application form (the entry and
+    account clicks it was written for). Everything else - form steps above all - is planned by the LLM planner."""
+
+    def __init__(self, scripted, llm):
+        self.scripted, self.llm = scripted, llm
+
+    async def plan(self, snapshot, facts, **context):
+        first = await self.scripted.plan(snapshot, facts, **context)
+        if first.page_kind in ("captcha", "email_verification"):
+            return first
+        if first.page_kind != "form" and any(action.op == "click" for action in first.actions):
+            return first
+        return await self.llm.plan(snapshot, facts, **context)
+
+
 def _engine():
     from jobhunt.apply import engine  # noqa: PLC0415 - the engine imports this module lazily too
 
