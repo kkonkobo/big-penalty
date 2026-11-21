@@ -284,7 +284,11 @@ def _creation_bounced(run: _Run, field: FormField, snap: PageSnapshot) -> bool:
     if not last or not engine._is_empty(field) or any(f.error for f in snap.fields if f.kind not in ("button", "link")):
         return False
     create = engine._Run._signup_submit(snap)
-    return create is not None and last == (urldefrag(run.page.url).url, norm(create.label))
+    # (the click must have been made ON this creation form - same number of password fields - not on the link that leads
+    # to it from a sign-in form, which carries the same words)
+    passwords = sum(f.kind == "password" for f in snap.fields)
+    return (create is not None and last == (urldefrag(run.page.url).url, norm(create.label))
+            and getattr(run, "last_click_passwords", -1) == passwords)
 
 
 def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: PageSnapshot, resolve) -> _Item | None:

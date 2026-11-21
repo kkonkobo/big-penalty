@@ -3565,6 +3565,7 @@ class _Run:
                 self.attach_done = True
             else:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
+                self.last_click_passwords = sum(f.kind == "password" for f in snap.fields)
             if bound_account and role in ("login", "signup"):
                 self.account_try = (role, self._account_address(self.page.url))
                 self.account_clicks += 1
