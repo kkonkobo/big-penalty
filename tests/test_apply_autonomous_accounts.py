@@ -486,3 +486,100 @@ async def test_account_page_that_keeps_coming_back_stops_with_a_reason_not_a_fai
         result.status, result.result.diagnostic_code, result.message)
     assert 1 <= len(server.posts) <= 3
     assert "fixture-password" not in repr(result.result.model_dump())
+
+
+# A large multi-step ATS's "Create Account" step: its consent box is not flagged required in the markup, the page itself refuses
+# to send the form while it is unticked ("Please check the box to continue"), and a hidden-by-wording honeypot input must stay empty.
+MULTISTEP_CREATE = '''<h1>Créer un compte</h1><form id="create" method="post" action="/Account/Register">
+  <label for="em">Adresse e-mail*</label><input id="em" type="text" name="email" aria-required="true"{email}>
+  <label for="pw">Mot de passe*</label><input id="pw" type="password" name="password" aria-required="true">
+  <label for="pw2">Confirmer le nouveau mot de passe*</label><input id="pw2" type="password" name="password2" aria-required="true">
+  <p>En créant un compte, vous acceptez que vos données soient traitées pour votre candidature.</p>
+  <input type="checkbox" id="ok" name="consent"><label for="ok">J'ai lu et j'accepte les conditions générales</label>
+  <p id="err" hidden>Error: Please check the box to continue</p>
+  <label for="hp">Enter website. This input is for robots only, do not enter if you're human.</label><input id="hp" name="website">
+  <button type="submit">Créer un compte</button>
+</form>
+<p>Vous avez déjà un compte ? <a href="/my-account/log-in.aspx">Connexion</a></p>
+<script>document.getElementById('create').addEventListener('submit', e => {
+  if (!document.getElementById('ok').checked) { e.preventDefault(); document.getElementById('err').hidden = false; }
+});</script>'''
+
+MULTISTEP_LOGIN = '''<h1>Connexion</h1>{notice}<form method="post" action="/Account/Login">
+  <label>Adresse e-mail<input type="email" name="email"></label><label>Mot de passe<input type="password" name="password"></label>
+  <button>Connexion</button></form><p><a href="/Account/Register">Créer un compte</a></p>'''
+
+
+def trusting_setup(server, profile, tmp_path, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_guard_mode", "core")
+    monkeypatch.setattr(service.get_settings(), "apply_fill_mode", "planner")
+    return setup(server, profile, tmp_path, monkeypatch)
+
+
+def multistep_planner(*, signup_click=True, fill_honeypot=True):
+    """A planner that never ticks the account form's consent box (it is not flagged required) and types into its honeypot."""
+    def plan(snap):
+        path = urlsplit(snap.url).path
+        if path == "/jobs/100":
+            return StepPlan(page_kind="job_page", actions=[act(snap, "Postuler", "click", role="open_form")])
+        if path == "/Account/Register":
+            actions = [act(snap, "Mot de passe", "fill", "account_password"), act(snap, "Confirmer", "fill", "account_password")]
+            if fill_honeypot:
+                actions.append(act(snap, "robots", "fill", value="https://example.test"))
+            if signup_click:
+                actions.append(act(snap, "Créer un compte", "click", role="signup", kind="button"))
+            return StepPlan(page_kind="account_signup", actions=actions)
+        if any(f.kind == "password" for f in snap.fields):
+            return StepPlan(page_kind="account_login", actions=[
+                act(snap, "Adresse e-mail", "fill", "account_email"), act(snap, "Mot de passe", "fill", "account_password"),
+                act(snap, "^Connexion$", "click", role="login", kind="button")])
+        return planner()(snap)
+    return plan
+
+
+async def test_multistep_ats_create_account_ticks_its_consent_box_and_leaves_the_honeypot_empty(server, profile, tmp_path, fast, monkeypatch):
+    app = trusting_setup(server, profile, tmp_path, monkeypatch)
+    server.redirects["/entry"] = "/Account/Register"
+    server.html["/Account/Register"] = MULTISTEP_CREATE.replace("{email}", "")
+    server.post_redirects["/Account/Register"] = "/jobs/100/apply"
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(multistep_planner()))
+    register = server.posts_to("/Account/Register")
+    assert len(register) == 1, (result.status, result.result.diagnostic_code, [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
+    body = parse_qs(register[0]["body"].decode(), keep_blank_values=True)
+    assert body["consent"] and body["website"] == [""]
+    assert body["email"] == ["camille@example.test"] and body["password"] == body["password2"] == ["fixture-password"]
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message)
+
+
+async def test_multistep_ats_create_account_without_a_planned_click_is_clicked_by_code(server, profile, tmp_path, fast, monkeypatch):
+    # The form came back with its e-mail already typed and the planner gave no click (it read "do not create the account
+    # again"): the one creation button is clicked by code.
+    app = trusting_setup(server, profile, tmp_path, monkeypatch)
+    server.redirects["/entry"] = "/Account/Register"
+    server.html["/Account/Register"] = MULTISTEP_CREATE.replace("{email}", ' value="camille@example.test"')
+    server.post_redirects["/Account/Register"] = "/jobs/100/apply"
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True,
+                               planner=ScriptedPlanner(multistep_planner(signup_click=False, fill_honeypot=False)))
+    register = server.posts_to("/Account/Register")
+    assert len(register) == 1, (result.status, result.result.diagnostic_code, [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
+    assert parse_qs(register[0]["body"].decode(), keep_blank_values=True)["consent"]
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message)
+
+
+async def test_multistep_ats_signin_page_asking_for_the_email_verification_is_a_verification_step(server, profile, tmp_path, fast, monkeypatch):
+    # After "Create Account" the site shows its sign-in page saying the account must first be verified by e-mail: the run
+    # takes it as the verification step (no mailbox in tests: it goes back to the posting) and then signs in, never creating
+    # the account a second time.
+    app = trusting_setup(server, profile, tmp_path, monkeypatch)
+    server.redirects["/entry"] = "/my-account/log-in.aspx"
+    server.html["/my-account/log-in.aspx"] = MULTISTEP_LOGIN.format(notice="")
+    server.html["/Account/Register"] = MULTISTEP_CREATE.replace("{email}", "")
+    server.post_redirects["/Account/Register"] = "/signin-pending"
+    server.html["/signin-pending"] = MULTISTEP_LOGIN.format(
+        notice="<p>Compte créé. Vérifiez votre adresse e-mail : un lien de vérification vous a été envoyé.</p>")
+    server.post_redirects["/Account/Login"] = "/jobs/100/apply"
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(multistep_planner()))
+    steps = [(x.page_kind, x.note, x.clicked) for x in result.result.steps]
+    assert len(server.posts_to("/Account/Register")) == 1, steps
+    assert len(server.posts_to("/Account/Login")) == 1, steps
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message, steps)
