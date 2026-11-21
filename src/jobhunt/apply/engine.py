@@ -1072,6 +1072,15 @@ class _Run:
         return bool(self.autonomous and not self.app_touched
                     and not any(f.kind == "file" for f in snap.fields) and MISSING_OFFER_RE.search(fold(snap.text)))
 
+    async def _page_says_received(self) -> bool:
+        """The whole visible page (any frame) states, as done, that the application was received."""
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                text = await fr.evaluate("() => (document.body && document.body.innerText || '').slice(0, 60000)")
+                if isinstance(text, str) and confirmation_evidence(text):
+                    return True
+        return False
+
     async def _page_says_gone(self) -> bool:
         """The whole page (any frame, disabled controls included) says the posting no longer exists."""
         for fr in self.page.frames:
@@ -2433,6 +2442,10 @@ class _Run:
                     gone = not has_form or self._form_gone(snap)
                     if gone and not any(f.error for f in snap.fields) and not await self._banner_error():
                         received = self._confirmed(snap, self.last_sent)
+                        if not received and urldefrag(self.page.url).url != self.sent_url:
+                            # The site moved on to another page that says, somewhere (a dialog over a job list), that the
+                            # application was received - even when a control there carries the send button's words.
+                            received = await self._page_says_received()
                         if not received and (snap.url, snap.text) != asked and loop.time() - started >= 3:
                             asked = (snap.url, snap.text)
                             pub, _ = self._public(snap)

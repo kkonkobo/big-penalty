@@ -1595,3 +1595,12 @@ async def test_a_live_region_that_announces_the_option_is_not_the_option(page): 
     item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Non")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Non"
     assert run.combo_options[trusting.norm(combo.label)] == ["Oui", "Non"]
+
+
+async def test_a_receipt_in_a_dialog_of_the_page_the_site_moved_to_is_found(page):  # noqa: F811
+    await page.set_content('''<main><h1>Offres</h1><a href="#">Ingénieur test</a></main>
+      <div role="dialog"><h2>Félicitations !</h2><p>Votre candidature a été enregistrée avec succès.</p>
+        <label>Adresse e-mail <input type="text"></label><button>Soumettre</button></div>''')
+    assert await engine._Run._page_says_received(SimpleNamespace(page=page))
+    await page.set_content('<main><h1>Offres</h1><a href="#">Ingénieur test</a><button>Soumettre</button></main>')
+    assert not await engine._Run._page_says_received(SimpleNamespace(page=page))
