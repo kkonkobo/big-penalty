@@ -1318,9 +1318,17 @@ async def test_a_form_still_there_with_its_required_field_empty_was_not_sent():
     snap = snap_of(name, status, send)
     run = _after_final_click(snap, sent_empty={("situation rqth", "combobox")})
     assert await engine._Run._submit_rejected(run, snap) and run.withdrawn and run.rejected_submits == 1 and not run.final_clicked
-    # nothing was knowingly left empty: the same page proves nothing (the send stays recorded)
+    # a field that a choice brought with it, empty and required, while what was filled keeps its values: refused too
     run = _after_final_click(snap, sent_empty=set())
-    assert not await engine._Run._submit_rejected(run, snap) and not run.withdrawn
+    assert await engine._Run._submit_rejected(run, snap) and run.withdrawn
+    # the form was emptied (what a site does after taking it): the same page proves nothing, the send stays recorded
+    emptied = snap_of(name.model_copy(update={"value": ""}), status, send)
+    run = _after_final_click(emptied, sent_empty=set())
+    assert not await engine._Run._submit_rejected(run, emptied) and not run.withdrawn
+    # nothing required is empty: no evidence of a refusal either
+    full = snap_of(name, status.model_copy(update={"required": False}), send)
+    run = _after_final_click(full, sent_empty=set())
+    assert not await engine._Run._submit_rejected(run, full) and not run.withdrawn
     # the field got its answer in the meantime, or the form is gone: no evidence of a refusal
     answered = snap_of(name, status.model_copy(update={"value": "Non"}), send)
     run = _after_final_click(answered, sent_empty={("situation rqth", "combobox")})
