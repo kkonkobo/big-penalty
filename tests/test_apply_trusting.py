@@ -649,3 +649,20 @@ async def test_cookie_dialog_prefers_the_refusal_button(page):
     await page.set_content(dialog("Nous utilisons des cookies", buttons))
     assert await trusting.dismiss_blocker(SimpleNamespace(page=page)) == "Tout refuser"
     assert await page.evaluate("document.body.getAttribute('data-choice')") == "refused"
+
+
+def test_a_code_list_named_by_its_label_or_its_options_makes_the_phone_national():
+    code = field(ref="c1", kind="select", label="Indicatif téléphonique du pays", options=[FieldOption(value="FRA_33", label="France (+33)"),
+                                                                                         FieldOption(value="BEL_32", label="Belgique (+32)")])
+    phone = field(ref="p1", kind="text", label="Numéro de téléphone", required=True)
+    snap = snap_of(code, phone)
+    assert trusting.is_dial(code, snap) and trusting.beside_dial(phone, snap)
+    made = trusting.check(run_of(), Action(ref="p1", op="fill", fact="phone"), phone, engine._Validated(), snap, None)
+    assert made is not None and made.national
+
+
+def test_a_phone_the_site_refused_is_typed_in_another_spelling():
+    phone = field(ref="p1", kind="text", label="Numéro de téléphone", required=True, value="+33 6 00 00 00 00",
+                  error="Format de numéro de téléphone non valide.")
+    made = trusting.check(run_of(), Action(ref="p1", op="fill", fact="phone"), phone, engine._Validated(), snap_of(phone), None)
+    assert made is not None and not made.forced.startswith("+")

@@ -222,7 +222,7 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     if op in ("check", "uncheck"):
         if kind != "radio" or not answer:
             return drop(f"opération {op} incompatible avec un champ {kind}")
-    dial = kind in ("select", "combobox") and engine._dial_selector(field, snap)
+    dial = is_dial(field, snap)
     phone = run.facts.get("phone")
     code = ("+33" if french_phone(phone.value or "") else international_calling_code(phone.value or "") or "") if phone and phone.value else ""
     if kind in ("select", "radio") or (kind == "combobox" and field.options):
@@ -253,20 +253,43 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         return out
     national = known is not None and known.key == "phone" and beside_dial(field, snap)
     current = field.value.strip()
-    if current and norm(current) == norm(want) and not (national and current.startswith(("+", "00"))):
+    if current and norm(current) == norm(want) and not field.error and not (national and current.startswith(("+", "00"))):
         return None
     if national and current and not current.startswith(("+", "00")) and re.sub(r"\D", "", current)[-9:] == re.sub(r"\D", "", want)[-9:]:
         return None
     out = item(Action(ref=field.ref, op="fill", fact=action.fact), field, known, value=want, used=used,
                inferred=inferred and not (known is not None and known.exact), basis=basis)
     out.national = national
+    if known is not None and known.exact and known.variants and current and field.error:
+        # The site refused the spelling it holds (a phone with its code, a LinkedIn URL without scheme): type another one.
+        # The planner's own text counts when it is one of the fact's spellings.
+        spellings = [known.value or "", *known.variants]
+        digits = lambda text: re.sub(r"\D", "", text)  # noqa: E731
+        others = [text for text in spellings if text.strip() != current and text.strip()]
+        asked = [text for text in others if answer and (text.strip() == answer or (digits(answer) and digits(text) == digits(answer)))]
+        flipped = [text for text in others if text.lstrip().startswith(("+", "00")) != current.startswith(("+", "00"))]
+        if asked or flipped or others:
+            out.forced = (asked or flipped or others)[0]
     return out
+
+
+_DIAL_LABEL = re.compile(r"indicatif|country code|calling code|dial(?:ing)? code|phone code|code (?:du |de )?pays|code pays|vorwahl|prefijo|prefisso")
+_DIAL_OPTION = re.compile(r"\(\+\d{1,4}\)|^\s*\+\d{1,4}\b")
+
+
+def is_dial(field: FormField, snap: PageSnapshot) -> bool:
+    """A calling-code picker: what the engine recognizes, a label that names it ("Indicatif téléphonique du pays"), or a list
+    whose options carry the codes ("France (+33)")."""
+    if field.kind not in ("select", "combobox"):
+        return False
+    if _engine()._dial_selector(field, snap) or _DIAL_LABEL.search(fold(f"{field.label} {field.placeholder} {field.name}")):
+        return True
+    return bool(field.options) and 2 * sum(bool(_DIAL_OPTION.search(option.label)) for option in field.options) >= len(field.options)
 
 
 def beside_dial(field: FormField, snap: PageSnapshot) -> bool:
     """A phone number field that stands next to a calling-code picker: the number goes in without the code."""
-    engine = _engine()
-    return any(other is not field and other.form == field.form and engine._dial_selector(other, snap) for other in snap.fields)
+    return any(other is not field and other.form == field.form and is_dial(other, snap) for other in snap.fields)
 
 
 def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validated:
@@ -748,7 +771,9 @@ async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> 
         await target.fill(secret, timeout=timeout)
         return engine.SECRET_LOG
     text = it.value or ""
-    if fact is not None and fact.exact and fact.variants:
+    if getattr(it, "forced", ""):
+        text = it.forced
+    elif fact is not None and fact.exact and fact.variants:
         length, pattern = await target.evaluate("e => [e.getAttribute('maxlength'), e.getAttribute('pattern')]")
         text = engine.pick_variant(fact, field, int(length) if length and length.isdigit() else None, pattern, national=it.national)
     if field.kind == "date":
