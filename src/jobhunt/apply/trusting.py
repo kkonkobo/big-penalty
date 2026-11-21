@@ -733,13 +733,57 @@ _REMOVE_CHOSEN_JS = r"""(e, keep) => { let removed = 0;
 _PLACEHOLDER_LABEL = re.compile(r"^(?:select|choose|selectionn\w*|choisi\w*|bitte wahlen|auswahlen)\b")
 
 
+# What a list made of unmarked elements (no role, custom tags, shadow roots) offers is what APPEARED when it opened:
+# `_MARK_SHOWN_JS` remembers what the page shows before the click, `_APPEARED_JS` returns the text leaves shown since.
+_MARK_SHOWN_JS = r"""() => { const shown = new WeakSet();
+  const walk = (root) => { for (const el of root.querySelectorAll('*')) {
+    if (el.getClientRects().length) shown.add(el);
+    if (el.shadowRoot) walk(el.shadowRoot); } };
+  walk(document); window.__bpShown = shown; }"""
+_APPEARED_JS = r"""() => { const shown = window.__bpShown, out = [];
+  if (!shown) return out;
+  const text = (el) => (el.innerText || el.textContent || '').trim();
+  const walk = (root) => { for (const el of root.querySelectorAll('*')) {
+    if (el.shadowRoot) walk(el.shadowRoot);
+    if (out.length >= 300 || shown.has(el) || !el.getClientRects().length || el.matches('script, style, input, textarea, select')) continue;
+    const mine = text(el);
+    if (!mine || mine.length > 120) continue;
+    if ([...el.children].some((child) => child.getClientRects().length && text(child))) continue;  // (only the text leaves)
+    out.push(el); } };
+  walk(document); return out; }"""
+_CONTROL_SHAPE_JS = r"""e => { const parts = [];
+  for (let n = e, i = 0; n && i < 4; i++) {
+    parts.push(n.tagName.toLowerCase() + (n.getAttribute('role') ? '[' + n.getAttribute('role') + ']' : ''));
+    n = n.parentElement || (n.getRootNode() && n.getRootNode().host); }
+  return parts.join(' < '); }"""
+
+
+async def mark_shown(run: _Run) -> None:
+    for frame in run.page.frames:
+        with contextlib.suppress(Exception):
+            await frame.evaluate(_MARK_SHOWN_JS)
+
+
 async def _popup_options(run: _Run) -> list[tuple[object, str]]:
     """(element, text) of every option the open list shows, in any frame. Elements, not positions: a virtualized list
-    recycles its rows, so "the n-th option" is another one a moment later."""
+    recycles its rows, so "the n-th option" is another one a moment later. A list without any option markup is read as
+    what appeared on the page since `mark_shown`."""
     found = []
     for frame in run.page.frames:
         with contextlib.suppress(Exception):
             for handle in (await frame.locator(_POPUP_OPTIONS).element_handles())[:300]:
+                text = " ".join(str(await handle.evaluate(_OPTION_TEXT_JS)).split())
+                if text:
+                    found.append((handle, text))
+    if found:
+        return found
+    for frame in run.page.frames:
+        with contextlib.suppress(Exception):
+            listed = await frame.evaluate_handle(_APPEARED_JS)
+            for prop in (await listed.get_properties()).values():
+                handle = prop.as_element()
+                if handle is None:
+                    continue
                 text = " ".join(str(await handle.evaluate(_OPTION_TEXT_JS)).split())
                 if text:
                     found.append((handle, text))
@@ -773,9 +817,20 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         labels = [text for _, text in found]
         if code:
             hits = [index for index, text in enumerate(labels) if re.findall(r"\+\s*[0-9]+", text) == [code]]
+            if not hits and not any(re.search(r"\+\s*[0-9]", text) for text in labels):  # a list of country names only
+                names = DIAL_COUNTRY_NAMES.get(code, ())
+                hits = [index for index, text in enumerate(labels) if norm(text) in names]
             return hits[0] if hits else -1
         index = best_option(labels, want)
-        return _closest(labels, want) if index < 0 and loose else index
+        if index < 0 and loose:
+            index = search_choice(labels, want, "")
+        if index < 0 and loose and _PLACE_LABEL.search(fold(field.label)):
+            # Suggestions of an address / city box: none is spelled like the answer ("12 Rue X, Toulouse, France" for
+            # "12 rue X 31000 Toulouse"); the first of those sharing the most words with it is the place meant.
+            shared = [_shared_words(label, want) for label in labels]
+            if shared and max(shared) >= min(2, len(norm(want).split())):
+                index = shared.index(max(shared))
+        return index
 
     def shows(live: str, label: str) -> bool:
         if code:
@@ -841,6 +896,7 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
             await loc.evaluate("e => e.click()")
         await asyncio.sleep(0.4)
 
+    await mark_shown(run)
     await open_list()
     found = await _popup_options(run)
     remember(found)
@@ -860,6 +916,7 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
             await asyncio.sleep(1.0)
             for _ in range(2):
                 found = await _popup_options(run)
+                remember(found)
                 index = pick(found, loose=True)
                 if index < 0 and len(found) == 1 and not code and norm(text) and norm(text) in norm(found[0][1]):
                     index = 0
@@ -871,7 +928,11 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     with contextlib.suppress(Exception):
         await run.page.keyboard.press("Escape")
     offered = run.combo_options.get(norm(field.label)) or []
-    raise engine._Skip("option introuvable dans la liste" + (" ; options proposées : " + " | ".join(offered[:20]) if offered else ""))
+    shape = ""
+    with contextlib.suppress(Exception):
+        shape = str(await loc.evaluate(_CONTROL_SHAPE_JS))[:120]
+    raise engine._Skip("option introuvable dans la liste" + (" ; options proposées : " + " | ".join(offered[:20]) if offered else "")
+                       + (f" (contrôle : {shape})" if shape else ""))
 
 
 _CODE_FIELD_NOT = re.compile(r"postal|zip|pays|country|promo|parrain|referral|indicatif|naf|ape|siret|iban|bic")
@@ -979,6 +1040,7 @@ async def _search_box(run: _Run, target, code: str) -> str:
     country of the code, then pick the one entry that carries the code."""
     engine = _engine()
     names = sorted(DIAL_COUNTRY_NAMES.get(code, ()), key=len)
+    await mark_shown(run)
     with contextlib.suppress(Exception):
         if await target.evaluate(_REMOVE_CHOSEN_JS, f"({code})"):  # another country's code sits there: take it out first
             await asyncio.sleep(0.4)
@@ -1018,6 +1080,7 @@ _CHOSEN_JS = r"""e => { for (let p = e.parentElement, i = 0; p && i < 4; p = p.p
     if (chosen) return (chosen.textContent || '').trim(); }
   return ''; }"""
 _OTHER_OPTION = re.compile(r"^(?:autres?|others?|sonstiges?|andere)\b|\b(?:not listed|non liste|other school|autre etablissement|autre ecole)\b")
+_PLACE_LABEL = re.compile(r"\b(?:adresse|address|anschrift|ville|city|localisation|location|lieu|commune|stadt|ort)\b")
 _SMALL_WORDS = frozenset({"ecole", "school", "universite", "university", "institut", "institute", "national", "nationale", "superieure",
                           "superieur", "ingenieur", "ingenieurs", "engineering", "sciences", "science", "pour", "with", "from", "dans"})
 
@@ -1078,6 +1141,7 @@ async def _search_pick(run: _Run, target, field: FormField, want: str) -> str:
                 await run.page.keyboard.press("Escape")
         return chosen and label
 
+    await mark_shown(run)
     words = sorted({word for word in re.findall(r"[^\W\d_][\w'’-]{2,}", want) if norm(word) not in _SMALL_WORDS and len(norm(word)) >= 4},
                    key=len, reverse=True)
     queries = [want, want.split(" (")[0], want.split(",")[0], *words[:4]]

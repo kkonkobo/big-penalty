@@ -1170,3 +1170,77 @@ def test_an_unknown_the_page_does_not_require_is_left_to_the_site():
     required = optional.model_copy(update={"required": True})
     blocking, _ = trusting.open_questions(run_of(), plan, snap_of(required), engine._Validated(), set(), None)
     assert [q.ref for q in blocking] == ["f1"]
+
+
+UNMARKED_LIST = '''<form><label for="code">Code pays</label><x-select id="host"></x-select>
+  <label>Numéro de téléphone <input type="tel" name="phone"></label></form>
+  <script>
+    const root = host.attachShadow({mode: 'open'});
+    root.innerHTML = '<input id="box" role="combobox" aria-label="Code pays"><div id="menu"></div>';
+    const box = root.getElementById('box'), menu = root.getElementById('menu');
+    const ALL = ITEMS;
+    const show = () => { menu.innerHTML = ALL.filter((name) => name.toLowerCase().includes(box.value.toLowerCase()))
+        .map((name) => `<div class="item"><i class="flag"></i><span>${name}</span></div>`).join('');
+      for (const item of menu.children) item.onclick = () => { box.value = item.textContent; menu.innerHTML = ''; }; };
+    box.addEventListener('click', show); box.addEventListener('input', show);
+  </script>'''
+
+
+@pytest.mark.parametrize(("items", "shown"), [
+    ("['Belgique', 'France', 'Suisse']", "France"),  # a list of country names only: the candidate's country
+    ("['Belgique (+32)', 'France (+33)', 'Suisse (+41)']", "France (+33)"),
+])
+async def test_a_list_without_option_markup_is_read_as_what_appeared(page, items, shown):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(UNMARKED_LIST.replace("ITEMS", items))
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="phone"), combo, None, value="+33")
+    item.dial_code = "+33"
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == shown
+
+
+async def test_a_list_that_offers_nothing_names_the_control_it_could_not_read(page):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(UNMARKED_LIST.replace("ITEMS", "[]"))
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    with pytest.raises(engine._Skip, match=r"contrôle : input\[combobox\] < x-select"):
+        await trusting._combobox(run, await resolve.element(combo.ref), combo, engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Ailleurs"))
+
+
+@pytest.mark.parametrize(("text", "stated"), [
+    ("Vous avez déjà un compte ? Connexion", False),  # the prompt of every creation form, not a statement
+    ("Déjà inscrit ?\nConnectez-vous", False),
+    ("Already registered? Sign in", False),
+    ("Un compte existe déjà avec cette adresse e-mail.", True),
+    ("This email is already registered. Please sign in.", True),
+    ("Cette adresse est déjà utilisée", True),
+])
+def test_a_sign_in_prompt_does_not_say_the_account_exists(text, stated):
+    from jobhunt.apply.answer_check import fold
+
+    assert engine.says_account_exists(fold(text)) is stated
+
+
+async def test_an_address_box_takes_the_suggestion_closest_to_the_answer(page):  # noqa: F811
+    await page.set_content('''<label for="a">Adresse</label><input id="a" role="combobox" aria-autocomplete="list"><div id="pop"></div>
+      <script>
+        const ALL = ['12 Rue des Tests, Testville, France', '12 Rue des Tests, Fauxbourg, France', '1 Place du Faux, Testville, France'];
+        a.addEventListener('input', () => {
+          const words = a.value.toLowerCase().split(/[ ,]+/).filter((w) => w.length > 2);
+          const hits = a.value.length < 3 ? [] : ALL.filter((name) => words.every((w) => name.toLowerCase().includes(w)));
+          pop.innerHTML = hits.map((name) => `<div class="s">${name}</div>`).join('');
+          for (const row of pop.children) row.onclick = () => { a.value = row.textContent; pop.innerHTML = ''; }; });
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="address"), combo, None, value="12 rue des Tests 99000 Testville")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "12 Rue des Tests, Testville, France"

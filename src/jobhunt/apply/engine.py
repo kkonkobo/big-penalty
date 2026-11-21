@@ -135,6 +135,18 @@ SIGNUP_LINK_RE = re.compile(r"cre(?:er|ez|e) (?:un |une |mon |ma |votre )?(?:com
 SOCIAL_RE = re.compile(r"google|linkedin|facebook|apple|microsoft|github|twitter|france ?connect|\bsso\b|\bavec (?:un |une )?autre")
 ACCOUNT_EXISTS_RE = re.compile(r"existe deja|deja (?:utilis|inscrit|existant|enregistr|cree|un compte)|already (?:exists?|in use|registered|taken|been (?:used|registered))|"
                                r"is already|deja associe|bereits (?:registriert|vorhanden|verwendet)")
+
+
+def says_account_exists(text: str) -> bool:
+    """The page STATES that the e-mail already has an account ("Un compte existe déjà avec cette adresse"). The prompt every
+    creation form carries ("Vous avez déjà un compte ? Connexion", "Already registered? Sign in") is a question, not that."""
+    for match in ACCOUNT_EXISTS_RE.finditer(text):
+        tail = re.split(r"[.!\n]", text[match.end():match.end() + 60], maxsplit=1)[0]
+        if "?" not in tail:
+            return True
+    return False
+
+
 LOGIN_BUTTON_RE = re.compile(r"se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden|identifier")
 CREATION_NAME_RE = re.compile(r"creation|creer|create|nouveau|nouvelle|\bnew|register|signup|sign up|inscri")
 EMAIL_FIELD_RE = re.compile(r"e-?mail|courriel|identifiant|login|username|adresse mail")
@@ -884,7 +896,7 @@ class _Run:
         for fr in self.page.frames:
             with contextlib.suppress(Exception):
                 text = await fr.evaluate("() => (document.body && document.body.innerText || '').slice(0, 20000)")
-                if isinstance(text, str) and ACCOUNT_EXISTS_RE.search(fold(text)):
+                if isinstance(text, str) and says_account_exists(fold(text)):
                     return True
         return False
 
