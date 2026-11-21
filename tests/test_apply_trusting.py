@@ -1576,3 +1576,22 @@ async def test_the_answer_to_an_account_click_is_kept_without_values():
     answers = await engine._Run._account_answers(run)
     assert answers == ["422 /fr-FR/acme/createAccount | errorCode=ACCOUNT_EXISTS ; message=Account for <e-mail> exists"]
     assert run.account_pending == []
+
+
+async def test_a_live_region_that_announces_the_option_is_not_the_option(page):  # noqa: F811
+    await page.set_content('''<label for="a">Mobile ?</label><input id="a" role="combobox">
+      <div id="say"></div><div id="pop"></div>
+      <script>
+        a.addEventListener('click', () => {
+          say.innerHTML = '<div role="alert">Non</div>';   // the announcer comes first in the page
+          pop.innerHTML = '<div class="row"><span>Oui</span></div><div class="row"><span>Non</span></div>';
+          for (const row of pop.children) row.onclick = () => { a.value = row.textContent; pop.innerHTML = ''; say.innerHTML = ''; }; });
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Non")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Non"
+    assert run.combo_options[trusting.norm(combo.label)] == ["Oui", "Non"]

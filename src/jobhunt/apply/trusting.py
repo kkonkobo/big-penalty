@@ -786,6 +786,8 @@ _APPEARED_JS = r"""() => { const shown = window.__bpShown, out = [];
   const walk = (root) => { for (const el of root.querySelectorAll('*')) {
     if (el.shadowRoot) walk(el.shadowRoot);
     if (out.length >= 300 || shown.has(el) || !el.getClientRects().length || el.matches('script, style, input, textarea, select')) continue;
+    // (a live region only ANNOUNCES the highlighted option to screen readers: clicking it chooses nothing)
+    if (el.closest('[role=alert], [role=status], [role=log], [aria-live]')) continue;
     const mine = text(el);
     if (!mine || mine.length > 120) continue;
     if ([...el.children].some((child) => child.getClientRects().length && text(child))) continue;  // (only the text leaves)
