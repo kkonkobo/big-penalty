@@ -2129,7 +2129,8 @@ class _Run:
                         await ctx.set_offline(False)
         res.steps = self.steps
         res.final_url = self.final_url
-        res.submit_clicked = self.final_clicked or self.nav_pending
+        # (trusting mode: only account sign-in / sign-up clicks are still "pending"; without application data they are not a send)
+        res.submit_clicked = self.final_clicked or (self.nav_pending and (self.app_touched or not self.trusting))
         res.finished_at = datetime.now()
         self._scrub(res)
         return res
