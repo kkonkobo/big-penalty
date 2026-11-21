@@ -171,7 +171,7 @@ async def ensure_letter(app: Application, job: MergedJob, master: Master, llm) -
         await asyncio.to_thread(_render_pdf, letter_html(master, job, paragraphs), pdf)
         text = full_text(master, job, paragraphs)
         _write_atomic(rev_dir / TXT_NAME, text)
-        cvstore.set_cover_letter(app.id, pdf)
+        cvstore.set_cover_letter(app.id, pdf, touch=False)  # (written during a send: the send stays bound)
         return Letter(text=text, pdf_path=pdf.resolve())
     except Exception:  # noqa: BLE001 - LLM, browser or disk problem: fail closed, the run pauses and asks the user
         return None

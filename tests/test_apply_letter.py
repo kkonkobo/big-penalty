@@ -57,6 +57,8 @@ async def test_letter_is_written_beside_the_revision_pdf_and_recorded(setup):
     assert res.text.startswith(f"Objet : candidature — {job.title}\n\nMadame, Monsieur,\n\n")
     assert res.text.rstrip().endswith("salutations distinguées.\n\nCamille Durand") and "Je vous prie d'agréer" in res.text
     assert store.get_application(app.id).cover_letter_path == str(rev_dir / "lettre.pdf")
+    # (written during a send: the application's version is untouched, so the running send stays bound to it)
+    assert store.get_application(app.id).updated_at == app.updated_at
     assert [c["cls"] for c in prov.calls] == ["LetterDraft", "LetterVerdict"]
     assert "Camille Durand" in prov.calls[0]["user"] and job.title in prov.calls[0]["user"]
 
