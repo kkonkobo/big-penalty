@@ -930,10 +930,15 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                 return (await run._combo_value(loc)) or f"{label} > {entry_label}"
         if (closed or field.multiple or live != before) and shows(live, label):
             return live or label
+        shape = ""
+        with contextlib.suppress(Exception):  # (what the option is and what the control shows, for the local failure record)
+            shape = (f" (option : {str(await option.evaluate(_CONTROL_SHAPE_JS))[:80]} ; "
+                     f"{'encore affichée' if await _shown(option) else 'liste fermée'} ; "
+                     f"contrôle {'inchangé' if live == before else 'modifié'})")
         await run._abandon_combobox(loc)
         with contextlib.suppress(Exception):
             await run.page.keyboard.press("Escape")
-        raise engine._Skip("la liste n'a pas retenu la réponse choisie")
+        raise engine._Skip("la liste n'a pas retenu la réponse choisie" + shape)
 
     def remember(found):
         # What the open list offers is shown to the planner at the next read (a list that only renders once opened). The

@@ -66,7 +66,10 @@ CONFIRM_RE = re.compile(
     r"nous avons bien recu|we (?:have )?(?:successfully )?received your application|thank(?:s| you) for applying|"
     r"merci (?:pour|d'avoir) (?:votre candidature|postule)|"
     r"candidature (?:a (?:bien |ete )*|est (?:bien )?|bien )?(?:recue|envoyee|enregistree|transmise|soumise|prise en compte)|"
+    # ("Votre candidature pour l'offre 2026-1 STAGE - ... a été envoyée": what it is for stands between the two)
+    r"candidature [^.!?\n]{1,200}? (?:a (?:bien )?ete|est (?:bien )?) ?(?:recue|envoyee|enregistree|transmise|soumise|prise en compte)|"
     r"application (?:has been |was |is |had been )?(?:successfully )?(?:received|submitted|sent|recorded)|"
+    r"application [^.!?\n]{1,200}? (?:has been|was) (?:successfully )?(?:received|submitted|sent|recorded)|"
     r"successfully (?:submitted|applied|sent)")
 NEGATION_RE = re.compile(
     r"n'a pas (?:ete|pu)|pas (?:ete )?(?:envoyee|transmise|enregistree|recue)|not been|has not|was not|were not|could not|couldn't|"
@@ -719,6 +722,7 @@ class _Run:
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
+        self.presend: dict[str, int] = {}  # trusting mode: re-reads made before a final click, per page
         self.signed_up: set[str] = _Accounts()     # account addresses where an account-creation click was made in this run
         self.form_hints: dict[str, int] = {}  # trusting mode: page URLs read again as the application form (twice each at most)
         self.plan_trace: list[dict] = []     # trusting mode: what the planner saw / answered at the latest steps (no value)
@@ -2480,6 +2484,11 @@ class _Run:
             kept = any(not _is_empty(f) for f in snap.fields
                        if f.kind not in ("button", "link") and (_norm(_label(f)), f.kind) in sent.fields)
             errors = bool(empty) and (kept or any((_norm(_label(f)), f.kind) in self.sent_empty for f in empty))
+        exists = False
+        if not errors and intact and self.trusting and any(f.kind == "password" for f in snap.fields):
+            # A form that creates the account and applies at once came back saying the account exists: nothing was received.
+            # The account is signed in to, then the application is made from there.
+            errors = exists = await self._says_account_exists()
         if not errors and intact and not silent:
             # The same form came back under an error banner or an "Erreur ..." page title (a server-side validation that
             # lists the missing fields in a banner instead of marking them).
@@ -2492,6 +2501,10 @@ class _Run:
             await withdraw()
         except Exception:
             return False
+        if exists:
+            address = self._account_address(self.page.url)
+            self.account_exists_hosts.add(address)
+            self.login_failed.discard(address)
         self.rejected_submits += 1
         self.final_awaiting = self.final_clicked = False
         self.submit_clicks = max(0, self.submit_clicks - 1)
@@ -3060,7 +3073,7 @@ class _Run:
                     # A sign-in BUTTON counts too (an account page that toggles between its create and sign-in forms); the
                     # same label twice (header + form) is one control: the one in the form, last in page order.
                     toggles = [field for field in snap.fields if field.kind in {"link", "button"} and re.fullmatch(
-                        r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
+                        r"(?:se connecter|connexion|connectez[ -]vous|identifiez[ -]vous|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
                     if len({fold(field.label).strip() for field in toggles}) == 1:
                         signin = [toggles[-1]]
                 # The same control twice (header + body) is one control; two different ones are ambiguous.
@@ -3353,16 +3366,18 @@ class _Run:
                 # Stop only for what nobody could answer: the planner's own unknowns and the answers that failed. Required
                 # fields it left alone are the site's to judge (its validation is the truth, not our reading of "required").
                 blocking, soft = trusting.open_questions(self, plan, snap, v, handled, v.click[0] if v.click else None) if guarded else ([], [])
-                if (blocking or soft) and handled and self.replans.get(page_key, 0) < 2:
+                # (each re-read follows a step that filled something: a one-page form whose answers bring new fields with
+                # them needs more than two of them)
+                if (blocking or soft) and handled and self.replans.get(page_key, 0) < 5:
                     self.replans[page_key] = self.replans.get(page_key, 0) + 1  # progress was made: read the page again first
                     log.note = self._r("; ".join(x for x in (log.note, *v.notes, "relecture avant le clic") if x))[:900]
                     await self._shot(log)
                     continue
                 chosen = {f.ref for f in snap.fields if f.kind in ("select", "combobox", "radio", "checkbox")} & handled
-                if final and chosen and self.replans.get(page_key, 0) < 2:
+                if final and chosen and self.presend.get(page_key, 0) < 2:
                     # A choice made in this step may have brought a new field with it ("Autre, précisez :"): the page is read
                     # again before the click that sends it.
-                    self.replans[page_key] = self.replans.get(page_key, 0) + 1
+                    self.presend[page_key] = self.presend.get(page_key, 0) + 1
                     log.note = self._r("; ".join(x for x in (log.note, *v.notes, "relecture avant l'envoi") if x))[:900]
                     await self._shot(log)
                     continue
@@ -3606,6 +3621,7 @@ class _Run:
                 return self._end("failed", f"Clic impossible sur « {_label(field)} » ({e}).")
             log.clicked = self._r(field.label)
             self.replans.pop(page_key, None)  # (a multi-step form keeps its URL: each step gets its own re-reads)
+            self.presend.pop(page_key, None)
             self.combo_options.clear()  # (and the lists of the next step are other lists, whatever their labels)
             await self._after_click()
             if self.autonomous:
