@@ -1445,3 +1445,27 @@ def test_a_photo_nobody_has_does_not_stop_the_send():
 ])
 def test_what_an_empty_or_loading_list_says_is_not_an_option(text, placeholder):
     assert bool(trusting._NO_RESULT.search(trusting.norm(text))) is placeholder
+
+
+@pytest.mark.parametrize(("required", "taken"), [("required", "Other"), ("", None)])
+async def test_a_required_list_without_the_answer_takes_its_other_entry(page, required, taken):  # noqa: F811
+    await page.set_content(f'''<label for="a">Source Detail *</label><input id="a" role="combobox" {required}><div id="pop"></div>
+      <script>
+        const ALL = ['CareerOne', 'Indeed', 'Other', 'Seek'];
+        const show = () => {{ const hits = ALL.filter((t) => t.toLowerCase().includes(a.value.toLowerCase()));
+          pop.innerHTML = '<ul role="listbox">' + hits.map((t) => `<li role="option">${{t}}</li>`).join('') + '</ul>';
+          for (const li of pop.querySelectorAll('li')) li.onclick = () => {{ a.value = li.textContent; pop.innerHTML = ''; }}; }};
+        a.addEventListener('click', show); a.addEventListener('input', show);
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    combo = combo.model_copy(update={"required": bool(required)})
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="Site carrière de l'entreprise")
+    if taken is None:
+        with pytest.raises(engine._Skip):
+            await trusting._combobox(run, await resolve.element(combo.ref), combo, item)
+    else:
+        assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == taken
