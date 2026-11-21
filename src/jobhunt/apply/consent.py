@@ -37,8 +37,13 @@ _DISMISS = r"""() => {
     + '[id*="axeptio" i], [class*="axeptio" i], [id*="usercentrics" i], [id*="sp_message" i], [class*="qc-cmp" i], [id*="truste" i], '
     + '[class*="truste" i], [id*="iubenda" i], [class*="iubenda" i], [id*="CybotCookiebot" i], [id*="cmp" i]';
   // (a long privacy statement mentions cookies somewhere: only its opening lines, or the container's own name, make it a cookie dialog)
+  // A box that opens as a privacy statement, or offers to print it, is the statement itself whatever it says of cookies.
+  const STATEMENT = /^.{0,160}(?:d[ée]claration de confidentialit|privacy statement|data privacy|protection des donn[ée]es|datenschutzerkl)/is;
+  const PRINT = /^(?:imprimer|print|drucken)$/i;
+  const statement = box => STATEMENT.test((box.innerText || '').trim())
+    || [...box.querySelectorAll('button, [role="button"], a')].some(n => visible(n) && PRINT.test(label(n)));
   const aboutCookies = node => { const box = outer(node);
-    return !!box && (box.matches(CMP) || !!node.closest(CMP) || COOKIE.test((box.innerText || '').slice(0, 700))); };
+    return !!box && (box.matches(CMP) || !!node.closest(CMP) || (COOKIE.test((box.innerText || '').slice(0, 700)) && !statement(box))); };
   for (const pattern of [REJECT, ACCEPT, SAVE]) {
     const found = buttons.filter(node => pattern.test(label(node)) && inTopic(node) && (pattern === ACCEPT || aboutCookies(node)));
     if (found.length) { found[0].click(); return label(found[0]); }

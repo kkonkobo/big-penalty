@@ -672,6 +672,7 @@ class _Run:
         self.email_login_tried = False       # trusting mode: at most one sign-in fallback from email verification
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
         self.sent_url = ""                   # page URL of the last final click
+        self.sent_empty: set[tuple[str, str]] = set()  # trusting mode: required fields left empty at the last guarded click
         self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
@@ -2418,6 +2419,10 @@ class _Run:
         intact = bool(sent.fields & present) and any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
         errors = any(f.error for f in snap.fields if f.kind not in ("button", "link"))
+        if not errors and intact and self.trusting and self.sent_empty:
+            # The form was sent with a required field knowingly left empty, and it is still there with that field empty:
+            # the site's own validation kept it (some mark the field only with a colour).
+            errors = any(f.required and _is_empty(f) and (_norm(_label(f)), f.kind) in self.sent_empty for f in snap.fields)
         if not errors and intact and not silent:
             # The same form came back under an error banner or an "Erreur ..." page title (a server-side validation that
             # lists the missing fields in a banner instead of marking them).
@@ -3294,6 +3299,7 @@ class _Run:
                     await self._shot(log)
                     continue
                 v.questions = [*blocking, *soft] if blocking else []
+                self.sent_empty = {(_norm(q.label), q.kind) for q in soft} if not blocking else set()
                 if soft and not blocking:
                     v.notes.append("champs requis laissés vides : " + ", ".join(q.label[:40] for q in soft[:6]))
             elif guarded or self.mode == "supervised":

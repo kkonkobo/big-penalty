@@ -657,6 +657,8 @@ _ACCEPT = re.compile(r"^(?:tout accepter|accepter.*|j.accepte.*|ok.*|accept.*|al
 
 
 _CLOSERS = frozenset({"fermer", "close", "×", "x"})
+_STATEMENT = re.compile(r"declaration de confidentialit|privacy statement|data privacy|protection des donnees|datenschutzerkl")
+_PRINT = frozenset({"imprimer", "print", "drucken"})
 
 
 async def _shown(handle) -> bool:
@@ -686,7 +688,10 @@ async def dismiss_blocker(run: _Run) -> str:
         named = [index for index, label in enumerate(labels) if label]
         # Cookies / trackers are refused when the notice offers it. A privacy statement or terms the site requires to
         # apply is accepted (the candidate's standing authorization): refusing it would end the application.
-        cookies = bool(re.search(r"cookie|traceur|tracking", fold(found["text"])))
+        # (a box that opens as a privacy statement, or offers to print it, is the statement itself whatever it says of cookies:
+        # refusing it ends the application - one ATS then offers to delete the whole candidate account)
+        statement = bool(_STATEMENT.search(fold(found["text"])[:200])) or any(label in _PRINT for label in labels)
+        cookies = bool(re.search(r"cookie|traceur|tracking", fold(found["text"]))) and not statement
         choice = next((index for index in named if _REFUSE.match(labels[index])), None) if cookies else None
         if choice is None:
             choice = next((index for index in named if _ACCEPT.match(labels[index]) and labels[index] not in _CLOSERS), None)
@@ -761,6 +766,8 @@ _APPEARED_JS = r"""() => { const shown = window.__bpShown, out = [];
     if ([...el.children].some((child) => child.getClientRects().length && text(child))) continue;  // (only the text leaves)
     out.push(el); } };
   walk(document); return out; }"""
+_NO_RESULT = re.compile(r"^(?:aucun resultat|aucune (?:option|correspondance|donnee)|pas de resultat|no (?:results?|options?|matches|match|data)|"
+                        r"nothing found|keine (?:ergebnisse|treffer)|sin resultados|nessun risultato)\b")
 _WAS_SHOWN_JS = "e => !!(window.__bpShown && window.__bpShown.has(e))"
 _CONTROL_SHAPE_JS = r"""e => { const parts = [];
   for (let n = e, i = 0; n && i < 4; i++) {
@@ -784,7 +791,7 @@ async def _popup_options(run: _Run) -> list[tuple[object, str]]:
         with contextlib.suppress(Exception):
             for handle in (await frame.locator(_POPUP_OPTIONS).element_handles())[:300]:
                 text = " ".join(str(await handle.evaluate(_OPTION_TEXT_JS)).split())
-                if text:
+                if text and not _NO_RESULT.search(norm(text)):
                     # (an option already shown before this list was opened belongs to another list left open)
                     (stale if await handle.evaluate(_WAS_SHOWN_JS) else found).append((handle, text))
     if found or stale:
@@ -797,7 +804,7 @@ async def _popup_options(run: _Run) -> list[tuple[object, str]]:
                 if handle is None:
                     continue
                 text = " ".join(str(await handle.evaluate(_OPTION_TEXT_JS)).split())
-                if text:
+                if text and not _NO_RESULT.search(norm(text)):
                     found.append((handle, text))
     return found
 
@@ -896,10 +903,12 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         raise engine._Skip("la liste n'a pas retenu la réponse choisie")
 
     def remember(found):
-        # What the open list offers is shown to the planner at the next read (a list that only renders once opened).
+        # What the open list offers is shown to the planner at the next read (a list that only renders once opened). The
+        # fullest list seen stands: what a typed query narrows it to (or its "no result" line) does not replace it.
         labels = list(dict.fromkeys(text for _, text in found))
-        if labels and len(labels) <= 60 and norm(field.label) and not _PLACEHOLDER_LABEL.search(norm(field.label)):
-            run.combo_options[norm(field.label)] = labels
+        key = norm(field.label)
+        if labels and len(labels) <= 60 and key and not _PLACEHOLDER_LABEL.search(key) and len(labels) > len(run.combo_options.get(key, ())):
+            run.combo_options[key] = labels
 
     async def open_list():
         try:
@@ -911,6 +920,11 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     await mark_shown(run)
     await open_list()
     found = await _popup_options(run)
+    for _ in range(3):  # (a list filled by a request made when it opens)
+        if found:
+            break
+        await asyncio.sleep(0.5)
+        found = await _popup_options(run)
     if found and not await found[0][0].evaluate(_WAS_SHOWN_JS):
         remember(found)
     index = pick(found)
