@@ -352,8 +352,13 @@ def force_failed(app_id: int, note: str) -> Application:
     return get_application(app_id)  # type: ignore[return-value]
 
 
-def set_cover_letter(app_id: int, path: str | Path | None) -> None:
-    """Record the cover-letter PDF of the application's CURRENT revision (it lives beside that revision's PDF)."""
+def set_cover_letter(app_id: int, path: str | Path | None, *, touch: bool = True) -> None:
+    """Record the cover-letter PDF of the application's CURRENT revision (it lives beside that revision's PDF). `touch=False`
+    leaves `updated_at` alone: a letter written DURING a send is not a change of the approved application (a running send
+    is bound to the version it started with, and would otherwise stop as "modified")."""
     with connect() as c:
-        c.execute("UPDATE applications SET cover_letter_path=?, updated_at=? WHERE id=?",
-                  (str(path) if path else None, _iso(now()), app_id))
+        if touch:
+            c.execute("UPDATE applications SET cover_letter_path=?, updated_at=? WHERE id=?",
+                      (str(path) if path else None, _iso(now()), app_id))
+        else:
+            c.execute("UPDATE applications SET cover_letter_path=? WHERE id=?", (str(path) if path else None, app_id))
