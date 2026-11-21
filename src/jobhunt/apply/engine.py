@@ -637,6 +637,7 @@ class _Run:
         self.email_verification = None
         self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
+        self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
         self.email_login_tried = False       # trusting mode: signed in after an e-mail verification that never came
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
         self.sent_url = ""                   # page URL of the last final click
@@ -3136,6 +3137,15 @@ class _Run:
 
             if v.click is None:
                 idle = 0 if handled else idle + 1
+                if (trust and idle and not self.app_touched and self.account_clicks and not self.back_to_posting
+                        and urldefrag(self.page.url).url != urldefrag(self.url).url):
+                    # Signed in, and the site left us on its candidate home with nothing to do: go back to the posting, once.
+                    self.back_to_posting = True
+                    log.note += "; connecté : retour à l'offre"
+                    with contextlib.suppress(Exception):
+                        await self.page.goto(self.url, wait_until="domcontentloaded", timeout=30_000)
+                    idle = 0
+                    continue
                 if idle >= 2:
                     return self._end("failed", "Aucune action possible sur cette page.")
                 continue
