@@ -2167,7 +2167,10 @@ class _Run:
         self.plan_trace.append({
             "step": len(self.steps), "url": bare_url(seen.url), "title": seen.title[:120], "text": seen.text[:700],
             "fields": [{"ref": f.ref, "kind": f.kind, "label": f.label[:80], "required": f.required, "filled": not _is_empty(f),
-                        "error": f.error[:80], "options": len(f.options)} for f in seen.fields][:150],
+                        "error": f.error[:80], "options": len(f.options),
+                        # (the option a choice control shows - a country, a level, yes / no - never free text)
+                        "chosen": f.value[:60] if f.kind in ("select", "combobox", "radio", "checkbox") or trusting.is_dial(f, seen) else ""}
+                       for f in seen.fields][:150],
             "plan": {"page_kind": plan.page_kind, "note": plan.note[:300],
                      "actions": [{"ref": a.ref, "label": _label(by_ref[a.ref])[:60] if a.ref in by_ref else "?", "op": a.op, "fact": a.fact,
                                   "click_role": a.click_role, "has_value": bool(a.value), "inferred": a.inferred} for a in plan.actions][:80],
@@ -3508,6 +3511,7 @@ class _Run:
                     return self._gone_result()
                 return self._end("failed", f"Clic impossible sur « {_label(field)} » ({e}).")
             log.clicked = self._r(field.label)
+            self.replans.pop(page_key, None)  # (a multi-step form keeps its URL: each step gets its own re-reads)
             await self._after_click()
             if self.autonomous:
                 if await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending):

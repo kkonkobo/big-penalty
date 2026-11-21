@@ -426,6 +426,16 @@ _JS = r"""
       f.value = el.value ? '•••' : '';
     } else {
       f.value = el.value || '';
+      if (!f.value && (kind === 'text' || kind === 'tel')) {
+        // A multi-select search box shows what was chosen as items of a list beside the (empty) input: that is its value.
+        for (let p = el.parentElement, i = 0; p && i < 4; p = p.parentElement, i++) {
+          const chosen = p.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"]');
+          if (chosen) {
+            if (p.querySelectorAll('input:not([type=hidden])').length <= 1) f.value = clean(chosen.textContent).slice(0, 120);
+            break;
+          }
+        }
+      }
     }
     tagRef(el, f.ref);
     out.push(f);
