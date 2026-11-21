@@ -954,3 +954,29 @@ def test_a_recorded_nationality_is_matched_to_a_list_that_words_it_differently()
 
 def test_an_ambiguous_stem_picks_nothing():
     assert trusting._closest(["Niger", "Nigeria", "France"], "Nigérienne") == -1
+
+
+class _FixedPlanner:
+    def __init__(self, plan):
+        self.plan_, self.calls = plan, 0
+
+    async def plan(self, snapshot, facts, **context):
+        self.calls += 1
+        return self.plan_
+
+
+@pytest.mark.parametrize("scripted, uses_llm", [
+    (StepPlan(page_kind="captcha"), False),
+    (StepPlan(page_kind="email_verification"), False),
+    (StepPlan(page_kind="job_page", actions=[Action(ref="b1", op="click", click_role="open_form")]), False),
+    (StepPlan(page_kind="account_login", actions=[Action(ref="b1", op="click", click_role="login")]), False),
+    (StepPlan(page_kind="job_page"), True),                                                    # "nothing to do": ask the LLM
+    (StepPlan(page_kind="account_signup", actions=[Action(ref="f1", op="fill", fact="account_password")]), True),  # no click
+    (StepPlan(page_kind="form", actions=[Action(ref="b1", op="click", click_role="next")]), True),  # form steps are the LLM's
+])
+async def test_scripted_planner_keeps_its_entry_and_account_clicks_and_the_llm_plans_the_rest(scripted, uses_llm):
+    answer = StepPlan(page_kind="form", actions=[Action(ref="b9", op="click", click_role="next")])
+    first, second = _FixedPlanner(scripted), _FixedPlanner(answer)
+    plan = await trusting.ScriptedThenLLM(first, second).plan(PageSnapshot(url="https://ats.example.test/apply"), FactSheet())
+    assert first.calls == 1 and second.calls == (1 if uses_llm else 0)
+    assert plan is (answer if uses_llm else scripted)
