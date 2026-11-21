@@ -36,7 +36,8 @@ AUTHORIZATIONS = (
     "Pour toute candidature, le candidat a explicitement autorisé d'avance : accepter les politiques de confidentialité, mentions "
     "d'information, conditions d'utilisation et traitements de données nécessaires à la candidature ; fermer ou accepter les fenêtres de "
     "confidentialité et de cookies (refuser si possible, sinon accepter) ; consentir aux vérifications d'antécédents obligatoires "
-    "demandées par l'employeur (répondre Oui) ; certifier l'exactitude des informations ; créer un compte candidat. "
+    "demandées par l'employeur (répondre Oui) ; certifier l'exactitude des informations ; s'engager à respecter la confidentialité "
+    "(ne pas divulguer d'informations confidentielles de tiers ou d'anciens employeurs : répondre Oui, j'accepte) ; créer un compte candidat. "
     "Refusé d'avance : newsletters, alertes emploi, viviers de talents, partage avec des partenaires.")
 YES = frozenset({"oui", "yes", "ja", "o", "y", "true", "vrai", "si"})
 NO = frozenset({"non", "no", "nein", "n", "false", "faux"})
@@ -102,6 +103,9 @@ def _required_consent(field: FormField) -> bool:
                 and not blocked_consent(text) and not engine.MARKETING_RE.search(text) and recruiter_ai_polarity(text) is None)
 
 
+_AGREEMENT = re.compile(r"\b(?:i agree|i certify|i acknowledge|i understand and agree|j'?accepte|je m'?engage|je certifie|je reconnais|ich stimme zu)\b")
+_AGREES = re.compile(r"(?:yes|oui|ja)\b.*\b(?:agree|accept\w*|d accord|engage|stimme zu)\b|(?:i agree|j accepte|ich stimme zu)\b")
+_DECLINES = re.compile(r"\b(?:do not|don t|not agree|n accepte pas|ne m engage pas|refuse|nicht)\b")
 _EXPOSED = re.compile(r"politiquement expos|politically exposed|politisch exponiert")
 
 
@@ -149,6 +153,15 @@ def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
             code = "application_privacy" if engine.SIGNUP_PRIVACY_RE.search(text) else "application_terms"
             return item(Action(ref=field.ref, op="check"), field, used=code)
         return None
+    if field.kind in ("select", "radio") and field.required and not field.multiple and _AGREEMENT.search(text):
+        # "I agree that ... [Yes, I agree | No, I do not agree (and withdraw)]": an undertaking the site requires to apply
+        labels = [norm(option.label) for option in field.options]
+        agree = [index for index, label in enumerate(labels) if _AGREES.match(label) and not _DECLINES.search(label)]
+        if len(agree) == 1 and any(_DECLINES.search(label) for label in labels):
+            if field.value and norm(field.value) == labels[agree[0]]:
+                return True
+            return item(Action(ref=field.ref, op="select"), field, option_index=agree[0], value=field.options[agree[0]].label,
+                        used="application_terms")
     key = declaration_key(field)
     if key and field.kind == "combobox" and not field.options and not field.multiple:
         if field.value.strip():
