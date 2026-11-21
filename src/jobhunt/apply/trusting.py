@@ -542,6 +542,11 @@ async def blocker_hint(run: _Run) -> str:
             f"{' | '.join(label for label in found['buttons'] if label)[:200]}. This step is ONLY the click that closes or accepts it.] ")
 
 
+def stuck_hint(labels: list[str]) -> str:
+    return (f"[The program could NOT set these fields (no matching option / refused value): {' | '.join(labels)}. Do not try them again: leave "
+            "them as they are and answer with ONLY the click that moves on (`next` or `submit`), unless a field it did not list is still empty.] ")
+
+
 async def _popup_options(run: _Run) -> list[tuple[object, str]]:
     """(element, text) of every option the open list shows, in any frame. Elements, not positions: a virtualized list
     recycles its rows, so "the n-th option" is another one a moment later."""

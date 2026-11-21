@@ -142,14 +142,18 @@ SIGNUP_CONSENT_RE = re.compile(r"conditions|\bcgu\b|\bcgv\b|terms|politique|priv
                                r"j'?ai lu|lu et|accepte|agree|consent")
 ACCEPT_BOX_RE = re.compile(r"^\s*(?:validation|valider|certifie|je certifie|confirmation)\b")  # a lone required "Validation" box
 SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
-AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer")
+AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer|"
+                          r"liste d.?offres|liste des offres|resultats? de recherche|search results|job list(?:ing)?|offer list|listing page")
 ERROR_TITLE_RE = re.compile(r"(?:erreur|error|errore|fehler|fout)\b")  # folded page title of a form sent back with errors
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
 ACCOUNT_CLICKS_MAX = 3   # login / signup clicks per run before the account step is reported as not accepted
 ENTRY_TRIES_CORE = 3     # core guard mode: entry discoveries per run (one per page)
 MISSING_OFFER_RE = re.compile(
     r"(?:offre|annonce|poste|job|position|posting)[^.!\n]{0,60}(?:n.?existe (?:pas|plus)|n'est plus (?:disponible|en ligne|active)|"
-    r"est (?:expiree|cloturee|pourvue)|no longer (?:exists?|available)|does not exist|has (?:expired|been (?:closed|removed|filled)))")
+    r"(?:est|a) (?:expiree?|cloturee|pourvue)|no longer (?:exists?|available)|does not exist|"
+    r"(?:has|is) (?:expired|been (?:closed|removed|filled)))")
+PRINT_VIEW_RE = re.compile(r"/imprimer-fiche-emploi-")  # a careers site's print view of an ad: no apply button; the normal view is "/emploi-..."
+GONE_PATH_RE = re.compile(r"/(?:error-?page|error|erreur|not-?found|page-?not-?found|404|oops|expired|offer-?expired|job-?closed)(?:/|\.\w+)?$")
 CHANGED_RETRY_S = 0.8  # one re-read of a decision scope that changed under the action (async option lists, dependent fields)
 PRE_STEP_CAP = 8        # pure pre-data steps (cookie banner, open_form, account pages) that do not use the max_steps budget
 SECRET_LOG = "•••"
@@ -584,7 +588,7 @@ class _Run:
         self.apply_navigation = None
         self.apply_entry = None
         self.discovering_apply_entry = False
-        self.entry_tried: set[str] = set()  # core guard mode: pages where the entry discovery already ran (once each, capped)
+        self.entry_tried: set[tuple[str, str]] = set()  # core guard mode: (page, kind the planner gave it) where the entry discovery ran (capped)
         self.entry_tries = 0
         self.apply_link_followed = False
         self.inspection_offline = False
@@ -643,6 +647,8 @@ class _Run:
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
         self.sent_url = ""                   # page URL of the last final click
         self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
+        self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
+        self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
         self.no_shot_noted = False
         self.final_url = ""
@@ -972,8 +978,8 @@ class _Run:
 
     def _error_page_gone(self, kind: str, snap: PageSnapshot) -> bool:
         """The site answered the posting with its own error / not-found page (no form on it): the ad is gone."""
-        return bool(self.autonomous and kind == "error" and not self.app_touched
-                    and re.search(r"/(?:error-?page|not-?found|page-?not-?found|404|oops)(?:/|\.\w+)?$", urlparse(snap.url).path.lower())
+        return bool(self.autonomous and kind in ("error", "other", "job_page") and not self.app_touched
+                    and GONE_PATH_RE.search(urlparse(snap.url).path.lower())
                     and not any(f.kind not in {"button", "link"} for f in snap.fields))
 
     def _gone_result(self) -> RunResult:
@@ -2650,6 +2656,9 @@ class _Run:
                 with contextlib.suppress(Exception):
                     if hint := await trusting.blocker_hint(self):
                         pub.text = self._r(hint) + pub.text
+                if self.stuck_fields:
+                    pub.text = self._r(trusting.stuck_hint(self.stuck_fields)) + pub.text
+                    self.stuck_fields = []
             if self._inspection_only:
                 inspection, keys = inspection_inputs(pub, self._planner_facts())
                 plan = await self.planner.plan(inspection, keys, job_title="", company="", history=[], mode=self.mode)
@@ -2660,9 +2669,9 @@ class _Run:
             core = bool(getattr(self.autonomous, "core", False))
             if (self.apply_entry and not self.touched and not self.app_touched and not self.apply_link_followed
                     and not (core and (self.entry_tries >= ENTRY_TRIES_CORE
-                                       or urldefrag(self.page.url).url in self.entry_tried))):
+                                       or (urldefrag(self.page.url).url, kind) in self.entry_tried))):
                 required = kind == "job_page"
-                self.entry_tried.add(urldefrag(self.page.url).url)
+                self.entry_tried.add((urldefrag(self.page.url).url, kind))
                 self.entry_tries += 1
                 self.inspection_offline = False
                 self.discovering_apply_entry = True
@@ -3148,6 +3157,9 @@ class _Run:
 
             if v.click is None:
                 idle = 0 if handled else idle + 1
+                if trust and idle and not handled:  # the planner only retried fields the program cannot set: tell it to move on
+                    self.stuck_fields = list(dict.fromkeys(_label(it.field)[:60] for it in v.items
+                                                           if any(n.startswith(f"{_label(it.field)} : ") for n in v.notes)))[:6]
                 if (trust and idle and not self.app_touched and self.account_clicks and not self.back_to_posting
                         and urldefrag(self.page.url).url != urldefrag(self.url).url):
                     # Signed in, and the site left us on its candidate home with nothing to do: go back to the posting, once.
@@ -3155,6 +3167,14 @@ class _Run:
                     log.note += "; connecté : retour à l'offre"
                     with contextlib.suppress(Exception):
                         await self.page.goto(self.url, wait_until="domcontentloaded", timeout=30_000)
+                    idle = 0
+                    continue
+                if (trust and idle and not self.app_touched and not self.print_view_left
+                        and PRINT_VIEW_RE.search(urlparse(self.page.url).path.lower())):
+                    self.print_view_left = True
+                    log.note += "; version imprimable de l'offre : retour à l'offre"  # (it has no apply control: open the normal view)
+                    with contextlib.suppress(Exception):
+                        await self.page.goto(PRINT_VIEW_RE.sub("/emploi-", self.page.url, count=1), wait_until="domcontentloaded", timeout=30_000)
                     idle = 0
                     continue
                 if idle >= 2:
@@ -3307,6 +3327,9 @@ class _Run:
             except _Dispatched as e:  # the click may have fired: after data / final it is "possibly sent", never retried
                 if self.mode == "submit" and (final or post_data):
                     return self._unconfirmed()
+                if self.autonomous and not self.app_touched and not post_data and GONE_PATH_RE.search(urlparse(self.page.url).path.lower()):
+                    await self._shot(log)  # the click took the page to the site's own "expired / error" page: the ad is gone
+                    return self._gone_result()
                 return self._end("failed", f"Clic impossible sur « {_label(field)} » ({e}).")
             log.clicked = self._r(field.label)
             await self._after_click()
