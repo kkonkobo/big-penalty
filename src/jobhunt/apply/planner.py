@@ -217,7 +217,7 @@ def history_payload(history: list[StepLog], *, problems: bool = False) -> list[d
             entry["filled"] = [f.label[:60] for f in h.filled][:40]
             notes = [part.strip() for part in h.note.split(";")[1:] if part.strip()]
             if notes:
-                entry["problems"] = [note[:160] for note in notes][:12]
+                entry["problems"] = [note[:400] for note in notes][:12]
     return out
 
 

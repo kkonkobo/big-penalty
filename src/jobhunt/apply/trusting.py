@@ -370,6 +370,10 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     out = item(Action(ref=field.ref, op="fill", fact=action.fact), field, known, value=want, used=used,
                inferred=inferred and not (known is not None and known.exact), basis=basis)
     out.national = national
+    if kind in ("text", "tel") and code and _DIAL_LABEL.search(fold(f"{field.label} {field.placeholder}")) and not _PHONE_NUMBER.search(
+            fold(field.label)):
+        out.dial_code = code  # ("Indicatif de pays" as a search box: see `_search_box`)
+        out.national = False
     if known is not None and known.exact and known.variants and current and field.error:
         # The site refused the spelling it holds (a phone with its code, a LinkedIn URL without scheme): type another one.
         # The planner's own text counts when it is one of the fact's spellings.
@@ -387,12 +391,18 @@ _DIAL_LABEL = re.compile(r"indicatif|country code|calling code|dial(?:ing)? code
 _DIAL_OPTION = re.compile(r"\(\+\d{1,4}\)|^\s*\+\d{1,4}\b")
 
 
+_PHONE_NUMBER = re.compile(r"\b(?:numero|number|nummer|n°|no|nº)\b")
+
+
 def is_dial(field: FormField, snap: PageSnapshot) -> bool:
     """A calling-code picker: what the engine recognizes, a label that names it ("Indicatif téléphonique du pays"), or a list
     whose options carry the codes ("France (+33)")."""
+    named = bool(_DIAL_LABEL.search(fold(f"{field.label} {field.placeholder} {field.name}")))
+    if field.kind in ("text", "tel"):  # a calling-code search box next to the number
+        return named and not _PHONE_NUMBER.search(fold(field.label))
     if field.kind not in ("select", "combobox"):
         return False
-    if _engine()._dial_selector(field, snap) or _DIAL_LABEL.search(fold(f"{field.label} {field.placeholder} {field.name}")):
+    if _engine()._dial_selector(field, snap) or named:
         return True
     return bool(field.options) and 2 * sum(bool(_DIAL_OPTION.search(option.label)) for option in field.options) >= len(field.options)
 
@@ -744,12 +754,35 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                     await asyncio.sleep(0.3)
         live = await run._combo_value(loc)
         closed = not await _shown(option)
+        if closed and not field.multiple and (not live or live == before):
+            # The choice opened a sub-list (a category, then its entries): choose there too - the answer or the fact it
+            # rests on when an entry says it, else "other", else the first entry.
+            deeper = await _popup_options(run)
+            texts = [text for _, text in deeper]
+            if deeper and label not in texts:
+                wanted = [want, it.fact.value if it.fact is not None and it.fact.value else ""]
+                inner = next((i for i in (best_option(texts, w) for w in wanted if w) if i >= 0), -1)
+                if inner < 0:
+                    inner = next((i for i, text in enumerate(texts) if re.search(r"\b(?:autre|other|sonstige)", fold(text))), 0)
+                entry, entry_label = deeper[inner]
+                try:
+                    await entry.click(timeout=2500)
+                except Exception:
+                    await entry.evaluate(_PRESS_JS)
+                await asyncio.sleep(0.4)
+                return (await run._combo_value(loc)) or f"{label} > {entry_label}"
         if (closed or field.multiple or live != before) and shows(live, label):
             return live or label
         await run._abandon_combobox(loc)
         with contextlib.suppress(Exception):
             await run.page.keyboard.press("Escape")
         raise engine._Skip("la liste n'a pas retenu la réponse choisie")
+
+    def remember(found):
+        # What the open list offers is shown to the planner at the next read (a list that only renders once opened).
+        labels = list(dict.fromkeys(text for _, text in found))
+        if labels and len(labels) <= 60 and norm(field.label):
+            run.combo_options[norm(field.label)] = labels
 
     async def open_list():
         try:
@@ -760,6 +793,7 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
 
     await open_list()
     found = await _popup_options(run)
+    remember(found)
     index = pick(found)
     if index >= 0 and (len(found) <= 40 or not typed):
         if done := await choose(found, index):
@@ -786,7 +820,8 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     await run._abandon_combobox(loc)
     with contextlib.suppress(Exception):
         await run.page.keyboard.press("Escape")
-    raise engine._Skip("option introuvable dans la liste")
+    offered = run.combo_options.get(norm(field.label)) or []
+    raise engine._Skip("option introuvable dans la liste" + (" ; options proposées : " + " | ".join(offered[:20]) if offered else ""))
 
 
 _CODE_FIELD_NOT = re.compile(r"postal|zip|pays|country|promo|parrain|referral|indicatif|naf|ape|siret|iban|bic")
@@ -889,6 +924,38 @@ async def _upload_through(run: _Run, opener, path) -> None:
     raise engine._Skip("aucun champ de fichier après le clic sur le bouton de dépôt")
 
 
+async def _search_box(run: _Run, target, code: str) -> str:
+    """A calling-code search box (a text input that lists countries once something is typed and Enter is pressed): type the
+    country of the code, then pick the one entry that carries the code."""
+    engine = _engine()
+    names = sorted(DIAL_COUNTRY_NAMES.get(code, ()), key=len)
+    for text in dict.fromkeys([*(name.title() for name in names[:1]), code, code.lstrip("+")]):
+        with contextlib.suppress(Exception):
+            await target.fill("", timeout=3000)
+        await target.type(text, delay=30, timeout=8000)
+        await asyncio.sleep(0.8)
+        found = await _popup_options(run)
+        if not found:
+            with contextlib.suppress(Exception):
+                await target.press("Enter", timeout=2000)
+            await asyncio.sleep(1.0)
+            found = await _popup_options(run)
+        hits = [entry for entry in found if re.findall(r"\+\s*[0-9]+", entry[1]) == [code]]
+        if not hits and names:
+            hits = [entry for entry in found if norm(entry[1]) in names]
+        if hits:
+            try:
+                await hits[0][0].click(timeout=2500)
+            except Exception:
+                await hits[0][0].evaluate(_PRESS_JS)
+            await asyncio.sleep(0.4)
+            return hits[0][1]
+    with contextlib.suppress(Exception):
+        await target.fill("", timeout=3000)
+        await run.page.keyboard.press("Escape")
+    raise engine._Skip("indicatif introuvable dans la liste de recherche")
+
+
 async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> str:
     """Carry out one item on the live page. `target` is the exact element of the snapshot (the first radio of a group)."""
     engine = _engine()
@@ -967,6 +1034,9 @@ async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> 
         await run._before_mutation(action.op, target)
         await target.fill(secret, timeout=timeout)
         return engine.SECRET_LOG
+    if it.dial_code and field.kind in ("text", "tel"):
+        await run._before_mutation(action.op, target)
+        return await _search_box(run, target, it.dial_code)
     text = it.value or ""
     if getattr(it, "forced", ""):
         text = it.forced
