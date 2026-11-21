@@ -664,7 +664,8 @@ class _Run:
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
         self.signed_up: set[str] = set()     # account addresses where an account-creation click was made in this run
-        self.form_hints: set[str] = set()    # trusting mode: page URLs read again as the application form (once each)
+        self.form_hints: dict[str, int] = {}  # trusting mode: page URLs read again as the application form (twice each at most)
+        self.plan_trace: list[dict] = []     # trusting mode: what the planner saw / answered at the latest steps (no value)
         self.no_shot_noted = False
         self.final_url = ""
         self._letter: Letter | None = None
@@ -2152,6 +2153,22 @@ class _Run:
     rehearse = False  # scripts/rehearse_apply.py: stop before any click that could send what was typed
     rehearse_ok: re.Pattern | None = None  # ... except in-page controls named by the developer (a dialog opener)
 
+    def _trace_plan(self, seen: PageSnapshot, plan: StepPlan) -> None:
+        """Keep what the planner was shown and what it answered at the latest steps (labels and kinds, never a value), for the
+        local failure record of a trusting run."""
+        if not self.trusting:
+            return
+        by_ref = {f.ref: f for f in seen.fields}
+        self.plan_trace.append({
+            "step": len(self.steps), "url": bare_url(seen.url), "title": seen.title[:120], "text": seen.text[:700],
+            "fields": [{"ref": f.ref, "kind": f.kind, "label": f.label[:80], "required": f.required, "filled": not _is_empty(f),
+                        "error": f.error[:80], "options": len(f.options)} for f in seen.fields][:150],
+            "plan": {"page_kind": plan.page_kind, "note": plan.note[:300],
+                     "actions": [{"ref": a.ref, "label": _label(by_ref[a.ref])[:60] if a.ref in by_ref else "?", "op": a.op, "fact": a.fact,
+                                  "click_role": a.click_role, "has_value": bool(a.value), "inferred": a.inferred} for a in plan.actions][:80],
+                     "unknown": [q.label[:80] for q in plan.unknown][:20]}})
+        del self.plan_trace[:-6]
+
     def _stop_reason(self, res: RunResult) -> str:
         """Why the run stopped, for the local failure record: no secret, no typed value (the message is cut when it may quote one)."""
         sensitive = {"account_login", "account_signup", "email_verification"}
@@ -2190,6 +2207,15 @@ class _Run:
                           "filled": [safe_reason(f.label, self._r, 60) for f in s.filled][:60],
                           "note": "" if contains_verification_code(s.note) else safe_reason(s.note, self._r, 900)} for s in self.steps]
                 (self.out_dir / "failure-steps.json").write_text(json.dumps(trace, ensure_ascii=False, indent=1), encoding="utf-8")
+                def masked(value):  # (secrets masked as everywhere)
+                    if isinstance(value, dict):
+                        return {key: masked(item) for key, item in value.items()}
+                    if isinstance(value, list):
+                        return [masked(item) for item in value]
+                    return self._r(value) if isinstance(value, str) else value
+
+                (self.out_dir / "failure-plans.json").write_text(json.dumps(masked(self.plan_trace), ensure_ascii=False, indent=1),
+                                                                 encoding="utf-8")
         except Exception:
             pass
 
@@ -2712,15 +2738,23 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
-            if (self.trusting and kind == "job_page" and not plan.actions and not self._inspection_only and not self.final_clicked
-                    and urldefrag(self.page.url).url not in self.form_hints and self._application_form(snap)):
+            self._trace_plan(pub, plan)
+            for attempt in (1, 2):
+                if not (self.trusting and kind == "job_page" and not plan.actions and not self._inspection_only and not self.final_clicked
+                        and self.form_hints.get(urldefrag(self.page.url).url, 0) < 2 and self._application_form(snap)):
+                    break
                 # The planner took a step of the application form (the job title is its heading) for the job ad and did
-                # nothing: read it again, once per page, saying what it is.
-                self.form_hints.add(urldefrag(self.page.url).url)
+                # nothing: read it again saying what it is; the second time without the page text and title that mislead it
+                # (the fields alone say what the page asks).
+                page_key = urldefrag(self.page.url).url
+                self.form_hints[page_key] = self.form_hints.get(page_key, 0) + 1
                 log.note += "; formulaire de candidature lu comme une offre : relecture"
-                plan = await self.planner.plan(pub.model_copy(update={"text": FORM_HINT + pub.text}), self._planner_facts(),
+                hinted = pub.model_copy(update={"text": FORM_HINT + pub.text} if self.form_hints[page_key] == 1
+                                        else {"text": FORM_HINT, "title": "Formulaire de candidature"})
+                plan = await self.planner.plan(hinted, self._planner_facts(),
                                                job_title=self.job_title, company=self.company, history=self.steps[:-1], mode=self.mode)
                 kind = log.page_kind = plan.page_kind
+                self._trace_plan(hinted, plan)
             if (self.trusting and kind == "account_login" and not self.email_attempted and not self.app_touched
                     and self._account_address(self.page.url) in self.signed_up and VERIFY_PENDING_RE.search(fold(snap.text))):
                 # After the account-creation click the site shows its sign-in page saying the new account must first be
@@ -3439,6 +3473,15 @@ class _Run:
                      self.final_awaiting) = before
                 return hold.result
             except _Dispatched as e:  # the click may have fired: after data / final it is "possibly sent", never retried
+                if trust and not final:
+                    # Not the send click: it was dispatched and the page moved or reloaded under it (an upload-confirm button,
+                    # a "next" that navigates). Read the page that follows instead of failing the run.
+                    log.clicked = self._r(field.label)
+                    log.note += "; clic interrompu par la page : relecture"
+                    await self._after_click()
+                    with contextlib.suppress(Exception):
+                        await self.autonomous.after_click(self.page, observing=False)
+                    continue
                 if self.mode == "submit" and (final or post_data):
                     return self._unconfirmed()
                 if self.autonomous and not self.app_touched and not post_data and GONE_PATH_RE.search(urlparse(self.page.url).path.lower()):
