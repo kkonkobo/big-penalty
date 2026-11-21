@@ -2,8 +2,8 @@
 
 Consent dialogs come back on every page of some sites (the login page, the candidate area, the form) and cover the
 controls the run needs. Owner decision: a fresh browser is used for every application, so the choice does not matter;
-reject when the dialog offers it, otherwise accept. Only buttons inside a container that talks about cookies / consent /
-privacy are ever clicked, never a form's own button.
+reject when a COOKIE dialog offers it, otherwise accept (a privacy statement required to apply is accepted, never refused).
+Only buttons inside a container that talks about cookies / consent / privacy are ever clicked, never a form's own button.
 """
 
 from __future__ import annotations
@@ -30,8 +30,17 @@ _DISMISS = r"""() => {
   const buttons = [...document.querySelectorAll('button, [role="button"], a[href], input[type="button"]')]
     .filter(node => visible(node) && !node.closest('form') && node.closest(BOX));
   const inTopic = node => { const box = outer(node); return !!box && TOPIC.test((box.innerText || '').slice(0, 4000)); };
+  // Refusing is for cookies / trackers only. A privacy STATEMENT the site requires to apply is not a cookie banner: refusing
+  // it ends the application (one ATS then offers to delete the whole candidate account), so it is accepted.
+  const COOKIE = /cookie|traceur|tracking|tracker/i;
+  const CMP = '[id*="cookie" i], [class*="cookie" i], [id*="onetrust" i], [id*="tarteaucitron" i], [id*="didomi" i], [class*="didomi" i], '
+    + '[id*="axeptio" i], [class*="axeptio" i], [id*="usercentrics" i], [id*="sp_message" i], [class*="qc-cmp" i], [id*="truste" i], '
+    + '[class*="truste" i], [id*="iubenda" i], [class*="iubenda" i], [id*="CybotCookiebot" i], [id*="cmp" i]';
+  // (a long privacy statement mentions cookies somewhere: only its opening lines, or the container's own name, make it a cookie dialog)
+  const aboutCookies = node => { const box = outer(node);
+    return !!box && (box.matches(CMP) || !!node.closest(CMP) || COOKIE.test((box.innerText || '').slice(0, 700))); };
   for (const pattern of [REJECT, ACCEPT, SAVE]) {
-    const found = buttons.filter(node => pattern.test(label(node)) && inTopic(node));
+    const found = buttons.filter(node => pattern.test(label(node)) && inTopic(node) && (pattern === ACCEPT || aboutCookies(node)));
     if (found.length) { found[0].click(); return label(found[0]); }
   }
   return '';

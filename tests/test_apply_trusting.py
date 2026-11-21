@@ -666,3 +666,24 @@ def test_a_phone_the_site_refused_is_typed_in_another_spelling():
                   error="Format de numéro de téléphone non valide.")
     made = trusting.check(run_of(), Action(ref="p1", op="fill", fact="phone"), phone, engine._Validated(), snap_of(phone), None)
     assert made is not None and not made.forced.startswith("+")
+
+
+async def test_a_privacy_statement_required_to_apply_is_accepted_never_refused(page):  # noqa: F811
+    # (refusing it is not "no cookies": one ATS then offers to delete the whole candidate account)
+    from jobhunt.apply.consent import dismiss_consent
+
+    statement = "Déclaration de confidentialité des données. " + "Nous traitons vos données pour le recrutement. " * 30 + "Ce site utilise des cookies."
+    await page.set_content(f'''<main><form><input name="email"><button type="button">Postuler</button></form></main>
+        <div role="dialog" style="position:fixed;inset:10%;background:#fff"><h2>Déclaration de confidentialité des données</h2>
+        <p>{statement}</p><button onclick="window.choice='accept'; this.closest('[role=dialog]').remove()">Accepter</button>
+        <button onclick="window.choice='refuse'">Refuser</button><button>Imprimer</button></div>''')
+    assert await dismiss_consent(page) == "Accepter"
+    assert await page.locator("[role=dialog]").count() == 0  # (the accept button removed it; "Refuser" would have left it)
+
+
+async def test_a_cookie_dialog_is_still_refused_when_it_offers_that(page):  # noqa: F811
+    from jobhunt.apply.consent import dismiss_consent
+
+    await page.set_content('''<div role="dialog" style="position:fixed;inset:10%;background:#fff"><p>Nous utilisons des cookies et traceurs.</p>
+        <button onclick="window.choice='accept'">Tout accepter</button><button onclick="window.choice='refuse'">Tout refuser</button></div>''')
+    assert await dismiss_consent(page) == "Tout refuser"
