@@ -1,0 +1,675 @@
+"""Planner-trusting field handling of autonomous runs (guard mode `core`).
+
+Owner decision (2026-11-20): maximize sends. The deterministic validation layers of the engine (label regexes, exact-fact
+lists, the answer verifier, the live re-read of every decision before each action) stopped every real form before a
+single field was filled. Here the planner's mapping is executed as given: every field it answers from a fact, or by a
+sensible deduction from the profile, is filled; the run stops only for an answer nobody knows.
+
+What stays by code:
+  - the owner's standing rules (required privacy / terms boxes ticked, marketing boxes left alone, "a relative works
+    here?" -> No, the declared ethnicity, "prefer not to say" on other diversity questions);
+  - hard facts (birth date, address, permits, criminal record...) are never invented: they need a known fact;
+  - passwords only ever go into password fields, from the credential store;
+  - the guard itself (`autonomous.target`): data is only typed into / sent from pages of the employer or its ATS.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import difflib
+import re
+from typing import TYPE_CHECKING
+
+from jobhunt.apply.answer_check import fold, is_hard_fact
+from jobhunt.apply.autonomous import blocked_consent
+from jobhunt.apply.prompt_rules import DIAL_COUNTRY_NAMES, decision_key, french_phone, international_calling_code, recruiter_ai_polarity
+from jobhunt.apply.types import Action, FormField, PageSnapshot, StepPlan
+
+if TYPE_CHECKING:
+    from jobhunt.apply.engine import _Item, _Run, _Validated
+
+# Decisions the owner took once for every application (2026-11-19 / 20): shown to the planner as a fact, so a consent it
+# covers is acted on instead of being sent back as a question.
+AUTHORIZATIONS_LABEL = "Autorisations permanentes déjà données par le candidat (décisions prises : ne jamais les redemander)"
+AUTHORIZATIONS = (
+    "Pour toute candidature, le candidat a explicitement autorisé d'avance : accepter les politiques de confidentialité, mentions "
+    "d'information, conditions d'utilisation et traitements de données nécessaires à la candidature ; fermer ou accepter les fenêtres de "
+    "confidentialité et de cookies (refuser si possible, sinon accepter) ; consentir aux vérifications d'antécédents obligatoires "
+    "demandées par l'employeur (répondre Oui) ; certifier l'exactitude des informations ; créer un compte candidat. "
+    "Refusé d'avance : newsletters, alertes emploi, viviers de talents, partage avec des partenaires.")
+YES = frozenset({"oui", "yes", "ja", "o", "y", "true", "vrai", "si"})
+NO = frozenset({"non", "no", "nein", "n", "false", "faux"})
+_OPTION_JS = ("e => [...e.querySelectorAll('[role=option], option, li')].filter(o => o.getClientRects().length)"
+              ".map(o => (o.innerText || o.textContent || '').trim().replace(/\\s+/g, ' ')).filter(Boolean).slice(0, 200)")
+# What a listbox popup renders as: the options a combobox opened, wherever the page mounted them.
+_POPUP_OPTIONS = "[role=option]:visible, [role=listbox] li:visible, [role=menuitemradio]:visible, [role=menuitem]:visible"
+
+
+def _engine():
+    from jobhunt.apply import engine  # noqa: PLC0415 - the engine imports this module lazily too
+
+    return engine
+
+
+def norm(text: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", fold(text or "")).strip()
+
+
+def best_option(labels: list[str], want: str | None) -> int:
+    """Index of the option an answer means, -1 when none: equality, yes / no and civility aliases, then the ONE option that
+    starts with the answer, then the one that contains it (or that the answer contains)."""
+    target = norm(want)
+    if not target:
+        return -1
+    folded = [norm(label) for label in labels]
+    for index, label in enumerate(folded):
+        if label == target:
+            return index
+    aliases = _engine()._ALIASES
+    for group in aliases:
+        if target in group:
+            hits = [index for index, label in enumerate(folded) if label in group]
+            if len(hits) == 1:
+                return hits[0]
+    first = [index for index, label in enumerate(folded) if label and (label.startswith(target + " ") or target.startswith(label + " "))]
+    if len(first) == 1:
+        return first[0]
+    polar = YES if target in YES else NO if target in NO else None
+    if polar:  # "Non, je n'ai aucun proche" for "Non"
+        hits = [index for index, label in enumerate(folded) if label.split(" ", 1)[0] in polar]
+        if len(hits) == 1:
+            return hits[0]
+    padded = f" {target} "
+    inside = [index for index, label in enumerate(folded) if label and (padded in f" {label} " or f" {label} " in padded)]
+    if len(inside) == 1:
+        return inside[0]
+    if len(first) > 1:
+        return min(first, key=lambda index: len(folded[index]))
+    return -1
+
+
+def _text(field: FormField) -> str:
+    return fold(f"{field.label} {field.group}")
+
+
+def _required_consent(field: FormField) -> bool:
+    """A REQUIRED box that accepts the site's privacy policy / terms / data processing, or certifies the application."""
+    engine = _engine()
+    text = _text(field)
+    return bool(field.kind == "checkbox" and field.required
+                and (engine._site_consent(field) or engine.SIGNUP_CONSENT_RE.search(text) or engine.ACCEPT_BOX_RE.search(text))
+                and not blocked_consent(text) and not engine.MARKETING_RE.search(text) and recruiter_ai_polarity(text) is None)
+
+
+def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
+    """The owner's standing rule for this field: an item to execute, True when the field is settled as it stands (nothing to
+    do, the planner's own action is ignored), None when no rule covers it."""
+    engine = _engine()
+    item = engine._Item
+    if field.kind in ("button", "link", "file", "password"):
+        return None
+    text = _text(field)
+    choice = run._autonomous_decision(field)
+    if choice:
+        code, index = choice
+        if field.kind == "checkbox":
+            return item(Action(ref=field.ref, op="check"), field, used=code) if engine._is_empty(field) else True
+        if field.options and field.value and norm(field.value) == norm(field.options[index].label):
+            return True
+        return item(Action(ref=field.ref, op="select"), field, option_index=index, value=field.options[index].label, used=code)
+    if field.kind == "checkbox":
+        if blocked_consent(text) and not field.required:  # newsletters, job alerts, talent pools, partner sharing: never ticked
+            return True if engine._is_empty(field) else item(Action(ref=field.ref, op="uncheck"), field, used="optional_opt_out")
+        if _required_consent(field):
+            if not engine._is_empty(field):
+                return True
+            code = "application_privacy" if engine.SIGNUP_PRIVACY_RE.search(text) else "application_terms"
+            return item(Action(ref=field.ref, op="check"), field, used=code)
+        return None
+    if field.kind in ("select", "radio", "combobox") and field.options and not field.multiple and "relatives" in {
+            decision_key(field.label), decision_key(field.group)}:
+        index = best_option([option.label for option in field.options], "Non")
+        if index >= 0:
+            if field.value and norm(field.value) == norm(field.options[index].label):
+                return True
+            return item(Action(ref=field.ref, op="select", fact="relatives_at_employer"), field, option_index=index,
+                        value=field.options[index].label, used="relatives_at_employer")
+    return None
+
+
+def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: PageSnapshot, resolve) -> _Item | None:
+    """One planner action -> an executable item. Dropped (with a note, and a question when the field is required) only when
+    it cannot be carried out at all or would invent a hard fact."""
+    engine = _engine()
+    item = engine._Item
+    op, kind = action.op, field.kind
+    drop = lambda why, ask=True: run._drop(v, field, why, ask)  # noqa: E731
+    if kind in ("button", "link") and op not in ("upload_cv", "upload_letter"):
+        return drop("action de saisie sur un bouton", ask=False)
+    if op in ("upload_cv", "upload_letter"):
+        if kind == "file" and run._file_satisfied(field, snap):
+            return drop("fichier déjà déposé dans cette candidature", ask=False)
+        if kind not in ("file", "button", "link"):
+            return drop("envoi de fichier sur un champ qui n'est pas un fichier")
+        if op == "upload_letter" and not field.required:
+            return drop("lettre facultative : ignorée", ask=False)
+        return item(action, field, used="cv" if op == "upload_cv" else "letter")
+    if op == "letter_text":
+        if kind not in ("textarea", "text"):
+            return drop("texte de lettre sur un champ inadapté")
+        return item(action, field, used="letter")
+    fact = run.facts.get(action.fact) if action.fact else None
+    if action.fact == "race_ethnicity":
+        return drop("origine ethnique : sélection contrôlée uniquement")
+    if kind == "file":
+        return drop("champ fichier : seul le CV ou la lettre y est déposé")
+    if kind == "password" or (fact is not None and fact.secret):
+        secret = run.facts.get("account_password")
+        if kind != "password" or secret is None or run.mode != "submit":
+            return drop("mot de passe et champ incompatibles")
+        frame_url = run._frame_url(resolve, field.ref) if resolve else run.page.url
+        if run._secret(frame_url) is None:
+            return drop("mot de passe indisponible pour ce site")
+        return item(Action(ref=field.ref, op="fill", fact=secret.key), field, secret, used=secret.key, frame_url=frame_url)
+    known = fact if fact is not None and fact.value not in (None, "") else None
+    answer = (action.value or "").strip()
+    if is_hard_fact(f"{field.label} {field.group}", field.name, field.placeholder) and known is None:
+        return drop("fait dur (état civil, adresse, permis, casier...) : jamais deviné")
+    inferred = known is None or action.inferred
+    basis = (action.basis.strip() or ("déduit du profil" if known is None else f"déduit du fait « {known.label} »"))[:200] if inferred else ""
+    used = known.key if known else ""
+    if kind == "checkbox":
+        if op not in ("check", "uncheck"):
+            said = norm(answer or (known.value if known else ""))
+            op = "check" if said in YES else "uncheck" if said in NO else ""
+            if not op:
+                return drop("case à cocher : réponse illisible")
+        if op == "check" and not field.required and (blocked_consent(_text(field)) or engine.MARKETING_RE.search(field.label)):
+            return drop("case facultative non cochée", ask=False)
+        if (op == "check") == (field.value == "true"):
+            return None
+        return item(Action(ref=field.ref, op=op, fact=action.fact), field, known, used=used, inferred=inferred, basis=basis)
+    if op in ("check", "uncheck"):
+        if kind != "radio" or not answer:
+            return drop(f"opération {op} incompatible avec un champ {kind}")
+    dial = kind in ("select", "combobox") and engine._dial_selector(field, snap)
+    phone = run.facts.get("phone")
+    code = ("+33" if french_phone(phone.value or "") else international_calling_code(phone.value or "") or "") if phone and phone.value else ""
+    if kind in ("select", "radio") or (kind == "combobox" and field.options):
+        labels = [option.label for option in field.options]
+        index = -1
+        if dial and code:
+            index = run._dial_option(field, phone)
+        for want in (answer, known.value if known else ""):
+            if index < 0:
+                index = best_option(labels, want)
+        if index < 0 and kind == "combobox":
+            pass  # the list shown in the snapshot may be partial: the answer is typed and looked up in the open list
+        elif index < 0:
+            return drop("valeur hors des options proposées")
+        else:
+            if kind != "combobox" and field.value and norm(field.value) == norm(labels[index]):
+                return None
+            return item(Action(ref=field.ref, op="select", fact=action.fact), field, known, value=labels[index], option_index=index,
+                        used=used, inferred=inferred, basis=basis)
+    want = known.value if known is not None and known.exact else (answer or (known.value if known else ""))
+    if not (want or "").strip():
+        return drop("valeur manquante")
+    if kind == "combobox":
+        out = item(Action(ref=field.ref, op="select", fact=action.fact), field, known, value=answer or want, used=used,
+                   inferred=inferred, basis=basis)
+        if dial and code:
+            out.dial_code, out.value = code, code
+        return out
+    national = known is not None and known.key == "phone" and beside_dial(field, snap)
+    current = field.value.strip()
+    if current and norm(current) == norm(want) and not (national and current.startswith(("+", "00"))):
+        return None
+    if national and current and not current.startswith(("+", "00")) and re.sub(r"\D", "", current)[-9:] == re.sub(r"\D", "", want)[-9:]:
+        return None
+    out = item(Action(ref=field.ref, op="fill", fact=action.fact), field, known, value=want, used=used,
+               inferred=inferred and not (known is not None and known.exact), basis=basis)
+    out.national = national
+    return out
+
+
+def beside_dial(field: FormField, snap: PageSnapshot) -> bool:
+    """A phone number field that stands next to a calling-code picker: the number goes in without the code."""
+    engine = _engine()
+    return any(other is not field and other.form == field.form and engine._dial_selector(other, snap) for other in snap.fields)
+
+
+def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validated:
+    engine = _engine()
+    v = engine._Validated()
+    by_ref = {field.ref: field for field in snap.fields}
+    seen: set[str] = set()
+    scope = run.signup_scope
+    fillable = plan.page_kind in ("form", "account_signup", "account_login", "other")
+    if fillable:
+        for field in snap.fields:
+            ruled = owner_item(run, field)
+            if ruled is None:
+                continue
+            seen.add(field.ref)
+            if ruled is not True:
+                v.items.append(ruled)
+    clicks: list[tuple[FormField, str]] = []
+    for action in plan.actions:
+        field = by_ref.get(action.ref)
+        if field is None:
+            v.notes.append(f"action ignorée : référence inconnue ({action.op})")
+            continue
+        if action.op == "click":
+            if field.kind not in ("button", "link") or action.click_role in (None, "other"):
+                v.notes.append(f"clic ignoré sur « {engine._label(field)} »")
+            else:
+                clicks.append((field, action.click_role))
+            continue
+        if action.ref in seen:
+            continue
+        seen.add(action.ref)
+        if scope is not None and field.kind == "password" and field.ref not in scope:
+            continue  # the login box next to an inline account-creation form
+        made = check(run, action, field, v, snap, resolve)
+        if made is not None:
+            v.items.append(made)
+    if plan.page_kind in ("form", "account_signup"):
+        password = run.facts.get("account_password")
+        for field in snap.fields:
+            if field.ref in seen:
+                continue
+            made = None
+            if scope is not None and field.kind == "password" and field.ref not in scope:
+                continue
+            if field.kind == "password" and plan.page_kind == "account_signup" and password is not None and engine._is_empty(field):
+                made = check(run, Action(ref=field.ref, op="fill", fact=password.key), field, v, snap, resolve)
+            elif field.kind == "file" and plan.page_kind == "form" and field.required and engine._is_empty(field) \
+                    and not run._file_satisfied(field, snap) and run._cv_by_code(field, snap):
+                made = engine._Item(Action(ref=field.ref, op="upload_cv"), field, used="cv")
+            elif field.kind in ("text", "email", "tel"):
+                made = run._identity_item(field, snap)  # a name / e-mail / phone field the plan left empty
+                if made is not None and made.used == "phone":
+                    made.national = beside_dial(field, snap)
+            if made is not None:
+                seen.add(field.ref)
+                v.questions = [question for question in v.questions if question.ref != field.ref]
+                v.items.append(made)
+    if clicks:
+        v.click = clicks[-1]
+    # files first: an upload often re-renders the form (the engine re-reads the page after it)
+    v.items.sort(key=lambda entry: entry.act.op not in ("upload_cv", "upload_letter"))
+    return v
+
+
+def effective_role(run: _Run, field: FormField, role: str, snap: PageSnapshot) -> str:
+    """The planner's role stands, except a navigation-looking click whose label says it sends the application."""
+    engine = _engine()
+    if role in ("next", "open_form") and run.app_touched and engine.SUBMIT_RE.search(field.label) and not engine.NAV_RE.search(field.label):
+        return "submit"
+    if role in ("signup", "login") and any(entry.kind == "file" and entry.value.strip() for entry in snap.fields):
+        return "submit"
+    return role
+
+
+def open_questions(run: _Run, plan: StepPlan, snap: PageSnapshot, v: _Validated, handled: set[str], click: FormField | None):
+    """What still stands between this page and its send / next click, as (blocking, soft): the answers that failed and the
+    planner's own unknowns block; required fields of the clicked form that are simply still empty are soft (the site's own
+    validation decides). Site widgets of a job ad are never questions."""
+    engine = _engine()
+    if plan.page_kind == "job_page":
+        return [], []
+    by_ref = {field.ref: field for field in snap.fields}
+    target = click.form if click else ""
+    mine = [field for field in snap.fields if not target or not field.form or field.form == target]
+    blocking = [question for question in v.questions if question.ref not in handled]
+    for question in plan.unknown:
+        field = by_ref.get(question.ref)
+        if question.required and question.ref not in handled and (field is None or engine._is_empty(field)) and not (
+                field is not None and (field.kind in ("button", "link") or owner_item(run, field) is True)):
+            blocking.append(engine._question(field) if field is not None else question)
+    soft = [engine._question(field) for field in mine if field.required and field.kind not in ("button", "link")
+            and field.ref not in handled and engine._is_empty(field) and not run._file_satisfied(field, snap)]
+
+    def unique(questions, seen):
+        out = []
+        for question in questions:
+            key = question.ref or norm(question.label)
+            if key not in seen:
+                seen.add(key)
+                out.append(question)
+        return out
+
+    seen: set[str] = set()
+    blocking = unique(blocking, seen)
+    return blocking, unique(soft, seen)
+
+
+# ---------------------------------------------------------------- execution
+async def _state(loc) -> bool:
+    return bool(await loc.evaluate("e => !!e.checked || e.getAttribute('aria-checked') === 'true'"))
+
+
+async def _toggle(run: _Run, loc, want: bool) -> None:
+    """Bring a box / radio to the wanted state whatever hides it (a styled label, an overlay, a custom widget)."""
+    engine = _engine()
+    if await _state(loc) == want:
+        return
+    attempts = (
+        lambda: (loc.check if want else loc.uncheck)(timeout=2500),
+        lambda: loc.evaluate("e => { const l = (e.labels && e.labels[0]) || e.closest('label'); (l || e).click(); }"),
+        lambda: (loc.check if want else loc.uncheck)(force=True, timeout=2500),
+        lambda: loc.evaluate("e => e.click()"),
+    )
+    for attempt in attempts:
+        with contextlib.suppress(Exception):
+            await attempt()
+        with contextlib.suppress(Exception):
+            if await _state(loc) == want:
+                return
+    raise engine._Skip("case impossible à cocher")
+
+
+_PRESS_JS = """e => { e.scrollIntoView({block: 'center'});
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'])
+    e.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window})); }"""
+# A modal that covers the page and holds no form: its text and its buttons (tagged so the chosen one can be clicked).
+_BLOCKER_JS = r"""() => {
+  const visible = n => { const r = n.getBoundingClientRect(), s = getComputedStyle(n);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const centre = document.elementFromPoint(Math.floor(innerWidth / 2), Math.floor(innerHeight / 2));
+  if (!centre) return null;
+  const SEL = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"], [class*="modal" i], [class*="popup" i], '
+    + '[class*="overlay" i], [id*="modal" i], [id*="popup" i]';
+  let box = null;
+  for (const node of document.querySelectorAll(SEL)) {
+    if (node === document.body || node === document.documentElement || !visible(node)) continue;
+    const pos = getComputedStyle(node).position;
+    const dialog = node.matches('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+    if (!dialog && pos !== 'fixed' && pos !== 'absolute') continue;
+    if (!(node === centre || node.contains(centre))) continue;
+    if (!box || box.contains(node)) box = node;   // the innermost one that still covers the centre
+  }
+  if (!box) return null;
+  const inputs = [...box.querySelectorAll('input, select, textarea')].filter(n => visible(n)
+    && !['hidden', 'button', 'submit', 'checkbox', 'radio'].includes((n.getAttribute('type') || '').toLowerCase()));
+  if (inputs.length) return null;   // a form in a dialog is the application itself
+  const label = n => (n.innerText || n.value || n.getAttribute('aria-label') || n.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
+  const buttons = [...box.querySelectorAll('button, [role="button"], a[href], input[type="button"], input[type="submit"]')].filter(visible);
+  buttons.forEach((n, i) => n.setAttribute('data-bp-blocker', String(i)));
+  return {text: (box.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 400), buttons: buttons.map(label).slice(0, 12),
+          links: buttons.map(n => n.matches('a[href]') && n.getAttribute('role') !== 'button').slice(0, 12)};
+}"""
+_TOPIC = re.compile(r"cookie|traceur|consent|tracking|privacy|confidentialit|donnees personnelles|datenschutz|terms|conditions d.utilisation|rgpd|gdpr")
+_REFUSE = re.compile(r"^(?:tout refuser|refuser.*|continuer sans accepter|reject.*|decline.*|deny.*|necessary only|only necessary|alle ablehnen|ablehnen|nur notwendige)$")
+_ACCEPT = re.compile(r"^(?:tout accepter|accepter.*|j.accepte.*|ok.*|accept.*|allow.*|i agree|agree.*|got it|j.ai compris|compris|continuer|continue|"
+                     r"fermer|close|alle akzeptieren|akzeptieren|zustimmen|erlauben|verstanden|weiter|×|x)$")
+
+
+async def _shown(handle) -> bool:
+    try:
+        return bool(await handle.evaluate("e => e.isConnected && e.getClientRects().length > 0"))
+    except Exception:
+        return False
+
+
+async def blocker(page) -> dict | None:
+    """The modal that covers the centre of the page and holds no input (a privacy notice, a welcome pop-up), if any."""
+    try:
+        found = await page.evaluate(_BLOCKER_JS)
+    except Exception:
+        return None
+    return found if isinstance(found, dict) else None
+
+
+async def dismiss_blocker(run: _Run) -> str:
+    """Owner rule: a cookie / privacy / terms notice never stops an application. Refuse when it offers that, otherwise accept
+    (or take its only button). Any other modal is left to the planner, which is told about it (`blocker_hint`)."""
+    for _ in range(2):
+        found = await blocker(run.page)
+        if not found or not found["buttons"] or not _TOPIC.search(fold(found["text"])):
+            return ""
+        labels = [fold(label).strip() for label in found["buttons"]]
+        named = [index for index, label in enumerate(labels) if label]
+        choice = next((index for index in named if _REFUSE.match(labels[index])), None)
+        if choice is None:
+            choice = next((index for index in named if _ACCEPT.match(labels[index])), None)
+        real = [index for index in named if not found["links"][index]]  # a link to the policy text is not the way out
+        if choice is None and len(real) == 1:
+            choice = real[0]
+        if choice is None:
+            return ""
+        try:
+            await run.page.locator(f'[data-bp-blocker="{choice}"]').first.click(timeout=3000)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await run.page.locator(f'[data-bp-blocker="{choice}"]').first.evaluate(_PRESS_JS)
+        await asyncio.sleep(0.5)
+        after = await blocker(run.page)
+        if not after or after["text"] != found["text"]:
+            return found["buttons"][choice]
+    return ""
+
+
+async def blocker_hint(run: _Run) -> str:
+    found = await blocker(run.page)
+    if not found or not found["buttons"]:
+        return ""
+    return (f"[A MODAL DIALOG COVERS THE PAGE and blocks every other control: « {found['text'][:240]} ». Its buttons: "
+            f"{' | '.join(label for label in found['buttons'] if label)[:200]}. This step is ONLY the click that closes or accepts it.] ")
+
+
+async def _popup_options(run: _Run) -> list[tuple[object, str]]:
+    """(element, text) of every option the open list shows, in any frame. Elements, not positions: a virtualized list
+    recycles its rows, so "the n-th option" is another one a moment later."""
+    found = []
+    for frame in run.page.frames:
+        with contextlib.suppress(Exception):
+            for handle in (await frame.locator(_POPUP_OPTIONS).element_handles())[:300]:
+                text = " ".join(str(await handle.evaluate("e => e.innerText || e.textContent || ''")).split())
+                if text:
+                    found.append((handle, text))
+    return found
+
+
+def _closest(labels: list[str], want: str) -> int:
+    """Last resort in a filtered list: the one option that clearly resembles the answer ("Français" for "Française")."""
+    target = norm(want)
+    scored = sorted(((difflib.SequenceMatcher(None, target, norm(label)).ratio(), index) for index, label in enumerate(labels)), reverse=True)
+    if scored and scored[0][0] >= 0.72 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.05):
+        return scored[0][1]
+    return -1
+
+
+async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
+    """Open the list, type the answer when the control takes text, pick the option that means it, and READ THE CONTROL BACK:
+    a choice that does not show the wanted answer is undone (never leave another country, code or level selected)."""
+    engine = _engine()
+    want = it.value or ""
+    if field.options and it.option_index >= 0:
+        want = field.options[it.option_index].label
+    code = it.dial_code
+    typed = bool(await loc.evaluate("e => e.matches('input,textarea')"))
+
+    def pick(found, loose=False):
+        labels = [text for _, text in found]
+        if code:
+            hits = [index for index, text in enumerate(labels) if re.findall(r"\+\s*[0-9]+", text) == [code]]
+            return hits[0] if hits else -1
+        index = best_option(labels, want)
+        return _closest(labels, want) if index < 0 and loose else index
+
+    def shows(live: str, label: str) -> bool:
+        if code:
+            return code in live.replace(" ", "") or not re.search(r"\+\s*[0-9]", live)
+        got, expected = norm(live), norm(label)
+        return not got or got == expected or got in expected or expected in got or best_option([live], want) == 0
+
+    async def choose(found, index) -> str:
+        option, label = found[index]
+        now = " ".join(str(await option.evaluate("e => e.isConnected ? (e.innerText || e.textContent || '') : ''")).split())
+        if now != label:
+            return ""  # the row was recycled under us: read the list again
+        before = await run._combo_value(loc)
+        try:
+            await option.click(timeout=2500)
+        except Exception:
+            await option.evaluate(_PRESS_JS)  # covered or off-screen: the events a list listens to, in order
+        await asyncio.sleep(0.4)
+        if await _shown(option) and not field.multiple:  # the list did not take it: Enter picks the highlighted row
+            with contextlib.suppress(Exception):
+                await option.evaluate(_PRESS_JS)
+                await asyncio.sleep(0.3)
+            if await _shown(option):
+                with contextlib.suppress(Exception):
+                    await loc.press("Enter", timeout=2000)
+                    await asyncio.sleep(0.3)
+        live = await run._combo_value(loc)
+        closed = not await _shown(option)
+        if (closed or field.multiple or live != before) and shows(live, label):
+            return live or label
+        await run._abandon_combobox(loc)
+        with contextlib.suppress(Exception):
+            await run.page.keyboard.press("Escape")
+        raise engine._Skip("la liste n'a pas retenu la réponse choisie")
+
+    async def open_list():
+        try:
+            await loc.click(timeout=4000)
+        except Exception:
+            await loc.evaluate("e => e.click()")
+        await asyncio.sleep(0.4)
+
+    await open_list()
+    found = await _popup_options(run)
+    index = pick(found)
+    if index >= 0 and (len(found) <= 40 or not typed):
+        if done := await choose(found, index):
+            return done
+    if typed:
+        words = want.split()
+        country = sorted(DIAL_COUNTRY_NAMES.get(code, ()), key=len)[:1] if code else []
+        texts = [code, code.lstrip("+"), *[name.title() for name in country]] if code else [
+            want, want.split(" (")[0], " ".join(words[:2]), words[0] if words else "", want[:4] if len(want) > 5 else ""]
+        for text in dict.fromkeys(text for text in texts if text):
+            with contextlib.suppress(Exception):
+                await loc.fill("", timeout=3000)
+            await loc.type(text, delay=30, timeout=8000)
+            await asyncio.sleep(1.0)
+            for _ in range(2):
+                found = await _popup_options(run)
+                index = pick(found, loose=True)
+                if index < 0 and len(found) == 1 and not code and norm(text) and norm(text) in norm(found[0][1]):
+                    index = 0
+                if index < 0:
+                    break
+                if done := await choose(found, index):
+                    return done
+    await run._abandon_combobox(loc)
+    with contextlib.suppress(Exception):
+        await run.page.keyboard.press("Escape")
+    raise engine._Skip("option introuvable dans la liste")
+
+
+async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> str:
+    """Carry out one item on the live page. `target` is the exact element of the snapshot (the first radio of a group)."""
+    engine = _engine()
+    action, field = it.act, it.field
+    timeout = engine.ACTION_TIMEOUT_MS
+    if action.op == "upload_cv":
+        await run._before_mutation(action.op, target)
+        if field.kind == "file":
+            await target.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": run.uploads.cv_bytes}, timeout=timeout)
+            run.uploaded = True
+            return "CV.pdf"
+        await run._set_files(resolve(field.ref), field, run.uploads.cv_pdf)
+        return "CV.pdf"
+    if action.op == "upload_letter":
+        letter = await run._letter_obj()
+        if letter is None or letter.pdf_path is None:
+            raise engine._Skip("lettre indisponible")
+        await run._before_mutation(action.op, target)
+        await run._set_files(resolve(field.ref), field, letter.pdf_path)
+        return letter.pdf_path.name
+    if action.op == "letter_text":
+        letter = await run._letter_obj()
+        if letter is None or not letter.text:
+            raise engine._Skip("lettre indisponible")
+        await run._before_mutation(action.op, target)
+        await target.fill(letter.text, timeout=timeout)
+        return letter.text[:60] + "…"
+    if field.kind == "checkbox":
+        want = action.op == "check"
+        await run._before_mutation(action.op, target)
+        await _toggle(run, target, want)
+        if want and it.used in {"application_privacy", "application_terms", "application_background_check"}:
+            run.consent_codes.add(it.used)
+        return "true" if want else "false"
+    if field.kind == "radio":
+        wanted = field.options[it.option_index]
+        group = resolve(field.ref)
+        live = await group.evaluate_all(engine._RADIOS_JS)
+        hits = [index for index, radio in enumerate(live) if norm(radio["label"]) == norm(wanted.label)
+                and (not wanted.value or radio["value"] == wanted.value)]
+        if not hits:
+            hits = [index for index, radio in enumerate(live) if norm(radio["label"]) == norm(wanted.label)]
+        if not hits and it.option_index < len(live):
+            hits = [it.option_index]
+        if not hits:
+            raise engine._Skip("option introuvable dans le groupe actuel")
+        member = group.nth(hits[0])
+        await run._before_mutation(action.op, await member.element_handle(timeout=timeout))
+        await _toggle(run, member, True)
+        if it.used == "application_background_check":
+            run.consent_codes.add(it.used)
+        return wanted.label
+    if field.kind == "select":
+        option = field.options[it.option_index]
+        await run._before_mutation(action.op, target)
+        try:
+            await target.select_option(value=option.value, timeout=timeout) if option.value else await target.select_option(
+                label=option.label, timeout=timeout)
+        except Exception:
+            await target.select_option(label=option.label, timeout=timeout)
+        shown = str(await target.evaluate("e => { const o = e.selectedOptions[0]; return o ? (o.label || o.textContent).trim() : ''; }") or "")
+        if norm(shown) != norm(option.label):
+            raise engine._Skip("valeur lue différente de la réponse choisie")
+        return shown
+    if field.kind == "combobox":
+        await run._before_mutation(action.op, target)
+        return await _combobox(run, target, field, it)
+    fact = it.fact
+    if fact is not None and fact.secret:
+        if field.kind != "password":
+            raise engine._Skip("mot de passe jamais saisi ici")
+        secret = run._secret(it.frame_url)
+        if secret is None:
+            raise engine._Skip("mot de passe indisponible")
+        run.secrets.add(secret)
+        await run._before_mutation(action.op, target)
+        await target.fill(secret, timeout=timeout)
+        return engine.SECRET_LOG
+    text = it.value or ""
+    if fact is not None and fact.exact and fact.variants:
+        length, pattern = await target.evaluate("e => [e.getAttribute('maxlength'), e.getAttribute('pattern')]")
+        text = engine.pick_variant(fact, field, int(length) if length and length.isdigit() else None, pattern, national=it.national)
+    if field.kind == "date":
+        from jobhunt.apply.facts import from_french_date  # noqa: PLC0415
+
+        text = from_french_date(text) or text
+    if field.kind != "textarea":
+        text = text.replace("\r", " ").replace("\n", " ")
+    await run._before_mutation(action.op, target)
+    if note := getattr(run.autonomous, "note_value", None):
+        note(text)
+    try:
+        await target.fill(text, timeout=timeout)
+    except Exception:
+        await target.click(timeout=timeout)
+        await run.page.keyboard.type(text, delay=25)
+    with contextlib.suppress(Exception):
+        if not str(await target.evaluate("e => e.value ?? ''") or "").strip():  # a masked input that ignores fill()
+            await target.click(timeout=timeout)
+            await run.page.keyboard.type(text, delay=25)
+    return text

@@ -80,6 +80,7 @@ class Settings(BaseModel):
     apply_daily_cap: int = 40
     apply_autonomous: bool = True
     apply_guard_mode: str = "core"  # JOBHUNT_APPLY_GUARD_MODE: core (browser-like, two core rules) | strict (every posting/entry proof)
+    apply_fill_mode: str = "planner"  # JOBHUNT_APPLY_FILL_MODE: planner (core mode fills what the planner maps) | strict (every validation layer)
     # JOBHUNT_APPLY_MAX_AGE_DAYS: oldest job (effective posting date) an application may still be sent to. The search and
     # the shortlist keep their own 14-day freshness window; this one only governs sending.
     apply_max_age_days: int = 14
@@ -181,6 +182,7 @@ def get_settings() -> Settings:
         apply_daily_cap=int(env("JOBHUNT_APPLY_DAILY_CAP") or 40),
         apply_autonomous=env("JOBHUNT_APPLY_AUTONOMOUS", "1").strip().lower() not in ("0", "false", "no", "off"),
         apply_guard_mode="strict" if env("JOBHUNT_APPLY_GUARD_MODE", "core").strip().lower() == "strict" else "core",
+        apply_fill_mode="strict" if env("JOBHUNT_APPLY_FILL_MODE", "planner").strip().lower() == "strict" else "planner",
         apply_max_age_days=int(env("JOBHUNT_APPLY_MAX_AGE_DAYS") or 14),
         apply_prepare_min_score=float(env("JOBHUNT_APPLY_PREPARE_MIN_SCORE") or 60),
         apply_prepare_daily_cap=int(env("JOBHUNT_APPLY_PREPARE_DAILY_CAP") or 15),

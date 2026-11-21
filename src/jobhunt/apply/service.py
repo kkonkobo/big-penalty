@@ -583,6 +583,15 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         guard.final_started = True
         audience.final_started = True
 
+    async def unmark_submit():
+        apply_store.unmark_autonomous_submit(attempt)
+        guard.final_started = guard.final_response = False
+        audience.final_started = audience.final_response = audience.final_json = False
+        audience.final_receipt_url = ""
+
+    if getattr(audience, "trusting", False):
+        audience.unmark_submit = unmark_submit
+
     async def verify_mail():
         return await mail.poll(email, audience.recipient_url, run_.started_at)
 
@@ -756,7 +765,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
             elif browser_adapter or not await follow_landing(page):
                 raise ApplyError(SUPERVISED_ONLY if browser_adapter or guard.refused else "Destination de candidature non vérifiée.")
             result = await run_application(
-                page, url=attempt.url, facts=facts, planner=planner if planner is not None else LLMPlanner(llm.get()),
+                page, url=attempt.url, facts=facts,
+                planner=planner if planner is not None else LLMPlanner(llm.get(), autonomy=bool(getattr(audience, "trusting", False))),
                 verifier=verifier if verifier is not None or planner is not None else _default_verifier(llm),
                 uploads=Uploads(cv_pdf=cvs.safe_pdf(app), cv_bytes=request.pdf), mode="submit", current_step=True,
                 autonomous=audience, autonomous_attempt=attempt, before_submit=recheck, on_submit_click=mark_submit,
@@ -766,7 +776,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 account_known=live_known(),
                 email_verification=mail_flow,
                 diagnostics=diagnostics, apply_entry=None if browser_adapter else open_apply,
-                host_allowed=audience.trusted_host if audience.core else (lambda host: host == _host(audience.document)), max_steps=min(12, get_settings().apply_max_steps),
+                host_allowed=audience.trusted_host if audience.core else (lambda host: host == _host(audience.document)),
+                max_steps=max(30, get_settings().apply_max_steps) if getattr(audience, "trusting", False) else min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
             result = handoff_result("human", diagnostics=diagnostics).model_copy(
@@ -1231,11 +1242,18 @@ def _settle(run_: ApplyRun, mode: Mode, result: RunResult, crashed: bool, *, rec
     if browser:
         attempt, guard = browser
         confirmed = guard.final_response and not guard.refused and not crashed
+        if (guard.core and guard.final_started and result.status == "submitted" and not guard.refused and not crashed
+                and result.dispatch_diagnostics.receipt_reason == "confirmation_text"):
+            confirmed = True  # core mode: the receipt page itself (form gone, receipt wording) after the recorded final click
         account_only_email = (result.status == 'needs_email' and result.dispatch_diagnostics.email is not None
                               and not guard.non_account_transmitted)
         # only the candidate-account login / signup was posted (no application data): a stop after it is not "possibly sent"
         account_only_stop = result.status in ('blocked', 'needs_human', 'needs_input') and not guard.non_account_transmitted
         clear = (not guard.transmitted or account_only_email or account_only_stop) and not guard.final_started and not crashed
+        if guard.core and not guard.final_started:
+            # Core mode: only the final click can send an application. A draft write, an upload or an autosave made while
+            # filling is not a send: a run that stops before its final click stays retriable.
+            clear = True
         return apply_store.finish_and_settle(run_.id, result, browser_attempt=attempt,
                                              browser_confirmed=confirmed, browser_clear=clear)
     return apply_store.finish_and_settle(run_.id, result, receipt=receipt)

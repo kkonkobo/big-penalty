@@ -830,6 +830,14 @@ def mark_autonomous_submit(attempt: Attempt) -> None:
         conn.execute("UPDATE application_runs SET submit_clicked_at=? WHERE id=?", (_iso(now()), attempt.run_id))
 
 
+def unmark_autonomous_submit(attempt: Attempt) -> None:
+    """The site refused the final click with field errors on the form it still shows: nothing was received, so the run is
+    no longer "possibly sent" (it may correct the form and click again, or stop on a question and be retried)."""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE application_runs SET submit_clicked_at=NULL WHERE id=? AND status='running'", (attempt.run_id,))
+
+
 def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=None, *, target_digests=()) -> dict[int, bool]:
     current = conn.execute("SELECT j.id, j.company, j.title, j.extra, j.origin_url FROM applications a JOIN jobs j"
                            " ON j.id=a.job_id AND j.profile_id=a.profile_id WHERE a.id=? AND a.profile_id=?",
