@@ -2226,6 +2226,55 @@ class _Run:
     rehearse = False  # scripts/rehearse_apply.py: stop before any click that could send what was typed
     rehearse_ok: re.Pattern | None = None  # ... except in-page controls named by the developer (a dialog opener)
 
+    def _watch_account_answers(self) -> None:
+        """Keep the responses the site gives to an account click (same host, POST), for the local failure record."""
+        self.account_pending = []
+        host = urlparse(self.page.url).hostname
+        page = self.page
+
+        def on_response(response) -> None:
+            with contextlib.suppress(Exception):
+                if response.request.method == "POST" and urlparse(response.url).hostname == host and len(self.account_pending) < 12:
+                    self.account_pending.append(response)
+
+        if (old := getattr(self, "_account_listener", None)) is not None:
+            with contextlib.suppress(Exception):
+                old[0].remove_listener("response", old[1])
+        self._account_listener = (page, on_response)
+        with contextlib.suppress(Exception):
+            page.on("response", on_response)
+
+    async def _account_answers(self) -> list[str]:
+        """What the site answered to the last account click: status, end of the path, and the error wording of a JSON
+        answer (never a value: e-mail addresses and long tokens are masked)."""
+        pending, self.account_pending = getattr(self, "account_pending", []), []
+        out = []
+        for response in pending:
+            line = f"{response.status} {urlparse(response.url).path[-60:]}"
+            with contextlib.suppress(Exception):
+                body = await response.json()
+                said = []
+
+                def walk(node, depth=0):
+                    if depth > 4 or len(said) >= 4:
+                        return
+                    if isinstance(node, dict):
+                        for key, value in node.items():
+                            if isinstance(value, str | int | bool) and re.search(r"error|message|code|status|reason|valid|locked|verif", str(key), re.I):
+                                said.append(f"{key}={str(value)[:120]}")
+                            else:
+                                walk(value, depth + 1)
+                    elif isinstance(node, list):
+                        for item in node[:5]:
+                            walk(item, depth + 1)
+
+                walk(body)
+                if said:
+                    line += " | " + " ; ".join(said)
+            line = re.sub(r"[\w.+-]+@[\w.-]+", "<e-mail>", line)
+            out.append(re.sub(r"[A-Za-z0-9_-]{32,}", "<…>", line)[:300])
+        return out[:8]
+
     def _trace_plan(self, seen: PageSnapshot, plan: StepPlan) -> None:
         """Keep what the planner was shown and what it answered at the latest steps (labels and kinds, never a value), for the
         local failure record of a trusting run."""
@@ -2234,7 +2283,7 @@ class _Run:
         by_ref = {f.ref: f for f in seen.fields}
         self.plan_trace.append({
             "step": len(self.steps), "url": bare_url(seen.url), "title": seen.title[:120], "text": seen.text[:700],
-            "signals": page_signals(seen.text),
+            "signals": page_signals(seen.text), "account_answers": getattr(self, "account_answers", []),
             "fields": [{"ref": f.ref, "kind": f.kind, "label": f.label[:80], "required": f.required, "filled": not _is_empty(f),
                         "error": f.error[:80], "options": len(f.options),
                         # (the option a choice control shows - a country, a level, yes / no - never free text)
@@ -2840,6 +2889,7 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
+            self.account_answers = await self._account_answers() if getattr(self, "account_pending", None) else []
             self._trace_plan(pub, plan)
             for attempt in (1, 2):
                 if not (self.trusting and kind == "job_page" and not plan.actions and not self._inspection_only and not self.final_clicked
@@ -3593,6 +3643,8 @@ class _Run:
                             self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"}, account=bound_account)
                         except (ManualField, ApplyError):
                             raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
+                    if trust and bound_account and role in ("login", "signup"):
+                        self._watch_account_answers()
                     await self._click(target, recheck=dispatch_check)
                 elif recheck_click:
                     await self._click(target, recheck=recheck)  # type: ignore[arg-type]

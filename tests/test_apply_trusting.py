@@ -1562,3 +1562,17 @@ async def test_an_apply_and_create_form_that_says_the_account_exists_was_not_sen
 ])
 def test_a_receipt_that_names_the_posting_between_its_words_is_a_receipt(text, received):
     assert engine.confirmation_evidence(text) is received
+
+
+async def test_the_answer_to_an_account_click_is_kept_without_values():
+    class _Response:
+        status = 422
+        url = "https://tenant.example.test/fr-FR/acme/createAccount?token=" + "a" * 40
+
+        async def json(self):
+            return {"errors": [{"errorCode": "ACCOUNT_EXISTS", "message": "Account for camille@example.org exists"}], "data": {"name": "x"}}
+
+    run = SimpleNamespace(account_pending=[_Response()])
+    answers = await engine._Run._account_answers(run)
+    assert answers == ["422 /fr-FR/acme/createAccount | errorCode=ACCOUNT_EXISTS ; message=Account for <e-mail> exists"]
+    assert run.account_pending == []
