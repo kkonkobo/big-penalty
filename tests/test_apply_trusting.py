@@ -1013,3 +1013,34 @@ async def test_an_opened_list_is_remembered_and_a_category_sub_list_is_followed(
     shown = await trusting._combobox(run, await resolve.element(combo.ref), combo, item)
     assert shown == "LinkedIn"
     assert run.combo_options[trusting.norm(combo.label)] == ["Site carrière", "Réseaux sociaux", "Salon"]
+
+
+MULTISELECT = '''<form><label for="code">Indicatif de pays</label>
+  <div class="box"><input id="code" type="text">
+    <ul role="listbox" data-automation-id="selectedItemList">ITEMS</ul></div>
+  <label>Nº de téléphone <input type="text" name="phoneNumber"></label></form>'''
+CHOSEN = ('<li role="option"><span>{0}</span><span data-automation-id="DELETE_charm" '
+          'onclick="this.closest(\'li\').remove()">x</span></li>')
+
+
+async def test_a_multiselect_search_box_shows_its_chosen_item_as_its_value(page):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(MULTISELECT.replace("ITEMS", CHOSEN.format("France (+33)")))
+    snap, _ = await take_snapshot(page)
+    box = next(f for f in snap.fields if f.label == "Indicatif de pays")
+    assert "France (+33)" in box.value
+    assert trusting.check(run_of(), Action(ref=box.ref, op="fill", fact="phone"), box, engine._Validated(), snap, None) is None
+    assert await trusting._popup_options(SimpleNamespace(page=page)) == []  # (a chosen item is not a choice of an open list)
+
+
+async def test_another_countrys_calling_code_is_taken_out_of_the_search_box(page):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(MULTISELECT.replace("ITEMS", CHOSEN.format("Belgique (+32)")))
+    snap, resolve = await take_snapshot(page)
+    box = next(f for f in snap.fields if f.label == "Indicatif de pays")
+    made = trusting.check(run_of(), Action(ref=box.ref, op="fill", fact="phone"), box, engine._Validated(), snap, None)
+    assert made is not None and made.dial_code == "+33"
+    assert await (await resolve.element(box.ref)).evaluate(trusting._REMOVE_CHOSEN_JS, "(+33)") == 1
+    assert await page.locator("li[role=option]").count() == 0

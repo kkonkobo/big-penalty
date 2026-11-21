@@ -372,7 +372,9 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     out.national = national
     if kind in ("text", "tel") and code and _DIAL_LABEL.search(fold(f"{field.label} {field.placeholder}")) and not _PHONE_NUMBER.search(
             fold(field.label)):
-        out.dial_code = code  # ("Indicatif de pays" as a search box: see `_search_box`)
+        if re.findall(r"\+\s*[0-9]+", current) == [code]:
+            return None  # the search box already holds the candidate's own calling code
+        out.dial_code = code  # ("Indicatif de pays" as a search box: see `_search_box`; another country chosen there is replaced)
         out.national = False
     if known is not None and known.exact and known.variants and current and field.error:
         # The site refused the spelling it holds (a phone with its code, a LinkedIn URL without scheme): type another one.
@@ -683,6 +685,23 @@ def stuck_hint(labels: list[str]) -> str:
             "them as they are and answer with ONLY the click that moves on (`next` or `submit`), unless a field it did not list is still empty.] ")
 
 
+# (the items a multi-select already holds are rendered as options of a "selected" list: not choices of the open list)
+_OPTION_TEXT_JS = ("e => e.closest('[data-automation-id=\"selectedItemList\"], [data-automation-id=\"selectedItem\"]') ? '' "
+                   ": (e.innerText || e.textContent || '')")
+_REMOVE_CHOSEN_JS = r"""(e, keep) => { let removed = 0;
+  for (let p = e.parentElement, i = 0; p && i < 4; p = p.parentElement, i++) {
+    const items = p.querySelectorAll('[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"] [role="option"]');
+    if (!items.length) continue;
+    for (const item of items) {
+      if ((item.textContent || '').includes(keep)) continue;
+      const cross = item.querySelector('[data-automation-id="DELETE_charm"], [aria-label*="supprimer" i], [aria-label*="remove" i], [aria-label*="delete" i]');
+      if (cross) { cross.click(); removed++; }
+    }
+    break;
+  }
+  return removed; }"""
+
+
 async def _popup_options(run: _Run) -> list[tuple[object, str]]:
     """(element, text) of every option the open list shows, in any frame. Elements, not positions: a virtualized list
     recycles its rows, so "the n-th option" is another one a moment later."""
@@ -690,7 +709,7 @@ async def _popup_options(run: _Run) -> list[tuple[object, str]]:
     for frame in run.page.frames:
         with contextlib.suppress(Exception):
             for handle in (await frame.locator(_POPUP_OPTIONS).element_handles())[:300]:
-                text = " ".join(str(await handle.evaluate("e => e.innerText || e.textContent || ''")).split())
+                text = " ".join(str(await handle.evaluate(_OPTION_TEXT_JS)).split())
                 if text:
                     found.append((handle, text))
     return found
@@ -929,6 +948,9 @@ async def _search_box(run: _Run, target, code: str) -> str:
     country of the code, then pick the one entry that carries the code."""
     engine = _engine()
     names = sorted(DIAL_COUNTRY_NAMES.get(code, ()), key=len)
+    with contextlib.suppress(Exception):
+        if await target.evaluate(_REMOVE_CHOSEN_JS, f"({code})"):  # another country's code sits there: take it out first
+            await asyncio.sleep(0.4)
     for text in dict.fromkeys([*(name.title() for name in names[:1]), code, code.lstrip("+")]):
         with contextlib.suppress(Exception):
             await target.fill("", timeout=3000)
@@ -949,6 +971,8 @@ async def _search_box(run: _Run, target, code: str) -> str:
             except Exception:
                 await hits[0][0].evaluate(_PRESS_JS)
             await asyncio.sleep(0.4)
+            with contextlib.suppress(Exception):
+                await target.evaluate(_REMOVE_CHOSEN_JS, f"({code})")  # (a widget that ADDS instead of replacing)
             return hits[0][1]
     with contextlib.suppress(Exception):
         await target.fill("", timeout=3000)
