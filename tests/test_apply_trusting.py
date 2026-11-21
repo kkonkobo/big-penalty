@@ -1482,3 +1482,32 @@ def test_the_autonomy_rules_tell_the_planner_to_send_from_a_review_page():
     from jobhunt.apply import planner
 
     assert "review / summary page" in planner.AUTONOMY and "month-first" in planner.AUTONOMY
+
+
+def test_france_is_found_under_its_name_in_another_language():
+    labels = ["Deutschland", "Frankreich", "Französisch-Guayana", "Belgien"]
+    assert labels[trusting.best_option(labels, "France")] == "Frankreich"
+
+
+def test_a_required_message_without_a_letter_takes_a_short_neutral_note():
+    run = run_of()
+    run.job_title = "Stage ingénieur test"
+    note = trusting.short_message(run)
+    assert "Stage ingénieur test" in note and note.startswith("Bonjour") and run.facts.get("last_name").value in note
+    assert trusting.short_message(run_of(FactSheet(facts=[]))) == ""
+
+
+async def test_a_choice_that_makes_the_page_replace_the_control_was_taken(page):  # noqa: F811
+    await page.set_content('''<div id="box"><label id="l">Pays</label>
+      <button id="b" aria-haspopup="listbox" aria-labelledby="l" onclick="pop.innerHTML = '<ul role=listbox><li role=option>France</li><li role=option>Belgique</li></ul>';
+        for (const li of pop.querySelectorAll('li')) li.onclick = () => { pop.innerHTML = '';
+          box.innerHTML = '<label id=l>Pays</label><button id=b2 aria-haspopup=listbox aria-labelledby=l>' + li.textContent + '</button>'; };">Select One</button></div>
+      <div id="pop"></div>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="country"), combo, None, value="France")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "France"
+    assert await page.inner_text("#b2") == "France"
