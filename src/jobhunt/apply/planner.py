@@ -155,6 +155,9 @@ M. Accounts. After the account-creation click (`history` shows a `signup` click)
 L. `history[].problems` lists what the program could not do at earlier steps (an option that was not found, a field that
    refused its value): choose another listed option or another format for those fields. A field that failed twice (or a "could NOT set" notice at
    the top of the page text): leave it, do not plan it again, and end the plan with the click that moves on.
+N. A review / summary page before the final send ("Réviser", "Review"): click the send button (`submit`). Do NOT go back to
+   re-check values that were entered in labelled fields at an earlier step; a summary shows dates in the SITE's own format
+   (05/10/2004 is 10 May on a month-first site), which is not an error. Go back only when the page shows an error message.
 """
 
 
