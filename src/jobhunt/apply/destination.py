@@ -45,6 +45,15 @@ def trust_planner() -> bool:
     return get_settings().apply_fill_mode != "strict"
 
 
+def network_filter() -> bool:
+    """JOBHUNT_APPLY_NETWORK_FILTER=1: abort third-party writes once candidate data was entered. Off by default (owner
+    decision 2026-11-20): it broke the bot checks, uploads and ATS calls a submit depends on (a blocked reCAPTCHA call = a
+    submit button that sends nothing). Data is still only typed into, and submitted from, the employer's / ATS's pages."""
+    from jobhunt.config import get_settings
+
+    return bool(get_settings().apply_network_filter)
+
+
 def login_return(url: str) -> str:
     try:
         parsed = urlsplit(url)
@@ -372,8 +381,9 @@ class RecipientGuard:
                     source = self.page.url if self.page is not None else ""
                 if audience.trusted(source):
                     audience.extend_chain(url)  # (per hop: a redirect's next request still comes from the source page)
+            filtered = network_filter()
             if read:
-                if (audience.data_entered and urlsplit(url).query and not audience.trusted(url)
+                if (filtered and audience.data_entered and urlsplit(url).query and not audience.trusted(url)
                         and (navigation or request.resource_type not in {"script", "stylesheet", "font", "image", "media"}
                              or audience.carries_data(url))):
                     self.record_abort(url)  # a read that could carry what was entered: a tracker call, a pixel
@@ -381,9 +391,16 @@ class RecipientGuard:
                     return
                 await route.continue_()
                 return
-            if audience.data_entered and not audience.trusted(url):
+            if filtered and audience.data_entered and not audience.trusted(url):
                 self.record_abort(url)
                 await route.abort()
+                return
+            if not audience.trusted(url):
+                # A third-party write (bot check, consent service, upload storage, analytics): sent by the browser like any
+                # other. It is never the application itself: not counted as transmitted, never taken for the final request.
+                if audience.clicking:
+                    audience.foreign_writes += 1  # (after a click: "the click sent nothing at all" no longer holds)
+                await route.continue_()
                 return
             try:
                 audience.recheck()

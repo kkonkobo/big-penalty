@@ -2239,6 +2239,13 @@ class _Run:
                     if loop.time() - started >= 5 and await self._submit_rejected(snap):
                         return snap, resolve  # the site refused the form (field errors): correct it and send again
                 if loop.time() >= deadline:
+                    if self.trusting and await self._submit_rejected(snap, silent=True):
+                        # the click sent nothing at all to the site and the form is still there: not a "possible send"
+                        if self.rejected_submits <= 2:
+                            return snap, resolve
+                        result = self._end("failed", "Le bouton d'envoi ne déclenche aucun envoi sur ce site.")
+                        result.diagnostic_code = "submit_no_effect"
+                        return result
                     return self._unconfirmed()
                 await asyncio.sleep(OBSERVE_POLL_S)
                 snap, resolve = await self._snapshot()
@@ -2287,17 +2294,22 @@ class _Run:
             await asyncio.sleep(OBSERVE_POLL_S)
             snap, resolve = await self._snapshot()
 
-    async def _submit_rejected(self, snap: PageSnapshot) -> bool:
-        """The final click was refused by the page's own validation: same page, the form we filled and its send button are
-        still there, and fields show errors. Nothing was received: the send record is withdrawn and the form can be
-        corrected and sent again (twice at most)."""
+    async def _submit_rejected(self, snap: PageSnapshot, *, silent: bool = False) -> bool:
+        """The final click did not send the application: same page, the form we filled and its send button are still there,
+        and either fields show errors (the page's own validation refused it) or - `silent`, asked when the wait is over - the
+        browser sent NO request at all to the site since the click. Nothing was received: the send record is withdrawn and
+        the form can be corrected and sent again (twice at most; a third silent click ends the run as not sent)."""
         sent = self.last_sent
         withdraw = getattr(self.autonomous, "unmark_submit", None)
-        if sent is None or withdraw is None or self.rejected_submits >= 2 or urldefrag(self.page.url).url != self.sent_url:
+        if sent is None or withdraw is None or urldefrag(self.page.url).url != self.sent_url:
             return False
         present = {(_norm(_label(f)), f.kind) for f in snap.fields}
-        if not (sent.fields & present and any(f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
-                and any(f.error for f in snap.fields if f.kind not in ("button", "link"))):
+        intact = bool(sent.fields & present) and any(
+            f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
+        errors = any(f.error for f in snap.fields if f.kind not in ("button", "link"))
+        nothing_left = (silent and getattr(self.autonomous, "click_write", object()) is None and not self.autonomous.final_response
+                        and not getattr(self.autonomous, "foreign_writes", 1))
+        if not intact or not (nothing_left or (errors and self.rejected_submits < 2)):
             return False
         try:
             await withdraw()
