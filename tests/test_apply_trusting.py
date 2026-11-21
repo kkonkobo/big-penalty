@@ -1604,3 +1604,18 @@ async def test_a_receipt_in_a_dialog_of_the_page_the_site_moved_to_is_found(page
     assert await engine._Run._page_says_received(SimpleNamespace(page=page))
     await page.set_content('<main><h1>Offres</h1><a href="#">Ingénieur test</a><button>Soumettre</button></main>')
     assert not await engine._Run._page_says_received(SimpleNamespace(page=page))
+
+
+async def test_a_list_nothing_can_be_typed_in_takes_the_entry_closest_to_the_answer(page):  # noqa: F811
+    await page.set_content('''<label id="l">Country of citizenship</label>
+      <span id="b" role="combobox" tabindex="0" aria-labelledby="l" onclick="pop.innerHTML = '<ul role=listbox>' +
+        ['Belgique', 'Burkina Faso', 'Burundi', 'France'].map((t) => '<li role=option>' + t + '</li>').join('') + '</ul>';
+        for (const li of pop.querySelectorAll('li')) li.onclick = () => { b.textContent = li.textContent; pop.innerHTML = ''; };">Sélectionner</span>
+      <div id="pop"></div>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="nationality"), combo, None, value="Burkinabè")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Burkina Faso"
