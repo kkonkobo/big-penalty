@@ -941,3 +941,16 @@ def test_a_one_time_passcode_mailed_from_the_ats_vendor_domain_is_read():
 def test_former_employer_question_is_a_declaration_answered_from_its_fact():
     asked = field(ref="q1", kind="select", required=True, label="Avez-vous déjà travaillé pour notre entreprise ?", options=opts("Oui", "Non"))
     assert trusting.declaration_key(asked) == "former_employer"
+
+
+def test_a_recorded_nationality_is_matched_to_a_list_that_words_it_differently():
+    adjectives = field(ref="n1", kind="select", label="Nationalité", required=True, options=opts("Belge", "Burkinabé(e)", "Française"))
+    countries = field(ref="n2", kind="select", label="Nazionalità", options=opts("Belgio", "Burkina Faso", "Burundi", "Francia"))
+    run = run_of(facts=FactSheet(facts=[Fact(key="nationality", label="Nationalité", value="Burkinabè")]))
+    v = trusting.validate(run, plan_of(), snap_of(adjectives, countries), None)
+    chosen = {item.field.ref: item.field.options[item.option_index].label for item in v.items}
+    assert chosen == {"n1": "Burkinabé(e)", "n2": "Burkina Faso"}
+
+
+def test_an_ambiguous_stem_picks_nothing():
+    assert trusting._closest(["Niger", "Nigeria", "France"], "Nigérienne") == -1

@@ -322,6 +322,10 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         for want in (answer, known.value if known else ""):
             if index < 0:
                 index = best_option(labels, want)
+        if index < 0 and kind != "combobox":  # "Burkinabè" for "Burkinabé(e)", "Burkina Faso" in a list of countries
+            for want in (answer, known.value if known else ""):
+                if index < 0 and want:
+                    index = _closest(labels, want)
         if index < 0 and kind == "combobox":
             pass  # the list shown in the snapshot may be partial: the answer is typed and looked up in the open list
         elif index < 0:
@@ -374,6 +378,16 @@ def is_dial(field: FormField, snap: PageSnapshot) -> bool:
     if _engine()._dial_selector(field, snap) or _DIAL_LABEL.search(fold(f"{field.label} {field.placeholder} {field.name}")):
         return True
     return bool(field.options) and 2 * sum(bool(_DIAL_OPTION.search(option.label)) for option in field.options) >= len(field.options)
+
+
+_LEFT_FACTS = ((re.compile(r"\b(?:nationalit\w*|nazionalit\w*|staatsangehorigkeit|citizenship|nacionalidad)\b"), "nationality"),)
+
+
+def _left_fact(field: FormField) -> str | None:
+    label = fold(field.label)
+    if re.search(r"\b(?:second|autre|other|altra|zweite|2)\b", label):
+        return None  # ("Seconde nationalité": only the main one is recorded)
+    return next((key for pattern, key in _LEFT_FACTS if pattern.search(label)), None)
 
 
 def beside_dial(field: FormField, snap: PageSnapshot) -> bool:
@@ -443,6 +457,9 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
             elif field.kind == "file" and plan.page_kind == "form" and field.required and engine._is_empty(field) \
                     and not run._file_satisfied(field, snap) and run._cv_by_code(field, snap):
                 made = engine._Item(Action(ref=field.ref, op="upload_cv"), field, used="cv")
+            elif field.kind in ("select", "radio") and field.options and engine._is_empty(field) and (key := _left_fact(field)):
+                # A recorded fact the planner left unanswered because the list words it differently (nationality lists).
+                made = check(run, Action(ref=field.ref, op="select", fact=key), field, v, snap, resolve) if run.facts.known(key) else None
             elif field.kind in ("text", "email", "tel"):
                 made = run._identity_item(field, snap)  # a name / e-mail / phone field the plan left empty
                 if made is not None and made.used == "phone":
@@ -658,6 +675,10 @@ def _closest(labels: list[str], want: str) -> int:
     scored = sorted(((difflib.SequenceMatcher(None, target, norm(label)).ratio(), index) for index, label in enumerate(labels)), reverse=True)
     if scored and scored[0][0] >= 0.72 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.05):
         return scored[0][1]
+    if len(target) >= 6:  # the ONE option that starts like the answer: "Burkina Faso" for "Burkinabè", "France" for "Française"
+        stem = [index for index, label in enumerate(labels) if norm(label).startswith(target[:5])]
+        if len(stem) == 1:
+            return stem[0]
     return -1
 
 

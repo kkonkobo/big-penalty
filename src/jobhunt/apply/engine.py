@@ -2318,7 +2318,14 @@ class _Run:
                             trace.receipt_kind, trace.receipt_reason = "first_party_confirmation", "confirmation_text"
                             return self._end("submitted", "Candidature envoyée.")
                     if loop.time() - started >= 5 and await self._submit_rejected(snap):
-                        return snap, resolve  # the site refused the form (field errors): correct it and send again
+                        if self.rejected_submits <= 2:
+                            return snap, resolve  # the site refused the form (field errors): correct it and send again
+                        # Refused a third time: nothing was received, and the form cannot be completed as it stands.
+                        missing = [_question(f) for f in snap.fields if f.kind not in ("button", "link") and (
+                            f.error or (f.required and _is_empty(f)))][:8]
+                        result = self._end("needs_input", "Le site refuse le formulaire : champs obligatoires à compléter.", missing)
+                        result.diagnostic_code = "submit_refused"
+                        return result
                 if loop.time() >= deadline:
                     if self.trusting and await self._submit_rejected(snap, silent=True):
                         # the click sent nothing at all to the site and the form is still there: not a "possible send"
@@ -2397,7 +2404,7 @@ class _Run:
             errors = bool(ERROR_TITLE_RE.match(fold(snap.title).strip())) or await self._banner_error()
         nothing_left = (silent and getattr(self.autonomous, "click_write", object()) is None and not self.autonomous.final_response
                         and not getattr(self.autonomous, "foreign_writes", 1))
-        if not intact or not (nothing_left or (errors and self.rejected_submits < 2)):
+        if not intact or not (nothing_left or errors):
             return False
         try:
             await withdraw()
@@ -2964,6 +2971,13 @@ class _Run:
                           and (field.kind == "link" or not field.form)]
                 signin = [field for field in snap.fields if field.kind == "link" and re.fullmatch(
                     r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
+                if trust and len(signin) != 1:
+                    # A sign-in BUTTON counts too (an account page that toggles between its create and sign-in forms); the
+                    # same label twice (header + form) is one control: the one in the form, last in page order.
+                    toggles = [field for field in snap.fields if field.kind in {"link", "button"} and re.fullmatch(
+                        r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
+                    if len({fold(field.label).strip() for field in toggles}) == 1:
+                        signin = [toggles[-1]]
                 # The same control twice (header + body) is one control; two different ones are ambiguous.
                 one_signup = len({fold(field.label).strip() for field in signup}) == 1
                 login = trusting.login_actions(snap) if trust and known_account and not self.app_touched else []
