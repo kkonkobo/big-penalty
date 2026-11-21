@@ -727,6 +727,10 @@ _REMOVE_CHOSEN_JS = r"""(e, keep) => { let removed = 0;
   return removed; }"""
 
 
+# (a list named after its placeholder is not told apart from the next one: what it offered is not kept under that name)
+_PLACEHOLDER_LABEL = re.compile(r"^(?:select|choose|selectionn\w*|choisi\w*|bitte wahlen|auswahlen)\b")
+
+
 async def _popup_options(run: _Run) -> list[tuple[object, str]]:
     """(element, text) of every option the open list shows, in any frame. Elements, not positions: a virtualized list
     recycles its rows, so "the n-th option" is another one a moment later."""
@@ -825,7 +829,7 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     def remember(found):
         # What the open list offers is shown to the planner at the next read (a list that only renders once opened).
         labels = list(dict.fromkeys(text for _, text in found))
-        if labels and len(labels) <= 60 and norm(field.label):
+        if labels and len(labels) <= 60 and norm(field.label) and not _PLACEHOLDER_LABEL.search(norm(field.label)):
             run.combo_options[norm(field.label)] = labels
 
     async def open_list():

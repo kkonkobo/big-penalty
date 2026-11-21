@@ -3517,6 +3517,7 @@ class _Run:
                 return self._end("failed", f"Clic impossible sur « {_label(field)} » ({e}).")
             log.clicked = self._r(field.label)
             self.replans.pop(page_key, None)  # (a multi-step form keeps its URL: each step gets its own re-reads)
+            self.combo_options.clear()  # (and the lists of the next step are other lists, whatever their labels)
             await self._after_click()
             if self.autonomous:
                 if await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending):
