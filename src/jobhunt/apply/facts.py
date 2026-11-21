@@ -656,7 +656,7 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
                        ("nationality", "Nationalité"), ("race_ethnicity", "Origine ethnique déclarée"),
                        ("address", "Adresse postale"), ("address_line_2", "Complément d’adresse"), ("postal_code", "Code postal"),
                        ("city", "Ville"), ("country", "Pays"), ("driving_licence", "Permis de conduire"),
-                       ("disability", "Reconnaissance de travailleur handicapé (RQTH)"),
+                       ("disability", "Reconnaissance de travailleur handicapé (RQTH) ; répond aussi à « bénéficiaire de l'obligation d'emploi » (OETH / BOETH)"),
                        ("birth_place", "Lieu de naissance"), ("department", "Département de résidence"),
                        ("needs_visa_sponsorship", "Besoin d'un visa ou d'un permis de travail (sponsoring)"),
                        ("vehicle", "Véhicule personnel"), ("criminal_record", "Casier judiciaire (déclaration)"),
