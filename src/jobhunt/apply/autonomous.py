@@ -123,6 +123,7 @@ class Audience:
         self.trusting = self.core and trust_planner()
         self.chain: set[str] = set()
         self.typed: set[str] = set()
+        self.foreign_writes = 0  # third-party writes seen since the last armed click (core mode)
 
     # ------------------------------------------------------------ core mode: trusted sites
     @staticmethod
@@ -539,6 +540,7 @@ class Audience:
 
     def arm_click(self, *, scripted: bool, account: bool = False):
         self.click_write = None
+        self.foreign_writes = 0
         self.scriptable = scripted and self.method != "GET"
         self.clicking = True
         self.account_click = account

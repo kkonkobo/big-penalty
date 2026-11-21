@@ -102,6 +102,23 @@ def _required_consent(field: FormField) -> bool:
                 and not blocked_consent(text) and not engine.MARKETING_RE.search(text) and recruiter_ai_polarity(text) is None)
 
 
+_EXPOSED = re.compile(r"politiquement expos|politically exposed|politisch exponiert")
+
+
+def declaration_key(field: FormField) -> str | None:
+    """Declarations answered "No" unless the candidate recorded otherwise: a relative or acquaintance at the employer (owner
+    rule), a conflict of interest through such a relation, a politically exposed person. The recorded fact wins when there is one."""
+    text = _text(field)
+    if _EXPOSED.search(text):
+        return "politically_exposed"
+    kinds = {decision_key(field.label), decision_key(field.group)}
+    if "relatives" in kinds:
+        return "relatives_at_employer"
+    if "conflict" in kinds:
+        return "conflict_of_interest"
+    return None
+
+
 def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
     """The owner's standing rule for this field: an item to execute, True when the field is settled as it stands (nothing to
     do, the planner's own action is ignored), None when no rule covers it."""
@@ -127,14 +144,15 @@ def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
             code = "application_privacy" if engine.SIGNUP_PRIVACY_RE.search(text) else "application_terms"
             return item(Action(ref=field.ref, op="check"), field, used=code)
         return None
-    if field.kind in ("select", "radio", "combobox") and field.options and not field.multiple and "relatives" in {
-            decision_key(field.label), decision_key(field.group)}:
-        index = best_option([option.label for option in field.options], "Non")
+    key = declaration_key(field)
+    if key and field.kind in ("select", "radio", "combobox") and field.options and not field.multiple:
+        fact = run.facts.get(key)
+        index = best_option([option.label for option in field.options], fact.value if fact is not None and fact.value else "Non")
         if index >= 0:
             if field.value and norm(field.value) == norm(field.options[index].label):
                 return True
-            return item(Action(ref=field.ref, op="select", fact="relatives_at_employer"), field, option_index=index,
-                        value=field.options[index].label, used="relatives_at_employer")
+            return item(Action(ref=field.ref, op="select", fact=key), field, option_index=index,
+                        value=field.options[index].label, used=key)
     return None
 
 

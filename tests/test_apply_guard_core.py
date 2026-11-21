@@ -114,7 +114,26 @@ async def test_apply_flow_crossing_to_a_recognized_ats_submits_once(core, profil
     assert [post["path"] for post in core.posts] == ["/ats/jobs/4567-ingenieur/apply"]
 
 
-async def test_write_to_a_tracker_after_data_entry_is_aborted_and_the_run_still_submits(core, profile, tmp_path, fast):
+TRACKER_PAGE = """<script>
+        const input = document.querySelector('#name');
+        input.addEventListener('input', () => {
+          fetch('https://tracker.thirdparty.test/collect', {method: 'POST', body: input.value}).catch(() => {});
+        });</script>"""
+
+
+async def test_third_party_writes_are_not_filtered_by_default_and_the_run_submits_once(core, profile, tmp_path, fast):
+    # (a bot check, a consent service or an upload store a submit depends on is such a write)
+    core.html["/site/jobs/100"] = form_page("/jobs/100", TRACKER_PAGE)
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code)
+    assert paths(core, "/track")
+    assert paths(core, "/site") == ["/site/jobs/100"]
+    assert not result.result.dispatch_diagnostics.aborted_hosts
+
+
+async def test_write_to_a_tracker_after_data_entry_is_aborted_and_the_run_still_submits(core, profile, tmp_path, fast, monkeypatch):
+    monkeypatch.setattr(service.get_settings(), "apply_network_filter", True)
     core.html["/site/jobs/100"] = form_page("/jobs/100", f"""<script>
         const input = document.querySelector('#name');
         input.addEventListener('input', () => {{
