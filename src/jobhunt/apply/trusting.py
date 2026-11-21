@@ -125,6 +125,8 @@ def attached_cv(run: _Run, field: FormField, snap: PageSnapshot) -> _Item | None
     return _engine()._Item(Action(ref=field.ref, op="select"), field, option_index=index, value=field.options[index].label, used="cv")
 
 
+# (a careers site opened in another language lists the candidate's country under that language's name)
+_COUNTRY_ALIASES = ({"france", "frankreich", "francia", "frankrijk", "franca"},)
 _GENDER_ALIASES = ({"homme", "masculin", "male", "man", "mann", "mannlich", "hombre", "uomo"},
                    {"femme", "feminin", "female", "woman", "frau", "weiblich", "mujer", "donna"})
 
@@ -139,7 +141,7 @@ def best_option(labels: list[str], want: str | None) -> int:
     for index, label in enumerate(folded):
         if label == target:
             return index
-    aliases = (*_engine()._ALIASES, *_GENDER_ALIASES)
+    aliases = (*_engine()._ALIASES, *_GENDER_ALIASES, *_COUNTRY_ALIASES)
     for group in aliases:
         if target in group:
             hits = [index for index, label in enumerate(folded) if label in group]
@@ -897,8 +899,10 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                 with contextlib.suppress(Exception):
                     await loc.press("Enter", timeout=2000)
                     await asyncio.sleep(0.3)
-        live = await run._combo_value(loc)
         closed = not await _shown(option)
+        if closed and not field.multiple and not await _shown(loc):
+            return label  # the page re-rendered around the choice (a country that reloads the address block): it was taken
+        live = await run._combo_value(loc)
         if closed and not field.multiple and (not live or live == before):
             # The choice opened a sub-list (a category, then its entries): choose there too - the answer or the fact it
             # rests on when an entry says it, else "other", else the first entry.
@@ -1219,7 +1223,7 @@ async def _search_pick(run: _Run, target, field: FormField, want: str) -> str:
         if index >= 0 and (done := await take(found[index])):
             return done
     if field.required:
-        for text in ("Autre", "Other"):
+        for text in ("Autre", "Other", "Sonstige"):
             with contextlib.suppress(Exception):
                 await target.fill("", timeout=3000)
             await target.type(text, delay=30, timeout=8000)
@@ -1232,6 +1236,18 @@ async def _search_pick(run: _Run, target, field: FormField, want: str) -> str:
         await target.fill("", timeout=3000)
         await run.page.keyboard.press("Escape")
     raise engine._Skip("aucun résultat de recherche ne correspond à la réponse")
+
+
+def short_message(run: _Run) -> str:
+    """The note a required "message" box takes when no cover letter is available: what the application is, nothing more."""
+    value = lambda key: (fact.value or "").strip() if (fact := run.facts.get(key)) is not None else ""  # noqa: E731
+    name = value("full_name") or " ".join(part for part in (value("first_name"), value("last_name")) if part)
+    title = " ".join(str(getattr(run, "job_title", "") or "").split())
+    if not name:
+        return ""
+    post = f" pour le poste « {title[:140]} »" if title else ""
+    return (f"Bonjour,\n\nJe vous adresse ma candidature{post}. Vous trouverez mon CV en pièce jointe ; je reste à votre "
+            f"disposition pour échanger sur mon profil.\n\nCordialement,\n{name}")
 
 
 async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> str:
@@ -1256,11 +1272,14 @@ async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> 
         return letter.pdf_path.name
     if action.op == "letter_text":
         letter = await run._letter_obj()
-        if letter is None or not letter.text:
+        text = letter.text if letter is not None and letter.text else ""
+        if not text and field.required and field.kind == "textarea":
+            text = short_message(run)  # no letter could be written: a required message box takes a short neutral note
+        if not text:
             raise engine._Skip("lettre indisponible")
         await run._before_mutation(action.op, target)
-        await target.fill(letter.text, timeout=timeout)
-        return letter.text[:60] + "…"
+        await target.fill(text, timeout=timeout)
+        return text[:60] + "…"
     if field.kind == "checkbox":
         want = action.op == "check"
         await run._before_mutation(action.op, target)
