@@ -701,3 +701,66 @@ def test_a_plain_yes_no_question_is_not_taken_for_an_agreement():
     question = field(ref="q1", kind="select", required=True, label="Will you now or in the future require sponsorship for an employment visa?",
                      options=opts("No", "Yes"))
     assert trusting.owner_item(run_of(), question) is None
+
+
+# ------------------------------------------------------------------ postings that are gone / not postings / stuck fields
+@pytest.mark.parametrize("text", [
+    "sorry, this job has expired",
+    "desole, cette offre a expire",
+    "cette annonce n'existe plus",
+    "l'offre est cloturee",
+    "the position is no longer available",
+])
+def test_missing_offer_wording(text):
+    assert engine.MISSING_OFFER_RE.search(text)
+
+
+@pytest.mark.parametrize("text", ["l'offre expire le 12 mars", "votre session a expire", "postuler a cette offre"])
+def test_live_offer_wording_is_not_gone(text):
+    assert not engine.MISSING_OFFER_RE.search(text)
+
+
+@pytest.mark.parametrize("path, gone", [
+    ("/oneclick-ui/company/Acme/publication/abc/expired", True),
+    ("/en_US/jobs/Error", True),
+    ("/jobs/error-page", True),
+    ("/careers/jobs/", False),
+    ("/job/internship-errors-in-code", False),
+])
+def test_gone_paths(path, gone):
+    assert bool(engine.GONE_PATH_RE.search(path.lower())) is gone
+
+
+@pytest.mark.parametrize("kind, url, fields, expected", [
+    ("job_page", "https://ats.example.test/co/pub/1/expired", [], True),
+    ("error", "https://careers.example.test/jobs/Error", [field(kind="link", label="Accueil")], True),
+    ("job_page", "https://ats.example.test/co/pub/1/expired", [field(label="Prénom")], False),
+    ("form", "https://ats.example.test/co/pub/1/expired", [], False),
+    ("job_page", "https://ats.example.test/co/pub/1", [], False),
+])
+def test_error_page_gone(kind, url, fields, expected):
+    run = SimpleNamespace(autonomous=object(), app_touched=False)
+    snap = PageSnapshot(url=url, fields=list(fields))
+    assert engine._Run._error_page_gone(run, kind, snap) is expected
+
+
+def test_list_of_offers_is_not_a_posting():
+    assert engine.AGGREGATOR_RE.search("liste d'offres, pas une annonce")
+    assert engine.AGGREGATOR_RE.search("a page of search results")
+
+
+def test_print_view_of_an_ad_maps_to_the_normal_view():
+    url = "https://careers.example.test/offre-de-emploi/imprimer-fiche-emploi-stage-ia-h-f_2326.aspx"
+    assert engine.PRINT_VIEW_RE.sub("/emploi-", url, count=1) == "https://careers.example.test/offre-de-emploi/emploi-stage-ia-h-f_2326.aspx"
+
+
+def test_stuck_hint_names_the_fields_and_asks_for_the_click():
+    hint = trusting.stuck_hint(["Ville", "Code pays"])
+    assert "Ville | Code pays" in hint and "click that moves on" in hint
+
+
+def test_generated_password_fits_sites_that_cap_it_at_eighteen():
+    from jobhunt.apply import accounts
+
+    pw = accounts.generate_password()
+    assert 8 <= len(pw) <= 18 and any(c.isdigit() for c in pw) and any(c.isupper() for c in pw) and any(c.islower() for c in pw)

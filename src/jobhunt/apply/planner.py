@@ -90,8 +90,9 @@ A styled upload button ("CHOISIR UN FICHIER", "Parcourir") that is the only cont
 not send anything.
 A phone dial-code selector ("Indicatif de pays", "Country code", "+33") is NOT a question and NOT a hard fact: choose the option whose
 code is the candidate's phone code (+33 -> "France (+33)"), citing the `phone` fact. A "pays de résidence" select is a hard fact.
-If the page is not the employer's posting at all (a job-app aggregator, an app-store / app-only page, no way to apply), classify it
-`other` and say so in `note` ("agrégateur", "App Store / Google Play").
+If the page is not the employer's posting at all (a job-app aggregator, an app-store / app-only page, no way to apply, or a LIST of many offers / search results /
+career-field page instead of one posting), classify it `other` and say so in `note` ("agrégateur", "App Store / Google Play",
+"liste d'offres").
 On a multi-step ATS where "the profile was imported from the CV" and a page shows no editable field, clicking "Next" / "Suivant" is
 right; but when fields show validation errors after that click, fill them, do not click again.
 Keep `note` short. If nothing can be done on the page, return no action.
@@ -149,7 +150,8 @@ M. Accounts. After the account-creation click (`history` shows a `signup` click)
    again. A page or message saying that a verification e-mail, link or code was sent / that the account must be verified
    or activated first is `email_verification` (quote the instruction in `note`), whatever form it still shows.
 L. `history[].problems` lists what the program could not do at earlier steps (an option that was not found, a field that
-   refused its value): choose another listed option or another format for those fields.
+   refused its value): choose another listed option or another format for those fields. A field that failed twice (or a "could NOT set" notice at
+   the top of the page text): leave it, do not plan it again, and end the plan with the click that moves on.
 """
 
 
