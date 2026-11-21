@@ -149,7 +149,9 @@ K. A CV parser may have pre-filled fields: correct a value only when it contradi
 M. Accounts. After the account-creation click (`history` shows a `signup` click) the site often returns to its sign-in page:
    the account now exists (`account_exists` says oui): sign in with `account_email` / `account_password`, do not create it
    again. A page or message saying that a verification e-mail, link or code was sent / that the account must be verified
-   or activated first is `email_verification` (quote the instruction in `note`), whatever form it still shows.
+   or activated first is `email_verification` (quote the instruction in `note`), whatever form it still shows. When the
+   creation form itself comes back (an error under a field or an unticked box), correct it (tick its privacy / terms box)
+   and click the creation button again. Never fill an input meant for robots ("leave empty if you are human").
 L. `history[].problems` lists what the program could not do at earlier steps (an option that was not found, a field that
    refused its value): choose another listed option or another format for those fields. A field that failed twice (or a "could NOT set" notice at
    the top of the page text): leave it, do not plan it again, and end the plan with the click that moves on.

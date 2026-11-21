@@ -146,12 +146,35 @@ def _text(field: FormField) -> str:
 
 
 def _required_consent(field: FormField) -> bool:
-    """A REQUIRED box that accepts the site's privacy policy / terms / data processing, or certifies the application."""
+    """A REQUIRED box that accepts the site's privacy policy / terms / data processing, or certifies the application. A box
+    the site sent back with a validation error ("Please check the box to continue") is required, whatever its markup says."""
     engine = _engine()
     text = _text(field)
-    return bool(field.kind == "checkbox" and field.required
+    return bool(field.kind == "checkbox" and (field.required or field.error.strip())
                 and (engine._site_consent(field) or engine.SIGNUP_CONSENT_RE.search(text) or engine.ACCEPT_BOX_RE.search(text))
                 and not blocked_consent(text) and not engine.MARKETING_RE.search(text) and recruiter_ai_polarity(text) is None)
+
+
+def account_consent(field: FormField, snap: PageSnapshot) -> bool:
+    """The privacy / terms / data-processing box of an account-creation form: the site will not create the account without
+    it, even when its markup does not flag it required (a large ATS's "Create Account" form answers "Please check the box to
+    continue"). Only a box of the form that holds the password fields; never a marketing, job-alert or talent-pool box."""
+    engine = _engine()
+    text = _text(field)
+    forms = {other.form for other in snap.fields if other.kind == "password"}
+    return bool(field.kind == "checkbox" and forms and (not field.form or field.form in forms)
+                and engine.SIGNUP_CONSENT_RE.search(text) and not blocked_consent(text)
+                and not engine.MARKETING_RE.search(text) and recruiter_ai_polarity(text) is None)
+
+
+_HONEYPOT = re.compile(r"\bfor robots\b|\brobots? only\b|if you(?: a|')re (?:a )?human|\bhoneypot\b|\bbeecatcher\b|"
+                       r"leave (?:this (?:field )?)?(?:blank|empty)|ne pas remplir|laisse[rz] (?:ce champ )?vide|nicht ausfullen")
+
+
+def honeypot(field: FormField) -> bool:
+    """A trap input for bots ("Enter website. This input is for robots only, do not enter if you're human"): never filled."""
+    return field.kind in ("text", "email", "tel", "url", "textarea", "number") and bool(
+        _HONEYPOT.search(fold(f"{field.label} {field.placeholder} {field.name} {field.automation_id}")))
 
 
 _AGREEMENT = re.compile(r"\b(?:i agree|i certify|i acknowledge|i understand and agree|j'?accepte|je m'?engage|je certifie|je reconnais|ich stimme zu)\b")
@@ -365,14 +388,23 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
     seen: set[str] = set()
     scope = run.signup_scope
     fillable = plan.page_kind in ("form", "account_signup", "account_login", "other")
+    for field in snap.fields:
+        if honeypot(field):
+            seen.add(field.ref)  # (neither the planner's action nor any fill by code)
     if fillable:
         for field in snap.fields:
+            if field.ref in seen:
+                continue
             if plan.page_kind == "form" and (cv := attached_cv(run, field, snap)) is not None:
                 seen.add(field.ref)
                 if field.value != cv.value:
                     v.items.append(cv)
                 continue
             ruled = owner_item(run, field)
+            if ruled is None and plan.page_kind == "account_signup" and account_consent(field, snap):
+                ruled = (True if not engine._is_empty(field) else engine._Item(
+                    Action(ref=field.ref, op="check"), field,
+                    used="application_privacy" if engine.SIGNUP_PRIVACY_RE.search(_text(field)) else "application_terms"))
             if ruled is None:
                 continue
             seen.add(field.ref)

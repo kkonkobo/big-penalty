@@ -473,6 +473,97 @@ def test_login_box_outside_the_signup_scope_is_skipped():
     assert [i.field.ref for i in v.items] == ["f2"]
 
 
+# ------------------------------------------------------------------ account-creation form of a large multi-step ATS
+def create_account_form(consent="J'ai lu et j'accepte les conditions générales", form="0:0"):
+    return snap_of(
+        field(ref="f1", label="Adresse e-mail", required=True, form=form),
+        field(ref="f2", kind="password", label="Mot de passe", required=True, form=form),
+        field(ref="f3", kind="password", label="Confirmer le nouveau mot de passe", required=True, form=form),
+        field(ref="f4", kind="checkbox", label=consent, value="false", form=form),  # not flagged required by the markup
+        field(ref="f5", label="Enter website. This input is for robots only, do not enter if you're human.", name="website", form=form),
+        field(ref="f6", kind="button", label="Créer un compte", form=form),
+        field(ref="f7", kind="button", label="Créer un compte", form=form),  # the click overlay over the real button
+    )
+
+
+@pytest.mark.parametrize("consent", [
+    "J'ai lu et j'accepte les conditions générales",
+    "Oui, j’ai lu et compris la notice d’information sur la confidentialité.",
+    "Je reconnais que mes données peuvent être transférées en dehors de mon pays et je ne m'y oppose pas.",
+    "Je consens au traitement de mes données personnelles dans le cadre du processus de recrutement",
+])
+def test_signup_consent_box_is_ticked_even_when_not_flagged_required(consent):
+    v = trusting.validate(run_of(), plan_of(kind="account_signup"), create_account_form(consent), None)
+    assert [(i.field.ref, i.act.op) for i in v.items if i.field.kind == "checkbox"] == [("f4", "check")]
+    assert {i.used for i in v.items if i.field.ref == "f4"} <= {"application_privacy", "application_terms"}
+
+
+@pytest.mark.parametrize("label", ["Je souhaite recevoir la newsletter et les offres de nos partenaires",
+                                   "Ajoutez-moi au vivier de talents pour de futures opportunités",
+                                   "Recevoir des alertes emploi"])
+def test_signup_marketing_box_is_never_ticked(label):
+    v = trusting.validate(run_of(), plan_of(kind="account_signup"), create_account_form(label), None)
+    assert not [i for i in v.items if i.field.kind == "checkbox" and i.act.op == "check"]
+
+
+def test_non_required_consent_box_outside_an_account_page_is_left_to_the_planner():
+    box = field(ref="f4", kind="checkbox", label="J'accepte les conditions générales", value="false")
+    assert trusting.validate(run_of(), plan_of(kind="form"), snap_of(box), None).items == []
+    # ... but a box the site sent back with "Please check the box to continue" is required
+    box.error = "Please check the box to continue"
+    v = trusting.validate(run_of(), plan_of(kind="form"), snap_of(box), None)
+    assert [(i.field.ref, i.act.op) for i in v.items] == [("f4", "check")]
+
+
+def test_signup_consent_box_already_ticked_is_left_alone():
+    snap = create_account_form()
+    snap.fields[3].value = "true"
+    plan = plan_of(Action(ref="f4", op="uncheck"), kind="account_signup")
+    assert not [i for i in trusting.validate(run_of(), plan, snap, None).items if i.field.ref == "f4"]
+
+
+def test_honeypot_input_is_never_filled():
+    snap = create_account_form()
+    plan = plan_of(Action(ref="f5", op="fill", value="https://example.test"), Action(ref="f1", op="fill", fact="account_email"),
+                   kind="account_signup")
+    v = trusting.validate(run_of(), plan, snap, None)
+    assert "f5" not in {i.field.ref for i in v.items}
+    assert {"f1", "f2", "f3", "f4"} <= {i.field.ref for i in v.items}
+    assert trusting.honeypot(snap.fields[4])
+    assert not trusting.honeypot(field(label="Site web personnel", name="website"))
+    assert not trusting.honeypot(field(label="Adresse e-mail"))
+
+
+def test_the_one_account_creation_button_is_found_by_code():
+    snap = create_account_form()
+    assert engine._Run._signup_submit(snap).ref == "f6"
+    snap.fields.append(field(ref="f8", kind="button", label="Sign up with Google", form="0:0"))
+    assert engine._Run._signup_submit(snap).ref == "f6"  # (a social button is never one)
+    snap.fields.append(field(ref="f9", kind="button", label="Créer mon profil", form="0:0"))
+    assert engine._Run._signup_submit(snap) is None  # two different creation buttons: ambiguous
+    assert engine._Run._signup_submit(snap_of(field(ref="f1", kind="button", label="Créer un compte"))) is None  # no password form
+
+
+def test_application_form_shape():
+    required = [field(ref=f"f{i}", label=label, required=True) for i, label in enumerate(("Prénom", "Nom", "E-mail"))]
+    assert engine._Run._application_form(snap_of(*required))
+    assert not engine._Run._application_form(snap_of(*required[:2]))
+    assert not engine._Run._application_form(snap_of(*required, field(ref="p", kind="password", label="Mot de passe")))
+
+
+@pytest.mark.parametrize("text, pending", [
+    ("Account created. Please verify your account using the link we sent to your e-mail.", True),
+    ("Vérifiez votre adresse e-mail : un lien de vérification vous a été envoyé.", True),
+    ("Bitte bestätigen Sie Ihr Konto über die Bestätigungs-E-Mail.", True),
+    ("Resend Account Verification", True),
+    ("Sign In. Email Address. Password. Forgot your password?", False),
+    ("Connexion. Vous avez oublié votre mot de passe ?", False),
+])
+def test_pending_verification_wording(text, pending):
+    from jobhunt.apply.answer_check import fold
+    assert bool(engine.VERIFY_PENDING_RE.search(fold(text))) is pending
+
+
 # ------------------------------------------------------------------ open_questions
 def test_open_questions_on_a_job_page_is_empty():
     f = field(label="Ville", required=True)

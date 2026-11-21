@@ -144,6 +144,17 @@ ACCEPT_BOX_RE = re.compile(r"^\s*(?:validation|valider|certifie|je certifie|conf
 SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer|"
                           r"liste d.?offres|liste des offres|resultats? de recherche|search results|job list(?:ing)?|offer list|listing page")
+# Trusting mode: what a sign-in page shown right after an account-creation click says when the new account still awaits the
+# link / code sent by e-mail (folded text).
+VERIFY_PENDING_RE = re.compile(
+    r"verify your (?:account|e-?mail)|check your (?:e-?mail|inbox)|(?:verification|activation) (?:e-?mail|link|code)|"
+    r"e-?mail (?:de )?(?:verification|validation|activation)|lien (?:de |d')(?:verification|validation|activation)|"
+    r"(?:verifie[rz]|active[rz]|valide[rz]|confirme[rz]) votre (?:compte|adresse|e-?mail)|(?:activate|confirm) your (?:account|e-?mail)|"
+    r"resend (?:account )?verification|renvoyer (?:l'?e-?mail (?:de )?)?(?:verification|activation)|"
+    r"konto (?:bestatigen|verifizieren|aktivieren)|bestatigungs-?e-?mail|bestatigen sie ihr")
+# Trusting mode: read again a page the planner called a job ad although it is the application form itself.
+FORM_HINT = ("[THIS PAGE IS A STEP OF THE APPLICATION FORM ITSELF (its required fields are empty), not the job ad: page_kind "
+             "`form`; fill it per the rules and end with the click that moves on.] ")
 ERROR_TITLE_RE = re.compile(r"(?:erreur|error|errore|fehler|fout)\b")  # folded page title of a form sent back with errors
 CAPTCHA_POLL_S = 2.0     # re-snapshot interval while waiting for a human to solve a CAPTCHA
 ACCOUNT_CLICKS_MAX = 3   # login / signup clicks per run before the account step is reported as not accepted
@@ -652,6 +663,8 @@ class _Run:
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
+        self.signed_up: set[str] = set()     # account addresses where an account-creation click was made in this run
+        self.form_hints: set[str] = set()    # trusting mode: page URLs read again as the application form (once each)
         self.no_shot_noted = False
         self.final_url = ""
         self._letter: Letter | None = None
@@ -2510,6 +2523,26 @@ class _Run:
             return False
 
     @staticmethod
+    def _application_form(snap: PageSnapshot) -> bool:
+        """At least 3 required, still empty input fields and no password field: the page is a step of an application form
+        (a job ad's own widgets - job alert, search, share - do not ask that much)."""
+        if any(f.kind == "password" for f in snap.fields):
+            return False
+        return sum(f.kind in FILLABLE - {"checkbox"} and f.required and _is_empty(f) and not trusting.honeypot(f)
+                   for f in snap.fields) >= 3
+
+    @staticmethod
+    def _signup_submit(snap: PageSnapshot) -> FormField | None:
+        """The one account-creation button of a page holding the creation form (the same label twice - a click overlay over
+        the real button - is one control): the first of them, in page order."""
+        forms = {f.form for f in snap.fields if f.kind == "password"}
+        buttons = [f for f in snap.fields if f.kind == "button" and SIGNUP_LINK_RE.search(fold(f.label))
+                   and not SOCIAL_RE.search(fold(f.label)) and (not f.form or f.form in forms)]
+        if not forms or len({fold(f.label).strip() for f in buttons}) != 1:
+            return None
+        return buttons[0]
+
+    @staticmethod
     def _has_form(snap: PageSnapshot) -> bool:
         """A form with fillable fields is on the page: a file input or at least 3 fillable fields (a header search box or a
         lone newsletter tick does not make a form)."""
@@ -2679,6 +2712,25 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
+            if (self.trusting and kind == "job_page" and not plan.actions and not self._inspection_only and not self.final_clicked
+                    and urldefrag(self.page.url).url not in self.form_hints and self._application_form(snap)):
+                # The planner took a step of the application form (the job title is its heading) for the job ad and did
+                # nothing: read it again, once per page, saying what it is.
+                self.form_hints.add(urldefrag(self.page.url).url)
+                log.note += "; formulaire de candidature lu comme une offre : relecture"
+                plan = await self.planner.plan(pub.model_copy(update={"text": FORM_HINT + pub.text}), self._planner_facts(),
+                                               job_title=self.job_title, company=self.company, history=self.steps[:-1], mode=self.mode)
+                kind = log.page_kind = plan.page_kind
+            if (self.trusting and kind == "account_login" and not self.email_attempted and not self.app_touched
+                    and self._account_address(self.page.url) in self.signed_up and VERIFY_PENDING_RE.search(fold(snap.text))):
+                # After the account-creation click the site shows its sign-in page saying the new account must first be
+                # verified through the e-mail it sent: the account exists; follow the e-mail, then sign in.
+                address = self._account_address(self.page.url)
+                self.account_exists_hosts.add(address)
+                self.login_failed.discard(address)
+                kind = log.page_kind = "email_verification"
+                plan = plan.model_copy(update={"page_kind": kind, "actions": []})
+                log.note += "; compte créé, en attente de vérification par e-mail"
             core = bool(getattr(self.autonomous, "core", False))
             if (self.apply_entry and not self.touched and not self.app_touched and not self.apply_link_followed
                     and not (core and (self.entry_tries >= ENTRY_TRIES_CORE
@@ -2789,6 +2841,10 @@ class _Run:
                                    and not explicit_verification and trusting.login_actions(snap))
                 if not (login_first or (self.trusting and self.email_login_tried and not explicit_verification)) \
                         and await self._verify_email(snap, resolve):
+                    if self.trusting:  # the account the link verified exists: sign in with it, never create it again
+                        address = self._account_address(self.page.url)
+                        self.account_exists_hosts.add(address)
+                        self.login_failed.discard(address)
                     continue
                 if self.trusting and not self.email_login_tried and not self.app_touched and not self.final_clicked:
                     # No verification link or code came (many sites only send a "your account was created" notice): the
@@ -2847,7 +2903,7 @@ class _Run:
             bound_account = bool(account_host_ok and
                                  (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields))
                                  and not self._combined_form(kind, snap))
-            signup_page, inline = False, None
+            signup_page, inline, known_account = False, None, False
             trust = self.trusting
             if bound_account:
                 if not trust and (self.app_touched or any(field.kind == "file" for field in snap.fields)):
@@ -2923,6 +2979,12 @@ class _Run:
                                  if bound_account and signup_page and inline is not None else None)
             v = self._validate(plan, snap, resolve)
             self.signup_scope = None
+            if trust and bound_account and kind == "account_signup" and v.click is None and not known_account:
+                # The account-creation form came back (an error the fills above correct: an unticked consent box...) and the
+                # plan has no click: click its one creation button again (ACCOUNT_CLICKS_MAX and the same-click check bound it).
+                if (create := self._signup_submit(snap)) is not None:
+                    v.click = (create, "signup")
+                    v.notes.append("clic de création du compte ajouté")
             if bound_account and not trust:
                 v.items = [item for item in v.items if item.act.op in ("fill", "select") and item.used in ACCOUNT_FACTS]
                 if signup_page:  # the terms / privacy boxes an account form requires: the owner authorizes ticking them
@@ -3341,6 +3403,8 @@ class _Run:
             if bound_account and role in ("login", "signup"):
                 self.account_try = (role, self._account_address(self.page.url))
                 self.account_clicks += 1
+                if role == "signup":
+                    self.signed_up.add(self.account_try[1])
             if plan.page_kind == "account_login" and role == "login" and (self.account_known is not None or (trust and bound_account)):
                 with contextlib.suppress(Exception):
                     known = self._account_exists()
