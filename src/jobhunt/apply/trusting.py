@@ -330,7 +330,7 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
             return drop(f"opération {op} incompatible avec un champ {kind}")
     dial = is_dial(field, snap)
     phone = run.facts.get("phone")
-    code = ("+33" if french_phone(phone.value or "") else international_calling_code(phone.value or "") or "") if phone and phone.value else ""
+    code = own_dial(run)
     if kind in ("select", "radio") or (kind == "combobox" and field.options):
         labels = [option.label for option in field.options]
         index = -1
@@ -394,6 +394,26 @@ _DIAL_OPTION = re.compile(r"\(\+\d{1,4}\)|^\s*\+\d{1,4}\b")
 
 
 _PHONE_NUMBER = re.compile(r"\b(?:numero|number|nummer|n°|no|nº)\b")
+_SHOWN_DIAL = re.compile(r"[^\W\d_]\s*\(\s*(\+\s*\d{1,4})\s*\)")
+
+
+def own_dial(run: _Run) -> str:
+    """The calling code of the candidate's own number ("+33"), '' when it cannot be told."""
+    phone = run.facts.get("phone")
+    if phone is None or not phone.value:
+        return ""
+    return "+33" if french_phone(phone.value) else international_calling_code(phone.value) or ""
+
+
+def foreign_dial(run: _Run, snap: PageSnapshot) -> str:
+    """The calling code a page about to be SENT shows for another country than the candidate's number ("Burkina Faso (+226)"
+    left by a country list in front of a French number): '' when the page shows none, or shows the candidate's."""
+    mine = own_dial(run)
+    if not mine:
+        return ""
+    texts = [snap.text, *(field.value for field in snap.fields if field.kind not in ("button", "link") and field.value)]
+    shown = {code.replace(" ", "") for text in texts for code in _SHOWN_DIAL.findall(text)}
+    return "" if not shown or mine in shown else sorted(shown)[0]
 
 
 def is_dial(field: FormField, snap: PageSnapshot) -> bool:
@@ -489,6 +509,11 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
             elif field.kind in ("select", "radio") and field.options and engine._is_empty(field) and (key := _left_fact(field)):
                 # A recorded fact the planner left unanswered because the list words it differently (nationality lists).
                 made = check(run, Action(ref=field.ref, op="select", fact=key), field, v, snap, resolve) if run.facts.known(key) else None
+            elif (code := own_dial(run)) and field.kind in ("text", "tel", "combobox") and is_dial(field, snap) and (
+                    shown := re.findall(r"\+\s*[0-9]+", field.value)) and shown != [code]:
+                # A calling-code box the plan left alone while it holds another country's code: the candidate's replaces it.
+                fact = "phone_calling_code" if run.facts.known("phone_calling_code") else "phone"
+                made = check(run, Action(ref=field.ref, op="fill", fact=fact, value=code), field, v, snap, resolve)
             elif field.kind in ("text", "email", "tel"):
                 made = run._identity_item(field, snap)  # a name / e-mail / phone field the plan left empty
                 if made is not None and made.used == "phone":
@@ -980,6 +1005,101 @@ async def _search_box(run: _Run, target, code: str) -> str:
     raise engine._Skip("indicatif introuvable dans la liste de recherche")
 
 
+_SEARCH_PROMPT_JS = ("e => !!(e.matches('[data-uxi-widget-type=\"selectinput\"], [data-automation-id=\"searchBox\"]') "
+                     "|| e.closest('[data-automation-id=\"multiSelectContainer\"], [data-automation-id=\"multiselectInputContainer\"]'))")
+_CHOSEN_JS = r"""e => { for (let p = e.parentElement, i = 0; p && i < 4; p = p.parentElement, i++) {
+    const chosen = p.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"]');
+    if (chosen) return (chosen.textContent || '').trim(); }
+  return ''; }"""
+_OTHER_OPTION = re.compile(r"^(?:autres?|others?|sonstiges?|andere)\b|\b(?:not listed|non liste|other school|autre etablissement|autre ecole)\b")
+_SMALL_WORDS = frozenset({"ecole", "school", "universite", "university", "institut", "institute", "national", "nationale", "superieure",
+                          "superieur", "ingenieur", "ingenieurs", "engineering", "sciences", "science", "pour", "with", "from", "dans"})
+
+
+def _shared_words(label: str, want: str) -> int:
+    mine = {word for word in norm(want).split() if len(word) >= 3}
+    return len(mine & set(norm(label).split()))
+
+
+def search_choice(labels: list[str], want: str, query: str) -> int:
+    """The result of a search prompt that means the answer: the option the answer names, the one that resembles it, the ONE
+    result of a query, else the single result sharing the most (at least two) words with the answer. -1 when none is clear."""
+    index = best_option(labels, want)
+    if index < 0:
+        index = _closest(labels, want)
+    if index < 0 and len(labels) == 1 and norm(query) and norm(query) in norm(labels[0]):
+        index = 0
+    if index < 0:
+        scored = sorted(((_shared_words(label, want), -len(label), position) for position, label in enumerate(labels)), reverse=True)
+        if scored and scored[0][0] >= 2 and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+            index = scored[0][2]
+    return index
+
+
+async def is_search_prompt(target) -> bool:
+    with contextlib.suppress(Exception):
+        return bool(await target.evaluate(_SEARCH_PROMPT_JS))
+    return False
+
+
+async def _search_pick(run: _Run, target, field: FormField, want: str) -> str:
+    """A search prompt (a text box whose typed text is only a query: the answer is the result picked from the list it
+    returns, shown beside the box as a chosen item). Type the answer, then its most telling words, and pick the result that
+    means it; a required prompt that knows nothing of the answer takes its "other" entry when it has one."""
+    engine = _engine()
+
+    async def results() -> list[tuple[object, str]]:
+        found = await _popup_options(run)
+        if not found:
+            with contextlib.suppress(Exception):
+                await target.press("Enter", timeout=2000)
+            for _ in range(8):
+                await asyncio.sleep(0.5)
+                if found := await _popup_options(run):
+                    break
+        return found
+
+    async def take(entry) -> str:
+        option, label = entry
+        try:
+            await option.click(timeout=2500)
+        except Exception:
+            await option.evaluate(_PRESS_JS)
+        await asyncio.sleep(0.6)
+        chosen = " ".join(str(await target.evaluate(_CHOSEN_JS) or "").split())
+        if await _shown(option):  # (a list that stays open once the item is taken)
+            with contextlib.suppress(Exception):
+                await run.page.keyboard.press("Escape")
+        return chosen and label
+
+    words = sorted({word for word in re.findall(r"[^\W\d_][\w'’-]{2,}", want) if norm(word) not in _SMALL_WORDS and len(norm(word)) >= 4},
+                   key=len, reverse=True)
+    queries = [want, want.split(" (")[0], want.split(",")[0], *words[:4]]
+    for text in dict.fromkeys(query.strip() for query in queries if query.strip()):
+        with contextlib.suppress(Exception):
+            await target.fill("", timeout=3000)
+        await target.type(text, delay=30, timeout=8000)
+        await asyncio.sleep(0.8)
+        found = await results()
+        index = search_choice([label for _, label in found], want, text)
+        if index >= 0 and (done := await take(found[index])):
+            return done
+    if field.required:
+        for text in ("Autre", "Other"):
+            with contextlib.suppress(Exception):
+                await target.fill("", timeout=3000)
+            await target.type(text, delay=30, timeout=8000)
+            await asyncio.sleep(0.8)
+            found = await results()
+            others = [entry for entry in found if _OTHER_OPTION.search(norm(entry[1]))]
+            if others and (done := await take(min(others, key=lambda entry: len(entry[1])))):
+                return done
+    with contextlib.suppress(Exception):
+        await target.fill("", timeout=3000)
+        await run.page.keyboard.press("Escape")
+    raise engine._Skip("aucun résultat de recherche ne correspond à la réponse")
+
+
 async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> str:
     """Carry out one item on the live page. `target` is the exact element of the snapshot (the first radio of a group)."""
     engine = _engine()
@@ -1074,6 +1194,8 @@ async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> 
     if field.kind != "textarea":
         text = text.replace("\r", " ").replace("\n", " ")
     await run._before_mutation(action.op, target)
+    if field.kind in ("text", "search") and text and await is_search_prompt(target):
+        return await _search_pick(run, target, field, text)
     if note := getattr(run.autonomous, "note_value", None):
         note(text)
     try:
