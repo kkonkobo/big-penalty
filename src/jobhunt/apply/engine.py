@@ -2430,10 +2430,14 @@ class _Run:
         intact = bool(sent.fields & present) and any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
         errors = any(f.error for f in snap.fields if f.kind not in ("button", "link"))
-        if not errors and intact and self.trusting and self.sent_empty:
-            # The form was sent with a required field knowingly left empty, and it is still there with that field empty:
-            # the site's own validation kept it (some mark the field only with a colour).
-            errors = any(f.required and _is_empty(f) and (_norm(_label(f)), f.kind) in self.sent_empty for f in snap.fields)
+        if not errors and intact and self.trusting:
+            # The form is still there with a required field empty - one knowingly left so, or one a choice brought with it -
+            # while what was filled still holds its values (a form emptied after a send does not): the site's own
+            # validation kept it (some mark the field only with a colour or a message we cannot tie to it).
+            empty = [f for f in snap.fields if f.required and _is_empty(f) and f.kind not in ("button", "link", "file")]
+            kept = any(not _is_empty(f) for f in snap.fields
+                       if f.kind not in ("button", "link") and (_norm(_label(f)), f.kind) in sent.fields)
+            errors = bool(empty) and (kept or any((_norm(_label(f)), f.kind) in self.sent_empty for f in empty))
         if not errors and intact and not silent:
             # The same form came back under an error banner or an "Erreur ..." page title (a server-side validation that
             # lists the missing fields in a banner instead of marking them).
@@ -3308,6 +3312,14 @@ class _Run:
                 if (blocking or soft) and handled and self.replans.get(page_key, 0) < 2:
                     self.replans[page_key] = self.replans.get(page_key, 0) + 1  # progress was made: read the page again first
                     log.note = self._r("; ".join(x for x in (log.note, *v.notes, "relecture avant le clic") if x))[:900]
+                    await self._shot(log)
+                    continue
+                chosen = {f.ref for f in snap.fields if f.kind in ("select", "combobox", "radio", "checkbox")} & handled
+                if final and chosen and self.replans.get(page_key, 0) < 2:
+                    # A choice made in this step may have brought a new field with it ("Autre, précisez :"): the page is read
+                    # again before the click that sends it.
+                    self.replans[page_key] = self.replans.get(page_key, 0) + 1
+                    log.note = self._r("; ".join(x for x in (log.note, *v.notes, "relecture avant l'envoi") if x))[:900]
                     await self._shot(log)
                     continue
                 v.questions = [*blocking, *soft] if blocking else []
