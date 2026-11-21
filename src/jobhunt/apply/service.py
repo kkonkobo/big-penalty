@@ -608,8 +608,8 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         audience.next_document = audience.account_next = ''
         audience.active = False
         await guard.navigate(tab, target, lambda current, url: pool.goto(current, url, challenge_timeout_s=0))
-        if guard.refused or not audience.initial_redirect(target, tab.url):
-            return False
+        if guard.refused or not (audience.core or audience.initial_redirect(target, tab.url)):
+            return False  # (core mode: the page reached after the verification link is followed as any other)
         audience.document = clean_url(tab.url, navigation=True)
         await audience.bind_document(tab)
         return True

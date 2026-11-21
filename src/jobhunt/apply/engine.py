@@ -2115,6 +2115,7 @@ class _Run:
 
     stop_note = ""
     rehearse = False  # scripts/rehearse_apply.py: stop before any click that could send what was typed
+    rehearse_ok: re.Pattern | None = None  # ... except in-page controls named by the developer (a dialog opener)
 
     def _stop_reason(self, res: RunResult) -> str:
         """Why the run stopped, for the local failure record: no secret, no typed value (the message is cut when it may quote one)."""
@@ -2711,6 +2712,11 @@ class _Run:
                             q = Question(label=f"Compte déjà existant sur {self._host()} : donner les identifiants ou se connecter à la main", kind="text")
                             return self._end("needs_input", q.label + ".", [q])
                         self.account_exists_hosts.add(address)
+                    elif self.trusting and role == "signup" and kind == "account_login" and not errors:
+                        # The creation form is gone and the site shows its sign-in page: the account was created (it may
+                        # still await an e-mail verification). Sign in with it instead of creating it again.
+                        self.account_exists_hosts.add(address)
+                        log.note += "; compte créé : connexion"
 
             if kind == "captcha":
                 await self._shot(log)
@@ -2726,6 +2732,17 @@ class _Run:
                 return self._gone_result()
             if kind == "confirmation":
                 await self._shot(log)
+                if (self.trusting and self.app_touched and not self.final_clicked and self.last_sent is not None
+                        and (not self._has_form(snap) or self._form_gone(snap)) and not any(f.error for f in snap.fields)):
+                    # The click before was not announced as the final one, yet the page that followed is the receipt:
+                    # record the send now.
+                    with contextlib.suppress(Exception):
+                        if self.on_submit_click is not None:
+                            await self.on_submit_click()
+                        self.final_clicked = True
+                        self.diagnostics.control = "final_submit"
+                        self.diagnostics.receipt_kind, self.diagnostics.receipt_reason = "first_party_confirmation", "confirmation_text"
+                        return self._end("submitted", "Candidature envoyée.")
                 if self.mode == "submit" and self.final_clicked:
                     return self._end("submitted", "Candidature envoyée.") if self._confirmed(snap, self.last_sent) else self._unconfirmed()
                 return self._end("failed", "Page de confirmation inattendue")
@@ -3101,7 +3118,8 @@ class _Run:
                 continue
             idle = 0
             field, planned = v.click
-            if self.rehearse and (final or post_data or role in ("login", "signup")):  # dev rehearsal on a live page: fake data is never sent
+            if self.rehearse and (final or role in ("login", "signup") or (post_data and not (
+                    self.rehearse_ok and self.rehearse_ok.search(field.label)))):  # dev rehearsal on a live page: fake data is never sent
                 return self._end("ready", f"Répétition : clic « {field.label[:60]} » ({role}) non effectué.")
             if v.click and not attach and self.last_click_rec == (urldefrag(self.page.url).url, _norm(field.label)):
                 loop_sig = [f for f in snap.fields if f.kind not in ("button", "link") and f.ref not in handled and not self._file_satisfied(f, snap)
@@ -3143,7 +3161,7 @@ class _Run:
                 continue
             async def recheck():
                 try:
-                    if _site_consent(field):
+                    if _site_consent(field) and not trust:  # (trusting mode: the candidate's standing authorization covers it)
                         raise _DecisionHold(self._end("needs_input", "Consentement à donner sur le site."))
                     await self._live_decisions(snap, field, approved_choices)
                 except _DecisionHold:
@@ -3174,7 +3192,10 @@ class _Run:
                         await self.on_nav_click()
                 except Exception:
                     return self._end("blocked", "Envoi bloqué : enregistrement du clic impossible.")
-                if self.app_touched or (self.autonomous and role in {"next", "login", "signup"}):
+                if (role in {"login", "signup"} and self.autonomous) if trust else (
+                        self.app_touched or (self.autonomous and role in {"next", "login", "signup"})):
+                    # (trusting mode: after a "next" / in-page click the planner simply reads the page that follows; a dialog,
+                    # a validation error or the same step is not a "possible send")
                     self.nav_pending = True  # recorded: from here on the application MAY have been sent, until a snapshot shows the form again
             if self.mode == "submit" and (final or self.app_touched) and not attach:
                 keys = {(_norm(_label(f)), f.kind) for f in snap.fields if f.ref in handled}
