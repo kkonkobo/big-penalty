@@ -529,6 +529,11 @@ class Audience:
         self.recheck()
         self.active = True
 
+    def account_only_request(self, request):
+        """The write of an armed candidate-account click (login / signup box of an account page): the engine only fills
+        account facts there, so it carries no application data."""
+        return bool(self.account_click and not self.final_started)
+
     def arm_click(self, *, scripted: bool, account: bool = False):
         self.click_write = None
         self.scriptable = scripted and self.method != "GET"
