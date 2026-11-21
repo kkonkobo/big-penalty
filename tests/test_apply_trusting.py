@@ -1244,3 +1244,17 @@ async def test_an_address_box_takes_the_suggestion_closest_to_the_answer(page): 
     run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
     item = engine._Item(Action(ref=combo.ref, op="select", fact="address"), combo, None, value="12 rue des Tests 99000 Testville")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "12 Rue des Tests, Testville, France"
+
+
+async def test_a_button_showing_text_slotted_into_its_component_is_read(page):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content('''<form><label>Prénom <input type="text" name="first"></label>
+      <x-button id="next">Suivant</x-button><x-plain id="add">Ajouter</x-plain></form>
+      <script>
+        next.attachShadow({mode: 'open'}).innerHTML = '<button type="button"><slot></slot></button>';
+        add.attachShadow({mode: 'open'}).innerHTML = '<button type="button"><i class="icon"></i></button>';
+      </script>''')
+    snap, resolve = await take_snapshot(page)
+    assert [f.label for f in snap.fields if f.kind == "button"] == ["Suivant", "Ajouter"]
+    await (await resolve.element(next(f.ref for f in snap.fields if f.label == "Suivant"))).click()
