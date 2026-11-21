@@ -38,6 +38,13 @@ def core_guard() -> bool:
     return get_settings().apply_guard_mode != "strict"
 
 
+def trust_planner() -> bool:
+    """Fill mode `planner` (the default): in core mode the engine executes the planner's field mapping as given."""
+    from jobhunt.config import get_settings
+
+    return get_settings().apply_fill_mode != "strict"
+
+
 def login_return(url: str) -> str:
     try:
         parsed = urlsplit(url)

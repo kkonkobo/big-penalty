@@ -27,7 +27,7 @@ from urllib.parse import quote, quote_plus, urldefrag, urlparse
 from patchright.async_api import ElementHandle, Locator, Page
 from pydantic import BaseModel
 
-from jobhunt.apply import mail
+from jobhunt.apply import mail, trusting
 from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.autonomous import (
     SUPERVISED_REQUIRED, _live_option, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
@@ -120,6 +120,7 @@ SPLIT_UPLOADS = True     # uploads get a step of their own, then the page is rea
 UPLOAD_SETTLE_S = 2.5    # lets a CV parser re-render / pre-fill the form after an upload
 OBSERVE_S = 12.0         # after a post-data click: how long the engine only observes the page before giving up ("not confirmed")
 OBSERVE_POLL_S = 2.0     # re-snapshot interval of that observation
+TRUSTING_OBSERVE_S = 30.0  # planner-trusting runs wait longer for the receipt page (slow confirmations, redirects)
 FILE_OPENER_RE = re.compile(r"(?:choisir|choose|select|selectionner|parcourir|browse|joindre|telecharger|televerser|upload|importer|deposer|ajouter|attach|add)\b"
                             r".{0,20}\b(?:fichier|file|document|cv|resume|curriculum|piece)|^\s*(?:parcourir|browse)")  # folded label of a button that opens a file dialog
 UPLOAD_CONFIRM_RE = re.compile(r"^\s*(?:ajouter|add|attach|joindre|telecharger|televerser|upload|importer|charger|envoyer le fichier|aggiungi|carica|allega|"
@@ -634,10 +635,19 @@ class _Run:
         self.email_verification = None
         self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
+        self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
+        self.sent_url = ""                   # page URL of the last final click
+        self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
+        self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
         self.no_shot_noted = False
         self.final_url = ""
         self._letter: Letter | None = None
         self._letter_done = False
+
+    @property
+    def trusting(self) -> bool:
+        """Autonomous run in guard mode `core`: the planner's mapping is executed as given (see `trusting`)."""
+        return bool(self.autonomous is not None and getattr(self.autonomous, "trusting", False))
 
     # ------------------------------------------------------------ secrets / redaction
     def _r(self, s: str) -> str:
@@ -767,6 +777,10 @@ class _Run:
         # drives), and never after data entry in a dry run (a rehearsal clicks nothing once the form is touched).
         if AUTO_CONSENT and self.mode != "supervised" and not (self.mode == "dry_run" and (self.touched or self.app_touched)):
             await dismiss_consent(self.page)
+            if self.trusting and not self.final_awaiting:
+                with contextlib.suppress(Exception):
+                    if closed := await trusting.dismiss_blocker(self):
+                        self.dismissed.append(closed)
         for attempt in range(3):
             try:
                 snapshot, resolve = await take_snapshot(self.page)
@@ -815,6 +829,8 @@ class _Run:
     def _planner_facts(self) -> FactSheet:
         """The facts the planner sees: ours plus the derived `account_exists` of the CURRENT page host (when we can tell)."""
         facts = [fact for fact in self.facts.facts if fact.key != "race_ethnicity"]
+        if self.trusting:
+            facts.append(Fact(key="candidate_authorizations", label=trusting.AUTHORIZATIONS_LABEL, value=trusting.AUTHORIZATIONS))
         if self.account_known is None:
             return FactSheet(facts=facts)
         try:
@@ -1011,6 +1027,8 @@ class _Run:
             v.questions.append(_question(f))
 
     def _validate(self, plan: StepPlan, snap: PageSnapshot, resolve: Resolver | None = None) -> _Validated:
+        if self.trusting:
+            return trusting.validate(self, plan, snap, resolve)
         v = _Validated()
         by_ref = {f.ref: f for f in snap.fields}
         proposed = {action.ref: action for action in plan.actions if action.op != "click"}
@@ -1208,6 +1226,8 @@ class _Run:
     async def _live_decisions(self, snap: PageSnapshot, target: FormField, approved: dict[str, tuple], *,
                               pending: set[str] = frozenset(), applying: _Item | None = None, retry: bool = True) -> None:
         """Read the whole live decision scope without retagging the original dispatch target."""
+        if self.trusting:
+            return
         fresh, _ = await take_snapshot(self.page, read_only=True)
         current = next((field for field in fresh.fields if field.live_ref == target.ref), None)
         if (fresh.url != snap.url or fresh.has_captcha or current is None or current.form != target.form
@@ -1258,7 +1278,7 @@ class _Run:
 
     async def _record_choice(self, snap: PageSnapshot, item: _Item, shown: str, approved: dict[str, tuple]) -> None:
         field = item.field
-        if field.kind not in CHOICE_KINDS:
+        if field.kind not in CHOICE_KINDS or self.trusting:
             return
         fresh, _ = await take_snapshot(self.page, read_only=True)
         current = next((entry for entry in fresh.fields if entry.live_ref == field.ref), None)
@@ -1448,7 +1468,7 @@ class _Run:
     async def _verify(self, v: _Validated) -> None:
         """One independent LLM pass over every answer code cannot accept by itself (see answer_check). Deductions fail closed."""
         pend = [it for it in v.items if it.llm]
-        if not pend:
+        if not pend or self.trusting:
             return
         verdicts: dict[str, str] = {}
         if self.verifier is not None:
@@ -1516,6 +1536,8 @@ class _Run:
 
     def _effective_role(self, f: FormField, role: str, snap: PageSnapshot) -> str:
         """Re-classify a click as `submit` when the planner understates what the button does."""
+        if self.trusting:
+            return trusting.effective_role(self, f, role, snap)
         has_file = any(x.kind == "file" for x in snap.fields)
         has_pw = any(x.kind == "password" for x in snap.fields)
         # "Holds the application": we entered data in this run, a file is selected, or the page / frame holds the candidate's OWN
@@ -2087,6 +2109,7 @@ class _Run:
         return res
 
     stop_note = ""
+    rehearse = False  # scripts/rehearse_apply.py: stop before any click that could send what was typed
 
     def _stop_reason(self, res: RunResult) -> str:
         """Why the run stopped, for the local failure record: no secret, no typed value (the message is cut when it may quote one)."""
@@ -2150,7 +2173,8 @@ class _Run:
         (b) a verified distinct continuation step (`nav_pending` only), (c) a rejection by the page (validation errors on the form:
         correcting and resubmitting is allowed again). Otherwise, when OBSERVE_S is over, the unconfirmed result."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + OBSERVE_S
+        started = loop.time()
+        deadline = started + (TRUSTING_OBSERVE_S if self.trusting else OBSERVE_S)
         asked: tuple[str, str] | None = None
         errors_seen = False
         while True:
@@ -2196,6 +2220,24 @@ class _Run:
                         and self.autonomous.receipt_settled()):
                     trace.receipt_kind = "first_party_confirmation"
                     return self._end("submitted", "Candidature envoyée.")
+                if self.trusting:
+                    # The page itself is the evidence, whatever the transport showed: the form of the click is gone and the
+                    # page says the application was received (its wording, else the planner's reading of the page).
+                    gone = not has_form or self._form_gone(snap)
+                    if gone and not any(f.error for f in snap.fields) and not await self._banner_error():
+                        received = self._confirmed(snap, self.last_sent)
+                        if not received and (snap.url, snap.text) != asked and loop.time() - started >= 3:
+                            asked = (snap.url, snap.text)
+                            pub, _ = self._public(snap)
+                            verdict = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title,
+                                                              company=self.company, history=self.steps[:-1], mode=self.mode)
+                            log.page_kind = verdict.page_kind
+                            received = verdict.page_kind == "confirmation"
+                        if received:
+                            trace.receipt_kind, trace.receipt_reason = "first_party_confirmation", "confirmation_text"
+                            return self._end("submitted", "Candidature envoyée.")
+                    if loop.time() - started >= 5 and await self._submit_rejected(snap):
+                        return snap, resolve  # the site refused the form (field errors): correct it and send again
                 if loop.time() >= deadline:
                     return self._unconfirmed()
                 await asyncio.sleep(OBSERVE_POLL_S)
@@ -2244,6 +2286,30 @@ class _Run:
                 return self._end("failed", FIELD_ERROR_MSG) if errors_seen else self._unconfirmed()
             await asyncio.sleep(OBSERVE_POLL_S)
             snap, resolve = await self._snapshot()
+
+    async def _submit_rejected(self, snap: PageSnapshot) -> bool:
+        """The final click was refused by the page's own validation: same page, the form we filled and its send button are
+        still there, and fields show errors. Nothing was received: the send record is withdrawn and the form can be
+        corrected and sent again (twice at most)."""
+        sent = self.last_sent
+        withdraw = getattr(self.autonomous, "unmark_submit", None)
+        if sent is None or withdraw is None or self.rejected_submits >= 2 or urldefrag(self.page.url).url != self.sent_url:
+            return False
+        present = {(_norm(_label(f)), f.kind) for f in snap.fields}
+        if not (sent.fields & present and any(f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
+                and any(f.error for f in snap.fields if f.kind not in ("button", "link"))):
+            return False
+        try:
+            await withdraw()
+        except Exception:
+            return False
+        self.rejected_submits += 1
+        self.final_awaiting = self.final_clicked = False
+        self.submit_clicks = max(0, self.submit_clicks - 1)
+        self.pending = self.last_sent = self.last_click_rec = None
+        self.replans.pop(urldefrag(self.page.url).url, None)
+        self.diagnostics.receipt_reason = "before_submit"
+        return True
 
     def _progress(self) -> RunResult:
         """The run so far (redacted), handed to `on_progress` right before a potentially sending click."""
@@ -2531,6 +2597,13 @@ class _Run:
                 snap, resolve = out
                 pub, _ = self._public(snap)
                 log.url = pub.url
+            if self.trusting:
+                if self.dismissed:
+                    log.note += "; fenêtre fermée : " + ", ".join(dict.fromkeys(self._r(x)[:40] for x in self.dismissed))
+                    self.dismissed = []
+                with contextlib.suppress(Exception):
+                    if hint := await trusting.blocker_hint(self):
+                        pub.text = self._r(hint) + pub.text
             if self._inspection_only:
                 inspection, keys = inspection_inputs(pub, self._planner_facts())
                 plan = await self.planner.plan(inspection, keys, job_title="", company="", history=[], mode=self.mode)
@@ -2652,8 +2725,9 @@ class _Run:
                                  (kind in ACCOUNT_KINDS or any(field.kind == "password" for field in snap.fields))
                                  and not self._combined_form(kind, snap))
             signup_page, inline = False, None
+            trust = self.trusting
             if bound_account:
-                if self.app_touched or any(field.kind == "file" for field in snap.fields):
+                if not trust and (self.app_touched or any(field.kind == "file" for field in snap.fields)):
                     return self._end("needs_human", SUPERVISED_REQUIRED)
                 if self.known_login_try:  # the stored credential was just tried and the site shows a password page again: no such account
                     self.known_login_try = False
@@ -2667,18 +2741,30 @@ class _Run:
                 inline = None if known_account else self._inline_signup(plan, snap)
                 if kind not in ACCOUNT_KINDS:  # the planner called it otherwise: the page itself says what it is
                     login_form = any(f.kind == "button" and LOGIN_BUTTON_RE.search(fold(f.label)) for f in snap.fields)
-                    if inline is None and not login_form:
+                    if inline is None and not login_form and not trust:
                         return self._end("needs_human", SUPERVISED_REQUIRED)
-                    kind = log.page_kind = "account_signup" if inline is not None else "account_login"
-                    plan = plan.model_copy(update={"page_kind": kind})
+                    if inline is not None or login_form:
+                        kind = log.page_kind = "account_signup" if inline is not None else "account_login"
+                        plan = plan.model_copy(update={"page_kind": kind})
+                signup = [field for field in snap.fields if field.kind in {"button", "link"} and not SOCIAL_RE.search(fold(field.label)) and
+                          SIGNUP_LINK_RE.search(fold(field.label)) and (field.kind == "link" or not field.form)]
+                signin = [field for field in snap.fields if field.kind == "link" and re.fullmatch(
+                    r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
+                # The same control twice (header + body) is one control; two different ones are ambiguous.
+                one_signup = len({fold(field.label).strip() for field in signup}) == 1
                 if inline is not None:
                     signup_page = True
-                    plan = plan.model_copy(update={"page_kind": "account_signup", "actions": inline[1]})
+                    extra = [action for action in plan.actions if action.op != "click"
+                             and action.ref not in {a.ref for a in inline[1]}] if trust else []
+                    plan = plan.model_copy(update={"page_kind": "account_signup", "actions": [*extra, *inline[1]]})
+                elif trust and kind not in ACCOUNT_KINDS:
+                    pass  # a password field on a page the planner calls otherwise: its own plan stands
+                elif trust and (
+                        (kind == "account_login" and not known_account and (not one_signup or self.signup_link_clicks >= 2))
+                        or (kind == "account_signup" and known_account and len(signin) != 1)):
+                    signup_page = kind == "account_signup"  # no unambiguous way by code: the planner's own plan stands
                 elif kind == "account_login" and not known_account:
-                    signup = [field for field in snap.fields if field.kind in {"button", "link"} and not SOCIAL_RE.search(fold(field.label)) and
-                              SIGNUP_LINK_RE.search(fold(field.label)) and (field.kind == "link" or not field.form)]
-                    # The same control twice (header + body) is one control; two different ones are ambiguous.
-                    if len({fold(field.label).strip() for field in signup}) != 1:
+                    if not one_signup:
                         return self._account_stop("account_signup_missing_link")
                     if self.signup_link_clicks >= 2:
                         return self._account_stop("account_signup_loop")
@@ -2686,11 +2772,11 @@ class _Run:
                     signup.sort(key=lambda field: field.kind != "link")
                     plan = plan.model_copy(update={"actions": [Action(ref=signup[0].ref, op="click", click_role="signup")]})
                 elif kind == "account_signup" and known_account:
-                    signin = [field for field in snap.fields if field.kind == "link" and re.fullmatch(
-                        r"(?:se connecter|connexion|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
                     if len(signin) != 1:
                         return self._end("needs_human", SUPERVISED_REQUIRED)
                     plan = plan.model_copy(update={"actions": [Action(ref=signin[0].ref, op="click", click_role="open_form")]})
+                elif trust:
+                    signup_page = kind == "account_signup"
                 else:
                     signup_page = kind == "account_signup"
                     byref = {field.ref: field for field in snap.fields}
@@ -2698,10 +2784,11 @@ class _Run:
                         (action.op == "fill" and action.fact in ACCOUNT_FACTS) or
                         (action.op == "click" and action.click_role == ("login" if kind == "account_login" else "signup")
                          and not (byref.get(action.ref) and SOCIAL_RE.search(fold(byref[action.ref].label))))]})
-            self.signup_scope = {a.ref for a in plan.actions} if bound_account and signup_page and inline is not None else None
+            self.signup_scope = ({a.ref for a in (inline[1] if trust else plan.actions)}
+                                 if bound_account and signup_page and inline is not None else None)
             v = self._validate(plan, snap, resolve)
             self.signup_scope = None
-            if bound_account:
+            if bound_account and not trust:
                 v.items = [item for item in v.items if item.act.op in ("fill", "select") and item.used in ACCOUNT_FACTS]
                 if signup_page:  # the terms / privacy boxes an account form requires: the owner authorizes ticking them
                     target = v.click[0].form if v.click else ""
@@ -2713,7 +2800,7 @@ class _Run:
                                 and recruiter_ai_polarity(text) is None):
                             code = "application_privacy" if SIGNUP_PRIVACY_RE.search(text) else "application_terms"
                             v.items.append(_Item(Action(ref=field.ref, op="check"), field, used=code))
-            if self.autonomous and kind == "form" and not bound_account:  # the owner authorizes ticking the REQUIRED privacy / terms box
+            if self.autonomous and kind == "form" and not bound_account and not trust:  # the owner authorizes ticking the REQUIRED privacy / terms box
                 taken = {item.field.ref for item in v.items}
                 target = v.click[0].form if v.click else ""
                 for field in snap.fields:
@@ -2806,7 +2893,10 @@ class _Run:
                 if plan.page_kind not in ACCOUNT_KINDS and not (it.fact and (it.fact.secret or it.fact.key.startswith("account_"))):
                     self.app_touched = True
                 try:
-                    shown = await self._execute(it, target if self.autonomous or self.mode == "supervised" else resolve(it.field.ref), snap, log)
+                    if trust:
+                        shown = await trusting.execute(self, it, target, resolve, snap)
+                    else:
+                        shown = await self._execute(it, target if self.autonomous or self.mode == "supervised" else resolve(it.field.ref), snap, log)
                 except _DecisionHold as hold:
                     return hold.result
                 except ManualField:
@@ -2912,7 +3002,7 @@ class _Run:
             if role is not None and role != v.click[1]:  # type: ignore[index]
                 v.notes.append(f"clic « {v.click[0].label} » reclassé en {role}")  # type: ignore[index]
             final = (not attach) and self._is_final(v.click[0], role) if v.click else False  # type: ignore[arg-type]
-            if bound_account and (final or role not in {None, "open_form", "login", "signup"}):
+            if bound_account and not trust and (final or role not in {None, "open_form", "login", "signup"}):
                 return self._end("needs_human", SUPERVISED_REQUIRED)
             # Whatever the planner called it, a click that is final or made after data entry may send the form: the unanswered
             # required questions are checked first. Only a pre-data cookies / open_form click is exempt.
@@ -2922,7 +3012,19 @@ class _Run:
                 bad = await self._dest_result(resolve, [], v.click[0])
                 if bad is not None:
                     return bad
-            if guarded or self.mode == "supervised":
+            if trust:
+                # Stop only for what nobody could answer: the planner's own unknowns and the answers that failed. Required
+                # fields it left alone are the site's to judge (its validation is the truth, not our reading of "required").
+                blocking, soft = trusting.open_questions(self, plan, snap, v, handled, v.click[0] if v.click else None) if guarded else ([], [])
+                if (blocking or soft) and handled and self.replans.get(page_key, 0) < 2:
+                    self.replans[page_key] = self.replans.get(page_key, 0) + 1  # progress was made: read the page again first
+                    log.note = self._r("; ".join(x for x in (log.note, *v.notes, "relecture avant le clic") if x))[:900]
+                    await self._shot(log)
+                    continue
+                v.questions = [*blocking, *soft] if blocking else []
+                if soft and not blocking:
+                    v.notes.append("champs requis laissés vides : " + ", ".join(q.label[:40] for q in soft[:6]))
+            elif guarded or self.mode == "supervised":
                 questions = list(v.questions)
                 questions += [q for q in plan.unknown if q.required]
                 # Required fields of ANOTHER <form> than the one being sent (e.g. the "déjà inscrit ?" login box next to the
@@ -2973,6 +3075,8 @@ class _Run:
                 continue
             idle = 0
             field, planned = v.click
+            if self.rehearse and (final or post_data or role in ("login", "signup")):  # dev rehearsal on a live page: fake data is never sent
+                return self._end("ready", f"Répétition : clic « {field.label[:60]} » ({role}) non effectué.")
             if v.click and not attach and self.last_click_rec == (urldefrag(self.page.url).url, _norm(field.label)):
                 loop_sig = [f for f in snap.fields if f.kind not in ("button", "link") and f.ref not in handled and not self._file_satisfied(f, snap)
                             and (f.error or (f.required and _is_empty(f) and (not field.form or not f.form or f.form == field.form)))]
@@ -2996,7 +3100,7 @@ class _Run:
                     bad = await self._dest_result(resolve, [], field)
                     if bad is not None:
                         return bad
-            if planned == "cookies" and re.search(r"\b(?:accepter|accepte|accept|agree|allow|autoriser)\b", _norm(field.label)) \
+            if not trust and planned == "cookies" and re.search(r"\b(?:accepter|accepte|accept|agree|allow|autoriser)\b", _norm(field.label)) \
                     and not re.search(r"\b(?:sans|without|refuser|reject)\b", _norm(field.label)):
                 return self._end("needs_input", "Préférences de cookies à confirmer sur le site.")
             if self.mode == "submit" and (final or post_data):
@@ -3007,7 +3111,8 @@ class _Run:
                 if bad is not None:
                     return bad
             target = await self._el(resolve, field.ref)
-            if not await self._same_target(target, field):
+            if not await self._same_target(target, field) and not (trust and (live_now := await live_button(target) if target is not None else None)
+                                                                   and live_now[1] and live_now[2]):
                 log.note = f"{log.note}; « {field.label[:40]} » a changé depuis la lecture : clic annulé"
                 continue
             async def recheck():
@@ -3036,6 +3141,7 @@ class _Run:
                 self.final_clicked = True  # from here on the application MAY have been sent, whatever happens next
                 self.final_awaiting = True
                 self.submit_clicks += 1
+                self.sent_url = urldefrag(self.page.url).url
             elif self.mode == "submit" and post_data:
                 try:
                     if self.on_nav_click is not None:

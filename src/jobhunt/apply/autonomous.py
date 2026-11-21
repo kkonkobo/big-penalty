@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 import tldextract
 
-from jobhunt.apply.destination import clean_url, core_guard, login_return, origin
+from jobhunt.apply.destination import clean_url, core_guard, login_return, origin, trust_planner
 from jobhunt.apply.errors import ApplyError, ManualField
 from jobhunt.apply.identity import ats_target
 from jobhunt.apply.prompt_rules import optional_recruiting, recruiter_ai_polarity
@@ -118,6 +118,9 @@ class Audience:
         # candidate data goes only to a trusted site, and nothing is sent twice. `chain` holds the sites the run reached by
         # top-level navigation from a trusted one; `typed` the values entered (a GET carrying one is a write).
         self.core = core_guard()
+        # In core mode the engine executes the planner's mapping as given (see `trusting`); `strict` fill keeps every
+        # deterministic validation layer of the engine.
+        self.trusting = self.core and trust_planner()
         self.chain: set[str] = set()
         self.typed: set[str] = set()
 
