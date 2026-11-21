@@ -1405,12 +1405,17 @@ def test_a_creation_form_that_comes_back_with_its_password_emptied_gets_a_new_pa
         run.password = SimpleNamespace(rotate=lambda address: calls.append(address) or "new")
         run._account_address = lambda url: "careers.example.test"
         run.last_click_rec = last
+        run.last_click_passwords = passwords
         v = engine._Validated()
         assert trusting.check(run, Action(ref="p1", op="fill", fact="account_password"), secret, v, snap, None) is not None
         return v
 
+    passwords = 1
     assert not bounced(None).notes and not calls                              # first visit of the form
     assert not bounced((URL, "connectez vous")).notes and not calls           # another click led here
+    passwords = 0  # the same words on the link that led here from another page (a sign-in form): not a bounce
+    assert not bounced((URL, "inscription")).notes and not calls
+    passwords = 1
     assert any("nouveau mot de passe" in note for note in bounced((URL, "inscription")).notes) and calls == ["careers.example.test"]
 
 
