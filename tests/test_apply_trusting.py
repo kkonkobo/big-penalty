@@ -764,3 +764,18 @@ def test_generated_password_fits_sites_that_cap_it_at_eighteen():
 
     pw = accounts.generate_password()
     assert 8 <= len(pw) <= 18 and any(c.isdigit() for c in pw) and any(c.isupper() for c in pw) and any(c.islower() for c in pw)
+
+
+def test_a_one_time_passcode_mailed_from_the_ats_vendor_domain_is_read():
+    from jobhunt.apply import mail
+
+    text = ("One-Time Password for Candidate Account Verification. Dear Camille Durand, your passcode for account verification is 482913 "
+            "Enter this passcode on the Create Account page. This passcode is valid for 30 minutes.")
+    found = mail.extract(text, "https://careers7.successfactors.eu/careers", sender_domain="successfactors.eu")
+    assert found is not None and found.kind == "code" and found.value == "482913"
+    assert mail.extract(text, "https://careers7.successfactors.eu/careers", sender_domain="mailer.example.test") is None
+
+
+def test_former_employer_question_is_a_declaration_answered_from_its_fact():
+    asked = field(ref="q1", kind="select", required=True, label="Avez-vous déjà travaillé pour notre entreprise ?", options=opts("Oui", "Non"))
+    assert trusting.declaration_key(asked) == "former_employer"

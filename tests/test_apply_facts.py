@@ -350,7 +350,7 @@ def test_date_conversion_round_trip_and_legacy_text():
 
 
 def test_save_answers_round_trip_reaches_build_facts(profile):
-    values = {"civility": "Mme", "birth_date": "1999-03-04", "birth_place": " Toulouse ", "nationality": "Française",
+    values = {"civility": "Mme", "gender": "Femme", "birth_date": "1999-03-04", "birth_place": " Toulouse ", "nationality": "Française",
               "race_ethnicity": "Black",
               "address": "12 rue des Lilas", "postal_code": "31000", "city": "Toulouse", "department": "Haute-Garonne",
               "country": "France", "work_authorization": "Citoyenne française", "needs_visa_sponsorship": "Non",

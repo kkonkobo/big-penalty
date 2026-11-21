@@ -641,6 +641,7 @@ class _Run:
         self.email_verification = None
         self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
+        self.code_entries = 0                # trusting mode: one-time codes read from the mailbox and typed
         self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
         self.email_login_tried = False       # trusting mode: signed in after an e-mail verification that never came
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
@@ -2249,6 +2250,12 @@ class _Run:
                     trace.receipt_kind = "first_party_confirmation"
                     return self._end("submitted", "Candidature envoyée.")
                 if self.trusting:
+                    with contextlib.suppress(Exception):
+                        if await trusting.enter_emailed_code(self, snap, resolve):  # the site asks for an e-mailed code first
+                            deadline = loop.time() + TRUSTING_OBSERVE_S
+                            started = loop.time()
+                            snap, resolve = await self._snapshot()
+                            continue
                     # The page itself is the evidence, whatever the transport showed: the form of the click is gone and the
                     # page says the application was received (its wording, else the planner's reading of the page).
                     gone = not has_form or self._form_gone(snap)
@@ -2744,6 +2751,10 @@ class _Run:
                 await self._shot(log)
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if kind == "email_verification":
+                if self.trusting:
+                    with contextlib.suppress(Exception):
+                        if await trusting.enter_emailed_code(self, snap, resolve):
+                            continue
                 if await self._verify_email(snap, resolve):
                     continue
                 if self.trusting and not self.email_login_tried and not self.app_touched and not self.final_clicked:
