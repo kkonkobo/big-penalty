@@ -587,6 +587,8 @@ def open_questions(run: _Run, plan: StepPlan, snap: PageSnapshot, v: _Validated,
         field = by_ref.get(question.ref)
         if field is not None and not field.required and not field.error:
             continue  # a question the page does not require is left unanswered: the site's own validation decides
+        if field is not None and field.kind == "file" and not field.error and _PHOTO.search(fold(f"{field.label} {field.name}")):
+            continue  # no photo is on record: the form is sent without one, and the site says whether it insists
         if question.required and question.ref not in handled and (field is None or engine._is_empty(field)) and not (
                 field is not None and (field.kind in ("button", "link") or owner_item(run, field) is True)):
             blocking.append(engine._question(field) if field is not None else question)
@@ -669,6 +671,7 @@ _ACCEPT = re.compile(r"^(?:tout accepter|accepter.*|j.accepte.*|ok.*|accept.*|al
 
 
 _CLOSERS = frozenset({"fermer", "close", "×", "x"})
+_PHOTO = re.compile(r"\b(?:photo|foto|picture|portrait|avatar)\b")
 _STATEMENT = re.compile(r"declaration de confidentialit|privacy statement|data privacy|protection des donnees|datenschutzerkl")
 _PRINT = frozenset({"imprimer", "print", "drucken"})
 

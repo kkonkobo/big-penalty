@@ -1407,3 +1407,33 @@ def test_a_creation_form_that_comes_back_with_its_password_emptied_gets_a_new_pa
     assert not bounced(None).notes and not calls                              # first visit of the form
     assert not bounced((URL, "connectez vous")).notes and not calls           # another click led here
     assert any("nouveau mot de passe" in note for note in bounced((URL, "inscription")).notes) and calls == ["careers.example.test"]
+
+
+def test_workday_account_pages_of_one_career_site_are_one_account():
+    apply_page = "https://tenant.wd3.myworkdayjobs.com/fr-FR/acme-careers/job/Testville/Stage-test_JR1/apply/applyManually"
+    login_page = "https://tenant.wd3.myworkdayjobs.com/fr-FR/acme-careers/login"
+    other_site = "https://tenant.wd3.myworkdayjobs.com/fr-FR/other-careers/login"
+    assert engine.account_key(apply_page) == engine.account_key(login_page) != engine.account_key(other_site)
+    assert engine.account_key("careers.example.test") == "careers.example.test"
+    seen = engine._Accounts()
+    seen.add(apply_page)
+    assert login_page in seen and other_site not in seen
+    seen.discard(login_page)
+    assert apply_page not in seen
+
+
+def test_page_signals_keep_what_the_site_said_without_addresses():
+    text = "Connexion Adresse e-mail Mot de passe. Erreur : adresse camille@example.org ou mot de passe incorrect. Suivez-nous"
+    assert engine.page_signals(text) == ["Erreur : adresse <e-mail> ou mot de passe incorrect."]
+    assert engine.page_signals("Connexion Adresse e-mail Mot de passe") == []
+
+
+def test_a_photo_nobody_has_does_not_stop_the_send():
+    photo = field(ref="f1", kind="file", label="Photo (Choisir un fichier Format autorisé: JPG)", required=True)
+    plan = plan_of(unknown=[Question(ref="f1", label="Photo au format JPG", kind="file")])
+    blocking, soft = trusting.open_questions(run_of(), plan, snap_of(photo), engine._Validated(), set(), None)
+    assert blocking == [] and [q.ref for q in soft] == ["f1"]  # (sent as it is: the site says whether it insists)
+    letter = field(ref="f2", kind="file", label="Lettre de recommandation", required=True)
+    plan = plan_of(unknown=[Question(ref="f2", label=letter.label, kind="file")])
+    blocking, _ = trusting.open_questions(run_of(), plan, snap_of(letter), engine._Validated(), set(), None)
+    assert [q.ref for q in blocking] == ["f2"]
