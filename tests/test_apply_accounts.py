@@ -86,7 +86,7 @@ def test_generated_passwords_differ_and_meet_the_policy():
 def test_create_password_stores_and_reads_back(mem):
     pw = A.create_password("boards.greenhouse.io", "camille@example.test")
     assert len(pw) == A.PASSWORD_LENGTH <= 18 and any(c in string.ascii_uppercase for c in pw) and any(c in string.ascii_lowercase for c in pw)
-    assert re.fullmatch(r"[A-Za-z0-9+._-]{16}", pw)
+    assert re.fullmatch(r"[A-Za-z0-9._-]{16}", pw)
     assert mem.items == {("big-penalty:boards.greenhouse.io", "camille@example.test"): pw}
     assert ("set", "big-penalty:boards.greenhouse.io", "camille@example.test", "Big Penalty \u2014 boards.greenhouse.io") in mem.calls
     assert A.get_password("boards.greenhouse.io", "camille@example.test") == pw
