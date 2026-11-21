@@ -24,6 +24,7 @@ class FakeRun:
     mode = "submit"
     signup_scope = None
     login_box: set = set()
+    combo_options: dict = {}
     _drop = engine._Run._drop
     _identity_item = engine._Run._identity_item
     _autonomous_decision = engine._Run._autonomous_decision
@@ -980,3 +981,35 @@ async def test_scripted_planner_keeps_its_entry_and_account_clicks_and_the_llm_p
     plan = await trusting.ScriptedThenLLM(first, second).plan(PageSnapshot(url="https://ats.example.test/apply"), FactSheet())
     assert first.calls == 1 and second.calls == (1 if uses_llm else 0)
     assert plan is (answer if uses_llm else scripted)
+
+
+def test_a_calling_code_search_box_is_recognized_and_makes_the_number_national():
+    code = field(ref="c1", kind="text", label="Indicatif de pays/province", required=True)
+    phone = field(ref="p1", kind="text", label="Nº de téléphone", required=True)
+    snap = snap_of(code, phone)
+    assert trusting.is_dial(code, snap) and not trusting.is_dial(phone, snap) and trusting.beside_dial(phone, snap)
+    made = trusting.check(run_of(), Action(ref="c1", op="fill", fact="phone"), code, engine._Validated(), snap, None)
+    assert made is not None and made.dial_code == "+33" and not made.national
+    number = trusting.check(run_of(), Action(ref="p1", op="fill", fact="phone"), phone, engine._Validated(), snap, None)
+    assert number is not None and number.national and not number.dial_code
+
+
+async def test_an_opened_list_is_remembered_and_a_category_sub_list_is_followed(page):  # noqa: F811
+    await page.set_content('''<label id="l">Comment nous avez-vous connus ?</label>
+      <button id="b" aria-haspopup="listbox" aria-labelledby="l" onclick="show(['Site carrière', 'Réseaux sociaux', 'Salon'])">Select One</button>
+      <div id="pop"></div>
+      <script>
+        const SUB = {'Réseaux sociaux': ['LinkedIn', 'Autre réseau']};
+        function show(items) { pop.innerHTML = '<ul role="listbox">' + items.map(t => `<li role="option">${t}</li>`).join('') + '</ul>';
+          for (const li of pop.querySelectorAll('li')) li.onclick = () => { if (SUB[li.textContent]) show(SUB[li.textContent]);
+            else { document.getElementById('b').textContent = li.textContent; pop.innerHTML = ''; } }; }
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select"), combo, Fact(key="job_source", label="Source", value="LinkedIn"), value="Réseaux sociaux")
+    shown = await trusting._combobox(run, await resolve.element(combo.ref), combo, item)
+    assert shown == "LinkedIn"
+    assert run.combo_options[trusting.norm(combo.label)] == ["Site carrière", "Réseaux sociaux", "Salon"]

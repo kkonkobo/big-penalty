@@ -45,7 +45,7 @@ from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
 from jobhunt.apply.widgets import DENIED, WIDGET, date_segment, date_segment_option, denied_widget
 from jobhunt.apply.store import binding_active
-from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
+from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FieldOption, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan, ACCOUNT_REASONS)
 from jobhunt.apply.unattended import ClickUncertain as _Dispatched, click_once, handoff_result, trial_click
 from jobhunt.browser import human_pause
@@ -654,6 +654,7 @@ class _Run:
         self.email_verification = None
         self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
+        self.combo_options: dict[str, list[str]] = {}  # trusting mode: options an opened list showed, by field label
         self.code_entries = 0                # trusting mode: one-time codes read from the mailbox and typed
         self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
         self.email_login_tried = False       # trusting mode: at most one sign-in fallback from email verification
@@ -811,6 +812,10 @@ class _Run:
         for attempt in range(3):
             try:
                 snapshot, resolve = await take_snapshot(self.page)
+                if self.trusting and self.combo_options:
+                    for field in snapshot.fields:  # a list that only renders once opened: show what it offered last time
+                        if field.kind == "combobox" and not field.options and (seen := self.combo_options.get(trusting.norm(field.label))):
+                            field.options = [FieldOption(value=label, label=label) for label in seen]
                 choices = {}
                 repeated = set()
                 self.questions_by_ref = {}
