@@ -144,6 +144,10 @@ J. Clicks: after filling a page, ALWAYS end the plan with the click that moves o
    cannot be answered at all, list it in `unknown` and still fill everything else.
 K. A CV parser may have pre-filled fields: correct a value only when it contradicts a fact (wrong name, e-mail, phone).
    Education / experience blocks already present need no action; never add experience entries that the CV does not hold.
+M. Accounts. After the account-creation click (`history` shows a `signup` click) the site often returns to its sign-in page:
+   the account now exists (`account_exists` says oui): sign in with `account_email` / `account_password`, do not create it
+   again. A page or message saying that a verification e-mail, link or code was sent / that the account must be verified
+   or activated first is `email_verification` (quote the instruction in `note`), whatever form it still shows.
 L. `history[].problems` lists what the program could not do at earlier steps (an option that was not found, a field that
    refused its value): choose another listed option or another format for those fields.
 """

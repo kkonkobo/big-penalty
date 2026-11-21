@@ -339,7 +339,7 @@ _JS = r"""
     if (kind === 'button') {
       const tag = el.tagName.toLowerCase();
       const text = (tag === 'input' ? clean(el.value) : clean(el.innerText || el.textContent))
-        || clean(el.getAttribute('aria-label')) || clean(el.getAttribute('title')) || clean(el.value);
+        || clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby') || clean(el.getAttribute('title')) || clean(el.value);
       if (!text) continue;
       // a button that only opens a file dialog: when a file input stands behind it (its label's control, a data target, or the only
       // file input of a nearby container) the planner sees THAT input (labelled with the group heading), not the button

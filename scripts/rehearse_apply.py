@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -109,6 +110,7 @@ async def main() -> int:
     args.add_argument("--title", default="")
     args.add_argument("--out", default="")
     args.add_argument("--steps", type=int, default=14)
+    args.add_argument("--click-ok", default="", help="regex of in-page controls (dialog openers) that may be clicked after data entry")
     opts = args.parse_args()
     data_dir = Path(os.environ.get("JOBHUNT_DATA_DIR", ""))
     if not os.environ.get("JOBHUNT_DATA_DIR") or (data_dir / "jobhunt.sqlite3").exists():
@@ -140,6 +142,7 @@ async def main() -> int:
                                on_nav_click=None, verifier=None, host_allowed=audience.trusted_host, max_steps=opts.steps, goto=None,
                                account_known=lambda url: False)
             flow.autonomous, flow.rehearse = audience, True
+            flow.rehearse_ok = re.compile(opts.click_ok, re.I) if opts.click_ok else None
             result = await flow.run()
             with __import__("contextlib").suppress(Exception):
                 await flow.page.screenshot(path=str(out / "final.png"), full_page=True)

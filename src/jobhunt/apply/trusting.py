@@ -436,6 +436,9 @@ _ACCEPT = re.compile(r"^(?:tout accepter|accepter.*|j.accepte.*|ok.*|accept.*|al
                      r"fermer|close|alle akzeptieren|akzeptieren|zustimmen|erlauben|verstanden|weiter|×|x)$")
 
 
+_CLOSERS = frozenset({"fermer", "close", "×", "x"})
+
+
 async def _shown(handle) -> bool:
     try:
         return bool(await handle.evaluate("e => e.isConnected && e.getClientRects().length > 0"))
@@ -461,9 +464,14 @@ async def dismiss_blocker(run: _Run) -> str:
             return ""
         labels = [fold(label).strip() for label in found["buttons"]]
         named = [index for index, label in enumerate(labels) if label]
-        choice = next((index for index in named if _REFUSE.match(labels[index])), None)
+        # Cookies / trackers are refused when the notice offers it. A privacy statement or terms the site requires to
+        # apply is accepted (the candidate's standing authorization): refusing it would end the application.
+        cookies = bool(re.search(r"cookie|traceur|tracking", fold(found["text"])))
+        choice = next((index for index in named if _REFUSE.match(labels[index])), None) if cookies else None
         if choice is None:
-            choice = next((index for index in named if _ACCEPT.match(labels[index])), None)
+            choice = next((index for index in named if _ACCEPT.match(labels[index]) and labels[index] not in _CLOSERS), None)
+        if choice is None and cookies:
+            choice = next((index for index in named if labels[index] in _CLOSERS), None)
         real = [index for index in named if not found["links"][index]]  # a link to the policy text is not the way out
         if choice is None and len(real) == 1:
             choice = real[0]
@@ -601,6 +609,59 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     raise engine._Skip("option introuvable dans la liste")
 
 
+_FILE_SOURCE = re.compile(r"appareil|device|ordinateur|computer|poste de travail|fichier|file|parcourir|browse|local|disque|upload|televers|importer")
+
+
+async def _file_inputs(run: _Run) -> list:
+    found = []
+    for frame in run.page.frames:
+        with contextlib.suppress(Exception):
+            found += await frame.locator("input[type=file]").element_handles()
+    return found
+
+
+async def _upload_through(run: _Run, opener, path) -> None:
+    """Put the file on the site through a styled upload control: the file input it stands for, the native file chooser it
+    opens, or the dialog / menu it opens (a file input that appears, or a "from this device" entry). ONE click on the opener."""
+    engine = _engine()
+    near = (await opener.evaluate_handle(engine._NEAR_FILE_JS)).as_element()
+    if near is not None:
+        await near.set_input_files(str(path))
+        run.uploaded = True
+        return
+    before = {await handle.evaluate("e => e.outerHTML.slice(0, 200)") for handle in await _file_inputs(run)}
+    try:
+        async with run.page.expect_file_chooser(timeout=4000) as waiting:
+            try:
+                await opener.click(timeout=3000)
+            except Exception:
+                await opener.evaluate(_PRESS_JS)
+        await (await waiting.value).set_files(str(path))
+        run.uploaded = True
+        return
+    except Exception:
+        pass
+    for attempt in range(10):  # no native chooser: the click opened a dialog / menu of its own
+        inputs = await _file_inputs(run)
+        fresh = [handle for handle in inputs if await handle.evaluate("e => e.outerHTML.slice(0, 200)") not in before]
+        choice = fresh or (inputs if len(inputs) == 1 else [])
+        if choice:
+            await choice[0].set_input_files(str(path))
+            run.uploaded = True
+            return
+        if attempt == 3:  # a source menu ("Depuis cet appareil", Dropbox, Drive...): the local entry opens the chooser
+            for option, text in await _popup_options(run):
+                if _FILE_SOURCE.search(fold(text)):
+                    with contextlib.suppress(Exception):
+                        async with run.page.expect_file_chooser(timeout=3000) as waiting:
+                            await option.click(timeout=2000)
+                        await (await waiting.value).set_files(str(path))
+                        run.uploaded = True
+                        return
+        await asyncio.sleep(0.5)
+    raise engine._Skip("aucun champ de fichier après le clic sur le bouton de dépôt")
+
+
 async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> str:
     """Carry out one item on the live page. `target` is the exact element of the snapshot (the first radio of a group)."""
     engine = _engine()
@@ -612,8 +673,8 @@ async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> 
             await target.set_input_files({"name": "CV.pdf", "mimeType": "application/pdf", "buffer": run.uploads.cv_bytes}, timeout=timeout)
             run.uploaded = True
             return "CV.pdf"
-        await run._set_files(resolve(field.ref), field, run.uploads.cv_pdf)
-        return "CV.pdf"
+        await _upload_through(run, target, run.uploads.cv_pdf)
+        return run.uploads.cv_pdf.name
     if action.op == "upload_letter":
         letter = await run._letter_obj()
         if letter is None or letter.pdf_path is None:
