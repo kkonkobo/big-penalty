@@ -3238,6 +3238,7 @@ class _Run:
                 if bad is not None:
                     return bad
             handled: set[str] = set()
+            lists_known = {key: len(value) for key, value in self.combo_options.items()}
             approved_choices: dict[str, tuple] = {}
             # Many ATS parse the uploaded CV and re-render (and pre-fill) the form: every other ref of this snapshot would
             # be stale. So a step that uploads AND fills does the uploads alone first, then the page is read again. Once per
@@ -3439,7 +3440,9 @@ class _Run:
                 blocking, soft = trusting.open_questions(self, plan, snap, v, handled, v.click[0] if v.click else None) if guarded else ([], [])
                 # (each re-read follows a step that filled something: a one-page form whose answers bring new fields with
                 # them needs more than two of them)
-                if (blocking or soft) and handled and self.replans.get(page_key, 0) < 5:
+                # (a list that showed its entries for the first time is progress too: the planner has not seen them yet)
+                learned = any(len(value) > lists_known.get(key, 0) for key, value in self.combo_options.items())
+                if (blocking or soft) and (handled or learned) and self.replans.get(page_key, 0) < 5:
                     self.replans[page_key] = self.replans.get(page_key, 0) + 1  # progress was made: read the page again first
                     log.note = self._r("; ".join(x for x in (log.note, *v.notes, "relecture avant le clic") if x))[:900]
                     await self._shot(log)
