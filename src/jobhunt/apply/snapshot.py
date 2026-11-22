@@ -202,6 +202,43 @@ _JS = r"""
     return openers.length === 1;
   };
 
+  const nativeRadioIn = (el) => !!(el.querySelector('input[type=radio]') || (el.shadowRoot && el.shadowRoot.querySelector('input[type=radio]')));
+  // parent in the RENDERED tree: the slot an element is assigned to, else its parent, else the host of its shadow root
+  const flatUp = (n) => n.assignedSlot || n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
+  const drawnRadio = (el) => el.tagName !== 'INPUT' && el.getAttribute('role') === 'radio' && !nativeRadioIn(el);
+  // the group of a drawn radio: the nearest role=radiogroup around it as rendered (a slotted radio sits, once rendered,
+  // inside a fieldset of its group's shadow root), else its parent
+  const drawnGroupOf = (el) => {
+    for (let p = flatUp(el), d = 0; p && d < 12; p = flatUp(p), d++) if (p.getAttribute('role') === 'radiogroup') return p;
+    return el.parentElement || el.getRootNode().host || el;
+  };
+  const drawnRadioLabel = (el) => clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby') || textOf(el)
+    || clean(el.getAttribute('label')) || adjacentOf(el);
+  const drawnRadioValue = (el) => (typeof el.value === 'string' ? el.value : el.getAttribute('value') || '');
+  const drawnChecked = (el) => el.getAttribute('aria-checked') === 'true' || el.checked === true;
+  // The question of a group of drawn radios: what names the group, else the words shown around its options - the text of
+  // the smallest box around the group (crossing shadow hosts) once the options' own words are taken off its end.
+  const drawnQuestion = (rg, members) => {
+    const forLabel = rg.id ? rg.getRootNode().querySelector('label[for="' + CSS.escape(rg.id) + '"]') : null;
+    const lg = rg.tagName === 'FIELDSET' ? rg.querySelector(':scope > legend') : null;
+    const named = (forLabel ? textOf(forLabel) : '') || idsText(rg, 'aria-labelledby') || clean(rg.getAttribute('aria-label'))
+      || (lg ? textOf(lg) : '');
+    if (named) return named;
+    const words = members.map(drawnRadioLabel).filter(Boolean);
+    const holds = (box, el) => { for (let p = el, d = 0; p && d < 30; p = flatUp(p), d++) if (p === box) return true; return false; };
+    for (let box = rg, d = 0; box && d < 5; box = box.parentElement || box.getRootNode().host, d++) {
+      if (['BODY', 'HTML', 'FORM', 'MAIN'].includes(box.tagName)) break;
+      if (els.some((x) => !members.includes(x) && (drawnRadio(x) || x.matches('input:not([type=hidden]), select, textarea')) && holds(box, x))) break;
+      let t = textOf(box);
+      const run = words.join(' '), at = run ? t.indexOf(run) : -1;
+      if (at >= 0) t = clean(t.slice(0, at)) || clean(t.slice(at + run.length));
+      else for (let i = words.length - 1; i >= 0; i--) if (t.endsWith(words[i])) t = clean(t.slice(0, t.length - words[i].length));
+      if (t.length > 300) break;
+      if (t.length >= 2) return t;
+    }
+    return preceding(rg) || '';
+  };
+
   const kindOf = (el) => {
     const tag = el.tagName.toLowerCase();
     const role = (el.getAttribute('role') || '').toLowerCase();
@@ -211,6 +248,9 @@ _JS = r"""
     if (tag !== 'input' && (role === 'checkbox' || role === 'switch')) return 'checkbox';
     if (tag === 'input' && el.getAttribute('aria-hidden') === 'true' && el.type === 'checkbox' && el.parentElement
         && [...el.parentElement.children].some((x) => x !== el && /^(checkbox|switch)$/.test(x.getAttribute('role') || ''))) return null;
+    // A radio drawn by the page (a custom element / div with role=radio, its state in aria-checked) is the radio, unless
+    // it only wraps a native one.
+    if (tag !== 'input' && role === 'radio') return nativeRadioIn(el) ? null : 'radio';
     if (tag === 'select') return 'select';
     if (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') return 'combobox';
     if (tag === 'input' && valueHelp(el)) return 'combobox';
@@ -337,6 +377,27 @@ _JS = r"""
           && !(readOnly && el.form && (el.checked || el.required))) continue;
     } else if (!vis(el) && !(readOnly && kind === 'select' && el.form && (el.value || el.required))) continue;
 
+    if (kind === 'radio' && el.tagName !== 'INPUT') {
+      const rg = drawnGroupOf(el);
+      const lab = drawnRadioLabel(el);
+      let g = groups.get(rg);
+      if (!g) {
+        const members = els.filter((member) => drawnRadio(member) && drawnGroupOf(member) === rg);
+        const raw = drawnQuestion(rg, members);
+        g = base('f' + (++n), 'radio', el);
+        g.label = tidy(raw); g.wording = raw; g.group = groupOf(el); g.error = errorOf(rg);
+        g.required = rg.getAttribute('aria-required') === 'true' || reqOf(el, raw);
+        g.choice_options = members.map((member) => [drawnRadioValue(member), drawnRadioLabel(member),
+          member.getAttribute('aria-disabled') === 'true', groupOf(member)]);
+        g.selected = members.flatMap((member, index) => drawnChecked(member) ? [index] : []);
+        groups.set(rg, g); out.push(g);
+      }
+      g.options.push({value: drawnRadioValue(el), label: lab});
+      if (drawnChecked(el)) g.value = lab;
+      tagRef(el, g.ref);
+      continue;
+    }
+
     if (kind === 'radio') {
       const fi = el.form ? (forms.has(el.form) ? forms.get(el.form) : (forms.set(el.form, forms.size), forms.size - 1)) : -1;
       const key = el.name ? fi + '|' + el.name : 'solo' + (n + 1) + out.length;
@@ -452,7 +513,9 @@ _JS = r"""
       // The <label> of a styled upload is often just the button text ("Parcourir...", "Choisir un fichier"): what the
       // file is for is then in the title attribute or in a short text just above the control. Put it in front.
       const GENERIC_UPLOAD = /^(parcourir|browse|choisir|choose|s[eé]lectionner|select|importer|import|t[eé]l[eé]charger|upload|d[eé]poser|ajouter|joindre|fichier|file)/i;
-      if (!f.label || f.label === (el.getAttribute('name') || '') || GENERIC_UPLOAD.test(f.label)) {
+      // (a label that already names the document - "Upload your CV" - says what the file is for)
+      const NAMED_FILE = /\b(cv|resume|r[eé]sum[eé]|curriculum|lebenslauf|lettre|letter|anschreiben|motivation|dipl[oô]mes?|transcripts?|relev[eé]s?|portfolio)\b/i;
+      if (!f.label || f.label === (el.getAttribute('name') || '') || (GENERIC_UPLOAD.test(f.label) && !NAMED_FILE.test(f.label))) {
         // The control's OWN text (title, data-field-name, aria-label) wins. A heading above it is used only when the control has
         // none, and never when the heading is shared by several file inputs (the ancestor holds more than one).
         const hints = [clean(el.getAttribute('title')), clean((el.getAttribute('data-field-name') || '').replace(/[-_]+/g, ' ')),
@@ -460,7 +523,10 @@ _JS = r"""
         if (!hints.length) {
           for (let p = el.parentElement, i = 0; p && i < 3; p = p.parentElement, i++) {
             if (p.querySelectorAll('input[type=file]').length > 1) break;
-            const prev = [...p.children].find((c) => !c.contains(el) && !c.querySelector('input,select,textarea,button')
+            // (a heading stands BEFORE the control and is no link: what follows it, or a link beside it, is another choice
+            // of the page - "Fill out the form by hand")
+            const prev = [...p.children].find((c) => !c.contains(el) && (c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)
+              && !c.matches('a, [role=button], [role=link]') && !c.querySelector('input,select,textarea,button,a')
               && clean(c.textContent).length > 1 && clean(c.textContent).length <= 80 && !GENERIC_UPLOAD.test(clean(c.textContent)));
             if (prev) { hints.push(clean(prev.textContent)); break; }
           }

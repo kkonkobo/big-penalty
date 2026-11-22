@@ -145,6 +145,11 @@ _GENDER_ALIASES = ({"homme", "masculin", "male", "man", "mann", "mannlich", "hom
                    {"femme", "feminin", "female", "woman", "frau", "weiblich", "mujer", "donna"})
 
 
+# (a mobility list in another language: the whole country, under the words each site uses for it)
+_AREA_ALIASES = ({"toute la france", "france entiere", "toute france", "partout en france", "all france", "all of france",
+                  "whole france", "anywhere in france", "ganz frankreich"},)
+
+
 def best_option(labels: list[str], want: str | None) -> int:
     """Index of the option an answer means, -1 when none: equality, yes / no and civility aliases, then the ONE option that
     starts with the answer, then the one that contains it (or that the answer contains)."""
@@ -155,7 +160,7 @@ def best_option(labels: list[str], want: str | None) -> int:
     for index, label in enumerate(folded):
         if label == target:
             return index
-    aliases = (*_engine()._ALIASES, *_GENDER_ALIASES, *_COUNTRY_ALIASES)
+    aliases = (*_engine()._ALIASES, *_GENDER_ALIASES, *_COUNTRY_ALIASES, *_AREA_ALIASES)
     for group in aliases:
         if target in group:
             hits = [index for index, label in enumerate(folded) if label in group]
@@ -872,6 +877,29 @@ _OPENER_JS = r"""e => {
   return found.length === 1 ? found[0] : null; }"""
 
 
+# How many elements beside a list's control (up to three boxes around it, shadow roots included, the options of a list
+# left aside) show exactly these words: one more after a choice is the tag a multiple-choice box adds for it.
+_TAGS_JS = r"""(e, label) => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const want = clean(label);
+  let box = e, count = 0;
+  for (let depth = 0; depth < 3; depth++) {
+    const up = box.parentElement || (box.getRootNode() && box.getRootNode().host);
+    if (!up || ['BODY', 'HTML', 'FORM', 'MAIN'].includes(up.tagName)) break;
+    box = up;
+  }
+  const walk = (node) => {
+    for (const el of [...node.children, ...(node.shadowRoot ? node.shadowRoot.children : [])]) {
+      if (el === e || el.matches('[role=listbox], [role=option], [role=menu], datalist, select, script, style, template')) continue;
+      if (el.getClientRects().length && clean(el.innerText || el.textContent) === want
+          && ![...el.children].some((child) => clean(child.innerText || child.textContent) === want)) count++;
+      walk(el);
+    }
+  };
+  if (want && box !== e) walk(box);
+  return count; }"""
+
+
 async def mark_shown(run: _Run) -> None:
     for frame in run.page.frames:
         with contextlib.suppress(Exception):
@@ -960,14 +988,25 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
             stats["recycled"] += 1
             return ""  # the row was recycled under us: read the list again
         before = await run._combo_value(loc)
+
+        async def tags() -> int:
+            try:
+                return int(await loc.evaluate(_TAGS_JS, label))
+            except Exception:
+                return 0
+
+        tags_before = await tags()
         try:
             await option.click(timeout=2500)
         except Exception:
             await option.evaluate(_PRESS_JS)  # covered or off-screen: the events a list listens to, in order
         await asyncio.sleep(0.4)
 
+        async def tagged() -> bool:
+            return await tags() > tags_before
+
         async def taken() -> bool:
-            return not await _shown(option) or (await run._combo_value(loc)) != before
+            return not await _shown(option) or (await run._combo_value(loc)) != before or await tagged()
 
         for _ in range(4):  # (a list that closes, or shows the choice, a moment after the click: pressing again would undo it)
             if await taken():
@@ -985,6 +1024,20 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         if closed and not field.multiple and not await _shown(loc):
             return label  # the page re-rendered around the choice (a country that reloads the address block): it was taken
         live = await run._combo_value(loc)
+        if (not live or live == before) and await tagged():
+            # A multiple-choice box: the choice became a tag beside the (still empty) text box, and the list may stay open.
+            if not closed:  # (an open list would cover the fields below it)
+                with contextlib.suppress(Exception):
+                    await loc.evaluate("e => e.blur()")
+                if await _shown(option):
+                    with contextlib.suppress(Exception):
+                        await loc.press("Escape", timeout=2000)
+                    with contextlib.suppress(Exception):
+                        await loc.evaluate("e => e.blur()")
+            chosen = getattr(run, "combo_chosen", None)
+            if chosen is not None and norm(field.label):
+                chosen[norm(field.label)] = label
+            return label
         if closed and not field.multiple and (not live or live == before):
             # The choice opened a sub-list (a category, then its entries): choose there too - the answer or the fact it
             # rests on when an entry says it, else "other", else the first entry.
@@ -1098,6 +1151,22 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                     break
                 if done := await choose(found, index):
                     return done
+    if typed and not code:
+        # The box's own search found nothing (it looks the words up its own way), yet the whole list had the entry: it is
+        # chosen there.
+        with contextlib.suppress(Exception):
+            await loc.fill("", timeout=3000)
+            await asyncio.sleep(0.4)
+        found = await _popup_options(run)
+        if not found:
+            await open_list()
+            for _ in range(4):
+                if found := await _popup_options(run):
+                    break
+                await asyncio.sleep(0.4)
+        index = pick(found)
+        if index >= 0 and (done := await choose(found, index)):
+            return done
     if field.required and not code:
         # A required list that offers nothing like the answer: its "other" entry is the honest "none of these".
         with contextlib.suppress(Exception):

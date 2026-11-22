@@ -526,3 +526,75 @@ async def test_a_box_drawn_by_the_page_is_the_checkbox_not_its_hidden_mirror_inp
     snap, _ = await take_snapshot(page)
     assert [f.value for f in snap.fields if f.kind == "checkbox"] == ["true"]
     assert await page.evaluate("document.querySelector('[role=checkbox]').getAttribute('aria-checked')") == "true"
+
+
+# A design system's radio question: every radio is a custom element with role=radio (its words in its shadow root), slotted
+# into a fieldset[role=radiogroup] that lives in the shadow root of the group element.
+DRAWN_RADIOS = """<script>
+customElements.define('x-radio', class extends HTMLElement {
+  connectedCallback() {
+    this.setAttribute('role', 'radio'); this.setAttribute('aria-disabled', 'false'); this.tabIndex = 0;
+    this.attachShadow({mode: 'open'}).innerHTML = '<style>span { padding: 4px }</style><i style="display:inline-block;width:16px;height:16px"></i><span></span>';
+    this.shadowRoot.querySelector('span').textContent = this.getAttribute('label');
+    this.addEventListener('click', () => {
+      for (const other of this.parentElement.querySelectorAll('x-radio')) other.removeAttribute('aria-checked');
+      this.setAttribute('aria-checked', 'true');
+    });
+  }
+});
+customElements.define('x-radio-group', class extends HTMLElement {
+  connectedCallback() {
+    const named = this.hasAttribute('named');
+    this.attachShadow({mode: 'open'}).innerHTML = '<style>fieldset { border: 0 }</style><div class="field"><label id="lbl">'
+      + (named ? '<slot name="label"></slot> *' : '') + '</label>'
+      + '<fieldset role="radiogroup" aria-labelledby="lbl" aria-required="true"><slot></slot></fieldset></div>';
+  }
+});
+</script>
+<form><div class="q"><x-question><x-radio-group named><span slot="label">Avez-vous déjà postulé chez nous ?</span>
+  <x-radio label="Oui"></x-radio><x-radio label="Non"></x-radio></x-radio-group></x-question></div>
+<div class="q"><x-question><p>Pouvez-vous travailler en France ?</p><x-radio-group>
+  <x-radio label="Oui"></x-radio><x-radio label="Non"></x-radio></x-radio-group></x-question></div>
+<label>Ville <input name="city"></label><button>Envoyer</button></form>"""
+
+
+async def test_radios_drawn_by_the_page_are_one_question_with_its_options(page):
+    """Custom elements with role=radio inside a role=radiogroup (no native input anywhere): the group is one radio field,
+    named by the group's label or, when that is empty, by the words shown above its options."""
+    from jobhunt.apply import engine
+
+    await page.set_content(DRAWN_RADIOS)
+    snap, resolve = await take_snapshot(page)
+    radios = [f for f in snap.fields if f.kind == "radio"]
+    assert [(f.label, f.required, [o.label for o in f.options], f.value, f.selected) for f in radios] == [
+        ("Avez-vous déjà postulé chez nous ?", True, ["Oui", "Non"], "", []),
+        ("Pouvez-vous travailler en France ?", True, ["Oui", "Non"], "", [])]
+    assert all(engine._is_empty(f) for f in radios)
+    group = resolve(radios[1].ref)
+    live = await group.evaluate_all(engine._RADIOS_JS)
+    assert [(r["label"], r["checked"]) for r in live] == [("Oui", False), ("Non", False)]
+    await group.nth(0).check()
+    snap, resolve = await take_snapshot(page)
+    radios = [f for f in snap.fields if f.kind == "radio"]
+    assert [(f.value, f.selected) for f in radios] == [("", []), ("Oui", [0])]
+    assert [r["checked"] for r in await resolve(radios[1].ref).evaluate_all(engine._RADIOS_JS)] == [True, False]
+
+
+async def test_an_element_with_role_radio_around_a_native_radio_is_not_a_second_group(page):
+    await page.set_content('<form><fieldset><legend>Disponible ?</legend>'
+                           '<span role="radio"><label><input type="radio" name="d" value="1"> Oui</label></span>'
+                           '<span role="radio"><label><input type="radio" name="d" value="0"> Non</label></span></fieldset></form>')
+    snap, _ = await take_snapshot(page)
+    assert [(f.label, [o.label for o in f.options]) for f in snap.fields if f.kind == "radio"] == [("Disponible ?", ["Oui", "Non"])]
+
+
+async def test_an_upload_named_after_the_cv_is_not_renamed_after_the_other_choice_of_the_dialog(page):
+    """A dialog offers "Upload your CV" (a link over an invisible file input) or "Fill out the form manually" (a link to
+    the empty form): the file input is the CV upload, not a file called after the second link."""
+    await page.set_content('''<div role="dialog"><ul>
+      <li style="position:relative"><a id="import" href="#">Upload your CV</a>
+        <div style="position:absolute;top:0;left:0;width:300px;height:40px;overflow:hidden">
+          <input type="file" accept=".pdf,.docx" tabindex="-1" style="opacity:0;position:absolute;width:100%;height:100%"></div></li>
+      <li><a href="/apply/manual">Fill out the form manually</a></li></ul></div>''')
+    snap, _ = await take_snapshot(page)
+    assert [f.label for f in snap.fields if f.kind == "file"] == ["Upload your CV"]

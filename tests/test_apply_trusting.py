@@ -1862,3 +1862,47 @@ async def test_a_suggesting_box_with_an_arrow_is_a_list_opened_by_its_arrow(page
         assert run.combo_options[trusting.norm(label)] == listed
     else:
         assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == taken
+
+
+# A multiple-choice search box of a design system: the text box and the chosen tags live in a shadow root, the list keeps
+# 60 entries, its own search only knows each entry's first letters, and a choice becomes a tag (the text box stays empty).
+TAGS_LIST = '''<form><label id="q">Mobilité géographique *</label><x-tags></x-tags><button>Envoyer</button></form>
+  <script>
+    const ALL = ['All France', 'FR - East', 'FR - West', 'All international', ...Array.from({length: 56}, (_, i) => 'Pays ' + (i + 1))];
+    const host = document.querySelector('x-tags');
+    host.attachShadow({mode: 'open'}).innerHTML = '<div class="box"><span class="tags"></span>'
+      + '<input role="combobox" aria-autocomplete="list" aria-label="Mobilité géographique" aria-required="true"></div><ul role="listbox" hidden></ul>';
+    const input = host.shadowRoot.querySelector('input'), list = host.shadowRoot.querySelector('ul'), tags = host.shadowRoot.querySelector('.tags');
+    const show = () => {
+      const typed = input.value.toLowerCase();
+      list.innerHTML = ''; list.hidden = false;
+      for (const name of ALL.filter((entry) => !typed || entry.toLowerCase().startsWith(typed))) {
+        const row = document.createElement('li'); row.setAttribute('role', 'option'); row.textContent = name;
+        row.onclick = () => { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = name; tags.append(tag); };
+        list.append(row);
+      }
+    };
+    input.addEventListener('click', show); input.addEventListener('input', show);
+    input.addEventListener('keydown', (event) => { if (event.key === 'Escape') list.hidden = true; });
+  </script>'''
+
+
+async def test_a_tag_box_takes_the_entry_of_its_full_list_when_its_search_finds_nothing(page):  # noqa: F811
+    """The stored answer is worded in another language than the list ("Toute la France" for "All France") and the box's own
+    search finds nothing for it: the entry is chosen in the whole list, and the tag it becomes is the proof it was taken."""
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(TAGS_LIST)
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, combo_chosen={}, _combo_value=engine._Run._combo_value,
+                          _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="mobility"), combo, None, value="Toute la France")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "All France"
+    assert await page.evaluate("[...document.querySelector('x-tags').shadowRoot.querySelectorAll('.tag')].map((tag) => tag.textContent)") == ["All France"]
+    assert run.combo_chosen == {trusting.norm(combo.label): "All France"}
+    assert await page.evaluate("document.querySelector('x-tags').shadowRoot.querySelector('ul').hidden") is True
+
+
+def test_the_whole_country_is_the_same_entry_in_another_language():
+    assert trusting.best_option(["All France", "FR - East France", "All international", "France", "Germany"], "Toute la France") == 0
