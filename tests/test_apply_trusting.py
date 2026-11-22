@@ -1774,3 +1774,20 @@ def test_a_box_acknowledging_the_information_notice_of_an_account_form_is_ticked
     assert trusting.account_consent(notice, snap) and trusting._required_consent(notice)
     made = trusting.validate(run_of(), plan_of(kind="account_signup"), snap, None)
     assert [(item.field.ref, item.act.op) for item in made.items if item.field.ref == "c1"] == [("c1", "check")]
+
+
+def test_after_an_unexplained_refusal_the_phone_is_respelled_even_when_the_plan_leaves_it_alone():
+    run = run_of()
+    run.rejected_submits = 1
+    name = field(ref="n1", kind="text", label="Nom", required=True, value="Durand")
+    phone = field(ref="p1", kind="text", label="Téléphone", required=True, value="+33 6 00 00 00 00")
+    send = field(ref="b1", kind="button", label="Envoyer")
+    plan = plan_of(Action(ref="b1", op="click", click_role="submit"))
+    made = trusting.validate(run, plan, snap_of(name, phone, send), None)
+    assert [(item.field.ref, bool(item.forced)) for item in made.items if item.field.ref == "p1"] == [("p1", True)]
+    # a page that says what is wrong (another field in error) is not a phone problem
+    other = run_of()
+    other.rejected_submits = 1
+    wrong = name.model_copy(update={"error": "Champ invalide"})
+    made = trusting.validate(other, plan, snap_of(wrong, phone, send), None)
+    assert not [item for item in made.items if item.field.ref == "p1"]
