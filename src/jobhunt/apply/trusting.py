@@ -343,8 +343,10 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         if kind != "password" or secret is None or run.mode != "submit":
             return drop("mot de passe et champ incompatibles")
         frame_url = run._frame_url(resolve, field.ref) if resolve else run.page.url
-        if (not getattr(run, "password_rotated", False) and (
-                (field.error and _PASSWORD_REFUSED.search(fold(field.error))) or _creation_bounced(run, field, snap))):
+        created = getattr(run, "maybe_created", None)  # (a creation form sent and left earlier in this run: hands off)
+        if (not getattr(run, "password_rotated", False)
+                and ((field.error and _PASSWORD_REFUSED.search(fold(field.error))) or _creation_bounced(run, field, snap))
+                and not (created and run._account_address(frame_url) in created)):
             # The site's own password policy refuses the stored password of an account that was never created: a new one,
             # once per run (an existing account keeps its password: `rotate` answers nothing for it).
             rotate = getattr(getattr(run, "password", None), "rotate", None)
