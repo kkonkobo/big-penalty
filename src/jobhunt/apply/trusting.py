@@ -127,6 +127,20 @@ def attached_cv(run: _Run, field: FormField, snap: PageSnapshot) -> _Item | None
 
 # (a careers site opened in another language lists the candidate's country under that language's name)
 _COUNTRY_ALIASES = ({"france", "frankreich", "francia", "frankrijk", "franca"},)
+# (a form in another language names the candidate's languages in that language: "French" for "Français")
+_LANGUAGE_ALIASES = (
+    {"francais", "french", "franzosisch", "frances", "francese"}, {"anglais", "english", "englisch", "ingles", "inglese"},
+    {"espagnol", "spanish", "spanisch", "espanol"}, {"allemand", "german", "deutsch", "aleman"}, {"italien", "italian", "italiano"},
+    {"arabe", "arabic", "arabisch"}, {"portugais", "portuguese", "portugues"}, {"chinois", "chinese", "mandarin"},
+    {"neerlandais", "dutch", "nederlands"}, {"russe", "russian"}, {"japonais", "japanese"})
+
+
+def language_names(want: str | None) -> list[str]:
+    """The other names of the language an answer starts with ("Français : langue maternelle" -> french, ...), else []."""
+    words = norm(want).split()
+    return sorted(next((group for group in _LANGUAGE_ALIASES if words and words[0] in group), set()) - set(words[:1]))
+
+
 _GENDER_ALIASES = ({"homme", "masculin", "male", "man", "mann", "mannlich", "hombre", "uomo"},
                    {"femme", "feminin", "female", "woman", "frau", "weiblich", "mujer", "donna"})
 
@@ -147,6 +161,11 @@ def best_option(labels: list[str], want: str | None) -> int:
             hits = [index for index, label in enumerate(folded) if label in group]
             if len(hits) == 1:
                 return hits[0]
+    names = set(language_names(target)) | set(target.split()[:1])
+    if len(names) > 1:  # a language, under any of its names (the label may add a level: "French (native)")
+        hits = [index for index, label in enumerate(folded) if label.split(" ")[0] in names]
+        if len(hits) == 1:
+            return hits[0]
     first = [index for index, label in enumerate(folded) if label and (label.startswith(target + " ") or target.startswith(label + " "))]
     if len(first) == 1:
         return first[0]
@@ -993,7 +1012,8 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         words = want.split()
         country = sorted(DIAL_COUNTRY_NAMES.get(code, ()), key=len)[:1] if code else []
         texts = [code, code.lstrip("+"), *[name.title() for name in country]] if code else [
-            want, want.split(" (")[0], " ".join(words[:2]), words[0] if words else "", want[:4] if len(want) > 5 else ""]
+            want, want.split(" (")[0], " ".join(words[:2]), words[0] if words else "", *[name.title() for name in language_names(want)],
+            want[:4] if len(want) > 5 else ""]
         for text in dict.fromkeys(text for text in texts if text):
             with contextlib.suppress(Exception):
                 await typer.fill("", timeout=3000)
