@@ -704,6 +704,7 @@ class _Run:
         self.last_click_rec: tuple[str, str] | None = None  # (url, normalized label) of the last unguarded click made
         self.page_data = False      # the live page holds candidate data in the form of the clicked control (saved draft...)
         self.nav_ref: tuple[str, set[tuple[str, str]], str] | None = None  # (url, fillable labels, button) of the recorded nav click
+        self.nav_role: str | None = None  # its role (login, signup, next)
         self.steps: list[StepLog] = []
         self.touched = False        # candidate data was entered / chosen / uploaded in this run (any page, any kind)
         self.app_touched = False    # same, on an application page (not an account page)
@@ -2517,7 +2518,7 @@ class _Run:
             # changes the message of the final (unconfirmed) result
             errors_seen = errors_seen or (has_form and any(f.error for f in snap.fields if f.kind not in ("button", "link"))) \
                 or await self._banner_error()
-            if self.nav_pending and not errors_seen and ((has_form and self._distinct_step(snap))
+            if self.nav_pending and not errors_seen and ((has_form and (self._distinct_step(snap) or self._signed_in(snap)))
                                                         or proven_continuation):
                 self.nav_pending = False
                 if self.autonomous:
@@ -2640,6 +2641,19 @@ class _Run:
         gone_button = not any(f.kind in ("button", "link") and _norm(_label(f)) == button for f in snap.fields)
         # the FORM advanced: a field that was not there AND something that was there is gone (a URL change proves nothing)
         return bool(now - before) and (bool(before - now) or gone_button)
+
+    def _signed_in(self, snap: PageSnapshot) -> bool:
+        """Trusting mode: the recorded click was a LOGIN made after application data was typed (a site that answers the send
+        click with "this e-mail has an account: sign in", then shows the form again). The page that follows no longer asks for
+        a password, the login button is gone and a form without error is there: the account step is over and the application
+        is still to be sent. A login sends no application, so this is a continuation even though no new field appeared."""
+        if not self.trusting or self.nav_role != "login" or self.nav_ref is None or self.final_awaiting:
+            return False
+        _, before, button = self.nav_ref
+        inputs = [f for f in snap.fields if f.kind not in ("button", "link")]
+        return (any(kind == "password" for _, kind in before) and bool(inputs)
+                and not any(f.kind == "password" or f.error for f in inputs)
+                and not any(f.kind in ("button", "link") and _norm(_label(f)) == button for f in snap.fields))
 
     async def _gate(self, n: int) -> RunResult | None:
         """submit mode: the send policy (`before_submit`) is consulted ONCE per step, before the first field interaction or click of it.
@@ -3701,6 +3715,7 @@ class _Run:
                 keys = {k for k in keys if k[0]}
                 self.pending = self.last_sent = _Sent(final=final, fields=keys, button=_norm(field.label))
             if self.nav_pending and not final:
+                self.nav_role = role
                 self.nav_ref = (urldefrag(self.page.url).url, {(_norm(_label(f)), f.kind) for f in snap.fields if f.kind not in ("button", "link")},
                                 _norm(field.label))
             if self.mode == "submit" and (final or post_data) and self.on_progress is not None:
