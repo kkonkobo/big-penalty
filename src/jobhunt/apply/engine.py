@@ -734,6 +734,8 @@ class _Run:
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
         self.presend: dict[str, int] = {}  # trusting mode: re-reads made before a final click, per page
         self.signed_up: set[str] = _Accounts()     # account addresses where an account-creation click was made in this run
+        self.maybe_created: set[str] = _Accounts()  # ... where a sent creation form was followed by another page: may exist
+        self.creation_form_clicked = False   # the last signup click was made on a creation form (not on the link to it)
         self.form_hints: dict[str, int] = {}  # trusting mode: page URLs read again as the application form (twice each at most)
         self.plan_trace: list[dict] = []     # trusting mode: what the planner saw / answered at the latest steps (no value)
         self.no_shot_noted = False
@@ -3047,6 +3049,10 @@ class _Run:
             if self.account_try:  # what the last login / signup click led to
                 role, address = self.account_try
                 self.account_try = None
+                if role == "signup" and self.creation_form_clicked and self._signup_submit(snap) is None:
+                    # The creation form was sent and is gone (a "check your e-mail" page, the sign-in page...): the account
+                    # may exist with the password typed then, which must not be replaced later in this run.
+                    self.maybe_created.add(address)
                 if account_key(address) == account_key(self._account_address(self.page.url)):
                     has_password = any(field.kind == "password" for field in snap.fields)
                     if (kind not in (*ACCOUNT_KINDS, "email_verification", "captcha", "error", "closed", "other") and not has_password
@@ -3713,6 +3719,7 @@ class _Run:
                 self.account_clicks += 1
                 if role == "signup":
                     self.signed_up.add(self.account_try[1])
+                    self.creation_form_clicked = self._signup_submit(snap) is not None  # (not the link that leads to the form)
             if plan.page_kind == "account_login" and role == "login" and (self.account_known is not None or (trust and bound_account)):
                 with contextlib.suppress(Exception):
                     known = self._account_exists()

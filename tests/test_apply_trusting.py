@@ -1791,3 +1791,18 @@ def test_after_an_unexplained_refusal_the_phone_is_respelled_even_when_the_plan_
     wrong = name.model_copy(update={"error": "Champ invalide"})
     made = trusting.validate(other, plan, snap_of(wrong, phone, send), None)
     assert not [item for item in made.items if item.field.ref == "p1"]
+
+
+def test_a_password_is_never_replaced_once_a_creation_form_was_sent_and_left_in_this_run():
+    secret = field(ref="p1", kind="password", label="Mot de passe", required=True, form="0:signup",
+                   error="Mot de passe non valide")
+    create = field(ref="b1", kind="button", label="Créer un compte", form="0:signup")
+    calls = []
+    run = run_of()
+    run.mode = "submit"
+    run.password = SimpleNamespace(rotate=lambda address: calls.append(address) or "new")
+    run._account_address = lambda url: "careers.example.test"
+    run.maybe_created = engine._Accounts()
+    run.maybe_created.add("careers.example.test")
+    assert trusting.check(run, Action(ref="p1", op="fill", fact="account_password"), secret, engine._Validated(), snap_of(secret, create), None)
+    assert calls == []
