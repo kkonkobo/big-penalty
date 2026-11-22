@@ -129,6 +129,9 @@ FILE_OPENER_RE = re.compile(r"(?:choisir|choose|select|selectionner|parcourir|br
                             r".{0,20}\b(?:fichier|file|document|cv|resume|curriculum|piece)|^\s*(?:parcourir|browse)")  # folded label of a button that opens a file dialog
 UPLOAD_CONFIRM_RE = re.compile(r"^\s*(?:ajouter|add|attach|joindre|telecharger|televerser|upload|importer|charger|envoyer le fichier|aggiungi|carica|allega|"
                                r"hinzufugen|hochladen|anhangen|anadir|adjuntar|subir|cargar|adicionar|anexar|toevoegen|uploaden)\b")
+# (the bare "add this file" button of an upload block: "Ajouter", "Add file" - not "Ajouter une expérience")
+BARE_ATTACH_RE = re.compile(r"(?:ajouter|add|attach|joindre|televerser|upload|importer|charger|hinzufugen|hochladen)"
+                            r"(?: (?:le |un |ce |the |this |a )?(?:fichier|file|document|cv|piece jointe|attachment|lettre|letter))?")
 NEXT_OR_SEND_RE = re.compile(r"postuler|envoyer|soumettre|valider|confirmer|terminer|finish|enregistrer|save|suivant|continuer|next|continue|submit|apply|send|"
                              r"weiter|senden|avanti|siguiente|seguinte|volgende|inviare|enviar|\bok\b")
 SIGNUP_LINK_RE = re.compile(r"cre(?:er|ez|e) (?:un |une |mon |ma |votre )?(?:compte|espace|profil)|creation (?:de |d')?(?:un |mon )?(?:compte|espace)|"
@@ -386,9 +389,10 @@ _ATTACH_JS = r"""(e) => {
     if (!fs.length) continue;
     const others = [...p.querySelectorAll('input,select,textarea')].filter((x) => x.tagName !== 'INPUT'
       || !['file', 'hidden', 'button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes((x.getAttribute('type') || 'text').toLowerCase()));
-    return {filled: fs.some((x) => x.files && x.files.length > 0), small: !['FORM', 'BODY', 'MAIN', 'HTML'].includes(p.tagName) && others.length === 0};
+    return {found: true, filled: fs.some((x) => x.files && x.files.length > 0),
+            small: !['FORM', 'BODY', 'MAIN', 'HTML'].includes(p.tagName) && others.length === 0};
   }
-  return {filled: false, small: false};
+  return {found: false, filled: false, small: false};
 }"""
 # fallback: the only file input of the control's form (else of its frame) - or the only one that accepts pdf / is named like a CV field
 _ANY_FILE_JS = r"""(e) => {
@@ -3449,6 +3453,15 @@ class _Run:
                 if self.page_data and plan.page_kind not in ACCOUNT_KINDS:
                     self.app_touched = True
             attach = False
+            if (trust and v.click and live is not None and v.click[0].kind in ("button", "link")
+                    and BARE_ATTACH_RE.fullmatch(fold(v.click[0].label).strip())):
+                # An "add this file" button next to a file input that holds no file (an optional letter nobody chose): the
+                # click would only send an empty upload back to the site, which answers with an error page.
+                with contextlib.suppress(Exception):
+                    near = await live.evaluate(_ATTACH_JS)
+                    if near.get("found") and not near.get("filled"):
+                        v.notes.append(f"clic « {v.click[0].label[:40]} » ignoré : aucun fichier choisi à joindre")
+                        v.click = None
             if v.click and self.uploaded and live is not None and v.click[0].kind in ("button", "link"):
                 lab = fold(v.click[0].label)
                 try:  # the button that ATTACHES the file just chosen: in the small container of a file input holding a file
