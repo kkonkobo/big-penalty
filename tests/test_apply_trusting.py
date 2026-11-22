@@ -1738,3 +1738,13 @@ async def test_the_sign_in_link_of_a_page_is_a_control_the_planner_can_click(pag
       <form><label>E-mail <input name="email"></label><button type="button">Postuler</button></form>''')
     snap, _ = await take_snapshot(page)
     assert [f.label for f in snap.fields if f.kind == "link"] == ["Connectez-vous", "Sign in"]
+
+
+def test_an_optional_letter_is_attached_once_the_site_refused_the_form_without_it():
+    letter = field(ref="f1", kind="file", label="Votre lettre de motivation")
+    action = Action(ref="f1", op="upload_letter")
+    made, v = do_check(run_of(), action, letter)
+    assert made is None and any("facultative" in note for note in v.notes)
+    refused = PageSnapshot(url=URL, title="Erreur - Je dépose ma candidature à une offre", fields=[letter])
+    made, _ = do_check(run_of(), action, letter, refused)
+    assert made is not None and made.used == "letter"

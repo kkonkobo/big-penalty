@@ -324,7 +324,9 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
             return drop("fichier déjà déposé dans cette candidature", ask=False)
         if kind not in ("file", "button", "link"):
             return drop("envoi de fichier sur un champ qui n'est pas un fichier")
-        if op == "upload_letter" and not field.required:
+        if op == "upload_letter" and not field.required and not (
+                field.error or getattr(run, "rejected_submits", 0) or engine.ERROR_TITLE_RE.match(fold(snap.title).strip())):
+            # (a letter field not marked required is left alone - until the site refuses the form without it)
             return drop("lettre facultative : ignorée", ask=False)
         return item(action, field, used="cv" if op == "upload_cv" else "letter")
     if op == "letter_text":
