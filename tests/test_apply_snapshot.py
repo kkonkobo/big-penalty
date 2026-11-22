@@ -487,3 +487,20 @@ async def test_the_first_option_of_a_list_that_only_asks_to_choose_is_not_a_choi
     snap, _ = await take_snapshot(page)
     field = next(f for f in snap.fields if f.kind == "select")
     assert (field.selected == []) is blank
+
+
+async def test_a_span_styled_and_wired_as_a_button_is_a_button(page):
+    """An upload dialog whose "Add" is a span with a button class and the pointer cursor (no role, no <button>)."""
+    await page.set_content("""<style>.fsp-button { cursor: pointer; padding: 8px } .label-button { padding: 8px }</style>
+      <div class="fsp-footer"><span class="fsp-button fsp-button--cancel">Tout déselectionner</span>
+        <span class="fsp-button fsp-button--primary" title="Ajouter">Ajouter</span></div>
+      <div class="btn-group" style="cursor:pointer"><button type="button">Réel</button></div>
+      <span class="label-button">Simple étiquette</span>
+      <a href="/x" class="btn"><span class="btn-text" style="cursor:pointer">Lien</span></a>
+      <div class="button" style="cursor:pointer">""" + "mot " * 30 + "</div>")
+    snap, resolve = await take_snapshot(page)
+    assert [(f.kind, f.label) for f in snap.fields] == [("button", "Tout déselectionner"), ("button", "Ajouter"), ("button", "Réel"),
+                                                        ("link", "Lien")]
+    await page.evaluate("document.querySelector('.fsp-button--primary').addEventListener('click', () => { document.title = 'ajouté'; })")
+    await resolve(snap.fields[1].ref).click()
+    assert await page.title() == "ajouté"

@@ -181,6 +181,17 @@ _JS = r"""
   // A text box that only SUGGESTS (aria-autocomplete=list, a popup announced) and carries its own arrow / value-help button
   // is a closed list: what is typed without picking an entry is refused. The button is the one icon-only button of the
   // box - inside the custom element whose shadow root holds the input, else right beside the input.
+  // A span / div the site styles and wires as a button without saying so (the "Add" of an upload dialog): a button class,
+  // the pointer cursor, a few words of its own and nothing interactive inside or around it.
+  const styledButton = (el) => {
+    if (!['SPAN', 'DIV'].includes(el.tagName) || !/(^|[\s_-])(btn|button)([\s_-]|$)/i.test(el.getAttribute('class') || '')) return false;
+    if (el.closest('button, a, [role=button], [role=link], label') || el.querySelector('button, a, input, select, textarea, [role=button]')) return false;
+    const text = (el.innerText || '').trim();
+    if (!text || text.length > 40 || !el.getClientRects().length) return false;
+    return getComputedStyle(el).cursor === 'pointer' && !(el.parentElement && styledButtonClass(el.parentElement) && el.parentElement.innerText.trim() === text);
+  };
+  const styledButtonClass = (el) => ['SPAN', 'DIV'].includes(el.tagName) && /(^|[\s_-])(btn|button)([\s_-]|$)/i.test(el.getAttribute('class') || '');
+
   const valueHelp = (el) => {
     if (el.getAttribute('aria-autocomplete') !== 'list' || !/^(dialog|listbox|true|menu|tree|grid)$/.test(el.getAttribute('aria-haspopup') || '')) return false;
     if (!['', 'text', 'search'].includes((el.getAttribute('type') || '').toLowerCase())) return false;
@@ -210,6 +221,7 @@ _JS = r"""
     }
     if (tag === 'button' || role === 'button') return 'button';
     if (tag === 'a' && el.hasAttribute('href')) return 'link';
+    if (styledButton(el)) return 'button';
     return null;
   };
 
