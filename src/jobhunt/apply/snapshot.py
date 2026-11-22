@@ -206,6 +206,11 @@ _JS = r"""
     const tag = el.tagName.toLowerCase();
     const role = (el.getAttribute('role') || '').toLowerCase();
     if (tag === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'password') return 'password';  // before combobox
+    // A box drawn by the page (a button / div with role=checkbox or switch, its state in aria-checked) is the box; the
+    // native input such a widget keeps beside it, hidden from users (aria-hidden), only mirrors it for the form.
+    if (tag !== 'input' && (role === 'checkbox' || role === 'switch')) return 'checkbox';
+    if (tag === 'input' && el.getAttribute('aria-hidden') === 'true' && el.type === 'checkbox' && el.parentElement
+        && [...el.parentElement.children].some((x) => x !== el && /^(checkbox|switch)$/.test(x.getAttribute('role') || ''))) return null;
     if (tag === 'select') return 'select';
     if (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') return 'combobox';
     if (tag === 'input' && valueHelp(el)) return 'combobox';
@@ -441,7 +446,7 @@ _JS = r"""
       const inner = el.matches('input,textarea') ? el : el.querySelector('input');
       f.value = inner ? inner.value : (/^(s[ée]lectionn|choisi|select|choose)/i.test(clean(el.textContent)) ? '' : clean(el.textContent).slice(0, 120));
     } else if (kind === 'checkbox') {
-      f.value = el.checked ? 'true' : 'false';
+      f.value = (el.tagName === 'INPUT' ? el.checked : el.getAttribute('aria-checked') === 'true') ? 'true' : 'false';
     } else if (kind === 'file') {
       f.accept = el.getAttribute('accept') || '';
       // The <label> of a styled upload is often just the button text ("Parcourir...", "Choisir un fichier"): what the
