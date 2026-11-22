@@ -459,6 +459,7 @@ _DIAL_OPTION = re.compile(r"\(\+\d{1,4}\)|^\s*\+\d{1,4}\b")
 
 
 _PHONE_NUMBER = re.compile(r"\b(?:numero|number|nummer|n°|no|nº)\b")
+_PHONE_FIELD = re.compile(r"\b(?:telephone|phone|mobile|portable|tel|handy|telefon)\b")
 _SHOWN_DIAL = re.compile(r"[^\W\d_]\s*\(\s*(\+\s*\d{1,4})\s*\)")
 
 
@@ -579,6 +580,14 @@ def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validat
                 # A calling-code box the plan left alone while it holds another country's code: the candidate's replaces it.
                 fact = "phone_calling_code" if run.facts.known("phone_calling_code") else "phone"
                 made = check(run, Action(ref=field.ref, op="fill", fact=fact, value=code), field, v, snap, resolve)
+            elif (getattr(run, "rejected_submits", 0) and field.kind in ("text", "tel") and field.value.strip()
+                    and _PHONE_FIELD.search(fold(f"{field.label} {field.name}")) and not is_dial(field, snap)
+                    and run.facts.known("phone") and not any(
+                        other.error or (other.required and engine._is_empty(other))
+                        for other in snap.fields if other.kind not in ("button", "link"))):
+                # The site refused the form and nothing on the page says why: the phone is the usual culprit (a format the
+                # site does not name), so it is typed in another spelling even when the plan leaves it alone.
+                made = check(run, Action(ref=field.ref, op="fill", fact="phone"), field, v, snap, resolve)
             elif field.kind in ("text", "email", "tel"):
                 made = run._identity_item(field, snap)  # a name / e-mail / phone field the plan left empty
                 if made is not None and made.used == "phone":
