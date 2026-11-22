@@ -718,6 +718,7 @@ class _Run:
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
         self.sent_url = ""                   # page URL of the last final click
         self.sent_empty: set[tuple[str, str]] = set()  # trusting mode: required fields left empty at the last guarded click
+        self.click_filled: set[tuple[str, str]] = set()  # trusting mode: fields that held a value at the last guarded click
         self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
@@ -2565,7 +2566,10 @@ class _Run:
                      and not (f.kind == "file" and self._file_satisfied(f, snap))]
             kept = any(not _is_empty(f) for f in snap.fields
                        if f.kind not in ("button", "link") and (_norm(_label(f)), f.kind) in sent.fields)
-            errors = bool(empty) and (kept or any((_norm(_label(f)), f.kind) in self.sent_empty for f in empty))
+            # (a required field that held nothing when the click was made - empty then, or shown only since, like the
+            # sections a site unfolds to point at what is missing - was not emptied by a send)
+            never_filled = any((_norm(_label(f)), f.kind) not in self.click_filled for f in empty)
+            errors = bool(empty) and (kept or never_filled or any((_norm(_label(f)), f.kind) in self.sent_empty for f in empty))
         exists = False
         if not errors and intact and self.trusting and any(f.kind == "password" for f in snap.fields):
             # A form that creates the account and applies at once came back saying the account exists: nothing was received.
@@ -3491,6 +3495,8 @@ class _Run:
                     continue
                 v.questions = [*blocking, *soft] if blocking else []
                 self.sent_empty = {(_norm(q.label), q.kind) for q in soft} if not blocking else set()
+                self.click_filled = {(_norm(_label(f)), f.kind) for f in snap.fields
+                                     if f.kind not in ("button", "link") and not _is_empty(f)}
                 if soft and not blocking:
                     v.notes.append("champs requis laissés vides : " + ", ".join(q.label[:40] for q in soft[:6]))
             elif guarded or self.mode == "supervised":

@@ -1295,7 +1295,9 @@ def test_a_password_refused_by_the_sites_policy_is_replaced_once():
     assert calls == ["careers.example.test"] and any("nouveau mot de passe" in note for note in v.notes)
 
 
-def _after_final_click(snap: PageSnapshot, *, sent_empty, exists=False) -> SimpleNamespace:
+def _after_final_click(snap: PageSnapshot, *, sent_empty, exists=False, click_filled=None) -> SimpleNamespace:
+    if click_filled is None:  # by default every field of the page held a value when the click was made
+        click_filled = {(trusting.norm(f.label), f.kind) for f in snap.fields if f.kind not in ("button", "link")}
     withdrawn = []
 
     async def unmark():
@@ -1311,7 +1313,8 @@ def _after_final_click(snap: PageSnapshot, *, sent_empty, exists=False) -> Simpl
         last_sent=engine._Sent(final=True, fields={("prenom", "text")}, button="envoyer"), page=SimpleNamespace(url=snap.url),
         _says_account_exists=says_exists, _account_address=lambda url: "careers.example.test",
         account_exists_hosts=engine._Accounts(), login_failed=engine._Accounts(),
-        sent_url=snap.url, trusting=True, sent_empty=sent_empty, _banner_error=no_banner, rejected_submits=0, final_awaiting=True,
+        sent_url=snap.url, trusting=True, sent_empty=sent_empty, click_filled=click_filled, _banner_error=no_banner,
+        rejected_submits=0, final_awaiting=True,
         final_clicked=True, submit_clicks=1, pending=None, last_click_rec=None, replans={}, diagnostics=SimpleNamespace(receipt_reason=""),
         autonomous=SimpleNamespace(unmark_submit=unmark, final_response=True, foreign_writes=1), withdrawn=withdrawn)
 
@@ -1680,4 +1683,16 @@ async def test_an_apply_and_create_form_shown_again_at_a_sibling_address_was_not
     assert await engine._Run._submit_rejected(run, snap) and run.withdrawn
     run = _after_final_click(snap, sent_empty=set(), exists=False)
     run.sent_url = "https://ats.example.test/careers"
+    assert not await engine._Run._submit_rejected(run, snap) and not run.withdrawn
+
+
+async def test_required_fields_a_site_unfolds_after_the_click_show_it_refused_the_form():
+    send = field(ref="b1", kind="button", label="Envoyer")
+    name = field(ref="f1", label="Prénom", required=True)          # (was on the page, empty: nothing had been filled)
+    title = field(ref="f2", kind="combobox", label="Civilité", required=True)  # (a section the site unfolded since)
+    snap = snap_of(name, title, send)
+    run = _after_final_click(snap, sent_empty=set(), click_filled=set())
+    assert await engine._Run._submit_rejected(run, snap) and run.withdrawn
+    # both held a value when the click was made and are empty now: the form was emptied, which proves nothing
+    run = _after_final_click(snap, sent_empty=set(), click_filled={("prenom", "text"), ("civilite", "combobox")})
     assert not await engine._Run._submit_rejected(run, snap) and not run.withdrawn
