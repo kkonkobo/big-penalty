@@ -2542,11 +2542,17 @@ class _Run:
         the form can be corrected and sent again (twice at most; a third silent click ends the run as not sent)."""
         sent = self.last_sent
         withdraw = getattr(self.autonomous, "unmark_submit", None)
-        if sent is None or withdraw is None or urldefrag(self.page.url).url != self.sent_url:
+        if sent is None or withdraw is None:
             return False
         present = {(_norm(_label(f)), f.kind) for f in snap.fields}
         intact = bool(sent.fields & present) and any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
+        if urldefrag(self.page.url).url != self.sent_url:
+            # Another URL: only the apply-and-create form that came back saying the account exists counts (some sites
+            # post that form to a sibling address and show it again there).
+            if not (self.trusting and intact and any(f.kind == "password" for f in snap.fields)
+                    and await self._says_account_exists()):
+                return False
         errors = any(f.error for f in snap.fields if f.kind not in ("button", "link"))
         if not errors and intact and self.trusting:
             # The form is still there with a required field empty - one knowingly left so, or one a choice brought with it -
