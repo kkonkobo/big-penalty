@@ -3138,6 +3138,17 @@ class _Run:
                                  and not self._combined_form(kind, snap))
             signup_page, inline, known_account = False, None, False
             trust = self.trusting
+            if (trust and not bound_account and account_host_ok and any(field.kind == "password" for field in snap.fields)
+                    and self._account_address(self.page.url) in self.account_exists_hosts
+                    and self._account_address(self.page.url) not in self.login_failed):
+                # A form that creates the account and applies at once, on a site that just said the account exists: the way
+                # in is its sign-in link, not the form again.
+                toggles = [field for field in snap.fields if field.kind in {"link", "button"} and re.fullmatch(
+                    r"(?:se connecter|connexion|connectez[ -]vous|identifiez[ -]vous|sign[ -]?in|log[ -]?in|anmelden)", fold(field.label).strip())]
+                if len({fold(field.label).strip() for field in toggles}) == 1:
+                    plan = plan.model_copy(update={"actions": [Action(ref=toggles[-1].ref, op="click", click_role="open_form")],
+                                                   "unknown": []})
+                    log.note = self._r("; ".join(x for x in (log.note, "compte existant : connexion") if x))[:900]
             if bound_account:
                 if not trust and (self.app_touched or any(field.kind == "file" for field in snap.fields)):
                     return self._end("needs_human", SUPERVISED_REQUIRED)
