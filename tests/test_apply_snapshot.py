@@ -598,3 +598,39 @@ async def test_an_upload_named_after_the_cv_is_not_renamed_after_the_other_choic
       <li><a href="/apply/manual">Fill out the form manually</a></li></ul></div>''')
     snap, _ = await take_snapshot(page)
     assert [f.label for f in snap.fields if f.kind == "file"] == ["Upload your CV"]
+
+
+YES_NO_BUTTONS = """<form><div class="entry"><label class="heading _required_x1" for="q1">Votre école fournit-elle une convention ?</label>
+  <div class="yesno"><button type="button" aria-pressed="false" data-option="yes">Yes</button><button type="button" aria-pressed="false" data-option="no">No</button>
+  <input type="checkbox" tabindex="-1" name="q1" style="position:absolute;opacity:0;width:0;height:0"></div></div>
+  <button>Submit Application</button></form>
+<script>for (const b of document.querySelectorAll('.yesno button')) b.addEventListener('click', () => {
+  for (const o of b.parentElement.querySelectorAll('button')) o.setAttribute('aria-pressed', String(o === b)); });</script>"""
+
+
+async def test_a_yes_no_question_drawn_as_toggle_buttons_is_one_radio_question(page):
+    """Two toggle buttons (aria-pressed) under a question label: one radio question with two options, answered by pressing
+    one - not two unrelated buttons the planner cannot "fill"."""
+    from jobhunt.apply import engine, trusting
+
+    await page.set_content(YES_NO_BUTTONS)
+    snap, resolve = await take_snapshot(page)
+    assert [f.label for f in snap.fields if f.kind == "button"] == ["Submit Application"]
+    assert not [f for f in snap.fields if f.kind == "checkbox"]
+    question = next(f for f in snap.fields if f.kind == "radio")
+    assert (question.label, question.required, [o.label for o in question.options], question.selected) == (
+        "Votre école fournit-elle une convention ?", True, ["Yes", "No"], [])
+    group = resolve(question.ref)
+    assert [(r["label"], r["checked"]) for r in await group.evaluate_all(engine._RADIOS_JS)] == [("Yes", False), ("No", False)]
+    await trusting._toggle(None, group.nth(0), True)
+    await trusting._toggle(None, group.nth(0), True)  # (already pressed: not pressed again)
+    snap, _ = await take_snapshot(page)
+    question = next(f for f in snap.fields if f.kind == "radio")
+    assert (question.value, question.selected) == ("Yes", [0])
+
+
+async def test_toggle_buttons_of_a_toolbar_stay_buttons(page):
+    await page.set_content('<div role="toolbar"><button aria-pressed="false">Gras</button><button aria-pressed="false">Italique</button></div>'
+                           '<form><label>Message <textarea name="m"></textarea></label><button>Envoyer</button></form>')
+    snap, _ = await take_snapshot(page)
+    assert not [f for f in snap.fields if f.kind == "radio"]

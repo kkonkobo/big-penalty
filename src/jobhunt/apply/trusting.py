@@ -674,7 +674,7 @@ def open_questions(run: _Run, plan: StepPlan, snap: PageSnapshot, v: _Validated,
 
 # ---------------------------------------------------------------- execution
 async def _state(loc) -> bool:
-    return bool(await loc.evaluate("e => !!e.checked || e.getAttribute('aria-checked') === 'true'"))
+    return bool(await loc.evaluate("e => e.checked === true || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true'"))
 
 
 async def _toggle(run: _Run, loc, want: bool) -> None:
@@ -724,7 +724,8 @@ _BLOCKER_JS = r"""() => {
   const label = n => (n.innerText || n.value || n.getAttribute('aria-label') || n.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
   const buttons = [...box.querySelectorAll('button, [role="button"], a[href], input[type="button"], input[type="submit"]')].filter(visible);
   buttons.forEach((n, i) => n.setAttribute('data-bp-blocker', String(i)));
-  return {text: (box.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 400), buttons: buttons.map(label).slice(0, 12),
+  const boxes = [...box.querySelectorAll('input[type=checkbox], input[type=radio], [role=checkbox], [role=radio], [role=switch]')].filter(visible).length;
+  return {text: (box.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 400), buttons: buttons.map(label).slice(0, 12), boxes,
           links: buttons.map(n => n.matches('a[href]') && n.getAttribute('role') !== 'button').slice(0, 12)};
 }"""
 _TOPIC = re.compile(r"cookie|traceur|consent|tracking|privacy|confidentialit|donnees personnelles|datenschutz|terms|conditions d.utilisation|rgpd|gdpr")
@@ -796,8 +797,13 @@ async def blocker_hint(run: _Run) -> str:
     found = await blocker(run.page)
     if not found or not found["buttons"]:
         return ""
-    return (f"[A MODAL DIALOG COVERS THE PAGE and blocks every other control: « {found['text'][:240]} ». Its buttons: "
-            f"{' | '.join(label for label in found['buttons'] if label)[:200]}. This step is ONLY the click that closes or accepts it.] ")
+    head = (f"[A MODAL DIALOG COVERS THE PAGE and blocks every other control: « {found['text'][:240]} ». Its buttons: "
+            f"{' | '.join(label for label in found['buttons'] if label)[:200]}. ")
+    if found.get("boxes"):
+        # (a statement to agree to before going on: its close button gives the whole step up)
+        return head + ("It asks for an agreement with boxes to tick: this step ticks the boxes it requires and clicks the button "
+                       "that CONFIRMS it (submit / continue / accept / save). NEVER its close button: closing it abandons the application.] ")
+    return head + "This step is ONLY the click that closes or accepts it.] "
 
 
 def stuck_hint(labels: list[str]) -> str:
@@ -1265,11 +1271,14 @@ async def _upload_through(run: _Run, opener, path) -> None:
         run.uploaded = True
         return
     before = {await handle.evaluate("e => e.outerHTML.slice(0, 200)") for handle in await _file_inputs(run)}
+    trace = []  # (for the local failure record: how the click went and what it brought)
     try:
         async with run.page.expect_file_chooser(timeout=4000) as waiting:
             try:
                 await opener.click(timeout=3000)
+                trace.append("clic fait")
             except Exception:
+                trace.append("clic empêché, événements envoyés")
                 await opener.evaluate(_PRESS_JS)
         await (await waiting.value).set_files(str(path))
         run.uploaded = True
@@ -1293,8 +1302,22 @@ async def _upload_through(run: _Run, opener, path) -> None:
                         await (await waiting.value).set_files(str(path))
                         run.uploaded = True
                         return
+        if attempt == 6 and not await _popup_options(run) and await blocker(run.page) is None:
+            # Nothing came of the click (no chooser, no dialog, no menu): the page was not listening yet, or took the
+            # first click for something else. Once more, as the page's own script would.
+            trace.append("rien d'ouvert : second clic")
+            with contextlib.suppress(Exception):
+                async with run.page.expect_file_chooser(timeout=3000) as waiting:
+                    await opener.evaluate("e => e.click()")
+                await (await waiting.value).set_files(str(path))
+                run.uploaded = True
+                return
         await asyncio.sleep(0.5)
-    raise engine._Skip("aucun champ de fichier après le clic sur le bouton de dépôt")
+    with contextlib.suppress(Exception):
+        shown = await blocker(run.page)
+        trace.append(f"{len(await _file_inputs(run))} champ(s) fichier, "
+                     + (f"dialogue « {shown['text'][:50]} » ({' | '.join(shown['buttons'])[:80]})" if shown else "aucun dialogue"))
+    raise engine._Skip("aucun champ de fichier après le clic sur le bouton de dépôt" + (f" ({' ; '.join(trace)})" if trace else ""))
 
 
 async def _search_box(run: _Run, target, code: str) -> str:

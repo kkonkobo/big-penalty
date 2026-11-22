@@ -1906,3 +1906,40 @@ async def test_a_tag_box_takes_the_entry_of_its_full_list_when_its_search_finds_
 
 def test_the_whole_country_is_the_same_entry_in_another_language():
     assert trusting.best_option(["All France", "FR - East France", "All international", "France", "Germany"], "Toute la France") == 0
+
+
+async def test_an_agreement_dialog_with_boxes_is_to_be_confirmed_not_closed(page):  # noqa: F811
+    """A dialog that asks to agree (a box to tick, a confirm button, a close cross): the planner is told to tick and confirm;
+    closing it would give the application up. A dialog without boxes keeps the plain "close or accept" wording."""
+    await page.set_content(dialog("Please review before continuing", '<button aria-label="Close the dialog">×</button>'
+                                  '<label><input type="checkbox" required> I have read and agree to the Privacy Policy.</label>'
+                                  '<button>Submit</button>'))
+    run = SimpleNamespace(page=page)
+    assert await trusting.dismiss_blocker(run) == ""
+    hint = await trusting.blocker_hint(run)
+    assert "Submit" in hint and "CONFIRMS" in hint and "NEVER its close button" in hint and "ONLY the click that closes" not in hint
+    await page.set_content(dialog("Bienvenue sur notre site !", CONTINUE))
+    assert "ONLY the click that closes or accepts it" in await trusting.blocker_hint(run)
+
+
+async def test_an_upload_button_whose_first_click_brought_nothing_is_clicked_once_more(page, tmp_path):  # noqa: F811
+    """The page took the first click for something else (it was not listening yet): no chooser, no dialog, no menu. The
+    button is clicked once more, and the file goes into the field its dialog then shows."""
+    await page.set_content('''<form><button type="button" id="up">Charger un CV</button><div id="slot"></div></form>
+      <script>let clicks = 0;
+        up.addEventListener('click', () => { if (++clicks < 2) return;
+          slot.innerHTML = '<div role="dialog"><span>Charger depuis l’appareil</span><input type="file" id="cv"></div>'; });
+      </script>''')
+    cv = tmp_path / "CV.pdf"
+    cv.write_bytes(b"%PDF-1.4 test")
+    run = SimpleNamespace(page=page, uploaded=False)
+    await trusting._upload_through(run, await page.query_selector("#up"), cv)
+    assert run.uploaded and await page.evaluate("document.getElementById('cv').files[0].name") == "CV.pdf"
+
+
+async def test_an_upload_button_that_never_brings_a_file_field_says_what_happened(page, tmp_path):  # noqa: F811
+    await page.set_content('<form><button type="button" id="up">Charger un CV</button></form>')
+    cv = tmp_path / "CV.pdf"
+    cv.write_bytes(b"%PDF-1.4 test")
+    with pytest.raises(engine._Skip, match=r"clic fait ; rien d'ouvert : second clic ; 0 champ\(s\) fichier, aucun dialogue"):
+        await trusting._upload_through(SimpleNamespace(page=page, uploaded=False), await page.query_selector("#up"), cv)

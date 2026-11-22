@@ -401,9 +401,9 @@ _RADIOS_JS = r"""(els) => els.map((e) => {
       : [...(n.shadowRoot || n).childNodes].map(flat).join(' ');
     const label = clean(e.getAttribute('aria-label'))
       || clean((e.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => e.getRootNode().getElementById(id)?.textContent || '').join(' '))
-      || clean(flat(e)) || clean(e.getAttribute('label'));
+      || (e.tagName === 'BUTTON' ? clean(e.innerText || e.textContent) : clean(flat(e))) || clean(e.getAttribute('label'));
     return {value: typeof e.value === 'string' ? e.value : e.getAttribute('value') || '', label,
-            checked: e.getAttribute('aria-checked') === 'true' || e.checked === true};
+            checked: e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true' || e.checked === true};
   }
   const label = (e.labels && e.labels.length ? clean(e.labels[0].textContent) : '') || (e.closest('label') ? clean(e.closest('label').textContent) : '')
     || clean(e.nextSibling && e.nextSibling.nodeType === 3 ? e.nextSibling.textContent : '')

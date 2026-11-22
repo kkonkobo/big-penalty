@@ -205,17 +205,30 @@ _JS = r"""
   const nativeRadioIn = (el) => !!(el.querySelector('input[type=radio]') || (el.shadowRoot && el.shadowRoot.querySelector('input[type=radio]')));
   // parent in the RENDERED tree: the slot an element is assigned to, else its parent, else the host of its shadow root
   const flatUp = (n) => n.assignedSlot || n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
-  const drawnRadio = (el) => el.tagName !== 'INPUT' && el.getAttribute('role') === 'radio' && !nativeRadioIn(el);
+  // A yes / no question drawn as buttons: two or more toggle buttons (aria-pressed) side by side, nothing else to press
+  // among them; pressing one answers the question.
+  const toggleChoice = (el) => {
+    if (el.tagName !== 'BUTTON' || !el.hasAttribute('aria-pressed') || el.type === 'submit' || !el.parentElement) return false;
+    const peers = [...el.parentElement.children].filter((x) => x.tagName === 'BUTTON');
+    return peers.length >= 2 && peers.length <= 6 && peers.every((x) => x.hasAttribute('aria-pressed') && x.type !== 'submit'
+      && clean(x.innerText || x.textContent).length > 0 && clean(x.innerText || x.textContent).length <= 40)
+      && !el.closest('[role=toolbar], [role=menubar], [role=tablist], nav, header, footer');
+  };
+  const drawnRadio = (el) => toggleChoice(el) || (el.tagName !== 'INPUT' && el.getAttribute('role') === 'radio' && !nativeRadioIn(el));
   // the group of a drawn radio: the nearest role=radiogroup around it as rendered (a slotted radio sits, once rendered,
   // inside a fieldset of its group's shadow root), else its parent
   const drawnGroupOf = (el) => {
+    if (el.tagName === 'BUTTON') return el.parentElement;
     for (let p = flatUp(el), d = 0; p && d < 12; p = flatUp(p), d++) if (p.getAttribute('role') === 'radiogroup') return p;
     return el.parentElement || el.getRootNode().host || el;
   };
-  const drawnRadioLabel = (el) => clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby') || textOf(el)
-    || clean(el.getAttribute('label')) || adjacentOf(el);
+  const drawnRadioLabel = (el) => clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby')
+    || (el.tagName === 'BUTTON' ? clean(el.innerText || el.textContent) : textOf(el)) || clean(el.getAttribute('label')) || adjacentOf(el);
   const drawnRadioValue = (el) => (typeof el.value === 'string' ? el.value : el.getAttribute('value') || '');
-  const drawnChecked = (el) => el.getAttribute('aria-checked') === 'true' || el.checked === true;
+  const drawnChecked = (el) => el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-pressed') === 'true' || el.checked === true;
+  // (a question whose own <label> is styled as required - the asterisk is drawn by the style sheet)
+  const markedRequired = (rg) => { const q = rg.previousElementSibling;
+    return !!q && q.tagName === 'LABEL' && /(^|[\s_-])required([\s_-]|$)/i.test(q.getAttribute('class') || ''); };
   // The question of a group of drawn radios: what names the group, else the words shown around its options - the text of
   // the smallest box around the group (crossing shadow hosts) once the options' own words are taken off its end.
   const drawnQuestion = (rg, members) => {
@@ -251,6 +264,7 @@ _JS = r"""
     // A radio drawn by the page (a custom element / div with role=radio, its state in aria-checked) is the radio, unless
     // it only wraps a native one.
     if (tag !== 'input' && role === 'radio') return nativeRadioIn(el) ? null : 'radio';
+    if (toggleChoice(el)) return 'radio';
     if (tag === 'select') return 'select';
     if (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') return 'combobox';
     if (tag === 'input' && valueHelp(el)) return 'combobox';
@@ -386,7 +400,7 @@ _JS = r"""
         const raw = drawnQuestion(rg, members);
         g = base('f' + (++n), 'radio', el);
         g.label = tidy(raw); g.wording = raw; g.group = groupOf(el); g.error = errorOf(rg);
-        g.required = rg.getAttribute('aria-required') === 'true' || reqOf(el, raw);
+        g.required = rg.getAttribute('aria-required') === 'true' || reqOf(el, raw) || markedRequired(rg);
         g.choice_options = members.map((member) => [drawnRadioValue(member), drawnRadioLabel(member),
           member.getAttribute('aria-disabled') === 'true', groupOf(member)]);
         g.selected = members.flatMap((member, index) => drawnChecked(member) ? [index] : []);
