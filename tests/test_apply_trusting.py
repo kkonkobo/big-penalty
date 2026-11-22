@@ -1764,3 +1764,13 @@ def test_a_phone_is_respelled_after_each_refused_send_without_repeating_itself()
     calm = run_of()
     phone = field(ref="p1", kind="text", label="Téléphone", required=True, value="+33 6 00 00 00 00")
     assert trusting.check(calm, Action(ref="p1", op="fill", fact="phone"), phone, engine._Validated(), snap_of(phone), None) is None
+
+
+def test_a_box_acknowledging_the_information_notice_of_an_account_form_is_ticked():
+    notice = field(ref="c1", kind="checkbox", required=True, value="false", form="0:signup",
+                   label="Merci de prendre connaissance des mentions d'information ci-dessous puis de cocher la case suivante")
+    secret = field(ref="p1", kind="password", label="Mot de passe", required=True, form="0:signup")
+    snap = snap_of(notice, secret)
+    assert trusting.account_consent(notice, snap) and trusting._required_consent(notice)
+    made = trusting.validate(run_of(), plan_of(kind="account_signup"), snap, None)
+    assert [(item.field.ref, item.act.op) for item in made.items if item.field.ref == "c1"] == [("c1", "check")]

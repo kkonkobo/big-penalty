@@ -199,7 +199,8 @@ LOGIN_BUTTON_RE = re.compile(r"se connecter|connexion|sign[ -]?in|log[ -]?in|anm
 CREATION_NAME_RE = re.compile(r"creation|creer|create|nouveau|nouvelle|\bnew|register|signup|sign up|inscri")
 EMAIL_FIELD_RE = re.compile(r"e-?mail|courriel|identifiant|login|username|adresse mail")
 SIGNUP_CONSENT_RE = re.compile(r"conditions|\bcgu\b|\bcgv\b|terms|politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement|"
-                               r"j'?ai lu|lu et|accepte|agree|consent")
+                               r"j'?ai lu|lu et|accepte|agree|consent|mentions (?:d.information|legales)|notice d.information|"
+                               r"pri[st] connaissance|prendre connaissance")
 ACCEPT_BOX_RE = re.compile(r"^\s*(?:validation|valider|certifie|je certifie|confirmation)\b")  # a lone required "Validation" box
 SIGNUP_PRIVACY_RE = re.compile(r"politique|privacy|confidentialite|donnees|rgpd|gdpr|traitement")
 AGGREGATOR_RE = re.compile(r"agregat|aggregat|app ?store|google play|application mobile|mobile app|app[- ]only|lien inexploitable|not the employer|"
