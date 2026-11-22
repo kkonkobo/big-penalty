@@ -1806,3 +1806,13 @@ def test_a_password_is_never_replaced_once_a_creation_form_was_sent_and_left_in_
     run.maybe_created.add("careers.example.test")
     assert trusting.check(run, Action(ref="p1", op="fill", fact="account_password"), secret, engine._Validated(), snap_of(secret, create), None)
     assert calls == []
+
+
+def test_a_data_use_consent_box_is_ticked_even_when_its_text_reads_like_personal_data():
+    box = field(ref="c1", kind="checkbox", value="false",
+                label="Vous confirmez avoir pris connaissance et validé les conditions d'utilisation de vos données personnelles.")
+    made, v = do_check(run_of(), Action(ref="c1", op="check"), box)
+    assert made is not None and made.act.op == "check" and not any("fait dur" in note for note in v.notes)
+    licence = field(ref="c2", kind="checkbox", value="false", label="Je suis titulaire du permis de conduire B")
+    made, v = do_check(run_of(FactSheet(facts=[])), Action(ref="c2", op="check"), licence)
+    assert made is None and any("fait dur" in note for note in v.notes)

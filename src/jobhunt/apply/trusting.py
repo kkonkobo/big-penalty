@@ -362,7 +362,11 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     declared = declaration_key(field)
     if declared and known is None:  # (choice controls are settled by `owner_item`; this covers a free-text declaration)
         answer = declared_answer(run, declared)
-    if not declared and is_hard_fact(f"{field.label} {field.group}", field.name, field.placeholder) and known is None:
+    # (a box that accepts the site's privacy / data-use conditions is a consent, whatever words of civil status its text
+    # happens to carry: it is the planner's to tick, never a "hard fact" to guess)
+    consent_box = bool(kind == "checkbox" and (engine.SIGNUP_CONSENT_RE.search(fold(_text(field))) or engine._site_consent(field))
+                       and not blocked_consent(_text(field)) and not engine.MARKETING_RE.search(field.label))
+    if not declared and not consent_box and is_hard_fact(f"{field.label} {field.group}", field.name, field.placeholder) and known is None:
         return drop("fait dur (état civil, adresse, permis, casier...) : jamais deviné")
     inferred = known is None or action.inferred
     basis = (action.basis.strip() or ("déduit du profil" if known is None else f"déduit du fait « {known.label} »"))[:200] if inferred else ""
