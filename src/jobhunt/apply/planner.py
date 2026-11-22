@@ -158,6 +158,15 @@ L. `history[].problems` lists what the program could not do at earlier steps (an
 N. A review / summary page before the final send ("Réviser", "Review"): click the send button (`submit`). Do NOT go back to
    re-check values that were entered in labelled fields at an earlier step; a summary shows dates in the SITE's own format
    (05/10/2004 is 10 May on a month-first site), which is not an error. Go back only when the page shows an error message.
+O. A profile page made of SECTIONS edited through buttons instead of fields ("Add a training", "Ajouter une formation",
+   "Please enter your level of experience", an icon button named "Modify" / "Edit" whose `group` shows the block it acts
+   on): when the page (its message, a section marked in error, an asterisk on a section) says a section is required or
+   incomplete, click the button that opens THAT section (`click_role` `other`), one per step: the program reads the
+   editor that opens and calls you again. Fill the editor from the facts (the candidate's current school and degree for a
+   training, `candidate_profile` for a level), then click the editor's own save button ("Save", "Enregistrer", "Valider";
+   `click_role` `next`). Never click a "Delete" button, and add nothing the CV or the facts do not hold. Only when no
+   required section is left incomplete, click the page's "Next". When offered "upload a CV" or "fill out manually", upload
+   the CV (`upload_cv`): the site fills the profile from it.
 """
 
 
