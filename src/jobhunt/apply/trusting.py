@@ -145,6 +145,11 @@ _GENDER_ALIASES = ({"homme", "masculin", "male", "man", "mann", "mannlich", "hom
                    {"femme", "feminin", "female", "woman", "frau", "weiblich", "mujer", "donna"})
 
 
+# (a mobility list in another language: the whole country, under the words each site uses for it)
+_AREA_ALIASES = ({"toute la france", "france entiere", "toute france", "partout en france", "all france", "all of france",
+                  "whole france", "anywhere in france", "ganz frankreich"},)
+
+
 def best_option(labels: list[str], want: str | None) -> int:
     """Index of the option an answer means, -1 when none: equality, yes / no and civility aliases, then the ONE option that
     starts with the answer, then the one that contains it (or that the answer contains)."""
@@ -155,7 +160,7 @@ def best_option(labels: list[str], want: str | None) -> int:
     for index, label in enumerate(folded):
         if label == target:
             return index
-    aliases = (*_engine()._ALIASES, *_GENDER_ALIASES, *_COUNTRY_ALIASES)
+    aliases = (*_engine()._ALIASES, *_GENDER_ALIASES, *_COUNTRY_ALIASES, *_AREA_ALIASES)
     for group in aliases:
         if target in group:
             hits = [index for index, label in enumerate(folded) if label in group]
@@ -669,7 +674,7 @@ def open_questions(run: _Run, plan: StepPlan, snap: PageSnapshot, v: _Validated,
 
 # ---------------------------------------------------------------- execution
 async def _state(loc) -> bool:
-    return bool(await loc.evaluate("e => !!e.checked || e.getAttribute('aria-checked') === 'true'"))
+    return bool(await loc.evaluate("e => e.checked === true || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true'"))
 
 
 async def _toggle(run: _Run, loc, want: bool) -> None:
@@ -719,7 +724,8 @@ _BLOCKER_JS = r"""() => {
   const label = n => (n.innerText || n.value || n.getAttribute('aria-label') || n.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
   const buttons = [...box.querySelectorAll('button, [role="button"], a[href], input[type="button"], input[type="submit"]')].filter(visible);
   buttons.forEach((n, i) => n.setAttribute('data-bp-blocker', String(i)));
-  return {text: (box.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 400), buttons: buttons.map(label).slice(0, 12),
+  const boxes = [...box.querySelectorAll('input[type=checkbox], input[type=radio], [role=checkbox], [role=radio], [role=switch]')].filter(visible).length;
+  return {text: (box.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 400), buttons: buttons.map(label).slice(0, 12), boxes,
           links: buttons.map(n => n.matches('a[href]') && n.getAttribute('role') !== 'button').slice(0, 12)};
 }"""
 _TOPIC = re.compile(r"cookie|traceur|consent|tracking|privacy|confidentialit|donnees personnelles|datenschutz|terms|conditions d.utilisation|rgpd|gdpr")
@@ -791,8 +797,13 @@ async def blocker_hint(run: _Run) -> str:
     found = await blocker(run.page)
     if not found or not found["buttons"]:
         return ""
-    return (f"[A MODAL DIALOG COVERS THE PAGE and blocks every other control: « {found['text'][:240]} ». Its buttons: "
-            f"{' | '.join(label for label in found['buttons'] if label)[:200]}. This step is ONLY the click that closes or accepts it.] ")
+    head = (f"[A MODAL DIALOG COVERS THE PAGE and blocks every other control: « {found['text'][:240]} ». Its buttons: "
+            f"{' | '.join(label for label in found['buttons'] if label)[:200]}. ")
+    if found.get("boxes"):
+        # (a statement to agree to before going on: its close button gives the whole step up)
+        return head + ("It asks for an agreement with boxes to tick: this step ticks the boxes it requires and clicks the button "
+                       "that CONFIRMS it (submit / continue / accept / save). NEVER its close button: closing it abandons the application.] ")
+    return head + "This step is ONLY the click that closes or accepts it.] "
 
 
 def stuck_hint(labels: list[str]) -> str:
@@ -870,6 +881,29 @@ _OPENER_JS = r"""e => {
   const found = [...(host ? box.querySelectorAll('button, [role=button], [ui5-button]') : box.children)]
     .filter((b) => b.matches('button, [role=button], [ui5-button]') && b.getClientRects().length && !(b.innerText || b.textContent || '').trim());
   return found.length === 1 ? found[0] : null; }"""
+
+
+# How many elements beside a list's control (up to three boxes around it, shadow roots included, the options of a list
+# left aside) show exactly these words: one more after a choice is the tag a multiple-choice box adds for it.
+_TAGS_JS = r"""(e, label) => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const want = clean(label);
+  let box = e, count = 0;
+  for (let depth = 0; depth < 3; depth++) {
+    const up = box.parentElement || (box.getRootNode() && box.getRootNode().host);
+    if (!up || ['BODY', 'HTML', 'FORM', 'MAIN'].includes(up.tagName)) break;
+    box = up;
+  }
+  const walk = (node) => {
+    for (const el of [...node.children, ...(node.shadowRoot ? node.shadowRoot.children : [])]) {
+      if (el === e || el.matches('[role=listbox], [role=option], [role=menu], datalist, select, script, style, template')) continue;
+      if (el.getClientRects().length && clean(el.innerText || el.textContent) === want
+          && ![...el.children].some((child) => clean(child.innerText || child.textContent) === want)) count++;
+      walk(el);
+    }
+  };
+  if (want && box !== e) walk(box);
+  return count; }"""
 
 
 async def mark_shown(run: _Run) -> None:
@@ -960,14 +994,25 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
             stats["recycled"] += 1
             return ""  # the row was recycled under us: read the list again
         before = await run._combo_value(loc)
+
+        async def tags() -> int:
+            try:
+                return int(await loc.evaluate(_TAGS_JS, label))
+            except Exception:
+                return 0
+
+        tags_before = await tags()
         try:
             await option.click(timeout=2500)
         except Exception:
             await option.evaluate(_PRESS_JS)  # covered or off-screen: the events a list listens to, in order
         await asyncio.sleep(0.4)
 
+        async def tagged() -> bool:
+            return await tags() > tags_before
+
         async def taken() -> bool:
-            return not await _shown(option) or (await run._combo_value(loc)) != before
+            return not await _shown(option) or (await run._combo_value(loc)) != before or await tagged()
 
         for _ in range(4):  # (a list that closes, or shows the choice, a moment after the click: pressing again would undo it)
             if await taken():
@@ -985,6 +1030,20 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         if closed and not field.multiple and not await _shown(loc):
             return label  # the page re-rendered around the choice (a country that reloads the address block): it was taken
         live = await run._combo_value(loc)
+        if (not live or live == before) and await tagged():
+            # A multiple-choice box: the choice became a tag beside the (still empty) text box, and the list may stay open.
+            if not closed:  # (an open list would cover the fields below it)
+                with contextlib.suppress(Exception):
+                    await loc.evaluate("e => e.blur()")
+                if await _shown(option):
+                    with contextlib.suppress(Exception):
+                        await loc.press("Escape", timeout=2000)
+                    with contextlib.suppress(Exception):
+                        await loc.evaluate("e => e.blur()")
+            chosen = getattr(run, "combo_chosen", None)
+            if chosen is not None and norm(field.label):
+                chosen[norm(field.label)] = label
+            return label
         if closed and not field.multiple and (not live or live == before):
             # The choice opened a sub-list (a category, then its entries): choose there too - the answer or the fact it
             # rests on when an entry says it, else "other", else the first entry.
@@ -1098,6 +1157,22 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                     break
                 if done := await choose(found, index):
                     return done
+    if typed and not code:
+        # The box's own search found nothing (it looks the words up its own way), yet the whole list had the entry: it is
+        # chosen there.
+        with contextlib.suppress(Exception):
+            await loc.fill("", timeout=3000)
+            await asyncio.sleep(0.4)
+        found = await _popup_options(run)
+        if not found:
+            await open_list()
+            for _ in range(4):
+                if found := await _popup_options(run):
+                    break
+                await asyncio.sleep(0.4)
+        index = pick(found)
+        if index >= 0 and (done := await choose(found, index)):
+            return done
     if field.required and not code:
         # A required list that offers nothing like the answer: its "other" entry is the honest "none of these".
         with contextlib.suppress(Exception):
@@ -1196,11 +1271,14 @@ async def _upload_through(run: _Run, opener, path) -> None:
         run.uploaded = True
         return
     before = {await handle.evaluate("e => e.outerHTML.slice(0, 200)") for handle in await _file_inputs(run)}
+    trace = []  # (for the local failure record: how the click went and what it brought)
     try:
         async with run.page.expect_file_chooser(timeout=4000) as waiting:
             try:
                 await opener.click(timeout=3000)
+                trace.append("clic fait")
             except Exception:
+                trace.append("clic empêché, événements envoyés")
                 await opener.evaluate(_PRESS_JS)
         await (await waiting.value).set_files(str(path))
         run.uploaded = True
@@ -1224,8 +1302,22 @@ async def _upload_through(run: _Run, opener, path) -> None:
                         await (await waiting.value).set_files(str(path))
                         run.uploaded = True
                         return
+        if attempt == 6 and not await _popup_options(run) and await blocker(run.page) is None:
+            # Nothing came of the click (no chooser, no dialog, no menu): the page was not listening yet, or took the
+            # first click for something else. Once more, as the page's own script would.
+            trace.append("rien d'ouvert : second clic")
+            with contextlib.suppress(Exception):
+                async with run.page.expect_file_chooser(timeout=3000) as waiting:
+                    await opener.evaluate("e => e.click()")
+                await (await waiting.value).set_files(str(path))
+                run.uploaded = True
+                return
         await asyncio.sleep(0.5)
-    raise engine._Skip("aucun champ de fichier après le clic sur le bouton de dépôt")
+    with contextlib.suppress(Exception):
+        shown = await blocker(run.page)
+        trace.append(f"{len(await _file_inputs(run))} champ(s) fichier, "
+                     + (f"dialogue « {shown['text'][:50]} » ({' | '.join(shown['buttons'])[:80]})" if shown else "aucun dialogue"))
+    raise engine._Skip("aucun champ de fichier après le clic sur le bouton de dépôt" + (f" ({' ; '.join(trace)})" if trace else ""))
 
 
 async def _search_box(run: _Run, target, code: str) -> str:

@@ -1862,3 +1862,96 @@ async def test_a_suggesting_box_with_an_arrow_is_a_list_opened_by_its_arrow(page
         assert run.combo_options[trusting.norm(label)] == listed
     else:
         assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == taken
+
+
+# A multiple-choice search box of a design system: the text box and the chosen tags live in a shadow root, the list keeps
+# 60 entries, its own search only knows each entry's first letters, and a choice becomes a tag (the text box stays empty).
+TAGS_LIST = '''<form><label id="q">Mobilité géographique *</label><x-tags></x-tags><button>Envoyer</button></form>
+  <script>
+    const ALL = ['All France', 'FR - East', 'FR - West', 'All international', ...Array.from({length: 56}, (_, i) => 'Pays ' + (i + 1))];
+    const host = document.querySelector('x-tags');
+    host.attachShadow({mode: 'open'}).innerHTML = '<div class="box"><span class="tags"></span>'
+      + '<input role="combobox" aria-autocomplete="list" aria-label="Mobilité géographique" aria-required="true"></div><ul role="listbox" hidden></ul>';
+    const input = host.shadowRoot.querySelector('input'), list = host.shadowRoot.querySelector('ul'), tags = host.shadowRoot.querySelector('.tags');
+    const show = () => {
+      const typed = input.value.toLowerCase();
+      list.innerHTML = ''; list.hidden = false;
+      for (const name of ALL.filter((entry) => !typed || entry.toLowerCase().startsWith(typed))) {
+        const row = document.createElement('li'); row.setAttribute('role', 'option'); row.textContent = name;
+        row.onclick = () => { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = name; tags.append(tag); };
+        list.append(row);
+      }
+    };
+    input.addEventListener('click', show); input.addEventListener('input', show);
+    input.addEventListener('keydown', (event) => { if (event.key === 'Escape') list.hidden = true; });
+  </script>'''
+
+
+async def test_a_tag_box_takes_the_entry_of_its_full_list_when_its_search_finds_nothing(page):  # noqa: F811
+    """The stored answer is worded in another language than the list ("Toute la France" for "All France") and the box's own
+    search finds nothing for it: the entry is chosen in the whole list, and the tag it becomes is the proof it was taken."""
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(TAGS_LIST)
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, combo_chosen={}, _combo_value=engine._Run._combo_value,
+                          _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="mobility"), combo, None, value="Toute la France")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "All France"
+    assert await page.evaluate("[...document.querySelector('x-tags').shadowRoot.querySelectorAll('.tag')].map((tag) => tag.textContent)") == ["All France"]
+    assert run.combo_chosen == {trusting.norm(combo.label): "All France"}
+    assert await page.evaluate("document.querySelector('x-tags').shadowRoot.querySelector('ul').hidden") is True
+
+
+def test_the_whole_country_is_the_same_entry_in_another_language():
+    assert trusting.best_option(["All France", "FR - East France", "All international", "France", "Germany"], "Toute la France") == 0
+
+
+async def test_an_agreement_dialog_with_boxes_is_to_be_confirmed_not_closed(page):  # noqa: F811
+    """A dialog that asks to agree (a box to tick, a confirm button, a close cross): the planner is told to tick and confirm;
+    closing it would give the application up. A dialog without boxes keeps the plain "close or accept" wording."""
+    await page.set_content(dialog("Please review before continuing", '<button aria-label="Close the dialog">×</button>'
+                                  '<label><input type="checkbox" required> I have read and agree to the Privacy Policy.</label>'
+                                  '<button>Submit</button>'))
+    run = SimpleNamespace(page=page)
+    assert await trusting.dismiss_blocker(run) == ""
+    hint = await trusting.blocker_hint(run)
+    assert "Submit" in hint and "CONFIRMS" in hint and "NEVER its close button" in hint and "ONLY the click that closes" not in hint
+    await page.set_content(dialog("Bienvenue sur notre site !", CONTINUE))
+    assert "ONLY the click that closes or accepts it" in await trusting.blocker_hint(run)
+
+
+async def test_an_upload_button_whose_first_click_brought_nothing_is_clicked_once_more(page, tmp_path):  # noqa: F811
+    """The page took the first click for something else (it was not listening yet): no chooser, no dialog, no menu. The
+    button is clicked once more, and the file goes into the field its dialog then shows."""
+    await page.set_content('''<form><button type="button" id="up">Charger un CV</button><div id="slot"></div></form>
+      <script>let clicks = 0;
+        up.addEventListener('click', () => { if (++clicks < 2) return;
+          slot.innerHTML = '<div role="dialog"><span>Charger depuis l’appareil</span><input type="file" id="cv"></div>'; });
+      </script>''')
+    cv = tmp_path / "CV.pdf"
+    cv.write_bytes(b"%PDF-1.4 test")
+    run = SimpleNamespace(page=page, uploaded=False)
+    await trusting._upload_through(run, await page.query_selector("#up"), cv)
+    assert run.uploaded and await page.evaluate("document.getElementById('cv').files[0].name") == "CV.pdf"
+
+
+async def test_an_upload_button_that_never_brings_a_file_field_says_what_happened(page, tmp_path):  # noqa: F811
+    await page.set_content('<form><button type="button" id="up">Charger un CV</button></form>')
+    cv = tmp_path / "CV.pdf"
+    cv.write_bytes(b"%PDF-1.4 test")
+    with pytest.raises(engine._Skip, match=r"clic fait ; rien d'ouvert : second clic ; 0 champ\(s\) fichier, aucun dialogue"):
+        await trusting._upload_through(SimpleNamespace(page=page, uploaded=False), await page.query_selector("#up"), cv)
+
+
+async def test_a_floating_notice_inside_the_frame_that_holds_the_form_is_read(page):  # noqa: F811
+    """A career site shows its application form in a frame; the form's own floating notice names the missing field. A cookie
+    bar or a help widget floating over the page is not such a notice."""
+    await page.set_content('''<title>Candidature à un poste</title><h1>Postuler</h1>
+      <div style="position:fixed;bottom:0;left:0;right:0">Nous utilisons des cookies pour améliorer votre visite.</div>
+      <iframe style="width:900px;height:400px" srcdoc="<div style='position:fixed;top:0;left:0;right:0'>
+        <span>Veuillez renseigner le champ 'Mobilité'.</span><a href='#'>×</a></div><form><input name='a'><button>Enregistrer</button></form>"></iframe>''')
+    await page.wait_for_timeout(300)
+    run = SimpleNamespace(page=page)
+    assert await engine._Run._notice_texts(run, "Candidature à un poste") == ["Veuillez renseigner le champ 'Mobilité'.×"]

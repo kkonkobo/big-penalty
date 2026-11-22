@@ -333,6 +333,29 @@ _BANNER_TEXTS_JS = "return out;".join(_BANNER_JS.replace(
     "return true;", "{ if (!out.includes(t)) out.push(t); if (out.length >= 3) return out; }").replace(
     "const WORDS", "const out = []; const WORDS", 1).rsplit("return false;", 1))  # (the last one: `vis` has its own)
 assert "return true" not in _BANNER_TEXTS_JS and _BANNER_TEXTS_JS.count("return out;") == 2 and "const out = []" in _BANNER_TEXTS_JS
+# A notice the site floats over the page (fixed / sticky, a few lines, maybe a close button, no field): what a form sent
+# back says is missing when nothing marks it as an error. Read only for a page whose title says "error", or when the
+# notice itself is worded like one (two at most; cookie bars and help widgets are not notices).
+_NOTICE_TEXTS_JS = r"""(titled) => {
+  const WORDS = /erreur|error|errore|fehler|obligatoire|obbligator|required|requis|erforderlich|pflicht|inserire|compilare|renseign|veuillez|invalid|manquant|missing|mancant/i;
+  const NOT_NOTICE = /cookie|traceur|consent|chat|assistan|besoin d'aide|need help|newsletter/i;
+  const out = [];
+  titled = titled || /^\s*(erreur|error|errore|fehler|fout)\b/i.test(document.title);   // (a form in a frame: its own title)
+  for (const e of document.querySelectorAll('body *')) {
+    if (['SCRIPT', 'STYLE', 'NAV', 'HEADER', 'FOOTER', 'FORM', 'IFRAME'].includes(e.tagName)) continue;
+    const pos = getComputedStyle(e).position;
+    if (pos !== 'fixed' && pos !== 'sticky') continue;
+    const r = e.getBoundingClientRect();
+    if (r.width < 200 || r.height < 10 || (e.checkVisibility && !e.checkVisibility({checkVisibilityCSS: true, visibilityProperty: true}))) continue;
+    if (e.querySelector('input:not([type=hidden]), select, textarea, nav, iframe, form')) continue;
+    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (t.length < 12 || t.length > 400 || NOT_NOTICE.test(t + ' ' + e.id + ' ' + (e.getAttribute('class') || ''))) continue;
+    if (!titled && !WORDS.test(t)) continue;
+    if (!out.some((seen) => seen.includes(t) || t.includes(seen))) out.push(t);
+    if (out.length >= 2) break;
+  }
+  return out;
+}"""
 # Does the clicked control's own form (else its closest form / dialog / main container) hold a pre-selected choice?
 _SCOPE_CHOICE_JS = r"""(e) => {
   const f = e.form || e.closest('form');
@@ -373,6 +396,16 @@ _FORM_INFO_JS = r"""(e) => {
 # The live members of a radio group, in their CURRENT order (value, label as the snapshot reads it, checked).
 _RADIOS_JS = r"""(els) => els.map((e) => {
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  if (e.tagName !== 'INPUT') {   // a radio drawn by the page (role=radio): its words may live in its shadow root
+    const flat = (n) => n.nodeType === 3 ? n.textContent : (n.nodeType !== 1 && n.nodeType !== 11) || /^(SCRIPT|STYLE|TEMPLATE|INPUT|BUTTON|SELECT|TEXTAREA|NOSCRIPT)$/.test(n.tagName || '') ? ''
+      : n.tagName === 'SLOT' && n.assignedNodes({flatten: true}).length ? n.assignedNodes({flatten: true}).map(flat).join(' ')
+      : [...(n.shadowRoot || n).childNodes].map(flat).join(' ');
+    const label = clean(e.getAttribute('aria-label'))
+      || clean((e.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => e.getRootNode().getElementById(id)?.textContent || '').join(' '))
+      || (e.tagName === 'BUTTON' ? clean(e.innerText || e.textContent) : clean(flat(e))) || clean(e.getAttribute('label'));
+    return {value: typeof e.value === 'string' ? e.value : e.getAttribute('value') || '', label,
+            checked: e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true' || e.checked === true};
+  }
   const label = (e.labels && e.labels.length ? clean(e.labels[0].textContent) : '') || (e.closest('label') ? clean(e.closest('label').textContent) : '')
     || clean(e.nextSibling && e.nextSibling.nodeType === 3 ? e.nextSibling.textContent : '')
     || clean((e.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => e.getRootNode().getElementById(id)?.textContent || '').join(' '))
@@ -732,6 +765,7 @@ class _Run:
         self.email_attempted = False
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
         self.combo_options: dict[str, list[str]] = {}  # trusting mode: options an opened list showed, by field label
+        self.combo_chosen: dict[str, str] = {}  # trusting mode: what a multiple-choice box took as a tag, by field label
         self.code_entries = 0                # trusting mode: one-time codes read from the mailbox and typed
         self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
         self.email_login_tried = False       # trusting mode: at most one sign-in fallback from email verification
@@ -902,6 +936,10 @@ class _Run:
                     for field in snapshot.fields:  # a list that only renders once opened: show what it offered last time
                         if field.kind == "combobox" and not field.options and (seen := self.combo_options.get(trusting.norm(field.label))):
                             field.options = [FieldOption(value=label, label=label) for label in seen]
+                if self.trusting and self.combo_chosen:
+                    for field in snapshot.fields:  # a box whose choices are tags beside it: its own text stays empty
+                        if field.kind == "combobox" and not field.value and (chosen := self.combo_chosen.get(trusting.norm(field.label))):
+                            field.value = chosen
                 choices = {}
                 repeated = set()
                 self.questions_by_ref = {}
@@ -1132,6 +1170,15 @@ class _Run:
             with contextlib.suppress(Exception):
                 found += [text for text in await fr.evaluate(_BANNER_TEXTS_JS) if isinstance(text, str) and text not in found]
         return found[:3]
+
+    async def _notice_texts(self, title: str) -> list[str]:
+        """What a notice floating over the page says (any frame; see `_NOTICE_TEXTS_JS`)."""
+        titled = bool(ERROR_TITLE_RE.match(fold(title).strip()))
+        found: list[str] = []
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                found += [text for text in await fr.evaluate(_NOTICE_TEXTS_JS, titled) if isinstance(text, str) and text not in found]
+        return found[:2]
 
     async def _holds_choice(self, el: ElementHandle | Locator) -> bool:
         """dry_run: a pre-selected / checked control in the SAME form (or container) as the clicked control. Unreadable = True."""
@@ -2337,7 +2384,7 @@ class _Run:
             "fields": [{"ref": f.ref, "kind": f.kind, "label": f.label[:80], "required": f.required, "filled": not _is_empty(f),
                         "error": f.error[:80], "options": len(f.options),
                         # (what a list offers - the site's own wording, never an answer - when the plan could not use it)
-                        "choices": [o.label[:40] for o in f.options][:90] if f.kind in ("select", "combobox") and _is_empty(f) else [],
+                        "choices": [o.label[:40] for o in f.options][:250] if f.kind in ("select", "combobox") and _is_empty(f) else [],
                         # (the option a choice control shows - a country, a level, yes / no - never free text)
                         "chosen": f.value[:60] if f.kind in ("select", "combobox", "radio", "checkbox") or trusting.is_dial(f, seen) else ""}
                        for f in seen.fields][:150],
@@ -2969,7 +3016,8 @@ class _Run:
                     self.stuck_fields = []
                 with contextlib.suppress(Exception):
                     # (a banner that lists what is missing may stand far below the part of the page the planner reads)
-                    said = [text for text in map(self._r, await self._banner_texts()) if text[:80] not in pub.text]
+                    said = [text for text in map(self._r, await self._banner_texts() or await self._notice_texts(pub.title))
+                            if text[:80] not in pub.text]
                     if said:
                         pub.text = trusting.banner_hint(said) + pub.text
             if self._inspection_only:
@@ -3828,6 +3876,7 @@ class _Run:
             self.replans.pop(page_key, None)  # (a multi-step form keeps its URL: each step gets its own re-reads)
             self.presend.pop(page_key, None)
             self.combo_options.clear()  # (and the lists of the next step are other lists, whatever their labels)
+            self.combo_chosen.clear()
             await self._after_click()
             if self.autonomous:
                 if await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending):

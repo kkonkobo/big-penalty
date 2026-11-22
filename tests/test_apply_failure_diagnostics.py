@@ -229,7 +229,10 @@ async def test_the_outline_names_the_controls_of_custom_elements_and_which_ones_
     from jobhunt.apply.snapshot import take_snapshot
 
     await page.set_content(f'''<p>Bonjour {SENTINEL}</p><x-question><x-radio>Oui, tout à fait</x-radio></x-question><x-text></x-text>
+      <x-note>Votre remarque ici</x-note>
       <script>
+        customElements.define('x-note', class extends HTMLElement {{ connectedCallback() {{
+          this.attachShadow({{mode: 'open'}}).innerHTML = '<div role="textbox" aria-label="Remarque" aria-required="true"><slot></slot></div>'; }} }});
         customElements.define('x-radio', class extends HTMLElement {{ connectedCallback() {{
           this.attachShadow({{mode: 'open'}}).innerHTML = '<span role="radio" aria-label="Oui" aria-checked="true"><slot></slot></span>'; }} }});
         customElements.define('x-question', class extends HTMLElement {{ connectedCallback() {{
@@ -242,8 +245,11 @@ async def test_the_outline_names_the_controls_of_custom_elements_and_which_ones_
     deep = {field["label"]: field for field in outline["shadow_fields"]}
     assert deep["Given name"] == {"label": "Given name", "type": "text", "name": "given", "required": True, "shown": True, "read": True,
                                   "inside": "input < x-text < body < html"}
-    assert deep["Oui"]["type"] == "radio" and deep["Oui"]["read"] is False and deep["Oui"]["inside"].startswith("span < x-radio")
+    # (a radio drawn by the page is read too)
+    assert deep["Oui"]["type"] == "radio" and deep["Oui"]["read"] is True and deep["Oui"]["inside"].startswith("span < x-radio")
     # a control the reader missed: its marks and the words on and around it - not its state, nor the page above it
-    assert deep["Oui"]["marks"] == "role=radio aria-label=Oui" and "marks" not in deep["Given name"]
-    assert "Oui, tout à fait" in deep["Oui"]["around"]
+    missed = deep["Remarque"]
+    assert missed["type"] == "textbox" and missed["read"] is False and missed["inside"].startswith("div < x-note")
+    assert missed["marks"] == "role=textbox aria-label=Remarque aria-required=true" and "marks" not in deep["Given name"]
+    assert "Votre remarque ici" in missed["around"]
     assert SENTINEL not in json.dumps(outline) and "aria-checked" not in json.dumps(outline)
