@@ -296,11 +296,11 @@ def owner_item(run: _Run, field: FormField) -> _Item | None | bool:
 
 
 def _creation_bounced(run: _Run, field: FormField, snap: PageSnapshot) -> bool:
-    """The account-creation button was just clicked and the same creation form is back with its password emptied and no
-    error on any field: the site refused the password without saying so (its criteria list only changes colour)."""
+    """The account-creation button was just clicked and the same creation form is back (its password emptied or kept) with
+    no error on any field: the site refused the password without saying so (its criteria list only changes colour)."""
     engine = _engine()
     last = getattr(run, "last_click_rec", None)
-    if not last or not engine._is_empty(field) or any(f.error for f in snap.fields if f.kind not in ("button", "link")):
+    if not last or any(f.error for f in snap.fields if f.kind not in ("button", "link")):
         return False
     create = engine._Run._signup_submit(snap)
     # (the click must have been made ON this creation form - same number of password fields - not on the link that leads
