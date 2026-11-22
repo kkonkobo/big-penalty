@@ -1007,8 +1007,14 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         with contextlib.suppress(Exception):
             if typed:
                 await loc.fill("", timeout=3000)
-            await open_list()
-            found = await _popup_options(run)
+                await asyncio.sleep(0.4)
+            found = await _popup_options(run)  # (emptying the box may have opened the list: a click would close it)
+            if not found:
+                await open_list()
+                for _ in range(4):
+                    if found := await _popup_options(run):
+                        break
+                    await asyncio.sleep(0.4)
             others = [index for index, (_, text) in enumerate(found) if _OTHER_OPTION.search(norm(text))]
             if len(others) == 1 and (done := await choose(found, others[0])):
                 return done
