@@ -220,6 +220,9 @@ MISSING_OFFER_RE = re.compile(
     r"(?:offre|annonce|poste|job|position|posting)[^.!\n]{0,60}(?:n.?existe (?:pas|plus)|n'est plus (?:disponible|en ligne|active)|"
     r"(?:est|a) (?:expiree?|cloturee|pourvue)|no longer (?:exists?|available)|does not exist|"
     r"(?:has|is) (?:expired|been (?:closed|removed|filled)))")
+NO_ATTACHMENT_RE = re.compile(r"aucune piece jointe|aucun fichier (?:n.a ete |charge|selectionne|joint)|no (?:file|attachment) (?:was |has been )?"
+                              r"(?:uploaded|selected|attached|loaded|chosen)|piece jointe (?:manquante|obligatoire|requise)|"
+                              r"veuillez (?:joindre|selectionner|choisir) (?:un|votre) (?:fichier|cv|document)")
 PRINT_VIEW_RE = re.compile(r"/imprimer-fiche-emploi-")  # a careers site's print view of an ad: no apply button; the normal view is "/emploi-..."
 GONE_PATH_RE = re.compile(r"/(?:error-?page|error|erreur|not-?found|page-?not-?found|404|oops|expired|offer-?expired|job-?closed)(?:/|\.\w+)?$")
 CHANGED_RETRY_S = 0.8  # one re-read of a decision scope that changed under the action (async option lists, dependent fields)
@@ -719,6 +722,7 @@ class _Run:
         self.sent_url = ""                   # page URL of the last final click
         self.sent_empty: set[tuple[str, str]] = set()  # trusting mode: required fields left empty at the last guarded click
         self.click_filled: set[tuple[str, str]] = set()  # trusting mode: fields that held a value at the last guarded click
+        self.reuploads = 0                   # trusting mode: times the uploads were forgotten because the site said no file came
         self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
@@ -3230,6 +3234,14 @@ class _Run:
                         (action.op == "fill" and action.fact in ACCOUNT_FACTS) or
                         (action.op == "click" and action.click_role == ("login" if kind == "account_login" else "signup")
                          and not (byref.get(action.ref) and SOCIAL_RE.search(fold(byref[action.ref].label))))]})
+            if (trust and self.uploaded_files and self.reuploads < 2
+                    and NO_ATTACHMENT_RE.search(fold(f"{snap.title} {snap.text}"))):
+                # The site says no file came with the attach click (the page was sent back in between and dropped the file
+                # chosen earlier): what was uploaded no longer counts, so the file is chosen again.
+                self.reuploads += 1
+                self.uploaded_files.clear()
+                self.uploaded = self.attach_done = False
+                log.note = self._r("; ".join(x for x in (log.note, "pièce jointe non reçue par le site : nouveau dépôt") if x))[:900]
             self.signup_scope = ({a.ref for a in (inline[1] if trust else plan.actions)}
                                  if bound_account and signup_page and inline is not None else None)
             v = self._validate(plan, snap, resolve)
