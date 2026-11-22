@@ -414,9 +414,13 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         return out
     national = known is not None and known.key == "phone" and beside_dial(field, snap)
     current = field.value.strip()
-    if current and norm(current) == norm(want) and not field.error and not (national and current.startswith(("+", "00"))):
+    # (a site that refused the form says "numéro invalide" in plain text, with nothing on the field itself: after a refused
+    # send, the phone the field holds is typed in another spelling)
+    respell = bool(field.error) or (known is not None and known.key == "phone" and bool(getattr(run, "rejected_submits", 0)))
+    if current and norm(current) == norm(want) and not respell and not (national and current.startswith(("+", "00"))):
         return None
-    if national and current and not current.startswith(("+", "00")) and re.sub(r"\D", "", current)[-9:] == re.sub(r"\D", "", want)[-9:]:
+    if (national and current and not respell and not current.startswith(("+", "00"))
+            and re.sub(r"\D", "", current)[-9:] == re.sub(r"\D", "", want)[-9:]):
         return None
     out = item(Action(ref=field.ref, op="fill", fact=action.fact), field, known, value=want, used=used,
                inferred=inferred and not (known is not None and known.exact), basis=basis)
@@ -427,16 +431,24 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
             return None  # the search box already holds the candidate's own calling code
         out.dial_code = code  # ("Indicatif de pays" as a search box: see `_search_box`; another country chosen there is replaced)
         out.national = False
-    if known is not None and known.exact and known.variants and current and field.error:
-        # The site refused the spelling it holds (a phone with its code, a LinkedIn URL without scheme): type another one.
-        # The planner's own text counts when it is one of the fact's spellings.
+    if known is not None and known.exact and known.variants and current and respell:
+        # The site refused the spelling it holds (a phone with its code, a LinkedIn URL without scheme): type another one,
+        # never one already tried in this run. The planner's own text counts when it is one of the fact's spellings.
         spellings = [known.value or "", *known.variants]
         digits = lambda text: re.sub(r"\D", "", text)  # noqa: E731
-        others = [text for text in spellings if text.strip() != current and text.strip()]
+        if known.key == "phone" and french_phone(known.value or ""):  # (the two compact spellings most validators take)
+            local = "0" + digits(known.value or "")[-9:]
+            spellings += [local, "+33" + local[1:]]
+        tried = getattr(run, "tried_spellings", None)
+        if tried is None:
+            tried = run.tried_spellings = set()
+        tried.add(current)
+        others = [text for text in dict.fromkeys(spellings) if text.strip() and text.strip() not in tried]
         asked = [text for text in others if answer and (text.strip() == answer or (digits(answer) and digits(text) == digits(answer)))]
         flipped = [text for text in others if text.lstrip().startswith(("+", "00")) != current.startswith(("+", "00"))]
         if asked or flipped or others:
             out.forced = (asked or flipped or others)[0]
+            tried.add(out.forced.strip())
     return out
 
 

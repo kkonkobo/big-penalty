@@ -1748,3 +1748,19 @@ def test_an_optional_letter_is_attached_once_the_site_refused_the_form_without_i
     refused = PageSnapshot(url=URL, title="Erreur - Je dépose ma candidature à une offre", fields=[letter])
     made, _ = do_check(run_of(), action, letter, refused)
     assert made is not None and made.used == "letter"
+
+
+def test_a_phone_is_respelled_after_each_refused_send_without_repeating_itself():
+    run = run_of()
+    run.rejected_submits = 1  # (the site refused the form: nothing on the field says why)
+    typed = ["+33 6 00 00 00 00"]
+    for _ in range(3):
+        phone = field(ref="p1", kind="text", label="Téléphone", required=True, value=typed[-1])
+        made = trusting.check(run, Action(ref="p1", op="fill", fact="phone"), phone, engine._Validated(), snap_of(phone), None)
+        assert made is not None and made.forced and made.forced not in typed
+        typed.append(made.forced)
+    assert not typed[1].startswith("+")  # the other form first: national after international
+    # before any refusal, a field that already holds the number is left alone
+    calm = run_of()
+    phone = field(ref="p1", kind="text", label="Téléphone", required=True, value="+33 6 00 00 00 00")
+    assert trusting.check(calm, Action(ref="p1", op="fill", fact="phone"), phone, engine._Validated(), snap_of(phone), None) is None
