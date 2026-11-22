@@ -2445,6 +2445,12 @@ class _Run:
                     # The page itself is the evidence, whatever the transport showed: the form of the click is gone and the
                     # page says the application was received (its wording, else the planner's reading of the page).
                     gone = not has_form or self._form_gone(snap)
+                    if (not gone and urldefrag(self.page.url).url != self.sent_url and not any(f.error for f in snap.fields)
+                            and await self._page_says_received()):
+                        # The site left the form's page for one that says the application was received, and shows ANOTHER
+                        # form there (an invitation to create an account): that form is not the one that was sent.
+                        trace.receipt_kind, trace.receipt_reason = "first_party_confirmation", "confirmation_text"
+                        return self._end("submitted", "Candidature envoyée.")
                     if gone and not any(f.error for f in snap.fields) and not await self._banner_error():
                         received = self._confirmed(snap, self.last_sent)
                         if not received and urldefrag(self.page.url).url != self.sent_url:
