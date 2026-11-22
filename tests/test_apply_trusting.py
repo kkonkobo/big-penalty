@@ -1955,3 +1955,19 @@ async def test_a_floating_notice_inside_the_frame_that_holds_the_form_is_read(pa
     await page.wait_for_timeout(300)
     run = SimpleNamespace(page=page)
     assert await engine._Run._notice_texts(run, "Candidature à un poste") == ["Veuillez renseigner le champ 'Mobilité'.×"]
+
+
+def test_a_phone_the_page_message_calls_invalid_is_respelled_without_its_trunk_zero_beside_a_calling_code():
+    """An editor's "Save" (not a send) comes back with "The phone number is invalid" in a message, nothing on the field.
+    Beside a calling-code list the number is typed without its trunk zero; a page that says nothing leaves it alone."""
+    code = field(ref="c1", kind="select", label="Indicatif téléphonique du pays", value="France (+33)",
+                 options=[FieldOption(value="FRA_33", label="France (+33)"), FieldOption(value="BEL_32", label="Belgique (+32)")])
+    phone = field(ref="p1", kind="tel", label="Numéro de téléphone", required=True, value="0600000000")
+    snap = snap_of(code, phone)
+    action = Action(ref="p1", op="fill", fact="phone")
+    assert trusting.check(run_of(), action, phone, engine._Validated(), snap, None) is None
+    run = run_of()
+    run.page_messages = ["The phone number is invalid"]
+    made = trusting.check(run, action, phone, engine._Validated(), snap, None)
+    assert made is not None and made.forced == "600000000"
+    assert trusting.phone_refused(["Le numéro de téléphone est incorrect."]) and not trusting.phone_refused(["Veuillez renseigner le champ 'Mobilité'."])

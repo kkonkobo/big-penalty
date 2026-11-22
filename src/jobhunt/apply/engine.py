@@ -789,6 +789,7 @@ class _Run:
         self.upload_split: set[str] = set()  # page URLs where the uploads were already done in a step of their own
         self.combo_options: dict[str, list[str]] = {}  # trusting mode: options an opened list showed, by field label
         self.combo_chosen: dict[str, str] = {}  # trusting mode: what a multiple-choice box took as a tag, by field label
+        self.page_messages: list[str] = []  # trusting mode: the error messages the page shows at this step
         self.code_entries = 0                # trusting mode: one-time codes read from the mailbox and typed
         self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
         self.email_login_tried = False       # trusting mode: at most one sign-in fallback from email verification
@@ -3041,8 +3042,9 @@ class _Run:
                     self.stuck_fields = []
                 with contextlib.suppress(Exception):
                     # (a banner that lists what is missing may stand far below the part of the page the planner reads)
-                    said = [text for text in map(self._r, await self._banner_texts() or await self._notice_texts(pub.title))
-                            if text[:80] not in pub.text]
+                    messages = await self._banner_texts() or await self._notice_texts(pub.title)
+                    self.page_messages = list(messages)  # (what the site says is wrong, for the filler: a refused phone)
+                    said = [text for text in map(self._r, messages) if text[:80] not in pub.text]
                     if said:
                         pub.text = trusting.banner_hint(said) + pub.text
             if self._inspection_only:
