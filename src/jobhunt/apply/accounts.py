@@ -128,7 +128,8 @@ def is_workday_host(host: str) -> bool:
 
 
 _WORKDAY_SEGMENT = r'[A-Za-z0-9_-]{1,64}'
-_WORKDAY_SLUG = r'[A-Za-z0-9_-]{1,255}'  # a posting's title slug ("STAGE-...-_JR123") is often longer than a namespace
+# (a posting's title or place slug is often longer than a namespace, and may be percent-encoded: "Saint-M%C3%A9dard")
+_WORKDAY_SLUG = r'(?:[A-Za-z0-9_-]|%[0-9A-Fa-f]{2}){1,255}'
 _WORKDAY_LOCALE = r'[a-z]{2}-[A-Z]{2}'
 
 
