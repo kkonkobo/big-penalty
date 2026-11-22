@@ -228,10 +228,12 @@ async def test_the_outline_names_the_controls_of_custom_elements_and_which_ones_
     from jobhunt.apply.page_outline import page_outline
     from jobhunt.apply.snapshot import take_snapshot
 
-    await page.set_content(f'''<x-radio></x-radio><x-text></x-text>
+    await page.set_content(f'''<p>Bonjour {SENTINEL}</p><x-question><x-radio>Oui, tout à fait</x-radio></x-question><x-text></x-text>
       <script>
         customElements.define('x-radio', class extends HTMLElement {{ connectedCallback() {{
-          this.attachShadow({{mode: 'open'}}).innerHTML = '<span role="radio" aria-label="Oui" aria-checked="true"></span>'; }} }});
+          this.attachShadow({{mode: 'open'}}).innerHTML = '<span role="radio" aria-label="Oui" aria-checked="true"><slot></slot></span>'; }} }});
+        customElements.define('x-question', class extends HTMLElement {{ connectedCallback() {{
+          this.attachShadow({{mode: 'open'}}).innerHTML = '<p>Avez-vous le permis ?</p><slot></slot>'; }} }});
         customElements.define('x-text', class extends HTMLElement {{ connectedCallback() {{
           this.attachShadow({{mode: 'open'}}).innerHTML = '<input aria-label="Given name" name="given" value="{SENTINEL}" aria-required="true">'; }} }});
       </script>''')
@@ -241,4 +243,7 @@ async def test_the_outline_names_the_controls_of_custom_elements_and_which_ones_
     assert deep["Given name"] == {"label": "Given name", "type": "text", "name": "given", "required": True, "shown": True, "read": True,
                                   "inside": "input < x-text < body < html"}
     assert deep["Oui"]["type"] == "radio" and deep["Oui"]["read"] is False and deep["Oui"]["inside"].startswith("span < x-radio")
-    assert SENTINEL not in json.dumps(outline)
+    # a control the reader missed: its marks and the words on and around it - not its state, nor the page above it
+    assert deep["Oui"]["marks"] == "role=radio aria-label=Oui" and "marks" not in deep["Given name"]
+    assert "Oui, tout à fait" in deep["Oui"]["around"]
+    assert SENTINEL not in json.dumps(outline) and "aria-checked" not in json.dumps(outline)
