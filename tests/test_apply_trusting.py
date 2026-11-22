@@ -1709,3 +1709,22 @@ def test_a_site_saying_no_file_came_with_the_attach_click(text, missing):
     from jobhunt.apply.answer_check import fold
 
     assert bool(engine.NO_ATTACHMENT_RE.search(fold(text))) is missing
+
+
+@pytest.mark.parametrize(("label", "bare"), [
+    ("Ajouter", True), ("Add file", True), ("Joindre le fichier", True), ("Upload", True),
+    ("Ajouter une expérience", False), ("Add another position", False), ("Valider", False),
+])
+def test_the_bare_attach_button_of_an_upload_block(label, bare):
+    from jobhunt.apply.answer_check import fold
+
+    assert bool(engine.BARE_ATTACH_RE.fullmatch(fold(label).strip())) is bare
+
+
+async def test_an_upload_block_without_a_chosen_file_is_told_apart(page):  # noqa: F811
+    await page.set_content('''<div id="cv"><input type="file" id="f1"><input type="text" name="title"><button id="b1">Ajouter</button></div>
+      <div id="letter"><input type="file" id="f2"><input type="text" name="title2"><button id="b2">Ajouter</button></div>''')
+    await page.set_input_files("#f1", {"name": "CV.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4 test"})
+    first = await (await page.query_selector("#b1")).evaluate(engine._ATTACH_JS)
+    second = await (await page.query_selector("#b2")).evaluate(engine._ATTACH_JS)
+    assert first["found"] and first["filled"] and second["found"] and not second["filled"]
