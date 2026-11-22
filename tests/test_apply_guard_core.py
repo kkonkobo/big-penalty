@@ -250,3 +250,28 @@ async def test_a_job_alert_box_of_the_ad_is_not_a_question_of_the_application(co
                                planner=ScriptedPlanner(lambda snapshot: StepPlan(page_kind="job_page")))
     assert not any("mail" in question.label for question in result.result.questions)
     assert not core.posts
+
+
+@pytest.mark.parametrize(("answer", "sent"), [(None, True), ("form.html", False)])
+async def test_a_send_click_the_page_interrupts_is_judged_by_the_page_that_follows(core, profile, tmp_path, fast, monkeypatch, answer, sent):
+    """The receipt page loading under the send click makes the click itself fail: the page that follows says whether the
+    application was received. Nothing is clicked again either way."""
+    from jobhunt.apply import engine
+
+    original = engine._Run._click
+
+    async def interrupted(self, target, *, recheck=None):
+        final = self.final_awaiting
+        await original(self, target, recheck=recheck)
+        if final:
+            raise engine._Dispatched("TimeoutError")
+
+    monkeypatch.setattr(engine._Run, "_click", interrupted)
+    core.html["/site/jobs/100"] = form_page("/jobs/100")
+    if answer:
+        core.post_pages["/site/jobs/100"] = answer  # the answer is the form again: no receipt
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert (result.status == "submitted") is sent, (result.message, result.result.diagnostic_code)
+    assert result.result.submit_clicked or sent
+    assert paths(core, "/site") == ["/site/jobs/100"]  # one send, whatever the outcome

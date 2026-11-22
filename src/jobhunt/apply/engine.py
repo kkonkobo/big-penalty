@@ -3765,6 +3765,16 @@ class _Run:
                     with contextlib.suppress(Exception):
                         await self.autonomous.after_click(self.page, observing=False)
                     continue
+                if trust and final and self.mode == "submit" and self.final_awaiting:
+                    # The send click was dispatched and the page moved under it (its receipt page loading). Nothing more
+                    # is clicked or typed: the page that follows is read for its receipt, a refusal, or neither (then the
+                    # send stays unconfirmed, as before).
+                    log.clicked = self._r(field.label)
+                    log.note += "; clic d'envoi interrompu par la page : lecture de la suite"
+                    await self._after_click()
+                    with contextlib.suppress(Exception):
+                        await self.autonomous.after_click(self.page, observing=True)
+                    continue
                 if self.mode == "submit" and (final or post_data):
                     return self._unconfirmed()
                 if self.autonomous and not self.app_touched and not post_data and GONE_PATH_RE.search(urlparse(self.page.url).path.lower()):
