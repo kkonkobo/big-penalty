@@ -844,13 +844,26 @@ _APPEARED_JS = r"""() => { const shown = window.__bpShown, out = [];
 # (what a list says when it has nothing to offer, or nothing yet: never an option)
 _NO_RESULT = re.compile(r"^(?:(?:il n y a )?aucun resultat|aucune (?:option|correspondance|donnee|selection)|pas de resultat|"
                         r"no (?:results?|options?|matches|match|data|selection)|nothing found|keine (?:ergebnisse|treffer|auswahl)|"
-                        r"sin resultados|nessun risultato|chargement|loading|recherche en cours|searching|wird geladen|laden)\b")
+                        r"sin resultados|nessun risultato|chargement|loading|recherche en cours|searching|wird geladen|laden|"
+                        # (what an empty list still announces to screen readers while its entries load)
+                        r"contient des elements selectionnables|contains selectable items|enthalt auswahlbare elemente)\b")
 _WAS_SHOWN_JS = "e => !!(window.__bpShown && window.__bpShown.has(e))"
 _CONTROL_SHAPE_JS = r"""e => { const parts = [];
   for (let n = e, i = 0; n && i < 4; i++) {
     parts.push(n.tagName.toLowerCase() + (n.getAttribute('role') ? '[' + n.getAttribute('role') + ']' : ''));
     n = n.parentElement || (n.getRootNode() && n.getRootNode().host); }
   return parts.join(' < '); }"""
+
+
+# The arrow / value-help button of a text box that only suggests (`valueHelp` in the snapshot): it opens the WHOLE list, when
+# typing only shows what the site's own search finds (a year, a country spelled another way: "no data").
+_OPENER_JS = r"""e => {
+  if (!e.matches('input') || e.getAttribute('aria-autocomplete') !== 'list' || !e.getAttribute('aria-haspopup')) return null;
+  const root = e.getRootNode(), host = root && root.host, box = host || e.parentElement;
+  if (!box) return null;
+  const found = [...(host ? box.querySelectorAll('button, [role=button], [ui5-button]') : box.children)]
+    .filter((b) => b.matches('button, [role=button], [ui5-button]') && b.getClientRects().length && !(b.innerText || b.textContent || '').trim());
+  return found.length === 1 ? found[0] : null; }"""
 
 
 async def mark_shown(run: _Run) -> None:
@@ -938,6 +951,7 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         option, label = found[index]
         now = " ".join(str(await option.evaluate("e => e.isConnected ? (e.innerText || e.textContent || '') : ''")).split())
         if now != label:
+            stats["recycled"] += 1
             return ""  # the row was recycled under us: read the list again
         before = await run._combo_value(loc)
         try:
@@ -994,7 +1008,10 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
             await run.page.keyboard.press("Escape")
         raise engine._Skip("la liste n'a pas retenu la réponse choisie" + shape)
 
+    stats = {"read": 0, "recycled": 0}  # (for the local failure record: how many entries were read, how many slipped away)
+
     def remember(found):
+        stats["read"] = max(stats["read"], len(found))
         # What the open list offers is shown to the planner at the next read (a list that only renders once opened). The
         # fullest list seen stands: what a typed query narrows it to (or its "no result" line) does not replace it.
         labels = list(dict.fromkeys(text for _, text in found))
@@ -1003,17 +1020,28 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
         if labels and len(labels) <= 250 and key and not _PLACEHOLDER_LABEL.search(key) and len(labels) > len(run.combo_options.get(key, ())):
             run.combo_options[key] = labels
 
+    opener = None
+    if typed:
+        with contextlib.suppress(Exception):
+            opener = (await loc.evaluate_handle(_OPENER_JS)).as_element()
+
     async def open_list():
         try:
             await loc.click(timeout=4000)
         except Exception:
             await loc.evaluate("e => e.click()")
         await asyncio.sleep(0.4)
+        if opener is not None and not await _popup_options(run):
+            try:  # (a box a click leaves closed: its arrow shows the whole list)
+                await opener.click(timeout=3000)
+            except Exception:
+                await opener.evaluate(_PRESS_JS)
+            await asyncio.sleep(0.6)
 
     await mark_shown(run)
     await open_list()
     found = await _popup_options(run)
-    for _ in range(3):  # (a list filled by a request made when it opens)
+    for _ in range(3 if typed else 7):  # (a list filled by a request made when it opens: seconds, for one that depends on another)
         if found:
             break
         await asyncio.sleep(0.5)
@@ -1021,7 +1049,7 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     if found and not await found[0][0].evaluate(_WAS_SHOWN_JS):
         remember(found)
     index = pick(found, loose=not typed)  # (a list nothing can be typed in: the entry closest to the answer, now)
-    if index >= 0 and (len(found) <= 40 or not typed):
+    if index >= 0 and (len(found) <= 40 or not typed or opener is not None):
         if done := await choose(found, index):
             return done
     typer = loc if typed else None
@@ -1077,6 +1105,8 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                     if found := await _popup_options(run):
                         break
                     await asyncio.sleep(0.4)
+            if found and not await found[0][0].evaluate(_WAS_SHOWN_JS):
+                remember(found)  # (a list that came late is still what the planner is shown next)
             others = [index for index, (_, text) in enumerate(found) if _OTHER_OPTION.search(norm(text))]
             if len(others) == 1 and (done := await choose(found, others[0])):
                 return done
@@ -1087,8 +1117,9 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     shape = ""
     with contextlib.suppress(Exception):
         shape = str(await loc.evaluate(_CONTROL_SHAPE_JS))[:120]
+    shape += f" ; {stats['read']} entrées lues" + (f", {stats['recycled']} choix sur une ligne disparue" if stats["recycled"] else "")
     raise engine._Skip("option introuvable dans la liste" + (" ; options proposées : " + " | ".join(offered[:20]) if offered else "")
-                       + (f" (contrôle : {shape})" if shape else ""))
+                       + f" (contrôle : {shape})")
 
 
 _CODE_FIELD_NOT = re.compile(r"postal|zip|pays|country|promo|parrain|referral|indicatif|naf|ape|siret|iban|bic")
