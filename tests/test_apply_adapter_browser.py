@@ -202,7 +202,7 @@ async def test_kill_switch_disables_enrolled_host_without_browser(server, profil
     assert service.queue(profile.id)[0].supervised
 
 
-async def test_enrolled_host_pauses_after_two_uncertain_sends(adapter_pool, server, profile, tmp_path, fast, monkeypatch):
+async def test_enrolled_host_pauses_after_two_uncertain_sends(adapter_pool, server, profile, tmp_path, fast, monkeypatch, host_pause):
     install_adapter(monkeypatch, server, False)
     for index in range(3):
         path = PUBLICATION_PATH[:-1] + str(index)

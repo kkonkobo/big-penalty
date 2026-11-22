@@ -31,6 +31,12 @@ def lock_backend(request):
     return try_lock, unlock
 
 
+@pytest.fixture
+def host_pause(monkeypatch):
+    """The owner's switch: two failed or unconfirmed autonomous attempts in a row pause their site."""
+    monkeypatch.setattr(get_settings(), "apply_host_pause", True)
+
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     from jobhunt import schedule
