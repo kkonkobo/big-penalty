@@ -21,7 +21,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from jobhunt.config import get_settings
 from jobhunt.apply.destination import clean_url
@@ -168,9 +168,38 @@ def workday_site(url: str, *, posting: bool = False) -> str | None:
     return ':'.join(scope)
 
 
+# Applicant-tracking hosts that several employers share, each with its own candidate accounts (one e-mail holds an account at
+# one employer and none at the next): there the account is the employer's, not the host's.
+_SHARED_HOST = re.compile(r'career\d*\.(?:successfactors|sapsf)\.(?:eu|com|cn)')
+_EMPLOYER = r'[a-z0-9][a-z0-9.-]{0,80}'
+
+
+def is_shared_ats_host(host: str) -> bool:
+    return bool(_SHARED_HOST.fullmatch(_hostname(host)))
+
+
+def shared_employer(posting_url: str) -> str | None:
+    """The employer a run on a shared host belongs to: the registrable host of the posting it started from ("example.com"
+    for careers.example.com), or the `company` parameter when the posting lives on the shared host itself."""
+    host = _hostname(posting_url)
+    if not host:
+        return None
+    if is_shared_ats_host(host):
+        try:
+            name = (parse_qs(urlparse(posting_url).query).get('company') or [''])[0]
+        except ValueError:
+            return None
+    else:
+        name = registrable_host(host)
+    name = name.casefold()
+    return name if re.fullmatch(_EMPLOYER, name) else None
+
+
 def service_name(host: str, *, site: str | None = None) -> str:
-    """Keychain service scoped to the full hostname and, for Workday, its explicit site path."""
-    return "big-penalty:" + _hostname(host) + (":workday:" + site if site else "")
+    """Keychain service scoped to the full hostname and, for Workday, its explicit site path (on a host that employers
+    share, to the employer)."""
+    kind = ":workday:" if is_workday_host(_hostname(host)) else ":employer:"
+    return "big-penalty:" + _hostname(host) + (kind + site if site else "")
 
 
 KEYRING_NAME = "trousseau du système"
@@ -422,8 +451,8 @@ def _check_name(host: str, email: str, *, site: str | None = None) -> None:
     """Hosts / accounts that would need quoting are refused before any backend is touched."""
     if not _hostname(host):
         raise ApplyError(_BAD_NAME)
-    if site and (not is_workday_host(_hostname(host)) or not re.fullmatch(
-            rf'(?:recruiting:{_WORKDAY_SEGMENT}:)?{_WORKDAY_SEGMENT}', site)):
+    if site and not (is_workday_host(_hostname(host)) and re.fullmatch(rf'(?:recruiting:{_WORKDAY_SEGMENT}:)?{_WORKDAY_SEGMENT}', site)
+                     or is_shared_ats_host(host) and re.fullmatch(_EMPLOYER, site)):
         raise ApplyError(_BAD_NAME)
     if not all(_SAFE_FIELD.fullmatch(v) for v in (service_name(host, site=site), email, _label(host))):
         raise ApplyError(_BAD_NAME)
@@ -487,16 +516,38 @@ def rotate_password(host: str, email: str, *, site: str | None = None) -> str | 
     return pw
 
 
+def _seed_employer(host: str, email: str, employer: str) -> None:
+    """First use of an employer's own account on a shared host: start from the password stored for the host as a whole (what
+    earlier sign-ups there used), as an account still to be confirmed - the run signs up with it, and signs in with it when
+    the site answers that the account exists."""
+    _check_name(host, email, site=employer)
+    backend = get_backend()
+    service = service_name(host, site=employer)
+    if backend.get(service, email):
+        return
+    shared = backend.get(service_name(host), email)
+    if not shared:
+        return
+    backend.set(service, email, shared, _label(host))
+    if backend.get(service, email) != shared:
+        raise ApplyError("Enregistrement dans le trousseau impossible")
+    _index_add(host, email, "pending", site=employer)
+
+
 def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *, posting_url: str = "") -> tuple[Callable[[str], str], Callable[[str], bool]]:
     """For Workday, require a live URL matching the reserved host and explicit career-site path."""
     reserved_host = _hostname(posting_url)
     reserved_site = workday_site(posting_url, posting=True)
+    employer = shared_employer(posting_url)
 
     def scope(url):
         host = _hostname(url)
         if not host or not accepts_host(host):
             return None
         if not (is_workday_host(host) or is_workday_host(reserved_host)):
+            # (the local file backend keeps one account per host: no employer scope there)
+            if is_shared_ats_host(host) and employer and not isinstance(get_backend(), FileBackend):
+                return host, employer
             return host, None
         if host == reserved_host and reserved_site and workday_site(url) == reserved_site:
             return host, reserved_site
@@ -507,6 +558,8 @@ def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *
         if not target:
             return ""
         host, site = target
+        if site and is_shared_ats_host(host):
+            _seed_employer(host, email, site)
         return create_password(host, email, site=site) if site else create_password(host, email)
 
     def known(url):

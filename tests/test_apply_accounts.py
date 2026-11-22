@@ -588,3 +588,29 @@ def test_workday_site_of_a_posting_whose_place_is_percent_encoded():
     assert A.workday_site(url) == "ACME" and A.workday_site(url.split("/apply")[0], posting=True) == "ACME"
     assert A.workday_site("https://tenant.wd3.myworkdayjobs.com/fr-FR/ACME/job/Bad%ZZ/x_JR-1") is None
     assert A.workday_site("https://tenant.wd3.myworkdayjobs.com/fr-FR/AC%4DE/job/Town/x_JR-1") is None  # (the namespace itself: never encoded)
+
+
+def test_accounts_on_a_host_that_employers_share_are_kept_per_employer(mem):
+    """One e-mail has an account at the first employer of a shared host and none at the second: each employer's account
+    has its own state and, once it parts from the first, its own password. The password stored for the host as a whole
+    (earlier sign-ups) is where each one starts, as an account still to be confirmed."""
+    host, email = "career5.successfactors.eu", "camille@example.test"
+    mem.items[(A.service_name(host), email)] = "synthetic-shared"
+    accept = {host}.__contains__
+    first_url, second_url = "https://careers.first-example.test/job/100", "https://jobs.second-example.test/offre/7"
+    first_password, first_known = A.guarded_account_callbacks(email, accept, posting_url=first_url)
+    second_password, second_known = A.guarded_account_callbacks(email, accept, posting_url=second_url)
+    page = f"https://{host}/career?company=X"
+    assert not first_known(page) and not second_known(page)
+    assert first_password(page) == second_password(page) == "synthetic-shared"
+    first_known.confirm(page)
+    assert first_known(page) and not second_known(page)
+    assert second_password.rotate(page) not in {None, "synthetic-shared"}  # (refused at the second employer: its own new password)
+    assert first_password(page) == "synthetic-shared" and second_password(page) != "synthetic-shared"
+    assert mem.items[(A.service_name(host), email)] == "synthetic-shared"
+    assert A.service_name(host, site="first-example.test") == "big-penalty:career5.successfactors.eu:employer:first-example.test"
+    # a posting that lives on the shared host itself names its employer in the address
+    assert A.shared_employer(f"https://{host}/sfcareer/jobreqcareer?jobId=1&company=AcmeCo") == "acmeco"
+    assert A.shared_employer("https://careers.first-example.test/job/100") == "first-example.test"
+    with pytest.raises(A.ApplyError):
+        A.create_password("jobs.lever.co", email, site="first-example.test")  # (no employer scope on a host of its own)
