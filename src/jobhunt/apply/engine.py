@@ -3084,10 +3084,10 @@ class _Run:
                 return self._gone_result()
             if kind == "confirmation":
                 await self._shot(log)
-                if (self.trusting and self.app_touched and not self.final_clicked and self.last_sent is not None
+                if (self.trusting and self.app_touched and not self.final_clicked
                         and (not self._has_form(snap) or self._form_gone(snap)) and not any(f.error for f in snap.fields)):
-                    # The click before was not announced as the final one, yet the page that followed is the receipt:
-                    # record the send now.
+                    # A click made after the data was entered was not announced as the final one - or was thought cancelled -
+                    # yet the page that followed is the receipt: record the send now (an unrecorded send would be sent again).
                     with contextlib.suppress(Exception):
                         if self.on_submit_click is not None:
                             await self.on_submit_click()
@@ -3097,6 +3097,14 @@ class _Run:
                         return self._end("submitted", "Candidature envoyée.")
                 if self.mode == "submit" and self.final_clicked:
                     return self._end("submitted", "Candidature envoyée.") if self._confirmed(snap, self.last_sent) else self._unconfirmed()
+                if self.trusting and self.app_touched and self.mode == "submit":
+                    # Data was entered and the page reads as a receipt while a form still shows: possibly sent. It is held
+                    # for a human check (a plain failure would be retried, and sent twice).
+                    with contextlib.suppress(Exception):
+                        if self.on_submit_click is not None:
+                            await self.on_submit_click()
+                        self.final_clicked = True
+                    return self._unconfirmed()
                 return self._end("failed", "Page de confirmation inattendue")
             if self.final_clicked:
                 await self._shot(log)
