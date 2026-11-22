@@ -316,3 +316,26 @@ async def test_two_postings_told_apart_by_a_parameter_the_cleaner_does_not_know_
     assert paths(core, "/site") == ["/site/offre/postuler"] * 2
     again = await send(apps[0])
     assert again.status != "submitted" and len(core.posts) == 2
+
+
+async def test_a_receipt_shown_on_the_same_page_inside_its_page_wide_form_is_read(core, profile, tmp_path, fast):
+    """A one-click application (the account holds the CV): nothing is typed, one form wraps the whole page (its search box
+    included) and the answer keeps the address. The "form of the click" is still there, yet the page says the application
+    was sent; a screen reader's "page is loaded" alert is not an error banner."""
+    core.html["/site/jobs/100"] = (
+        '<title>Ingénieur systèmes embarqués</title><form action="/jobs/100" method="post">'
+        '<label for="keywords">Mots-clés</label><input id="keywords" name="keywords">'
+        '<label for="place">Lieu</label><select id="place" name="place"><option value="">Tous</option><option>Lyon</option></select>'
+        '<main><h1>Ingénieur systèmes embarqués</h1><p>Votre CV enregistré sera joint à la candidature.</p>'
+        '<button name="apply" value="1">Envoyer ma candidature</button></main></form>')
+    core.post_pages["/site/jobs/100"] = "receipt_one_form.html"
+
+    def one_click(snapshot):
+        if not any(field.label == "Envoyer ma candidature" for field in snapshot.fields):
+            return StepPlan(page_kind="other")
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Envoyer ma candidature", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(one_click))
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code)
+    assert paths(core, "/site") == ["/site/jobs/100"] and store.outstanding_attempt(app.id) is None

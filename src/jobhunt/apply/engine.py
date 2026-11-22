@@ -69,7 +69,8 @@ CONFIRM_RE = re.compile(
     # ("Votre candidature pour l'offre 2026-1 STAGE - ... a été envoyée": what it is for stands between the two)
     r"candidature [^.!?\n]{1,200}? (?:a (?:bien )?ete|est (?:bien )?) ?(?:recue|envoyee|enregistree|transmise|soumise|prise en compte)|"
     r"application (?:has been |was |is |had been )?(?:successfully )?(?:received|submitted|sent|recorded)|"
-    r"application [^.!?\n]{1,200}? (?:has been|was) (?:successfully )?(?:received|submitted|sent|recorded)|"
+    # ("Your application for the offer 2026-1 ... as been send": a site's own spelling of "has been sent")
+    r"application [^.!?\n]{1,200}? (?:h?as been|was) (?:successfully )?(?:received|submitted|sent|send|recorded)|"
     r"successfully (?:submitted|applied|sent)")
 NEGATION_RE = re.compile(
     r"n'a pas (?:ete|pu)|pas (?:ete )?(?:envoyee|transmise|enregistree|recue)|not been|has not|was not|were not|could not|couldn't|"
@@ -307,7 +308,12 @@ _BANNER_JS = r"""() => {
   const WORDS = /erreur|error|invalide|invalid|obligatoire manquant|please correct|veuillez corriger|[eé]chec|failed|failure|impossible|n'a pas pu|could not|unable|probl[eè]me|problem|r[eé]essay|try again|retry|incorrect|manquant|missing|requis|required/i;
   const STYLED = /error|danger|invalid|alert(?!-success|-info)|failure|echec/i;     // error-styled: ANY text counts
   const WEAK = /message|notice|feedback|status|toast|flash|hint|help/i;               // plain containers: the wording list decides
-  const OK = /candidature.{0,40}(envoy|re[cç]u|enregistr|transmis)|application.{0,40}(received|submitted|sent)|merci|thank|cookie|traceur|consent/i;
+  // a notice that says it went well is not an error (the posting's title may stand between "application" and "sent") ...
+  const OK = /candidature.{0,200}(envoy|re[cç]u|enregistr|transmis|soumis)|application.{0,200}(received|submitted|sent|send\b|recorded)|merci|thank|cookie|traceur|consent|f[eé]licitations|congratulations|\bsuccessfully\b|avec succ[eè]s/i;
+  // ... unless it says the opposite
+  const NOT = /\bnot\b|n'a pas|n'ont pas|pas [eé]t[eé]|\bunsuccess|could not|couldn't|unable|[eé]chec|failed|erreur|error/i;
+  // what a screen reader is told about the page itself ("Search for jobs page is loaded"): not a message about the form
+  const SPOKEN = /\b(?:page|content|contenu)\b.{0,60}\b(?:loaded|charg[eé]e?)\b/i;
   const vis = (e) => { if (!e.isConnected) return false;
     if (e.checkVisibility && !e.checkVisibility({checkVisibilityCSS: true, visibilityProperty: true})) return false;
     const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
@@ -315,7 +321,7 @@ _BANNER_JS = r"""() => {
   for (const e of document.querySelectorAll('[role=alert],[aria-live=assertive],[class]')) {
     if (SKIP.has(e.tagName) || (e.getAttribute('role') || '') === 'button' || !vis(e) || e.querySelector('input,select,textarea,button')) continue;
     const t = (e.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!t || t.length > 400 || OK.test(t)) continue;
+    if (!t || t.length > 400 || (OK.test(t) && !NOT.test(t)) || SPOKEN.test(t)) continue;
     const cls = e.getAttribute('class') || '';
     const alert = e.getAttribute('role') === 'alert' || e.getAttribute('aria-live') === 'assertive';
     if (alert || STYLED.test(cls) || ((WEAK.test(cls)) && WORDS.test(t))) return true;
@@ -2471,9 +2477,10 @@ class _Run:
                         return self._end("submitted", "Candidature envoyée.")
                     if gone and not any(f.error for f in snap.fields) and not await self._banner_error():
                         received = self._confirmed(snap, self.last_sent)
-                        if not received and urldefrag(self.page.url).url != self.sent_url:
-                            # The site moved on to another page that says, somewhere (a dialog over a job list), that the
-                            # application was received - even when a control there carries the send button's words.
+                        if not received:
+                            # The page says, somewhere (a dialog over a job list, a banner over the ad), that the application
+                            # was received - even when a control there carries the send button's words, or when the site
+                            # keeps one page-wide form (its search box) and the same address.
                             received = await self._page_says_received()
                         if not received and (snap.url, snap.text) != asked and loop.time() - started >= 3:
                             asked = (snap.url, snap.text)

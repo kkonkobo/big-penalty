@@ -1160,7 +1160,27 @@ CONFIRMATION_TEXTS = [
     ("Assurez-vous que votre candidature a été transmise", False), ("Make sure your application was submitted", False),
     ("Votre candidature est incomplète", False), ("Prénom Nom E-mail Envoyer", False), ("Envoi en cours", False),
     ("Un problème est survenu", False), ("", False), ("mercier", False), ("Merci d'avoir postulé. Échec de l'envoi", False),
+    # (what stands between "application" and "sent" may be long; one site spells "has been sent" its own way)
+    ("Your application to the 2026-00100 – Stage - Ingénieur systèmes embarqués – Banc de mesure F/H job opening has been successfully sent", True),
+    ("Your candidate file data have been saved.\nYour application for the offer 2026-00100 Stage Ingénieur (hardware/software) H/F as been send", True),
+    ("Your application for the offer 2026-00100 has not been send", False),
 ]
+
+
+@pytest.mark.parametrize(("markup", "error"), [
+    # read aloud only, about the page itself: not a message about the form
+    ('<span role="alert" style="position:absolute;width:1px;height:1px;overflow:hidden">Rechercher des emplois page is loaded</span>', False),
+    ('<div role="alert">Your application to the 2026-00100 – Stage - Ingénieur systèmes embarqués – Banc de mesure F/H job opening '
+     'has been successfully sent</div>', False),
+    ('<div role="alert" class="notice">Félicitations ! Votre candidature a été enregistrée avec succès.</div>', False),
+    ('<div role="alert">Votre candidature n\'a pas été envoyée.</div>', True),
+    ('<div role="alert">Your application could not be submitted.</div>', True),
+    ('<div role="alert">Le numéro de téléphone doit comporter dix chiffres.</div>', True),
+    ('<div class="alert alert-danger">Format non reconnu</div>', True),
+])
+async def test_an_error_banner_is_not_a_success_notice_nor_a_screen_reader_announcement(page, markup, error):
+    await page.set_content(f"<main><h1>Offre</h1>{markup}</main>")
+    assert await page.evaluate(engine._BANNER_JS) is error
 
 
 @pytest.mark.parametrize("text,ok", CONFIRMATION_TEXTS)
