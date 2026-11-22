@@ -1668,3 +1668,16 @@ def test_an_ordinary_answer_has_no_language_names():
     assert trusting.language_names("France") == [] and trusting.language_names("Oui") == [] and trusting.language_names("") == []
     labels = ["Oui", "Non"]
     assert labels[trusting.best_option(labels, "Non")] == "Non"
+
+
+async def test_an_apply_and_create_form_shown_again_at_a_sibling_address_was_not_sent():
+    name = field(ref="f1", label="Prénom", required=True)
+    secret = field(ref="f2", kind="password", label="Choisir un mot de passe", required=True)
+    send = field(ref="b1", kind="button", label="Envoyer")
+    snap = snap_of(name, secret, send)
+    run = _after_final_click(snap, sent_empty=set(), exists=True)
+    run.sent_url = "https://ats.example.test/careers"   # (the click was made there; the form is shown again at /career)
+    assert await engine._Run._submit_rejected(run, snap) and run.withdrawn
+    run = _after_final_click(snap, sent_empty=set(), exists=False)
+    run.sent_url = "https://ats.example.test/careers"
+    assert not await engine._Run._submit_rejected(run, snap) and not run.withdrawn
