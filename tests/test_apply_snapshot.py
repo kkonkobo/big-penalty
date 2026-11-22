@@ -504,3 +504,25 @@ async def test_a_span_styled_and_wired_as_a_button_is_a_button(page):
     await page.evaluate("document.querySelector('.fsp-button--primary').addEventListener('click', () => { document.title = 'ajouté'; })")
     await resolve(snap.fields[1].ref).click()
     assert await page.title() == "ajouté"
+
+
+RADIX_BOX = """<form><div style="display:flex;position:relative">
+  <button type="button" role="checkbox" aria-checked="false" data-state="unchecked" id="cgu" aria-required="true" style="width:16px;height:16px"
+          onclick="const on = this.getAttribute('aria-checked') !== 'true'; this.setAttribute('aria-checked', on); this.nextElementSibling.checked = on"></button>
+  <input type="checkbox" aria-hidden="true" tabindex="-1" value="on"
+         style="position:absolute;pointer-events:none;opacity:0;margin:0;width:16px;height:16px">
+  <label for="cgu">J'accepte les CGU *</label></div><button>Envoyer</button></form>"""
+
+
+async def test_a_box_drawn_by_the_page_is_the_checkbox_not_its_hidden_mirror_input(page):
+    """A widget library draws the box as a button with role=checkbox and keeps a hidden native input beside it for the
+    form: ticking the mirror changes nothing for the page. The drawn box is the field, read from aria-checked."""
+    await page.set_content(RADIX_BOX)
+    snap, resolve = await take_snapshot(page)
+    boxes = [f for f in snap.fields if f.kind == "checkbox"]
+    assert [(f.label, f.value, f.required) for f in boxes] == [("J'accepte les CGU", "false", True)]
+    assert [f.label for f in snap.fields if f.kind == "button"] == ["Envoyer"]
+    await resolve(boxes[0].ref).check()
+    snap, _ = await take_snapshot(page)
+    assert [f.value for f in snap.fields if f.kind == "checkbox"] == ["true"]
+    assert await page.evaluate("document.querySelector('[role=checkbox]').getAttribute('aria-checked')") == "true"
