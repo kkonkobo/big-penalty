@@ -85,6 +85,9 @@ class Settings(BaseModel):
     # JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT=1: an application whose uncertain send was settled "not sent" may be sent again by
     # the automatic pass (default: only by hand, in supervised mode)
     apply_retry_verified_not_sent: bool = False
+    # JOBHUNT_APPLY_RETRY_PAUSES=1: a "needs a human" pause older than the retry epoch that never reached the send click is
+    # tried again by the automatic pass (default: it waits for the candidate). A CAPTCHA pause always waits.
+    apply_retry_stale_pauses: bool = False
     # JOBHUNT_APPLY_MAX_AGE_DAYS: oldest job (effective posting date) an application may still be sent to. The search and
     # the shortlist keep their own 14-day freshness window; this one only governs sending.
     apply_max_age_days: int = 14
@@ -189,6 +192,7 @@ def get_settings() -> Settings:
         apply_network_filter=env("JOBHUNT_APPLY_NETWORK_FILTER", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_fill_mode="strict" if env("JOBHUNT_APPLY_FILL_MODE", "planner").strip().lower() == "strict" else "planner",
         apply_retry_verified_not_sent=env("JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT", "0").strip().lower() in ("1", "true", "yes", "on"),
+        apply_retry_stale_pauses=env("JOBHUNT_APPLY_RETRY_PAUSES", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_max_age_days=int(env("JOBHUNT_APPLY_MAX_AGE_DAYS") or 14),
         apply_prepare_min_score=float(env("JOBHUNT_APPLY_PREPARE_MIN_SCORE") or 60),
         apply_prepare_daily_cap=int(env("JOBHUNT_APPLY_PREPARE_DAILY_CAP") or 15),

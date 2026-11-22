@@ -596,6 +596,47 @@ async def test_an_old_human_pause_is_never_retried(env, profile, code):
     assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
 
 
+async def test_the_owners_switch_reads_a_captcha_in_the_message_of_a_pause_without_code(env, profile, monkeypatch):
+    from jobhunt.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "apply_retry_stale_pauses", True)
+    app = cvs.approve(env.draft(env.job(1)).id, 1)
+    r = astore.start_run(app.id, 1, "submit", "auto", lambda rid: env.tmp / "runs" / str(rid))
+    astore.finish_run(r.id, RunResult(status="needs_human", message="Un CAPTCHA doit être résolu à la main."))
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET started_at=? WHERE id=?", (OLD, r.id))
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
+
+
+@pytest.fixture
+def retry_pauses(monkeypatch):
+    from jobhunt.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "apply_retry_stale_pauses", True)
+
+
+@pytest.mark.parametrize("code", ["human_required", "credential_page", "posting_mismatch", "supervised_only", "account_login_failed"])
+async def test_with_the_owners_switch_an_old_pause_that_is_not_a_captcha_is_retried(env, profile, retry_pauses, code):
+    job = env.job(1)
+    app = engine_paused_run(env, job, code, started=OLD)
+    assert not astore.has_site_handoff(app.id)
+    s, _ = await daily(profile)
+    assert [a for a, _ in env.runs] == [app.id] and s.paused == 0
+
+
+@pytest.mark.parametrize(("code", "started", "clicked"), [
+    ("challenge", OLD, False), ("challenge_or_rate_limited", OLD, False),  # a CAPTCHA always waits for a person
+    ("posting_mismatch", NEW, False),  # judged by the current code: it waits
+    ("posting_mismatch", OLD, True),  # the send click was reached: never retried
+])
+async def test_the_owners_switch_never_retries_a_captcha_a_fresh_pause_or_a_possible_send(env, profile, retry_pauses, code, started, clicked):
+    job = env.job(1)
+    app = engine_paused_run(env, job, code, started=started, submit_clicked=clicked)
+    s, _ = await daily(profile)
+    assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
+
+
 async def test_an_old_engine_pause_after_a_submit_click_is_never_retried(env, profile):
     job = env.job(1)
     app = engine_paused_run(env, job, "recipient_refused_same_site_write", started=OLD, submit_clicked=True)

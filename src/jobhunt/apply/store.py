@@ -479,16 +479,33 @@ ENGINE_PAUSE_CODES = frozenset({
 })
 
 
+# What only a person can do: with `apply_retry_stale_pauses`, every other pause older than the epoch is tried again.
+_HUMAN_ONLY = re.compile(r"captcha|anti-robot", re.I)
+_HUMAN_ONLY_CODES = ("challenge", "challenge_or_rate_limited")
+
+
+def _retry_pauses() -> bool:
+    from jobhunt.config import get_settings  # noqa: PLC0415
+
+    return bool(get_settings().apply_retry_stale_pauses)
+
+
 def _site_handoff(t: str) -> str:
-    """SQL: run `t` hands the application over to the candidate on the site (a stale engine pause does not)."""
-    codes = ", ".join(f"'{code}'" for code in sorted(ENGINE_PAUSE_CODES))
+    """SQL: run `t` hands the application over to the candidate on the site (a stale engine pause does not; nor, when the
+    owner switched `apply_retry_stale_pauses` on, any stale pause other than a CAPTCHA)."""
+    code = f"COALESCE(json_extract({t}.result_json, '$.diagnostic_code'), '')"
+    if _retry_pauses():
+        retried = (f"{code} NOT IN {_HUMAN_ONLY_CODES!r} AND COALESCE({t}.message, '') NOT LIKE '%captcha%'"
+                   f" AND COALESCE({t}.message, '') NOT LIKE '%anti-robot%'")  # (LIKE is case-insensitive on ASCII)
+    else:
+        retried = f"{code} IN ({', '.join(repr(known) for known in sorted(ENGINE_PAUSE_CODES))})"
     return (f"(({t}.status='needs_human' AND NOT ({t}.started_at < '{ENGINE_RETRY_EPOCH}' AND {t}.submit_clicked_at IS NULL"
-            f" AND COALESCE(json_extract({t}.result_json, '$.submit_clicked'), 0) = 0"
-            f" AND json_extract({t}.result_json, '$.diagnostic_code') IN ({codes})))"
+            f" AND COALESCE(json_extract({t}.result_json, '$.submit_clicked'), 0) = 0 AND {retried}))"
             f" OR ({t}.status='needs_email' AND {t}.email_resumed=0))")
 
 
-_OUTSTANDING_RUNS = """
+def _outstanding_runs() -> str:
+    return """
     SELECT run.*, app.id AS owner_application_id, EXISTS (
         SELECT 1 FROM application_runs retry WHERE retry.application_id = app.id
         AND retry.operator_not_sent_at IS NOT NULL
@@ -513,7 +530,7 @@ _OUTSTANDING_RUNS = """
 
 def _outstanding_row(c, application_id: int):
     c.create_function("owner_confirmed_dead", 1, _owner_confirmed_dead)
-    return c.execute(_OUTSTANDING_RUNS + " WHERE app.id = ? AND run.id IS NOT NULL", (application_id,)).fetchone()
+    return c.execute(_outstanding_runs() + " WHERE app.id = ? AND run.id IS NOT NULL", (application_id,)).fetchone()
 
 
 def outstanding_attempt(application_id: int) -> ApplyRun | None:
@@ -551,7 +568,7 @@ def queue_attempts(profile_id: int) -> tuple[dict[int, ApplyRun], set[int], set[
     """Read verification holds, manual retries and site handoffs for a queue."""
     with connect() as conn:
         conn.create_function("owner_confirmed_dead", 1, _owner_confirmed_dead)
-        rows = conn.execute(_OUTSTANDING_RUNS + " WHERE app.profile_id = ? AND app.status NOT IN ('submitted','withdrawn')",
+        rows = conn.execute(_outstanding_runs() + " WHERE app.profile_id = ? AND app.status NOT IN ('submitted','withdrawn')",
                             (profile_id,)).fetchall()
     return ({row["owner_application_id"]: _from_row(row) for row in rows if row["id"] is not None},
             set() if _auto_retry_allowed() else {row["owner_application_id"] for row in rows if row["manual_retry"]},
@@ -769,16 +786,23 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
 
 
 def stale_engine_pause(run: ApplyRun | None) -> bool:
-    """`run` is an engine-caused pause judged by code older than ENGINE_RETRY_EPOCH, and it cannot have sent anything."""
+    """`run` is an engine-caused pause judged by code older than ENGINE_RETRY_EPOCH, and it cannot have sent anything.
+    With `apply_retry_stale_pauses`, so is any such pause that is not a CAPTCHA."""
     if (run is not None and run.status == "needs_input" and run.result is not None and not run.result.submit_clicked
             and run.submit_clicked_at is None and run.nav_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH):
         # A question stop (missing answer, unfilled widget, account page) judged by older engine code: the newer engine
         # may answer it itself (new standing facts, widget fixes, account creation). Nothing was clicked, so a retry is
         # safe; a question that really needs the candidate comes back as a new pause.
         return True
-    return bool(run is not None and run.status == "needs_human" and run.result is not None
-                and run.result.diagnostic_code in ENGINE_PAUSE_CODES and not run.result.submit_clicked
-                and run.submit_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH)
+    if (run is None or run.status != "needs_human" or run.result is None or run.result.submit_clicked
+            or run.submit_clicked_at is not None or _iso(run.started_at) >= ENGINE_RETRY_EPOCH):
+        return False
+    if run.result.diagnostic_code in ENGINE_PAUSE_CODES:
+        return True
+    # (the owner's switch: an old pause that is not a CAPTCHA - an account the engine has since learnt to open, a guard
+    # rule since dropped - is tried again; the send click was never reached, so nothing can be sent twice)
+    return (_retry_pauses() and run.result.diagnostic_code not in _HUMAN_ONLY_CODES
+            and not _HUMAN_ONLY.search(f"{run.message or ''} {run.result.message or ''}"))
 
 
 def counts_as_failure(run: ApplyRun) -> bool:
