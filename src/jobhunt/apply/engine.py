@@ -2257,11 +2257,16 @@ class _Run:
         """What the site answered to the last account click: status, end of the path, and the error wording of a JSON
         answer (never a value: e-mail addresses and long tokens are masked)."""
         pending, self.account_pending = getattr(self, "account_pending", []), []
+        if (watched := getattr(self, "_account_listener", None)) is not None:
+            self._account_listener = None
+            with contextlib.suppress(Exception):
+                watched[0].remove_listener("response", watched[1])
         out = []
         for response in pending:
             line = f"{response.status} {urlparse(response.url).path[-60:]}"
             with contextlib.suppress(Exception):
-                body = await response.json()
+                # (a response whose body never ends - a stream, a request cut by a navigation - must not hold the run)
+                body = await asyncio.wait_for(response.json(), 3)
                 said = []
 
                 def walk(node, depth=0):
@@ -2902,7 +2907,10 @@ class _Run:
                 plan = await self.planner.plan(pub, self._planner_facts(), job_title=self.job_title, company=self.company,
                                                history=self.steps[:-1], mode=self.mode)
             kind = log.page_kind = plan.page_kind
-            self.account_answers = await self._account_answers() if getattr(self, "account_pending", None) else []
+            self.account_answers = []
+            if getattr(self, "account_pending", None):
+                with contextlib.suppress(Exception):  # (a diagnostic never holds a run)
+                    self.account_answers = await asyncio.wait_for(self._account_answers(), 12)
             self._trace_plan(pub, plan)
             for attempt in (1, 2):
                 if not (self.trusting and kind == "job_page" and not plan.actions and not self._inspection_only and not self.final_clicked

@@ -1619,3 +1619,19 @@ async def test_a_list_nothing_can_be_typed_in_takes_the_entry_closest_to_the_ans
     run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
     item = engine._Item(Action(ref=combo.ref, op="select", fact="nationality"), combo, None, value="Burkinabè")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Burkina Faso"
+
+
+async def test_an_answer_whose_body_never_ends_does_not_hold_the_run(monkeypatch):
+    import asyncio
+
+    class _Hanging:
+        status = 200
+        url = "https://tenant.example.test/fr-FR/acme/login"
+
+        async def json(self):
+            await asyncio.sleep(3600)
+
+    real = asyncio.wait_for
+    monkeypatch.setattr(engine.asyncio, "wait_for", lambda aw, timeout: real(aw, 0.05))
+    run = SimpleNamespace(account_pending=[_Hanging()])
+    assert await engine._Run._account_answers(run) == ["200 /fr-FR/acme/login"]
