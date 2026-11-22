@@ -871,6 +871,9 @@ class _Run:
         for attempt in range(3):
             try:
                 snapshot, resolve = await take_snapshot(self.page)
+                if self.trusting and self.autonomous is not None:
+                    with contextlib.suppress(Exception):
+                        self.autonomous.page_url = self.page.url  # (the page a verification mail is matched against)
                 if self.trusting and self.combo_options:
                     for field in snapshot.fields:  # a list that only renders once opened: show what it offered last time
                         if field.kind == "combobox" and not field.options and (seen := self.combo_options.get(trusting.norm(field.label))):

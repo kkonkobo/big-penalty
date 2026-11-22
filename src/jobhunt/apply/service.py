@@ -615,7 +615,14 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         return started
 
     async def verify_mail():
-        return await mail.poll(email, audience.recipient_url, mail_since())
+        found = await mail.poll(email, audience.recipient_url, mail_since())
+        live = getattr(audience, "page_url", "")
+        if (not found[0] and getattr(audience, "trusting", False) and live and _host(live) != _host(audience.recipient_url)
+                and audience.trusted(live)):
+            # The form stands on the employer's application platform, which sends the code or link under its own name:
+            # the mail is matched against the page that asks for it.
+            found = await mail.poll(email, live, mail_since())
+        return found
 
     async def follow_mail(tab, link, still_current):
         if not await mail.open_link(tab.context, audience.recipient_url, link, still_current):
