@@ -178,12 +178,26 @@ _JS = r"""
   const REQ_TAIL = /\s*(\*+\s*|[-–(]\s*)?(required|obligatoire|requis|champ obligatoire)\s*\)?\s*$/i;
   const tidy = (raw) => clean(raw.replace(/\(\s*(obligatoire|required|requis)\s*\)/ig, ' ').replace(REQ_TAIL, '').replace(/\s*\*+\s*$/, '').replace(/^\s*\*+\s*/, ''));
 
+  // A text box that only SUGGESTS (aria-autocomplete=list, a popup announced) and carries its own arrow / value-help button
+  // is a closed list: what is typed without picking an entry is refused. The button is the one icon-only button of the
+  // box - inside the custom element whose shadow root holds the input, else right beside the input.
+  const valueHelp = (el) => {
+    if (el.getAttribute('aria-autocomplete') !== 'list' || !/^(dialog|listbox|true|menu|tree|grid)$/.test(el.getAttribute('aria-haspopup') || '')) return false;
+    if (!['', 'text', 'search'].includes((el.getAttribute('type') || '').toLowerCase())) return false;
+    const root = el.getRootNode(), host = root && root.host, box = host || el.parentElement;
+    if (!box) return false;
+    const openers = [...(host ? box.querySelectorAll('button, [role=button], [ui5-button]') : box.children)]
+      .filter((b) => b.matches('button, [role=button], [ui5-button]') && b.getClientRects().length && !clean(b.innerText || b.textContent));
+    return openers.length === 1;
+  };
+
   const kindOf = (el) => {
     const tag = el.tagName.toLowerCase();
     const role = (el.getAttribute('role') || '').toLowerCase();
     if (tag === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'password') return 'password';  // before combobox
     if (tag === 'select') return 'select';
     if (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') return 'combobox';
+    if (tag === 'input' && valueHelp(el)) return 'combobox';
     if (tag === 'textarea') return 'textarea';
     if (tag === 'input') {
       const t = (el.getAttribute('type') || 'text').toLowerCase();

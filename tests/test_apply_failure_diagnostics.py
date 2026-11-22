@@ -222,3 +222,23 @@ async def test_guard_admits_only_workday_static_reads(request_, responses, hops,
     assert guard.refused_request == (f"{request_.method} {bare_url(request_.url)}" if refused else "")
     if request_.method == "POST" or request_.navigation:
         assert guard.aborted_hosts == {"wd3.myworkdaycdn.com": 1}
+
+
+async def test_the_outline_names_the_controls_of_custom_elements_and_which_ones_were_read(page):
+    from jobhunt.apply.page_outline import page_outline
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(f'''<x-radio></x-radio><x-text></x-text>
+      <script>
+        customElements.define('x-radio', class extends HTMLElement {{ connectedCallback() {{
+          this.attachShadow({{mode: 'open'}}).innerHTML = '<span role="radio" aria-label="Oui" aria-checked="true"></span>'; }} }});
+        customElements.define('x-text', class extends HTMLElement {{ connectedCallback() {{
+          this.attachShadow({{mode: 'open'}}).innerHTML = '<input aria-label="Given name" name="given" value="{SENTINEL}" aria-required="true">'; }} }});
+      </script>''')
+    await take_snapshot(page)
+    outline = await page_outline(page)
+    deep = {field["label"]: field for field in outline["shadow_fields"]}
+    assert deep["Given name"] == {"label": "Given name", "type": "text", "name": "given", "required": True, "shown": True, "read": True,
+                                  "inside": "input < x-text < body < html"}
+    assert deep["Oui"]["type"] == "radio" and deep["Oui"]["read"] is False and deep["Oui"]["inside"].startswith("span < x-radio")
+    assert SENTINEL not in json.dumps(outline)

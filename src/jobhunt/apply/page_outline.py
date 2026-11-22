@@ -2,7 +2,7 @@
 
 Written only into the run's own folder under the (gitignored) data dir. The outline holds page STRUCTURE only - the URL
 without query string / fragment, title, headings, the text of buttons and links, and each form field's label / type /
-required flag. It never reads a field's value or checked state, cookies, storage or request bodies; in the screenshot every
+required flag (for a field inside a custom element: also the tags around it and whether the form reader had taken it). It never reads a field's value or checked state, cookies, storage or request bodies; in the screenshot every
 form control is masked, and no screenshot is taken at all once a secret (password) was typed in the run.
 """
 
@@ -85,6 +85,27 @@ OUTLINE_JS = r"""([textMax, listMax]) => {
             name: clip(node.getAttribute('name') || ''),
             options: node.matches('select') ? node.options.length : undefined,
         })).slice(0, listMax);
+    // Controls inside shadow roots (custom elements), which the list above does not reach: what each one is, and whether
+    // the form reader had taken it (`read`) - the trace of a question the engine never saw.
+    const deep = [];
+    const walk = root => {
+        for (const node of root.querySelectorAll('*')) {
+            if (node.shadowRoot) walk(node.shadowRoot);
+            if (root === document || deep.length >= listMax) continue;
+            if (!node.matches('input, textarea, select, [role="radio"], [role="checkbox"], [role="radiogroup"], [role="combobox"], '
+                              + '[role="textbox"], [role="switch"]') || node.matches('input[type="hidden"]')) continue;
+            const inside = [];
+            for (let at = node, depth = 0; at && depth < 4; depth++) {
+                inside.push(at.tagName.toLowerCase());
+                at = at.parentElement || (at.getRootNode() && at.getRootNode().host);
+            }
+            deep.push({label: labelOf(node), type: node.matches('input') ? (node.getAttribute('type') || 'text').toLowerCase()
+                           : node.getAttribute('role') || node.tagName.toLowerCase(),
+                       name: clip(node.getAttribute('name') || ''), required: node.required === true || node.getAttribute('aria-required') === 'true',
+                       shown: visible(node), read: node.hasAttribute('data-bp-ref'), inside: inside.join(' < ')});
+        }
+    };
+    walk(document);
     const frames = [...document.querySelectorAll('iframe')].map(node => {
         try { return new URL(node.src, location.href).origin; } catch (e) { return ''; }
     }).filter(origin => origin && origin !== 'null').slice(0, 20);
@@ -108,7 +129,7 @@ OUTLINE_JS = r"""([textMax, listMax]) => {
                        text: clip(text(node)).slice(0, 80),
                        covers_center: !!centre && (node === centre || node.contains(centre))});
     }
-    return {title: clip(document.title), headings, controls, fields, frames,
+    return {title: clip(document.title), headings, controls, fields, shadow_fields: deep, frames,
             overlays: overlays.map(({node, ...rest}) => rest),
             forms: document.forms.length, password_fields: document.querySelectorAll('input[type="password"]').length};
 }"""

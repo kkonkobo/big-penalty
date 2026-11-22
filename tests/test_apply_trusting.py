@@ -1455,6 +1455,7 @@ def test_a_photo_nobody_has_does_not_stop_the_send():
 @pytest.mark.parametrize(("text", "placeholder"), [
     ("Il n’y a aucun résultat.", True), ("Chargement en cours…", True), ("Loading...", True), ("Aucune sélection", True),
     ("No results found", True), ("Normandie", False), ("Other", False), ("Aucun diplôme", False),
+    ("Contient des éléments sélectionnables.", True),
 ])
 def test_what_an_empty_or_loading_list_says_is_not_an_option(text, placeholder):
     assert bool(trusting._NO_RESULT.search(trusting.norm(text))) is placeholder
@@ -1816,3 +1817,48 @@ def test_a_data_use_consent_box_is_ticked_even_when_its_text_reads_like_personal
     licence = field(ref="c2", kind="checkbox", value="false", label="Je suis titulaire du permis de conduire B")
     made, v = do_check(run_of(FactSheet(facts=[])), Action(ref="c2", op="check"), licence)
     assert made is None and any("fait dur" in note for note in v.notes)
+
+
+_VALUE_HELP = '''<x-box id="h"><button slot="icon" style="width:20px;height:20px"></button></x-box>
+  <label for="free">Ville</label><input id="free" aria-autocomplete="list" aria-haspopup="true">
+  <script>
+    const ALL = %s;
+    customElements.define('x-box', class extends HTMLElement { connectedCallback() {
+      const root = this.attachShadow({mode: 'open'});
+      root.innerHTML = '<input aria-label="%s" aria-autocomplete="list" aria-haspopup="dialog"><slot name="icon"></slot><div id="pop"></div>';
+      const input = root.querySelector('input'), pop = root.querySelector('#pop');
+      const show = (items) => {
+        pop.innerHTML = '<ul role="listbox">' + (items.length ? items : ['Aucune donnée']).map((t) => `<li role="option">${t}</li>`).join('') + '</ul>';
+        for (const li of pop.querySelectorAll('li')) li.onclick = () => { if (items.length) { input.value = li.textContent; pop.innerHTML = ''; } }; };
+      // (the site's own search: nothing for a year, nothing for a name it spells another way)
+      input.addEventListener('input', () => show(ALL.filter((t) => input.value && t.toLowerCase().endsWith(' - ' + input.value.toLowerCase()))));
+      this.querySelector('button').onclick = () => show(ALL);
+    } });
+  </script>'''
+_YEARS = [str(year) for year in range(1980, 2027)]
+_COUNTRIES = ["AE - EMIRATS ARABES UNIS", "AUTRES", "BE - BELGIQUE", "FR - FRANCE"]
+
+
+@pytest.mark.parametrize(("label", "listed", "want", "taken"), [
+    ("Completion year", _YEARS, "2025", "2025"),  # typing finds nothing: the arrow shows the whole list
+    ("Country", _COUNTRIES, "France", "FR - FRANCE"),
+    ("Country", _COUNTRIES, "Burkina Faso", "AUTRES"),  # not offered: the list's "other" entry
+    ("Completion year", _YEARS, "2027", None),  # not offered, no "other": nothing is chosen, the list is shown to the planner
+])
+async def test_a_suggesting_box_with_an_arrow_is_a_list_opened_by_its_arrow(page, label, listed, want, taken):  # noqa: F811
+    import json
+
+    await page.set_content(_VALUE_HELP % (json.dumps(listed), label))
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    assert [(f.label, f.kind) for f in snap.fields if f.kind in ("text", "combobox")] == [(label, "combobox"), ("Ville", "text")]
+    combo = next(f for f in snap.fields if f.kind == "combobox").model_copy(update={"required": True})
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value=want)
+    if taken is None:
+        with pytest.raises(engine._Skip):
+            await trusting._combobox(run, await resolve.element(combo.ref), combo, item)
+        assert run.combo_options[trusting.norm(label)] == listed
+    else:
+        assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == taken
