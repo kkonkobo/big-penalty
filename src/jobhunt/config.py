@@ -82,6 +82,9 @@ class Settings(BaseModel):
     apply_guard_mode: str = "core"  # JOBHUNT_APPLY_GUARD_MODE: core (browser-like, two core rules) | strict (every posting/entry proof)
     apply_network_filter: bool = False  # JOBHUNT_APPLY_NETWORK_FILTER=1: core mode aborts third-party writes after data entry
     apply_fill_mode: str = "planner"  # JOBHUNT_APPLY_FILL_MODE: planner (core mode fills what the planner maps) | strict (every validation layer)
+    # JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT=1: an application whose uncertain send was settled "not sent" may be sent again by
+    # the automatic pass (default: only by hand, in supervised mode)
+    apply_retry_verified_not_sent: bool = False
     # JOBHUNT_APPLY_MAX_AGE_DAYS: oldest job (effective posting date) an application may still be sent to. The search and
     # the shortlist keep their own 14-day freshness window; this one only governs sending.
     apply_max_age_days: int = 14
@@ -185,6 +188,7 @@ def get_settings() -> Settings:
         apply_guard_mode="strict" if env("JOBHUNT_APPLY_GUARD_MODE", "core").strip().lower() == "strict" else "core",
         apply_network_filter=env("JOBHUNT_APPLY_NETWORK_FILTER", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_fill_mode="strict" if env("JOBHUNT_APPLY_FILL_MODE", "planner").strip().lower() == "strict" else "planner",
+        apply_retry_verified_not_sent=env("JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_max_age_days=int(env("JOBHUNT_APPLY_MAX_AGE_DAYS") or 14),
         apply_prepare_min_score=float(env("JOBHUNT_APPLY_PREPARE_MIN_SCORE") or 60),
         apply_prepare_daily_cap=int(env("JOBHUNT_APPLY_PREPARE_DAILY_CAP") or 15),
