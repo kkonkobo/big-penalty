@@ -17,7 +17,7 @@ from typing import Callable
 from pydantic import BaseModel
 
 from jobhunt.apply.adapters import Attempt, Receipt, clean_receipt
-from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin
+from jobhunt.apply.destination import RECIPIENT_REFUSED, audit_url, clean_text, clean_url, contains_verification_code, origin, posting_url
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, posting_fingerprint, resolved_identity, similar_role
 from jobhunt.apply.types import ACCOUNT_REASONS, Mode, RunResult, RunStatus
@@ -654,7 +654,7 @@ def resolve_attempt(application_id: int, *, sent: bool, run_id: int | None = Non
             job = c.execute("SELECT origin_url FROM jobs WHERE id=? AND profile_id=?", (a["job_id"], a["profile_id"])).fetchone()
             if (not held or not attempt.adapter or not clean_receipt(receipt, attempt) or attempt.run_id != run_id
                     or attempt.application_id != application_id or attempt.rev != a["current_rev"]
-                    or not job or clean_url(job["origin_url"], navigation=True) != attempt.url
+                    or not job or posting_url(job["origin_url"]) != attempt.url
                     or held["binding_json"] != _binding_json(attempt) or sent != (receipt.outcome == "confirmed")):
                 raise ApplyError("Reçu périmé ou différent de la réservation.")
             _save_receipt(c, run_id, receipt)
@@ -891,7 +891,10 @@ def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=
     if current is None:
         return {}
     identities = {dedupe_identity(canonical), dedupe_identity(resolved_identity(current["extra"]))} - {None}
-    current_url = clean_url(current["origin_url"])
+    def link(url):  # (a posting told apart by a parameter the cleaner does not know keeps it: see `posting_url`)
+        return posting_url(url) or clean_url(url)
+
+    current_url = link(current["origin_url"])
     digests = {digest for digest in target_digests if digest}
     if current_url:
         digests.add(_url_key(current_url))
@@ -918,7 +921,7 @@ def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=
                  or any(digest in digests for digest in (row["url_key"], binding.get("url_digest"), binding.get("landing_digest"))
                         if isinstance(digest, str))
                  or bool(current_url and (row["url_key"] in (_url_key(current_url), canonical_url(current_url))
-                         or any(current_url == clean_url(row[key]) for key in ("origin_url", "url_key", "sent_origin_url")))))
+                         or any(current_url == link(row[key]) for key in ("origin_url", "url_key", "sent_origin_url")))))
         if exact or similar_role(current["company"], current["title"], row["company"], row["title"]):
             found[row["id"]] = exact or found.get(row["id"], False)
     return found

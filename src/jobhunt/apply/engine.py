@@ -33,7 +33,7 @@ from jobhunt.apply.adapters import Attempt
 from jobhunt.apply.autonomous import (
     SUPERVISED_REQUIRED, _live_option, blocked_consent, decision as autonomous_decision, eeo_field, race_ethnicity_field,
 )
-from jobhunt.apply.destination import clean_text, clean_url, contains_verification_code, origin
+from jobhunt.apply.destination import clean_text, clean_url, contains_verification_code, origin, posting_url
 from jobhunt.apply.errors import ApplyError, ManualField, StepChanged
 from jobhunt.apply.consent import dismiss_consent
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
@@ -3823,7 +3823,7 @@ async def run_application(page: Page, *, url: str, facts: FactSheet, planner: Pl
     Legacy dispatch callbacks alone do not authorize live sends. Dry callers
     should supply a fresh headless context, as the apply service does.
     """
-    url = clean_url(url, navigation=True)
+    url = posting_url(url)
     if not url:
         return RunResult(status="blocked", message="Lien de candidature non autorisé.")
     if autonomous and (mode != "submit" or not autonomous_attempt or not autonomous_attempt.autonomous

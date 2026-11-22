@@ -9,7 +9,7 @@ from typing import Literal
 
 from jobhunt import db
 from jobhunt.apply import store as apply_store
-from jobhunt.apply.destination import clean_url
+from jobhunt.apply.destination import posting_url
 from jobhunt.config import get_settings
 from jobhunt.cv import service, store
 from jobhunt.cv.master import MasterError, load_master
@@ -64,7 +64,7 @@ def duplicate_of(app: Application, job: MergedJob, *, confirmed_distinct: frozen
 def _find_duplicate(app, job, reserved, lookup_app, candidates, keys):
     role = normalize_role(job.company, job.title)
     url = _canon(job.origin_url)
-    navigation_url = clean_url(job.origin_url, navigation=True)
+    navigation_url = posting_url(job.origin_url)
     url_digest = apply_store._url_key(navigation_url) if navigation_url else ""
     for r in reserved:  # role / URL recorded at click time
         if r["application_id"] != app.id and ((role != "|" and r["role_key"] == role) or (url and r["url_key"] == url)

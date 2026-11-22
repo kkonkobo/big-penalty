@@ -71,7 +71,16 @@ def login_return(url: str) -> str:
         return ""
 
 
-def clean_url(url: str | None, *, navigation: bool = False, allow_login_redirect: bool = True) -> str:
+def posting_url(url: str | None) -> str:
+    """The link of a job posting as the automatic pass opens, reserves and compares it. Core guard mode keeps the query
+    parameters it does not know (`idOffre=`, `offre_id=`, a tenant code: on many career sites they are the posting's only
+    identity, and a link without them is another page); the strict mode refuses such a link."""
+    from jobhunt.config import get_settings
+
+    return clean_url(url, navigation=True, opaque=get_settings().apply_guard_mode == "core")
+
+
+def clean_url(url: str | None, *, navigation: bool = False, allow_login_redirect: bool = True, opaque: bool = False) -> str:
     if not url or any(ord(char) < 33 or char == "\\" for char in url):
         return ""
     try:
@@ -81,7 +90,7 @@ def clean_url(url: str | None, *, navigation: bool = False, allow_login_redirect
         port = parsed.port
         host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
         netloc = f"{host}:{port}" if port is not None else host
-        kept = {}
+        kept, unknown = {}, []
         for key, value in parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=100):
             name = key.lower()
             if name in _REQUISITION and _ID.fullmatch(value) and name not in kept:
@@ -89,8 +98,10 @@ def clean_url(url: str | None, *, navigation: bool = False, allow_login_redirect
             elif navigation and name in _LOGIN_REDIRECT and allow_login_redirect and login_return(url):
                 continue
             elif navigation and name not in _TRACKING and not name.startswith(_TRACKING_PREFIXES):
-                return ""
-        return urlunsplit((parsed.scheme, netloc, parsed.path or "/", urlencode(sorted(kept.values())), ""))
+                if not opaque or len(key) > 60 or len(value) > 300:
+                    return ""
+                unknown.append((key, value))
+        return urlunsplit((parsed.scheme, netloc, parsed.path or "/", urlencode(sorted([*kept.values(), *unknown])), ""))
     except ValueError:
         return ""
 
