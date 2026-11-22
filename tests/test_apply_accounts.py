@@ -581,3 +581,10 @@ def test_guarded_password_callback_rotates_within_its_scope(mem):
     assert password.rotate("https://elsewhere.example.test/apply") is None
     second = password.rotate("https://careers.example.test/apply")
     assert second and second != first and password("https://careers.example.test/apply") == second
+
+
+def test_workday_site_of_a_posting_whose_place_is_percent_encoded():
+    url = "https://tenant.wd3.myworkdayjobs.com/fr-FR/ACME/job/Saint-M%C3%A9dard---Test/STAGE---Test_JR-1/apply/applyManually"
+    assert A.workday_site(url) == "ACME" and A.workday_site(url.split("/apply")[0], posting=True) == "ACME"
+    assert A.workday_site("https://tenant.wd3.myworkdayjobs.com/fr-FR/ACME/job/Bad%ZZ/x_JR-1") is None
+    assert A.workday_site("https://tenant.wd3.myworkdayjobs.com/fr-FR/AC%4DE/job/Town/x_JR-1") is None  # (the namespace itself: never encoded)
