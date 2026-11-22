@@ -634,3 +634,17 @@ async def test_toggle_buttons_of_a_toolbar_stay_buttons(page):
                            '<form><label>Message <textarea name="m"></textarea></label><button>Envoyer</button></form>')
     snap, _ = await take_snapshot(page)
     assert not [f for f in snap.fields if f.kind == "radio"]
+
+
+async def test_a_button_that_only_shows_an_icon_is_named_by_the_icon_and_the_block_it_acts_on(page):
+    """A profile block edited through a pencil: the button has no words, its icon carries a title. It is listed under that
+    title, with the words of its block as context, and the live read of the button gives the same name."""
+    await page.set_content('''<div class="profile"><p>Titre du profil ? Téléphone ?</p>
+      <div class="action"><button class="modify"><span title="Modify" style="display:inline-block;width:16px;height:16px"></span></button></div></div>
+      <div class="training"><p>Formation : École d'ingénieurs</p>
+      <div class="action"><button class="delete"><svg width="16" height="16"><title>Delete</title></svg></button></div></div>
+      <button>Next</button>''')
+    snap, resolve = await take_snapshot(page)
+    buttons = [(f.label, f.group) for f in snap.fields if f.kind == "button"]
+    assert buttons == [("Modify", "Titre du profil ? Téléphone ?"), ("Delete", "Formation : École d'ingénieurs"), ("Next", "")]
+    assert await live_button(resolve(snap.fields[0].ref)) == ("Modify", True, True)
