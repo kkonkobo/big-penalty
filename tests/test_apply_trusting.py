@@ -1635,3 +1635,23 @@ async def test_an_answer_whose_body_never_ends_does_not_hold_the_run(monkeypatch
     monkeypatch.setattr(engine.asyncio, "wait_for", lambda aw, timeout: real(aw, 0.05))
     run = SimpleNamespace(account_pending=[_Hanging()])
     assert await engine._Run._account_answers(run) == ["200 /fr-FR/acme/login"]
+
+
+async def test_a_list_with_its_own_search_box_is_searched_there(page):  # noqa: F811
+    await page.set_content('''<label id="l">Country of citizenship</label>
+      <span id="b" role="combobox" tabindex="0" aria-labelledby="l">Sélectionner</span><div id="pop"></div>
+      <script>
+        const ALL = ['Afghanistan', 'Albanie', 'Algérie', 'Belgique', 'Burkina Faso', 'Burundi', 'France'];
+        const show = (query) => { const hits = ALL.filter((t) => t.toLowerCase().startsWith(query.toLowerCase())).slice(0, 3);
+          list.innerHTML = hits.map((t) => `<li role="option">${t}</li>`).join('');
+          for (const li of list.children) li.onclick = () => { b.textContent = li.textContent; pop.innerHTML = ''; }; };
+        b.onclick = () => { pop.innerHTML = '<input type="search" id="q"><ul role="listbox" id="list"></ul>';
+          window.list = document.getElementById('list'); q.oninput = () => show(q.value); show(''); q.focus(); };
+      </script>''')
+    from jobhunt.apply.snapshot import take_snapshot
+
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="nationality"), combo, None, value="Burkina Faso")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Burkina Faso"
