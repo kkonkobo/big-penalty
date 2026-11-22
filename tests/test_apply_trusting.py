@@ -1728,3 +1728,13 @@ async def test_an_upload_block_without_a_chosen_file_is_told_apart(page):  # noq
     first = await (await page.query_selector("#b1")).evaluate(engine._ATTACH_JS)
     second = await (await page.query_selector("#b2")).evaluate(engine._ATTACH_JS)
     assert first["found"] and first["filled"] and second["found"] and not second["filled"]
+
+
+async def test_the_sign_in_link_of_a_page_is_a_control_the_planner_can_click(page):  # noqa: F811
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content('''<p>Utilisateur déjà enregistré ? <a href="/login">Connectez-vous</a></p>
+      <p><a href="/legal">Mentions légales</a> <a href="/account">Sign in</a></p>
+      <form><label>E-mail <input name="email"></label><button type="button">Postuler</button></form>''')
+    snap, _ = await take_snapshot(page)
+    assert [f.label for f in snap.fields if f.kind == "link"] == ["Connectez-vous", "Sign in"]

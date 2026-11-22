@@ -199,7 +199,7 @@ _JS = r"""
     return null;
   };
 
-  const LINK_RE = /postuler|candidat|apply|continuer|suivant|next|je postule|int[eé]ress|interested|rejoindre|join us|cr[eé]er (un|votre|mon) compte|s'?inscrire|inscription|sign ?up|register|create (an )?account|konto erstellen|registrieren|pas encore de compte|new user/i;
+  const LINK_RE = /postuler|candidat|apply|continuer|suivant|next|je postule|int[eé]ress|interested|rejoindre|join us|cr[eé]er (un|votre|mon) compte|s'?inscrire|inscription|sign ?up|register|create (an )?account|konto erstellen|registrieren|pas encore de compte|new user|se connecter|connectez[- ]vous|identifiez[- ]vous|connexion|sign[ -]?in|log[ -]?in|anmelden/i;
   const BTN_CLASS_RE = /(^|[\s_-])(btn|button|cta)([\s_-]|$)/i;
   const up = (e) => e.parentElement || (e.getRootNode && e.getRootNode().host) || null;
   const fileUsable = (el) => {
