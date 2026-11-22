@@ -30,7 +30,8 @@ from jobhunt.apply import scoped_choices, store as apply_store
 from jobhunt.apply.engine import UNSUPPORTED_DISPATCH, Uploads, run_application
 from jobhunt.apply.page_outline import (DIAGNOSED_STATUSES, OUTLINE_FILE, note_stop_reason, save_failure_diagnostics,
                                         save_run_record)
-from jobhunt.apply.destination import RECIPIENT_REFUSED, RecipientGuard, clean_url, contains_verification_code, is_bound_pdf
+from jobhunt.apply.destination import (RECIPIENT_REFUSED, RecipientGuard, clean_url, contains_verification_code, is_bound_pdf,
+                                        posting_url)
 from jobhunt.apply.errors import ApplyError
 from jobhunt.apply.identity import canonical_identity, dedupe_identity, dispatch_url, resolved_identity
 from jobhunt.apply.facts import answers_path as facts_answers_path
@@ -163,7 +164,7 @@ def make_host_allowed(origin_url: str | None, trusted: list[str] | set[str] = ()
 
 def origin_digest(url: str | None) -> str:
     """sha256 hex of a job's `origin_url`: what a send form carries so the destination the user saw is the one used."""
-    return hashlib.sha256(clean_url(url, navigation=True).encode("utf-8")).hexdigest()
+    return hashlib.sha256(posting_url(url).encode("utf-8")).hexdigest()
 
 
 def untrusted_host_of(run_: ApplyRun | None) -> str:
@@ -233,7 +234,7 @@ def _item(app: Application, job, run_: ApplyRun | None, settings, reads: policy.
     if generic and run_ and run_.mode == "submit" and run_.status == "needs_human":
         autonomous_ready = False
     return QueueItem(
-        app=app, bucket=bucket, score=job.score if job else None, origin_url=clean_url(job.origin_url, navigation=True) if job else None,  # type: ignore[arg-type]
+        app=app, bucket=bucket, score=job.score if job else None, origin_url=posting_url(job.origin_url) if job else None,  # type: ignore[arg-type]
         origin_host=_host(job.origin_url if job else None), origin_sha=origin_digest(job.origin_url if job else None), age_days=age_days(job) if job else None, last_run=run_,
         outstanding=outstanding,
         auto=bool((adapted or autonomous_ready) and not (manual_retry or outstanding or site_handoff) and job and job.score is not None
@@ -328,7 +329,7 @@ def _gate(app: Application, job, mode: Mode, trigger: str, *, confirmed_distinct
         return ["candidature déjà envoyée"]
     if app.status == "withdrawn":
         return ["candidature retirée"]
-    if job is not None and policy._usable_origin(job) and not clean_url(job.origin_url, navigation=True):
+    if job is not None and policy._usable_origin(job) and not posting_url(job.origin_url):
         return ["Lien de candidature non autorisé."]
     if mode in ("submit", "supervised"):
         if mode == "supervised" and (trigger != "user" or app.approved_by != "user"):
@@ -392,7 +393,7 @@ def _dispatch_match(job, mode: Mode) -> Match | None:
 
 def _generic_enabled(job, *, check_host: bool = True) -> bool:
     return bool(get_settings().apply_autonomous and job and policy._usable_origin(job)
-                and clean_url(job.origin_url, navigation=True)
+                and posting_url(job.origin_url)
                 and not ((match := registry.find(job.origin_url, job.origin_ats)) and match.capability == "unattended")
                 and (not check_host or not apply_store.host_paused(_host(dispatch_url(job.origin_url, job.extra, autonomous=True)))))
 
@@ -415,7 +416,7 @@ def _check_boundary(run_: ApplyRun, started_job, mode: Mode, trigger: str, *, re
             problems.append("Mode supervisé indisponible pour cette approbation ou cette destination.")
     if problems:
         raise ApplyError(" ; ".join(dict.fromkeys(problems)))
-    url = clean_url(job.origin_url, navigation=True)
+    url = posting_url(job.origin_url)
     parsed = urlparse(url)
     if (not parsed.hostname or parsed.username is not None or parsed.password is not None or
             (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}))
@@ -1446,7 +1447,7 @@ async def reconcile_attempt(run_id: int, *, evidence: object = None) -> Receipt 
         outstanding = apply_store.outstanding_attempt(attempt.application_id)
         app = cvstore.get_application(attempt.application_id)
         job = db.get_job(app.job_id) if app else None
-        if not outstanding or outstanding.id != run_id or not job or clean_url(job.origin_url, navigation=True) != attempt.url:
+        if not outstanding or outstanding.id != run_id or not job or posting_url(job.origin_url) != attempt.url:
             return None
         match = registry.find(attempt.url, job.origin_ats)
         if (not match or match.adapter.name != attempt.adapter
@@ -1598,7 +1599,7 @@ async def resume_email(profile_id: int | None = None, *, pool=None, _lock_held: 
                     continue
                 metadata = job.extra.get('origin_resolution') if isinstance(job.extra, dict) else None
                 verified = metadata.get('verified_urls') if isinstance(metadata, dict) and metadata.get('canonical_ok') is True else None
-                urls = [dispatch_url(job.origin_url, job.extra, autonomous=True), clean_url(job.origin_url, navigation=True)]
+                urls = [dispatch_url(job.origin_url, job.extra, autonomous=True), posting_url(job.origin_url)]
                 if isinstance(verified, list):
                     urls.extend(clean_url(url, navigation=True) for url in verified if isinstance(url, str))
                 scope = apply_store.email_scope(held.id, urls)

@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlsplit
 
 from jobhunt.dedupe import normalize_company, normalize_title
-from jobhunt.apply.destination import clean_url, origin
+from jobhunt.apply.destination import clean_url, origin, posting_url
 
 _ID = re.compile(r"[a-z0-9][a-z0-9_.:/-]{0,127}\Z")
 
@@ -65,7 +65,7 @@ def ats_target(url: str) -> tuple[str | None, tuple[str, str] | None]:
 
 
 def dispatch_url(original: str | None, extra, *, autonomous: bool) -> str:
-    fallback = clean_url(original, navigation=True)
+    fallback = posting_url(original)
     if not autonomous or not fallback or not resolved_identity(extra):
         return fallback
     from jobhunt.origin import MIN_CONFIDENCE
@@ -74,7 +74,7 @@ def dispatch_url(original: str | None, extra, *, autonomous: bool) -> str:
         extra = json.loads(extra)
     resolution = extra["origin_resolution"]
     target = clean_url(resolution.get("apply_url") if isinstance(resolution.get("apply_url"), str) else None, navigation=True)
-    posting = clean_url(resolution.get("posting_url") if isinstance(resolution.get("posting_url"), str) else None, navigation=True)
+    posting = posting_url(resolution.get("posting_url") if isinstance(resolution.get("posting_url"), str) else None)
     confidence = resolution.get("confidence")
     ats = resolution.get("submit_ats")
     if (resolution.get("canonical_ok") is not True or resolution.get("state") != "resolved"

@@ -275,3 +275,44 @@ async def test_a_send_click_the_page_interrupts_is_judged_by_the_page_that_follo
     assert (result.status == "submitted") is sent, (result.message, result.result.diagnostic_code)
     assert result.result.submit_clicked or sent
     assert paths(core, "/site") == ["/site/jobs/100"]  # one send, whatever the outcome
+
+
+def test_a_posting_link_keeps_the_parameters_the_cleaner_does_not_know_in_core_mode_only(monkeypatch):
+    from jobhunt.apply.destination import clean_url, posting_url
+
+    url = "https://careers.example.test/offre/detail.aspx?idOffre=100&utm_source=annonce&LCID=1036"
+    settings = service.get_settings()
+    monkeypatch.setattr(settings, "apply_guard_mode", "strict")
+    assert posting_url(url) == ""
+    monkeypatch.setattr(settings, "apply_guard_mode", "core")
+    assert posting_url(url) == "https://careers.example.test/offre/detail.aspx?idOffre=100"  # (tracking is still dropped)
+    assert posting_url(url + "&token=" + "a" * 301) == ""
+    assert clean_url(url, navigation=True) == ""  # any other link (a landing, a redirect) is judged as before
+
+
+async def test_two_postings_told_apart_by_a_parameter_the_cleaner_does_not_know_are_each_sent_once(core, profile, tmp_path, fast):
+    """`detail.aspx?idOffre=100` and `?idOffre=200` are two postings of one site: neither is left to the supervised mode,
+    each is opened with its own parameter, and the second is not taken for the first one sent again."""
+    from apply_cv_helpers import make_app, make_job
+    from cv_fakes import save_confirmed
+
+    from jobhunt.cv import service as cvs
+
+    core.html["/site/offre/detail.aspx"] = form_page("/offre/postuler")
+    master, apps = save_confirmed(profile.id), []
+    for ref, title in (("100", "Ingénieur systèmes embarqués"), ("200", "Technicienne d'essais mécaniques")):
+        job = make_job(profile, url=f"{CAREERS}/offre/detail.aspx?idOffre={ref}&utm_source=annonce", title=title,
+                       company="Société Exemple")
+        assert service._generic_enabled(job)
+        (tmp_path / ref).mkdir()
+        app = make_app(profile, job, tmp_path / ref, master_hash=master.content_hash)
+        cvs.approve(app.id, app.current_rev)
+        apps.append(app)
+    for app in apps:
+        result = await send(app)
+        assert result.status == "submitted", (result.message, result.result.diagnostic_code)
+    opened = [path for path in core.requests if path.startswith("/site/offre/detail.aspx")]
+    assert opened == ["/site/offre/detail.aspx?idOffre=100", "/site/offre/detail.aspx?idOffre=200"]
+    assert paths(core, "/site") == ["/site/offre/postuler"] * 2
+    again = await send(apps[0])
+    assert again.status != "submitted" and len(core.posts) == 2
