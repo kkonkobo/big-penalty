@@ -664,11 +664,33 @@ def autonomous_outcome(env, job, status, *, started, receipt=None, submit_clicke
     ([("failed", OLD, None, False), ("failed", NEW, None, False)], False),        # only one failure counts
     ([("failed", OLD, None, True), ("failed", OLD, "uncertain", False)], True),   # a possible send always counts
 ])
-async def test_old_engine_failures_no_longer_pause_their_host(env, profile, outcomes, paused):
+async def test_old_engine_failures_no_longer_pause_their_host(env, profile, host_pause, outcomes, paused):
     for n, (status, started, receipt, clicked) in enumerate(outcomes, 1):
         autonomous_outcome(env, env.job(n), status, started=started, receipt=receipt, submit_clicked=clicked)
     assert astore.host_paused("job.example.test") is paused
     assert ("job.example.test" in astore.paused_hosts()) is paused
+
+
+async def test_two_failures_on_a_site_do_not_leave_its_other_applications_to_the_supervised_mode(env, profile, monkeypatch):
+    """Default: no site pause. The pass keeps sending the site's other applications (each one stops after its own two
+    failures); `apply_host_pause` restores the pause."""
+    from jobhunt.config import get_settings
+
+    for n in (1, 2):
+        autonomous_outcome(env, env.job(n), "failed", started=NEW, submit_clicked=n == 1)
+    assert not astore.host_paused("job.example.test") and astore.paused_hosts() == set()
+    monkeypatch.setattr(get_settings(), "apply_host_pause", True)
+    assert astore.host_paused("job.example.test") and astore.paused_hosts() == {"job.example.test"}
+
+
+@pytest.mark.parametrize("code", ["supervised_only", "no_adapter"])
+async def test_an_application_once_left_to_the_supervised_mode_is_sent_by_the_next_pass(env, profile, code):
+    job = env.job(1)
+    app = engine_paused_run(env, job, code, started=OLD)
+    assert not astore.has_site_handoff(app.id)
+    s, lines = await daily(profile)
+    assert [a for a, _ in env.runs] == [app.id] and (s.sent, s.paused, s.supervised) == (1, 0, 0)
+    assert not any("supervisé" in line for line in lines)
 
 
 @pytest.mark.parametrize("status", ["needs_email", "needs_human"])

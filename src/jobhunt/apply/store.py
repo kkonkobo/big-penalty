@@ -476,6 +476,7 @@ ENGINE_PAUSE_CODES = frozenset({
     "recipient_refused_other_write", "recipient_refused_redirect", "recipient_refused_response",
     "recipient_refused_same_site_navigation", "recipient_refused_same_site_write", "recipient_refused_transport",
     "apply_target_unverified", "public_page_shell", "job_page_no_apply_control", "apply_control_ambiguous",
+    "supervised_only", "no_adapter",  # (left to the supervised mode by a rule of the time, a paused site among them)
 })
 
 
@@ -815,7 +816,17 @@ def counts_as_failure(run: ApplyRun) -> bool:
     return clicked or _iso(run.started_at) >= ENGINE_RETRY_EPOCH
 
 
+def _host_pause() -> bool:
+    from jobhunt.config import get_settings  # noqa: PLC0415
+
+    return bool(get_settings().apply_host_pause)
+
+
 def _host_paused(conn, host: str) -> bool:
+    """Two failed or unconfirmed autonomous attempts in a row pause a site - only when the owner switched
+    `apply_host_pause` on: by default the pass keeps sending there (an application stops after its own two failures)."""
+    if not _host_pause():
+        return False
     outcomes = conn.execute("""SELECT r.status, v.receipt_outcome FROM apply_reservations v
         JOIN application_runs r ON r.id=v.run_id
         WHERE r.finished_at IS NOT NULL AND json_extract(v.binding_json, '$.autonomous')=1
@@ -832,6 +843,8 @@ def host_paused(host: str) -> bool:
 
 
 def paused_hosts() -> set[str]:
+    if not _host_pause():
+        return set()
     with connect() as conn:
         rows = conn.execute("""WITH eligible AS (
             SELECT v.id, json_extract(v.binding_json, '$.host') AS host,

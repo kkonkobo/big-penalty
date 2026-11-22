@@ -39,7 +39,7 @@ from jobhunt.apply.consent import dismiss_consent
 from jobhunt.apply.answer_check import (AnswerCheckItem, AnswerVerifier, as_verdict, derived_from, fold, is_hard_fact)
 from jobhunt.apply.missing_answers import IDENTITY, ambiguous_name, capture, exact_option, fact_key, standing_key
 from jobhunt.apply.planner import Planner, facts_payload, inspection_inputs
-from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, bare_url, safe_reason, save_failure_diagnostics
+from jobhunt.apply.page_outline import DIAGNOSED_STATUSES, bare_url, note_stop_reason, safe_reason, save_failure_diagnostics
 from jobhunt.apply.prompt_rules import DIAL_COUNTRY_NAMES, decision_key, device_type, french_phone, international_calling_code, recruiter_ai_polarity, technical_key
 from jobhunt.apply.scoped_choices import field_choices
 from jobhunt.apply.snapshot import Resolver, apply_demographic_choice, live_button, take_snapshot
@@ -1754,7 +1754,8 @@ class _Run:
                     self.autonomous.upload_pending = True
             except ManualField:
                 raise
-            except ApplyError:
+            except ApplyError as exc:
+                note_stop_reason(self.out_dir, f"field refused before typing ({op}): {exc}")
                 raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
         elif self.mode == "supervised":
             await self._supervised_checkpoint(target)
@@ -3740,7 +3741,9 @@ class _Run:
                                 await self.on_submit_click()
                                 self.diagnostics.receipt_reason = "submit_unverified"
                             self.autonomous.arm_click(scripted=final or role in {"next", "login", "signup"}, account=bound_account)
-                        except (ManualField, ApplyError):
+                        except (ManualField, ApplyError) as exc:
+                            note_stop_reason(self.out_dir, f"click refused before dispatch ({role or 'none'}"
+                                                           f"{', final' if final else ''}): {type(exc).__name__}: {exc}")
                             raise _DecisionHold(self._end("needs_human", SUPERVISED_REQUIRED)) from None
                     if trust and bound_account and role in ("login", "signup"):
                         self._watch_account_answers()
