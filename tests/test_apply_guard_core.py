@@ -339,3 +339,32 @@ async def test_a_receipt_shown_on_the_same_page_inside_its_page_wide_form_is_rea
     result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(one_click))
     assert result.status == "submitted", (result.message, result.result.diagnostic_code)
     assert paths(core, "/site") == ["/site/jobs/100"] and store.outstanding_attempt(app.id) is None
+
+
+async def test_what_an_error_banner_says_reaches_the_planner_even_far_down_the_page(core, profile, tmp_path, fast):
+    """The site refuses the form and names the missing list in a banner that stands below the part of the page the planner
+    reads; the list itself is not marked required and shows its "nothing chosen" option. The planner is told what the
+    banner says, picks the option, and the form is sent."""
+    core.html["/site/jobs/100"] = (
+        '<title>Ingénieur systèmes embarqués</title><main><h1>Ingénieur systèmes embarqués</h1>'
+        '<form action="/jobs/100" method="post" enctype="multipart/form-data"><label for="name">Prénom</label>'
+        '<input id="name" name="first_name"><label for="level">Niveau d\'études</label><select id="level" name="level">'
+        '<option value="0">Selezionare un valore</option><option value="5">Bac+5</option></select>'
+        '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form></main>')
+    core.post_pages["/site/jobs/100"] = "refused_banner_far_below.html"
+    seen = []
+
+    def plan(snapshot):
+        told = "THE PAGE SHOWS THIS MESSAGE" in snapshot.text and "Niveau d'études" in snapshot.text[:600]
+        seen.append(told)
+        level = [act(snapshot, "Niveau", "select", value="Bac+5")] if told else []
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"),
+                                                   act(snapshot, "CV", "upload_cv", kind="file"), *level,
+                                                   act(snapshot, "Envoyer", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code, seen)
+    assert seen[0] is False and True in seen
+    assert paths(core, "/site") == ["/site/jobs/100", "/site/jobs/100/retry"]
+    assert b'name="level"\r\n\r\n5' in core.posts_to("/site/jobs/100/retry")[0]["body"]

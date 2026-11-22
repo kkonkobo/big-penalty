@@ -328,6 +328,11 @@ _BANNER_JS = r"""() => {
   }
   return false;
 }"""
+# The same banners, as text (three at most): what the site says is wrong, wherever it stands on the page.
+_BANNER_TEXTS_JS = "return out;".join(_BANNER_JS.replace(
+    "return true;", "{ if (!out.includes(t)) out.push(t); if (out.length >= 3) return out; }").replace(
+    "const WORDS", "const out = []; const WORDS", 1).rsplit("return false;", 1))  # (the last one: `vis` has its own)
+assert "return true" not in _BANNER_TEXTS_JS and _BANNER_TEXTS_JS.count("return out;") == 2 and "const out = []" in _BANNER_TEXTS_JS
 # Does the clicked control's own form (else its closest form / dialog / main container) hold a pre-selected choice?
 _SCOPE_CHOICE_JS = r"""(e) => {
   const f = e.form || e.closest('form');
@@ -1119,6 +1124,14 @@ class _Run:
                 if await fr.evaluate(_BANNER_JS):
                     return True
         return False
+
+    async def _banner_texts(self) -> list[str]:
+        """What the page's error banners say (any frame; three at most)."""
+        found: list[str] = []
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                found += [text for text in await fr.evaluate(_BANNER_TEXTS_JS) if isinstance(text, str) and text not in found]
+        return found[:3]
 
     async def _holds_choice(self, el: ElementHandle | Locator) -> bool:
         """dry_run: a pre-selected / checked control in the SAME form (or container) as the clicked control. Unreadable = True."""
@@ -2954,6 +2967,11 @@ class _Run:
                 if self.stuck_fields:
                     pub.text = self._r(trusting.stuck_hint(self.stuck_fields)) + pub.text
                     self.stuck_fields = []
+                with contextlib.suppress(Exception):
+                    # (a banner that lists what is missing may stand far below the part of the page the planner reads)
+                    said = [text for text in map(self._r, await self._banner_texts()) if text[:80] not in pub.text]
+                    if said:
+                        pub.text = trusting.banner_hint(said) + pub.text
             if self._inspection_only:
                 inspection, keys = inspection_inputs(pub, self._planner_facts())
                 plan = await self.planner.plan(inspection, keys, job_title="", company="", history=[], mode=self.mode)

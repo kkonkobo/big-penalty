@@ -800,6 +800,11 @@ def stuck_hint(labels: list[str]) -> str:
             "them as they are and answer with ONLY the click that moves on (`next` or `submit`), unless a field it did not list is still empty.] ")
 
 
+def banner_hint(texts: list[str]) -> str:
+    return ("[THE PAGE SHOWS THIS MESSAGE, most likely an error about the form: « " + " » « ".join(text[:300] for text in texts)
+            + " ». If it names fields, fill or correct exactly those before any `next` / `submit` click.] ")
+
+
 # (the items a multi-select already holds are rendered as options of a "selected" list: not choices of the open list)
 _OPTION_TEXT_JS = ("e => e.closest('[data-automation-id=\"selectedItemList\"], [data-automation-id=\"selectedItem\"]') ? '' "
                    ": (e.innerText || e.textContent || '')")

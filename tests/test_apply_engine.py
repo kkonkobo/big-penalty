@@ -1181,6 +1181,16 @@ CONFIRMATION_TEXTS = [
 async def test_an_error_banner_is_not_a_success_notice_nor_a_screen_reader_announcement(page, markup, error):
     await page.set_content(f"<main><h1>Offre</h1>{markup}</main>")
     assert await page.evaluate(engine._BANNER_JS) is error
+    assert bool(await page.evaluate(engine._BANNER_TEXTS_JS)) is error
+
+
+async def test_the_words_of_an_error_banner_are_read_wherever_it_stands_and_hidden_ones_are_not(page):
+    await page.set_content(
+        '<main><div role="alert" style="display:none">Erreur cachée</div>'
+        "<div class=\"message error\">Inserire le informazioni nel campo 'Nazionalità'. Inserire le informazioni nel campo 'Livello'.</div>"
+        '<div role="alert">Your application to the 2026-00100 job opening has been successfully sent</div></main>')
+    assert await page.evaluate(engine._BANNER_TEXTS_JS) == [
+        "Inserire le informazioni nel campo 'Nazionalità'. Inserire le informazioni nel campo 'Livello'."]
 
 
 @pytest.mark.parametrize("text,ok", CONFIRMATION_TEXTS)
