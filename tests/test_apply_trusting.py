@@ -1696,3 +1696,16 @@ async def test_required_fields_a_site_unfolds_after_the_click_show_it_refused_th
     # both held a value when the click was made and are empty now: the form was emptied, which proves nothing
     run = _after_final_click(snap, sent_empty=set(), click_filled={("prenom", "text"), ("civilite", "combobox")})
     assert not await engine._Run._submit_rejected(run, snap) and not run.withdrawn
+
+
+@pytest.mark.parametrize(("text", "missing"), [
+    ("Erreur de saisie - aucune pièce jointe chargée - Je dépose ma candidature", True),
+    ("No file was uploaded. Please select a file.", True),
+    ("Veuillez joindre votre CV avant d'envoyer", True),
+    ("Votre CV : CV.pdf (pièce jointe chargée)", False),
+    ("Aucun résultat", False),
+])
+def test_a_site_saying_no_file_came_with_the_attach_click(text, missing):
+    from jobhunt.apply.answer_check import fold
+
+    assert bool(engine.NO_ATTACHMENT_RE.search(fold(text))) is missing
