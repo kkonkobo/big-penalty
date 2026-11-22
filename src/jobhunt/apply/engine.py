@@ -2313,6 +2313,8 @@ class _Run:
             "signals": page_signals(seen.text), "account_answers": getattr(self, "account_answers", []),
             "fields": [{"ref": f.ref, "kind": f.kind, "label": f.label[:80], "required": f.required, "filled": not _is_empty(f),
                         "error": f.error[:80], "options": len(f.options),
+                        # (what a list offers - the site's own wording, never an answer - when the plan could not use it)
+                        "choices": [o.label[:40] for o in f.options][:90] if f.kind in ("select", "combobox") and _is_empty(f) else [],
                         # (the option a choice control shows - a country, a level, yes / no - never free text)
                         "chosen": f.value[:60] if f.kind in ("select", "combobox", "radio", "checkbox") or trusting.is_dial(f, seen) else ""}
                        for f in seen.fields][:150],
