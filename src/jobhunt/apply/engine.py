@@ -340,6 +340,7 @@ _NOTICE_TEXTS_JS = r"""(titled) => {
   const WORDS = /erreur|error|errore|fehler|obligatoire|obbligator|required|requis|erforderlich|pflicht|inserire|compilare|renseign|veuillez|invalid|manquant|missing|mancant/i;
   const NOT_NOTICE = /cookie|traceur|consent|chat|assistan|besoin d'aide|need help|newsletter/i;
   const out = [];
+  titled = titled || /^\s*(erreur|error|errore|fehler|fout)\b/i.test(document.title);   // (a form in a frame: its own title)
   for (const e of document.querySelectorAll('body *')) {
     if (['SCRIPT', 'STYLE', 'NAV', 'HEADER', 'FOOTER', 'FORM', 'IFRAME'].includes(e.tagName)) continue;
     const pos = getComputedStyle(e).position;
@@ -1171,11 +1172,13 @@ class _Run:
         return found[:3]
 
     async def _notice_texts(self, title: str) -> list[str]:
-        """What a notice floating over the main page says (see `_NOTICE_TEXTS_JS`)."""
-        with contextlib.suppress(Exception):
-            found = await self.page.evaluate(_NOTICE_TEXTS_JS, bool(ERROR_TITLE_RE.match(fold(title).strip())))
-            return [text for text in found if isinstance(text, str)][:2]
-        return []
+        """What a notice floating over the page says (any frame; see `_NOTICE_TEXTS_JS`)."""
+        titled = bool(ERROR_TITLE_RE.match(fold(title).strip()))
+        found: list[str] = []
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                found += [text for text in await fr.evaluate(_NOTICE_TEXTS_JS, titled) if isinstance(text, str) and text not in found]
+        return found[:2]
 
     async def _holds_choice(self, el: ElementHandle | Locator) -> bool:
         """dry_run: a pre-selected / checked control in the SAME form (or container) as the clicked control. Unreadable = True."""

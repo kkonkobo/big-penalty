@@ -1943,3 +1943,15 @@ async def test_an_upload_button_that_never_brings_a_file_field_says_what_happene
     cv.write_bytes(b"%PDF-1.4 test")
     with pytest.raises(engine._Skip, match=r"clic fait ; rien d'ouvert : second clic ; 0 champ\(s\) fichier, aucun dialogue"):
         await trusting._upload_through(SimpleNamespace(page=page, uploaded=False), await page.query_selector("#up"), cv)
+
+
+async def test_a_floating_notice_inside_the_frame_that_holds_the_form_is_read(page):  # noqa: F811
+    """A career site shows its application form in a frame; the form's own floating notice names the missing field. A cookie
+    bar or a help widget floating over the page is not such a notice."""
+    await page.set_content('''<title>Candidature à un poste</title><h1>Postuler</h1>
+      <div style="position:fixed;bottom:0;left:0;right:0">Nous utilisons des cookies pour améliorer votre visite.</div>
+      <iframe style="width:900px;height:400px" srcdoc="<div style='position:fixed;top:0;left:0;right:0'>
+        <span>Veuillez renseigner le champ 'Mobilité'.</span><a href='#'>×</a></div><form><input name='a'><button>Enregistrer</button></form>"></iframe>''')
+    await page.wait_for_timeout(300)
+    run = SimpleNamespace(page=page)
+    assert await engine._Run._notice_texts(run, "Candidature à un poste") == ["Veuillez renseigner le champ 'Mobilité'.×"]
