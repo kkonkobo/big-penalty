@@ -1812,6 +1812,25 @@ async def test_click_dispatches_exactly_once_even_when_it_raises_after_dispatch(
     assert el.dispatches == 1
 
 
+async def test_a_button_hidden_under_the_pages_own_click_catcher_is_clicked_through_the_catcher(page):
+    """Some sites hide the real submit button (aria-hidden) under a transparent role=button catcher of the same box and only
+    listen on the catcher: activating the hidden button would post the form natively, which such a site ignores."""
+    await page.set_content("""<form onsubmit="document.body.dataset.native = '1'; return false"><div style="position:relative;width:200px;height:40px">
+      <div role="button" aria-label="Connexion" tabindex="0" style="position:absolute;inset:0;z-index:2"
+           onclick="document.body.dataset.caught = (+document.body.dataset.caught || 0) + 1"></div>
+      <button id="real" type="submit" aria-hidden="true" tabindex="-2" style="width:200px;height:40px">Connexion</button></div></form>""")
+    await engine._Run._click(object(), page.locator("#real"))  # type: ignore[arg-type]
+    assert await page.evaluate("[document.body.dataset.caught, document.body.dataset.native || '']") == ["1", ""]
+
+
+async def test_a_button_under_something_else_is_still_activated_directly(page):
+    """A banner or a sticky header over the button is not its click catcher: the button itself is activated, once."""
+    await page.set_content("""<div style="position:fixed;inset:0;z-index:5" onclick="document.body.dataset.banner = '1'"></div>
+      <button id="b" type="button" onclick="document.body.dataset.n = (+document.body.dataset.n || 0) + 1">Postuler</button>""")
+    await engine._Run._click(object(), page.locator("#b"))  # type: ignore[arg-type]
+    assert await page.evaluate("[document.body.dataset.n, document.body.dataset.banner || '']") == ["1", ""]
+
+
 async def test_real_click_is_activated_exactly_once(page, server, fast, cv_pdf, tmp_path):
     await serve(page, "counter", '<button id=b type=button onclick="document.body.dataset.n=(+document.body.dataset.n||0)+1;fetch(\'/count\',{method:\'POST\',body:\'x\'})">Postuler</button>')
     plan = lambda snap: StepPlan(page_kind="job_page", actions=[act(snap, r"Postuler", "click", role="open_form")])  # noqa: E731
