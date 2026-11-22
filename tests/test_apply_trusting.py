@@ -1655,3 +1655,16 @@ async def test_a_list_with_its_own_search_box_is_searched_there(page):  # noqa: 
     run = SimpleNamespace(page=page, combo_options={}, _combo_value=engine._Run._combo_value, _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
     item = engine._Item(Action(ref=combo.ref, op="select", fact="nationality"), combo, None, value="Burkina Faso")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Burkina Faso"
+
+
+@pytest.mark.parametrize(("want", "label"), [("Français", "French"), ("Français : langue maternelle", "French"), ("Anglais", "English")])
+def test_a_language_is_found_under_its_name_in_the_forms_language(want, label):
+    labels = ["Dutch", "English", "French", "German", "Other"]
+    assert labels[trusting.best_option(labels, want)] == label
+    assert label.lower() in trusting.language_names(want)
+
+
+def test_an_ordinary_answer_has_no_language_names():
+    assert trusting.language_names("France") == [] and trusting.language_names("Oui") == [] and trusting.language_names("") == []
+    labels = ["Oui", "Non"]
+    assert labels[trusting.best_option(labels, "Non")] == "Non"
