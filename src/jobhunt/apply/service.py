@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import urlparse
@@ -603,8 +603,19 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
     if getattr(audience, "trusting", False):
         audience.unmark_submit = unmark_submit
 
+    def mail_since():
+        """From when verification mails count: this run's start, or - planner-trusting mode - the start of an earlier run
+        of the same application within the last three hours (the mail a site sent to an account created by a run that
+        was then interrupted is the one this run waits for)."""
+        started = run_.started_at
+        if getattr(audience, "trusting", False):
+            for earlier in apply_store.list_runs(app.id):
+                if earlier.id != run_.id and timedelta(0) < run_.started_at - earlier.started_at <= timedelta(hours=3):
+                    started = min(started, earlier.started_at)
+        return started
+
     async def verify_mail():
-        return await mail.poll(email, audience.recipient_url, run_.started_at)
+        return await mail.poll(email, audience.recipient_url, mail_since())
 
     async def follow_mail(tab, link, still_current):
         if not await mail.open_link(tab.context, audience.recipient_url, link, still_current):
