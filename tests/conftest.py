@@ -37,6 +37,12 @@ def host_pause(monkeypatch):
     monkeypatch.setattr(get_settings(), "apply_host_pause", True)
 
 
+@pytest.fixture
+def hold_similar_roles(monkeypatch):
+    """The owner's switch: a title close to one already sent to the same employer waits for "ce n'est pas un doublon"."""
+    monkeypatch.setattr(get_settings(), "apply_hold_similar_roles", True)
+
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     from jobhunt import schedule
