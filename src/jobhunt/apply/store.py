@@ -524,8 +524,17 @@ def outstanding_attempt(application_id: int) -> ApplyRun | None:
     return _from_row(r) if r else None
 
 
+def _auto_retry_allowed() -> bool:
+    from jobhunt.config import get_settings  # noqa: PLC0415
+
+    return bool(get_settings().apply_retry_verified_not_sent)
+
+
 def requires_manual_retry(application_id: int) -> bool:
-    """A verified non-send can only be retried by an explicit manual send."""
+    """A verified non-send can only be retried by an explicit manual send - unless the owner switched that off
+    (`apply_retry_verified_not_sent`): the automatic pass may then send it again."""
+    if _auto_retry_allowed():
+        return False
     with connect() as c:
         return c.execute("SELECT 1 FROM application_runs WHERE application_id=? AND operator_not_sent_at IS NOT NULL LIMIT 1",
                          (application_id,)).fetchone() is not None
@@ -545,7 +554,7 @@ def queue_attempts(profile_id: int) -> tuple[dict[int, ApplyRun], set[int], set[
         rows = conn.execute(_OUTSTANDING_RUNS + " WHERE app.profile_id = ? AND app.status NOT IN ('submitted','withdrawn')",
                             (profile_id,)).fetchall()
     return ({row["owner_application_id"]: _from_row(row) for row in rows if row["id"] is not None},
-            {row["owner_application_id"] for row in rows if row["manual_retry"]},
+            set() if _auto_retry_allowed() else {row["owner_application_id"] for row in rows if row["manual_retry"]},
             {row["owner_application_id"] for row in rows if row["site_handoff"]})
 
 
@@ -984,7 +993,8 @@ def reserve_send(run_id: int, *, profile_id: int, application_id: int, trigger: 
                 WHERE v.profile_id=? AND v.released_at IS NOT NULL AND (
                     r.id IS NULL OR r.status='running' OR r.submit_clicked_at IS NOT NULL OR r.nav_clicked_at IS NOT NULL
                     OR r.operator_not_sent_at IS NOT NULL OR v.receipt_outcome IS NOT NULL OR v.receipt_kind IS NOT NULL
-                    OR COALESCE(json_extract(r.result_json, '$.submit_clicked'), 0) != 0)""", (profile_id,))
+                    OR COALESCE(json_extract(r.result_json, '$.submit_clicked'), 0) != 0)"""
+                + (" AND r.operator_not_sent_at IS NULL" if _auto_retry_allowed() else ""), (profile_id,))  # (settled "not sent")
             if any(row["dedupe_key"] == binding.dedupe_key or (
                     identity and identity == dedupe_identity((row["tenant"], row["requisition"]))) for row in released):
                 raise ApplyError("Nouvel essai manuel requis pour ce poste.")

@@ -1837,3 +1837,35 @@ async def test_consent_dismissal_never_clicks_a_form_button(server):
         assert await dismiss_consent(page) == "Refuser"
         await browser.close()
     assert not server.posts
+
+
+@pytest.mark.parametrize(("trace", "blocked"), [("operator_not_sent", False), ("submit_clicked", True), ("uncertain_receipt", True)])
+def test_a_settled_not_sent_attempt_may_be_retried_automatically_when_the_owner_allows_it(profile, tmp_path, monkeypatch, trace, blocked):
+    from jobhunt.config import get_settings
+
+    monkeypatch.setenv("JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT", "1")
+    get_settings.cache_clear()
+    url = "https://jobs.example.test/apply/100"
+    _, app = approved_fixture(profile, tmp_path, url)
+    first = _auto_attempt(profile, tmp_path, app, url)
+    _reserve_auto(profile, first)
+    store.finish_and_settle(first.run_id, RunResult(status="needs_human", message="pause"), browser_attempt=first,
+                            browser_clear=True)
+    with db.connect() as conn:
+        if trace == "uncertain_receipt":
+            conn.execute("UPDATE apply_reservations SET receipt_kind='none', receipt_outcome='uncertain' WHERE run_id=?",
+                         (first.run_id,))
+        else:
+            column = {"submit_clicked": "submit_clicked_at", "operator_not_sent": "operator_not_sent_at"}[trace]
+            conn.execute(f"UPDATE application_runs SET {column}='2026-01-01T00:00:00+00:00' WHERE id=?", (first.run_id,))
+    try:
+        assert not store.requires_manual_retry(app.id)  # (the switch: a settled non-send no longer asks for a manual send)
+        retry = _auto_attempt(profile, tmp_path, app, url)
+        if blocked:  # an attempt that may have sent and was NOT settled still stops the automatic retry
+            with pytest.raises(ApplyError, match="Nouvel essai manuel requis"):
+                _reserve_auto(profile, retry)
+        else:
+            _reserve_auto(profile, retry)
+    finally:
+        monkeypatch.delenv("JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT")
+        get_settings.cache_clear()
