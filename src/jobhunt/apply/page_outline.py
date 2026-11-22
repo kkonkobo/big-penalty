@@ -2,7 +2,8 @@
 
 Written only into the run's own folder under the (gitignored) data dir. The outline holds page STRUCTURE only - the URL
 without query string / fragment, title, headings, the text of buttons and links, and each form field's label / type /
-required flag (for a field inside a custom element: also the tags around it and whether the form reader had taken it). It never reads a field's value or checked state, cookies, storage or request bodies; in the screenshot every
+required flag (for a field inside a custom element: also the tags around it, whether the form reader had taken it and,
+when it had not, its role / aria marks and the words shown on and around it). It never reads a field's value or checked state, cookies, storage or request bodies; in the screenshot every
 form control is masked, and no screenshot is taken at all once a secret (password) was typed in the run.
 """
 
@@ -95,14 +96,26 @@ OUTLINE_JS = r"""([textMax, listMax]) => {
             if (!node.matches('input, textarea, select, [role="radio"], [role="checkbox"], [role="radiogroup"], [role="combobox"], '
                               + '[role="textbox"], [role="switch"]') || node.matches('input[type="hidden"]')) continue;
             const inside = [];
+            let outer = node;
             for (let at = node, depth = 0; at && depth < 4; depth++) {
                 inside.push(at.tagName.toLowerCase());
+                if (!['BODY', 'HTML', 'MAIN', 'FORM'].includes(at.tagName)) outer = at;
                 at = at.parentElement || (at.getRootNode() && at.getRootNode().host);
             }
-            deep.push({label: labelOf(node), type: node.matches('input') ? (node.getAttribute('type') || 'text').toLowerCase()
-                           : node.getAttribute('role') || node.tagName.toLowerCase(),
-                       name: clip(node.getAttribute('name') || ''), required: node.required === true || node.getAttribute('aria-required') === 'true',
-                       shown: visible(node), read: node.hasAttribute('data-bp-ref'), inside: inside.join(' < ')});
+            const read = node.hasAttribute('data-bp-ref');
+            const entry = {label: labelOf(node), type: node.matches('input') ? (node.getAttribute('type') || 'text').toLowerCase()
+                               : node.getAttribute('role') || node.tagName.toLowerCase(),
+                           name: clip(node.getAttribute('name') || ''), required: node.required === true || node.getAttribute('aria-required') === 'true',
+                           shown: visible(node), read, inside: inside.join(' < ')};
+            if (!read) {
+                // A control the form reader missed: how it is marked up and what stands around it (the question, the
+                // option's words), so that the reader can be taught - never its value or checked state.
+                entry.marks = [...node.attributes].filter(a => /^(role|slot|part|tabindex|aria-(label|labelledby|describedby|required|disabled))$/.test(a.name))
+                    .map(a => a.name + '=' + clip(a.value)).join(' ');
+                entry.text = clip(node.innerText || node.textContent || '');
+                entry.around = clip(outer.innerText || outer.textContent || '');
+            }
+            deep.push(entry);
         }
     };
     walk(document);

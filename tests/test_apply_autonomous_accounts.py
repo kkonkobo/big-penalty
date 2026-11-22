@@ -583,3 +583,37 @@ async def test_multistep_ats_signin_page_asking_for_the_email_verification_is_a_
     assert len(server.posts_to("/Account/Register")) == 1, steps
     assert len(server.posts_to("/Account/Login")) == 1, steps
     assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message, steps)
+
+
+async def test_a_login_asked_for_in_answer_to_the_send_click_is_followed_by_one_send(server, profile, tmp_path, fast, monkeypatch):
+    """A form that creates the account and applies at once answers "this e-mail is already registered: sign in". After the
+    login the same form is shown again, without its account fields and with nothing new: the login sent no application, so
+    the form is sent from there - instead of the run ending "envoi non confirmé" on a login click."""
+    monkeypatch.setattr(service.get_settings(), "apply_guard_mode", "core")
+    app = setup(server, profile, tmp_path, monkeypatch)
+    create = ('<label for="mail">Adresse e-mail</label><input id="mail" name="email">'
+              '<label for="new">Choisir un mot de passe</label><input id="new" type="password" name="new_password">')
+    form = ('<title>Ingénieur systèmes embarqués</title><main><h1>Ingénieur systèmes embarqués</h1>'
+            '<form action="{action}" method="post" enctype="multipart/form-data">{create}<label for="name">Prénom</label>'
+            '<input id="name" name="first_name"><label for="cv">CV</label><input id="cv" type="file" name="cv">'
+            '<button>Envoyer</button></form></main>')
+    server.html["/jobs/100"] = form.format(action="/jobs/100/apply", create=create)
+    server.post_pages["/jobs/100/apply"] = "account_exists_form.html"
+    server.post_redirects["/login"] = "/jobs/100/signed-in"
+    server.html["/jobs/100/signed-in"] = form.format(action="/jobs/100/send", create="")
+
+    def plan(snap):
+        if any(f.kind == "button" and f.label == "Se connecter" for f in snap.fields):
+            return StepPlan(page_kind="account_login", actions=[
+                act(snap, "^Identifiant", "fill", "account_email"), act(snap, "Mot de passe du compte", "fill", "account_password"),
+                act(snap, "Se connecter", "click", "account_exists", role="login")])
+        account = [act(snap, "Adresse e-mail", "fill", "account_email"), act(snap, "Choisir un mot de passe", "fill", "account_password")
+                   ] if any(f.kind == "password" for f in snap.fields) else []
+        return StepPlan(page_kind="form", actions=account + [
+            act(snap, "Prénom", "fill", "first_name"), act(snap, "CV", "upload_cv", kind="file"),
+            act(snap, "Envoyer", "click", role="submit")])
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message,
+                                          [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
+    assert [len(server.posts_to(path)) for path in ("/jobs/100/apply", "/login", "/jobs/100/send")] == [1, 1, 1]
