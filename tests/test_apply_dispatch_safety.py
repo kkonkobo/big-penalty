@@ -429,7 +429,7 @@ def test_reservation_and_landing_dedupe_in_both_orders(profile, tmp_path, first_
             reserve(ats_attempt)
 
 
-async def test_autonomous_noncanonical_job_refuses_real_fuzzy_duplicate(server, profile, tmp_path, monkeypatch):
+async def test_autonomous_noncanonical_job_refuses_real_fuzzy_duplicate(server, profile, tmp_path, monkeypatch, hold_similar_roles):
     monkeypatch.setattr(service.get_settings(), "apply_autonomous", True)
     _, first = approved_fixture(profile, tmp_path, server.url("jobs/100"))
     _, second = approved_fixture(profile, tmp_path, server.url("jobs/200"), title="Ingénieur système embarqué",
@@ -441,6 +441,24 @@ async def test_autonomous_noncanonical_job_refuses_real_fuzzy_duplicate(server, 
     result = await service.run(second.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(form))
     assert result.status == "blocked" and result.result.diagnostic_code == "duplicate_unconfirmed"
     assert not server.requests and not store.outstanding_attempt(second.id)
+
+
+@pytest.mark.parametrize(("other", "held"), [
+    ("https://careers.example.test/jobs/200", False),            # the same career site, another link: another opening
+    ("https://careers.example.test/offre.aspx?idOffre=200", False),
+    ("https://jobs.example-board.test/offre/9", True),           # another site: it may be the same opening
+])
+def test_a_close_title_on_another_link_of_the_same_site_is_another_opening(profile, tmp_path, monkeypatch, other, held):
+    """An employer publishes the same internship title for several teams: each posting of its site is sent. The same
+    posting is never sent twice, and the owner's switch holds close titles again."""
+    _, first = approved_fixture(profile, tmp_path, "https://careers.example.test/jobs/100")
+    _, second = approved_fixture(profile, tmp_path, other, title="Ingénieur système embarqué")
+    legacy = store.start_run(first.id, first.current_rev, "submit", "user", lambda run_id: tmp_path / "legacy")
+    store.reserve_send(legacy.id, profile_id=profile.id, application_id=first.id, trigger="user", role_key="", url_key="", daily_cap=9)
+    store.finish_and_settle(legacy.id, RunResult(status="failed"))
+    assert (first.id in store.potential_duplicates(profile.id, second.id)) is held
+    monkeypatch.setattr(service.get_settings(), "apply_hold_similar_roles", True)
+    assert first.id in store.potential_duplicates(profile.id, second.id)
 
 
 def test_verified_apply_target_requires_matching_metadata_and_requisition():
@@ -1369,7 +1387,7 @@ async def test_supervised_rechecks_after_live_scan(changed, page, server, profil
 
 
 @pytest.mark.parametrize("canonical", [False, True])
-async def test_supervised_dedupe_canonical_or_legacy_pair_confirmation(canonical, server, profile, tmp_path):
+async def test_supervised_dedupe_canonical_or_legacy_pair_confirmation(canonical, server, profile, tmp_path, hold_similar_roles):
     first_job, first = approved_fixture(profile, tmp_path, server.url("first"))
     second_job, second = approved_fixture(profile, tmp_path, server.url("second"),
                                          title="Poste distinct" if canonical else "Ingénieur système embarqué")

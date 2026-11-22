@@ -92,6 +92,10 @@ class Settings(BaseModel):
     # leaves that site's other applications to the supervised mode (default: it keeps sending; each application still stops
     # after its own two failures and is never sent twice)
     apply_host_pause: bool = False
+    # JOBHUNT_APPLY_HOLD_SIMILAR_ROLES=1: an application whose title is close to one already sent to the same employer waits
+    # for "ce n'est pas un doublon", even when both postings have their own link on the same career site (default: two
+    # links on one site are two openings and both are sent; the same posting is still never sent twice)
+    apply_hold_similar_roles: bool = False
     # JOBHUNT_APPLY_MAX_AGE_DAYS: oldest job (effective posting date) an application may still be sent to. The search and
     # the shortlist keep their own 14-day freshness window; this one only governs sending.
     apply_max_age_days: int = 14
@@ -198,6 +202,7 @@ def get_settings() -> Settings:
         apply_retry_verified_not_sent=env("JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_retry_stale_pauses=env("JOBHUNT_APPLY_RETRY_PAUSES", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_host_pause=env("JOBHUNT_APPLY_HOST_PAUSE", "0").strip().lower() in ("1", "true", "yes", "on"),
+        apply_hold_similar_roles=env("JOBHUNT_APPLY_HOLD_SIMILAR_ROLES", "0").strip().lower() in ("1", "true", "yes", "on"),
         apply_max_age_days=int(env("JOBHUNT_APPLY_MAX_AGE_DAYS") or 14),
         apply_prepare_min_score=float(env("JOBHUNT_APPLY_PREPARE_MIN_SCORE") or 60),
         apply_prepare_daily_cap=int(env("JOBHUNT_APPLY_PREPARE_DAILY_CAP") or 15),

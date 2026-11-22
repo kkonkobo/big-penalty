@@ -13,6 +13,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 
@@ -884,6 +885,19 @@ def unmark_autonomous_submit(attempt: Attempt) -> None:
         conn.execute("UPDATE application_runs SET submit_clicked_at=NULL WHERE id=? AND status='running'", (attempt.run_id,))
 
 
+def _other_posting(url: str, other: str) -> bool:
+    """Two postings of ONE career site, each with its own link: two openings, however alike their titles (an employer
+    publishes the same internship title for several teams or sites). The owner's switch `apply_hold_similar_roles` holds
+    them again. Postings on different sites (the employer's and a job board's) may be one opening: they are still held."""
+    from jobhunt.config import get_settings  # noqa: PLC0415
+
+    if get_settings().apply_hold_similar_roles or not url or not other:
+        return False
+    one, two = urlsplit(url), urlsplit(other)
+    return bool(one.hostname and one.hostname == two.hostname
+                and (one.path.rstrip("/"), one.query) != (two.path.rstrip("/"), two.query))
+
+
 def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=None, *, target_digests=()) -> dict[int, bool]:
     current = conn.execute("SELECT j.id, j.company, j.title, j.extra, j.origin_url FROM applications a JOIN jobs j"
                            " ON j.id=a.job_id AND j.profile_id=a.profile_id WHERE a.id=? AND a.profile_id=?",
@@ -922,7 +936,8 @@ def _potential_duplicates(conn, profile_id: int, application_id: int, canonical=
                         if isinstance(digest, str))
                  or bool(current_url and (row["url_key"] in (_url_key(current_url), canonical_url(current_url))
                          or any(current_url == link(row[key]) for key in ("origin_url", "url_key", "sent_origin_url")))))
-        if exact or similar_role(current["company"], current["title"], row["company"], row["title"]):
+        if exact or (similar_role(current["company"], current["title"], row["company"], row["title"])
+                     and not _other_posting(current_url, link(row["origin_url"]))):
             found[row["id"]] = exact or found.get(row["id"], False)
     return found
 
