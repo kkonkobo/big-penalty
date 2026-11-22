@@ -396,3 +396,45 @@ async def test_what_a_floating_notice_says_about_a_refused_form_reaches_the_plan
     assert seen[0] is False and True in seen
     assert paths(core, "/site") == ["/site/jobs/100", "/site/jobs/100/retry"]
     assert b'name="level"\r\n\r\n5' in core.posts_to("/site/jobs/100/retry")[0]["body"]
+
+
+STEPPED_FORM = """<title>Ingénieur systèmes embarqués</title><main><h1>Ingénieur systèmes embarqués</h1>
+<form action="/jobs/100" method="post" enctype="multipart/form-data">
+  <section id="s1"><label for="name">Prénom</label><input id="name" name="first_name">
+    <label for="cv">CV</label><input id="cv" type="file" name="cv"></section>
+  <section id="s2" hidden><fieldset><legend>Dans quelles régions êtes-vous mobile ?</legend>
+    <label><input type="checkbox" name="r" value="0" aria-required="true"> Aucune</label>
+    <label><input type="checkbox" name="r" value="1" aria-required="true"> Bretagne</label>
+    <label><input type="checkbox" name="r" value="2" aria-required="true"> Occitanie</label>
+    <label><input type="checkbox" name="r" value="3" aria-required="true"> Grand Est</label></fieldset>
+    <label for="more">Remarque *</label><input id="more" name="more"></section>
+  <button type="button" id="next">Suivant</button><button id="send" hidden>Envoyer</button></form></main>
+<script>document.getElementById('next').onclick = () => {
+  const first = document.getElementById('s1'), second = document.getElementById('s2');
+  if (!first.hidden) { first.hidden = true; second.hidden = false; return; }
+  second.hidden = true; document.getElementById('next').hidden = true; document.getElementById('send').hidden = false; };</script>"""
+
+
+async def test_the_next_button_of_a_stepped_form_that_keeps_its_address_is_not_a_loop(core, profile, tmp_path, fast):
+    """A multi-step form keeps one address and one "Suivant" button. Its second step holds a "tick all that apply" list
+    whose every box is marked required (one is "none") and a field marked required that the site does not insist on:
+    clicking "Suivant" there is the next step, not the first click made again on a page that refuses it."""
+    core.html["/site/jobs/100"] = STEPPED_FORM
+
+    def plan(snapshot):
+        labels = {field.label for field in snapshot.fields}
+        if "Prénom" in labels:
+            return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"),
+                                                       act(snapshot, "CV", "upload_cv", kind="file"),
+                                                       act(snapshot, "Suivant", "click", role="next")])
+        if "Bretagne" in labels:
+            ticks = [act(snapshot, region, "check") for region in ("Bretagne", "Occitanie", "Grand Est")
+                     if next(field for field in snapshot.fields if field.label == region).value != "true"]
+            return StepPlan(page_kind="form", actions=[*ticks, act(snapshot, "Suivant", "click", role="next")])
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Envoyer", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code)
+    body = core.posts_to("/site/jobs/100")[0]["body"]
+    assert body.count(b'name="r"') == 3 and b'name="r"\r\n\r\n0' not in body

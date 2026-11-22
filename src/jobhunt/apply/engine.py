@@ -608,6 +608,28 @@ def _is_empty(f: FormField) -> bool:
     return f.value in ("", "false") if f.kind == "checkbox" else not f.value.strip()
 
 
+def release_answered_box_lists(fields: list[FormField]) -> None:
+    """A "tick all that apply" list - three or more required boxes in a row under one heading, with short labels - asks for
+    at least one tick: once one box is ticked, the others are no longer required (a site marks every box of such a list as
+    required). Boxes that accept a policy or certify something are never part of such a list."""
+    start = 0
+    while start < len(fields):
+        first = fields[start]
+        end = start
+        if first.kind == "checkbox" and first.required:
+            while (end + 1 < len(fields) and fields[end + 1].kind == "checkbox" and fields[end + 1].required
+                   and fields[end + 1].form == first.form and fields[end + 1].group == first.group):
+                end += 1
+        run = fields[start:end + 1]
+        if (len(run) >= 3 and any(box.value == "true" for box in run) and all(len(box.label) <= 60 for box in run)
+                and not any(_site_consent(box) or SIGNUP_CONSENT_RE.search(fold(box.label)) or ACCEPT_BOX_RE.search(fold(box.label))
+                            for box in run)):
+            for box in run:
+                if box.value != "true":
+                    box.required = False
+        start = end + 1
+
+
 _ALIASES = ({"m", "mr", "monsieur"}, {"mme", "madame", "mrs", "ms"}, {"mlle", "mademoiselle", "miss"},   # civility
             {"oui", "yes", "o", "y"}, {"non", "no", "n"})                                              # yes / no
 
@@ -740,6 +762,7 @@ class _Run:
         self.pre_steps = 0
         self.attach_pending = False          # an "Ajouter"-style upload-confirm button was just clicked
         self.last_click_rec: tuple[str, str] | None = None  # (url, normalized label) of the last unguarded click made
+        self.last_click_fields: frozenset[str] = frozenset()  # the fields of the page that click was made on (labels)
         self.page_data = False      # the live page holds candidate data in the form of the clicked control (saved draft...)
         self.nav_ref: tuple[str, set[tuple[str, str]], str] | None = None  # (url, fillable labels, button) of the recorded nav click
         self.nav_role: str | None = None  # its role (login, signup, next)
@@ -936,6 +959,8 @@ class _Run:
                     for field in snapshot.fields:  # a list that only renders once opened: show what it offered last time
                         if field.kind == "combobox" and not field.options and (seen := self.combo_options.get(trusting.norm(field.label))):
                             field.options = [FieldOption(value=label, label=label) for label in seen]
+                if self.trusting:
+                    release_answered_box_lists(snapshot.fields)
                 if self.trusting and self.combo_chosen:
                     for field in snapshot.fields:  # a box whose choices are tags beside it: its own text stays empty
                         if field.kind == "combobox" and not field.value and (chosen := self.combo_chosen.get(trusting.norm(field.label))):
@@ -3697,7 +3722,13 @@ class _Run:
             if self.rehearse and (final or role in ("login", "signup") or (post_data and not (
                     self.rehearse_ok and self.rehearse_ok.search(field.label)))):  # dev rehearsal on a live page: fake data is never sent
                 return self._end("ready", f"Répétition : clic « {field.label[:60]} » ({role}) non effectué.")
-            if v.click and not attach and self.last_click_rec == (urldefrag(self.page.url).url, _norm(field.label)):
+            # (a multi-step form keeps its address and its "Next" button from one step to the other: the same click is a loop
+            # only on the page it was made on, i.e. one that still shows most of the fields it had)
+            shown = frozenset(_norm(_label(f)) for f in snap.fields if f.kind not in ("button", "link"))
+            same_page = not self.last_click_fields or not shown or (
+                len(shown & self.last_click_fields) * 2 >= min(len(shown), len(self.last_click_fields)))
+            if (v.click and not attach and same_page
+                    and self.last_click_rec == (urldefrag(self.page.url).url, _norm(field.label))):
                 loop_sig = [f for f in snap.fields if f.kind not in ("button", "link") and f.ref not in handled and not self._file_satisfied(f, snap)
                             and (f.error or (f.required and _is_empty(f) and (not field.form or not f.form or f.form == field.form)))]
                 if loop_sig:  # the same click on the same page with the same problem still showing: stop instead of burning the steps
@@ -3802,6 +3833,7 @@ class _Run:
                 self.attach_done = True
             else:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
+                self.last_click_fields = frozenset(_norm(_label(f)) for f in snap.fields if f.kind not in ("button", "link"))
                 self.last_click_passwords = sum(f.kind == "password" for f in snap.fields)
             if bound_account and role in ("login", "signup"):
                 self.account_try = (role, self._account_address(self.page.url))
