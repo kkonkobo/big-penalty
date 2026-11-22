@@ -818,7 +818,8 @@ _REMOVE_CHOSEN_JS = r"""(e, keep) => { let removed = 0;
 
 
 # (a list named after its placeholder is not told apart from the next one: what it offered is not kept under that name)
-_PLACEHOLDER_LABEL = re.compile(r"^(?:select|choose|selectionn\w*|choisi\w*|bitte wahlen|auswahlen)\b")
+_PLACEHOLDER_LABEL = re.compile(r"^(?:select|choose|selectionn\w*|choisi\w*|bitte wahlen|auswahlen|selezion\w*|scegli\w*|seleccion\w*"
+                                r"|selecion\w*|escolh\w*)\b")
 
 
 # What a list made of unmarked elements (no role, custom tags, shadow roots) offers is what APPEARED when it opened:

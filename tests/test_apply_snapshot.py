@@ -472,3 +472,18 @@ async def test_cookie_preference_center_switches_are_not_fields(page):
     """)
     snap, _ = await take_snapshot(page)
     assert [f.label for f in snap.fields] == ["Votre email"]
+
+
+@pytest.mark.parametrize(("label", "value", "blank"), [
+    ("Veuillez sélectionner une valeur", "0", True), ("Selezionare un valore", "0", True), ("Seleccione un valor", "0", True),
+    ("Bitte wählen", "0", True), ("Selecione uma opção", "-1", True), ("-- Select --", "0", True),
+    ("Sélection nationale", "12", False),  # a real first option: its value is not a "nothing chosen" code
+    ("Select", "FR", False), ("France", "0", False),
+])
+async def test_the_first_option_of_a_list_that_only_asks_to_choose_is_not_a_choice(page, label, value, blank):
+    """Career sites shown in another language keep the same "nothing chosen" option (value 0): the list is still empty."""
+    await page.set_content(f'<label for="n">Nationalité</label><select id="n"><option value="{value}">{label}</option>'
+                           '<option value="33">Autre</option></select>')
+    snap, _ = await take_snapshot(page)
+    field = next(f for f in snap.fields if f.kind == "select")
+    assert (field.selected == []) is blank
