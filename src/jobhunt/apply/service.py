@@ -1803,6 +1803,12 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
     return summary
 
 
+def _closed_for_good(app_id: int) -> bool:
+    """The two latest runs of the application both ended on the site's "this offer is closed"."""
+    runs = apply_store.list_runs(app_id)[:2]
+    return len(runs) == 2 and all(r.result is not None and r.result.diagnostic_code == "job_closed" for r in runs)
+
+
 async def _receipt_by_mail(app: Application, job, res: ApplyRun) -> bool:
     """The send click was made and the site showed no receipt page: when its acknowledgement arrives by mail (from the
     employer's or its platform's domain, since the click, naming this posting), the attempt is settled as sent - what a
@@ -1909,6 +1915,14 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
     if res.status == "submitted":
         summary.sent += 1
         emit(f"{tag} : envoyée")
+    elif _closed_for_good(app.id):
+        # The site said twice in a row that the offer is closed: it leaves the queue (the application is withdrawn, the job
+        # set aside) instead of being opened again at every pass. Both are undone from the application's page.
+        with contextlib.suppress(ApplyError, CVError, ValueError):
+            cvs.withdraw(app.id)
+            db.set_status([job.id], "rejected", app.profile_id)
+        summary.waiting += 1
+        emit(f"{tag} : offre clôturée (retirée de la file)")
     elif apply_store.outstanding_attempt(app.id) is not None:
         if await _receipt_by_mail(app, job, res):
             summary.sent += 1
