@@ -2676,8 +2676,15 @@ class _Run:
                     longer += 1
                     deadline = loop.time() + TRUSTING_OBSERVE_S
                 if loop.time() >= deadline:
+                    checked = int(getattr(self.autonomous, "check_writes", 0) or 0)
                     if self.trusting and await self._submit_rejected(snap, silent=True):
                         # the click sent nothing at all to the site and the form is still there: not a "possible send"
+                        if checked:
+                            # Only the site's bot check answered the click, and it let nothing through: clicking again
+                            # would meet it again. The application waits like any other stopped by a challenge.
+                            log.note += "; contrôle anti-robot invisible : l'envoi n'est pas parti"
+                            await self._shot(log)
+                            return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
                         if self.rejected_submits <= 2:
                             return snap, resolve
                         result = self._end("failed", "Le bouton d'envoi ne déclenche aucun envoi sur ce site.")
@@ -2798,8 +2805,10 @@ class _Run:
             self.replans.pop(urldefrag(self.page.url).url, None)
             self.diagnostics.receipt_reason = "before_submit"
             return True
-        intact = bool(sent.fields & present) and any(
+        intact = bool(sent.fields & present) and (any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
+            # (asked when the wait is over: the send button stuck on "Submitting..." is still the form's send button)
+            or (silent and await self._busy_button(snap)))
         if urldefrag(self.page.url).url != self.sent_url:
             # Another URL: only the apply-and-create form that came back saying the account exists counts (some sites
             # post that form to a sibling address and show it again there).
@@ -2903,11 +2912,8 @@ class _Run:
         self.nav_pending = False
         self.pending = self.last_sent = self.nav_ref = None
 
-    async def _send_in_progress(self, snap: PageSnapshot) -> bool:
-        """After the send click: the site shows it is still at it - the request left and no answer came yet, a button
-        reads "Submitting..." / "Envoi en cours", or the page marks itself busy."""
-        if getattr(self.autonomous, "click_write", None) is not None and not getattr(self.autonomous, "final_response", True):
-            return True
+    async def _busy_button(self, snap: PageSnapshot) -> bool:
+        """A button of the page reads "Submitting..." / "Envoi en cours" (usable or switched off), or is marked busy."""
         if any(f.kind == "button" and SEND_BUSY_RE.match(fold(f.label).strip()) for f in snap.fields):
             return True
         for fr in self.page.frames:
@@ -2915,6 +2921,13 @@ class _Run:
                 if await fr.evaluate(_BUSY_JS):
                     return True
         return False
+
+    async def _send_in_progress(self, snap: PageSnapshot) -> bool:
+        """After the send click: the site shows it is still at it - the request left and no answer came yet, a button
+        reads "Submitting..." / "Envoi en cours", or the page marks itself busy."""
+        if getattr(self.autonomous, "click_write", None) is not None and not getattr(self.autonomous, "final_response", True):
+            return True
+        return await self._busy_button(snap)
 
     def _unconfirmed(self) -> RunResult:
         return self._end("failed", UNCONFIRMED_MSG)
@@ -2934,6 +2947,12 @@ class _Run:
             if banners := await self._banner_texts():
                 parts.append("bannière : " + " / ".join(self._r(text)[:80] for text in banners[:2]))
             parts.append("texte de réception " + ("lu" if await self._page_says_received() else "non lu"))
+            if self.autonomous is not None:
+                parts.append("requête d'envoi " + ("sans réponse" if getattr(self.autonomous, "click_write", None) is not None
+                                                   and not getattr(self.autonomous, "final_response", False) else
+                                                   "répondue" if getattr(self.autonomous, "final_response", False) else "non partie"))
+                if getattr(self.autonomous, "check_writes", 0):
+                    parts.append("échanges avec un contrôle anti-robot")
             self.steps[-1].note += "; envoi non confirmé : " + ", ".join(parts)
 
     async def _email_hold(self, log: StepLog, note: str = '') -> RunResult:

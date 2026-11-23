@@ -679,3 +679,22 @@ async def test_a_send_the_site_is_still_working_on_is_watched_until_its_receipt(
     result = await send(app)
     assert result.status == "submitted", (result.status, result.message)
     assert len(paths(core, "/site")) == 1 and store.outstanding_attempt(app.id) is None
+
+
+@pytest.mark.parametrize(("host", "status"), [("tracker.thirdparty.test", "needs_human"), ("cdn.thirdparty.test", "failed")])
+async def test_a_send_held_back_by_an_invisible_bot_check_is_a_challenge_pause(core, profile, tmp_path, fast, monkeypatch, host, status):
+    """The click only starts an invisible bot check: the button stays on "Submitting...", the browser talks to the check's
+    host and sends the site nothing. Nothing was sent: the application waits like one stopped by a challenge, it is not
+    held as a possible send. The same silence with a write to any OTHER third party stays a possible send."""
+    from jobhunt.apply import destination, engine
+
+    monkeypatch.setattr(engine, "TRUSTING_OBSERVE_S", 0.6)
+    monkeypatch.setattr(destination, "BOT_CHECK_HOSTS", (*destination.BOT_CHECK_HOSTS, "tracker.thirdparty.test"))
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        const button = event.target.querySelector('button'); button.disabled = true; button.textContent = 'Submitting...';
+        fetch('https://%s/check', {method: 'POST', body: 'token', mode: 'no-cors'}).catch(() => {}); });</script>""" % host)
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == status, (result.status, result.message)
+    assert not paths(core, "/site") and (store.outstanding_attempt(app.id) is None) is (status == "needs_human")

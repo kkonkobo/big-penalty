@@ -250,6 +250,19 @@ def pre_data_read(url: str, method: str, resource_type: str, *, data_entered: bo
             and not host.endswith((".local", ".internal", ".localhost")) and len(url) <= 2048)
 
 
+# Hosts of the bot checks sites run when a form is sent. What the browser exchanges with them after a click is the check
+# itself, never the application.
+BOT_CHECK_HOSTS = ("challenges.cloudflare.com", "hcaptcha.com", "recaptcha.net", "captcha-delivery.com", "arkoselabs.com")
+
+
+def bot_check(url: str) -> bool:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if any(host == known or host.endswith("." + known) for known in BOT_CHECK_HOSTS):
+        return True
+    return host in {"www.google.com", "google.com", "www.gstatic.com"} and "/recaptcha/" in parts.path
+
+
 class RecipientGuard:
     def __init__(self, allowed: frozenset[str], *, audience=None, read_only: frozenset[str] = frozenset(),
                  inspection_only: bool = False,
@@ -409,7 +422,9 @@ class RecipientGuard:
             if not audience.trusted(url):
                 # A third-party write (bot check, consent service, upload storage, analytics): sent by the browser like any
                 # other. It is never the application itself: not counted as transmitted, never taken for the final request.
-                if audience.clicking:
+                if audience.clicking and bot_check(url):
+                    audience.check_writes += 1  # (an invisible bot check answering the click: it carries no application)
+                elif audience.clicking:
                     audience.foreign_writes += 1  # (after a click: "the click sent nothing at all" no longer holds)
                 await route.continue_()
                 return
