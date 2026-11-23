@@ -2808,7 +2808,11 @@ class _Run:
         intact = bool(sent.fields & present) and (any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
             # (asked when the wait is over: the send button stuck on "Submitting..." is still the form's send button)
-            or (silent and await self._busy_button(snap)))
+            or (silent and await self._busy_button(snap))
+            # (most of the form is back under an error the page states - a field error, an error banner: it was refused,
+            # whatever the site now calls its send button)
+            or (self.trusting and not silent and len(sent.fields & present) * 2 >= len(sent.fields)
+                and (any(f.error for f in snap.fields if f.kind not in ("button", "link")) or await self._banner_error())))
         if urldefrag(self.page.url).url != self.sent_url:
             # Another URL: only the apply-and-create form that came back saying the account exists counts (some sites
             # post that form to a sibling address and show it again there).
@@ -2947,6 +2951,11 @@ class _Run:
             if banners := await self._banner_texts():
                 parts.append("bannière : " + " / ".join(self._r(text)[:80] for text in banners[:2]))
             parts.append("texte de réception " + ("lu" if await self._page_says_received() else "non lu"))
+            if (sent := self.last_sent) is not None:
+                present = {(_norm(_label(f)), f.kind) for f in snap.fields}
+                parts.append(f"champs du clic encore là : {len(sent.fields & present)}/{len(sent.fields)}")
+                parts.append("bouton d'envoi " + ("présent" if any(
+                    f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields) else "absent"))
             if self.autonomous is not None:
                 parts.append("requête d'envoi " + ("sans réponse" if getattr(self.autonomous, "click_write", None) is not None
                                                    and not getattr(self.autonomous, "final_response", False) else

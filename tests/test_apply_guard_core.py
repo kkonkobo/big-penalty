@@ -698,3 +698,29 @@ async def test_a_send_held_back_by_an_invisible_bot_check_is_a_challenge_pause(c
     result = await send(app)
     assert result.status == status, (result.status, result.message)
     assert not paths(core, "/site") and (store.outstanding_attempt(app.id) is None) is (status == "needs_human")
+
+
+async def test_a_form_that_comes_back_under_an_error_banner_was_refused_whatever_its_button_now_says(core, profile, tmp_path, fast):
+    """The site answers the send with the same form under "there is a problem, check and try again", and its send button
+    now reads otherwise: nothing was received. The send record is withdrawn and the form is corrected and sent again - the
+    run used to be held as a possible send because the button's words had changed."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      let tries = 0;
+      document.querySelector('form').addEventListener('submit', (event) => { tries += 1;
+        if (tries > 1) return;   // (the second send goes through)
+        event.preventDefault();
+        fetch('/jobs/100/check', {method: 'POST', body: new FormData(event.target)}).catch(() => {}).finally(() => {
+          const banner = document.createElement('div'); banner.setAttribute('role', 'alert');
+          banner.textContent = 'Oups, il y a un problème. Veuillez vérifier toutes les informations avant de réessayer.';
+          document.querySelector('main').prepend(banner);
+          event.target.querySelector('button').textContent = 'Envoyer de nouveau'; }); });</script>""")
+
+    def plan(snapshot):
+        again = any(field.kind == "button" and field.label == "Envoyer de nouveau" for field in snapshot.fields)
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"), act(snapshot, "CV", "upload_cv", kind="file"),
+                                                   act(snapshot, "Envoyer de nouveau" if again else "Envoyer", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.message)
+    assert paths(core, "/site") == ["/site/jobs/100/check", "/site/jobs/100"]
