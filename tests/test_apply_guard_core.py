@@ -451,3 +451,43 @@ async def test_a_page_that_moves_between_the_read_and_the_typing_is_read_again(c
     result = await send(app)
     assert result.status == "submitted", (result.message, result.result.diagnostic_code)
     assert paths(core, "/site") == ["/site/jobs/100/apply"]
+
+
+ADDED_BLOCK_FORM = """<title>Ingénieur systèmes embarqués</title><main><h1>Ingénieur systèmes embarqués</h1>
+<form action="/jobs/100" method="post">
+  <label for="name">Prénom</label><input id="name" name="first_name">
+  <label for="cv">CV</label><input id="cv" type="file" name="cv">
+  <section><h3>Formation</h3><div id="blocks"></div><button type="button" id="add">Ajouter un autre</button></section>
+  <button>Envoyer</button></form></main>
+<script>document.getElementById('add').onclick = () => {
+  const block = document.createElement('div');
+  block.innerHTML = '<label>Domaine d\\'études * <select name="field" required><option value="">Choisir</option><option>Droit</option><option>Lettres</option></select></label>'
+    + '<button type="button">Supprimer</button>';
+  block.querySelector('button').onclick = () => block.remove();
+  document.getElementById('blocks').append(block); };</script>"""
+
+
+async def test_a_block_the_run_added_and_cannot_complete_is_given_back_to_the_planner(core, profile, tmp_path, fast):
+    """The run adds a second education block whose required list has no entry for the answer. That used to end the run
+    ("informations manquantes"); the planner is now told which field could not be set and removes the block it added."""
+    core.html["/site/jobs/100"] = ADDED_BLOCK_FORM
+    told = []
+
+    def plan(snapshot):
+        labels = [field.label for field in snapshot.fields]
+        told.append("could NOT set" in snapshot.text)
+        if "Supprimer" in labels and told[-1]:
+            return StepPlan(page_kind="form", actions=[act(snapshot, "Supprimer", "click", role="other")])
+        if "Supprimer" in labels:
+            return StepPlan(page_kind="form", actions=[act(snapshot, "Domaine", "select", value="Mécatronique"),
+                                                       act(snapshot, "Envoyer", "click", role="submit")])
+        if not next(field for field in snapshot.fields if field.label == "Prénom").value:
+            return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"),
+                                                       act(snapshot, "CV", "upload_cv", kind="file"),
+                                                       act(snapshot, "Ajouter un autre", "click", role="other")])
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Envoyer", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code, told)
+    assert True in told and b"field=" not in core.posts_to("/site/jobs/100")[0]["body"]

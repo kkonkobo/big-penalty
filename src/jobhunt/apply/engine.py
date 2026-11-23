@@ -811,6 +811,7 @@ class _Run:
         self.dismissed: list[str] = []       # trusting mode: labels of the privacy / cookie notices closed by code
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
+        self.stuck_rounds: dict[str, int] = {}  # trusting mode: steps given back to the planner for such fields, by page
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
         self.presend: dict[str, int] = {}  # trusting mode: re-reads made before a final click, per page
         self.signed_up: set[str] = _Accounts()     # account addresses where an account-creation click was made in this run
@@ -3470,6 +3471,7 @@ class _Run:
                     return bad
             dirty = False
             moved = False
+            unset: set[str] = set()  # fields the program tried and could not set in this step
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
             for it in v.items if not self._inspection_only else ():
                 self.diagnostics.control = ("upload" if it.act.op.startswith("upload_") else
@@ -3539,6 +3541,7 @@ class _Run:
                     v.notes.append(f"{_label(it.field)} : {e}")
                     if it.field.required:
                         v.questions.append(_question(it.field))
+                        unset.add(it.field.ref)
                     if it.act.op in ("upload_cv", "upload_letter"):
                         v.upload_failed = v.upload_failed or self._upload_question(it.act.op)
                         v.upload_refs.add(it.field.ref)
@@ -3684,6 +3687,17 @@ class _Run:
                     # again before the click that sends it.
                     self.presend[page_key] = self.presend.get(page_key, 0) + 1
                     log.note = self._r("; ".join(x for x in (log.note, *v.notes, "relecture avant l'envoi") if x))[:900]
+                    await self._shot(log)
+                    continue
+                unset |= {q.ref for q in v.questions if q.ref}  # (answers refused before typing too: no such entry in the list)
+                if (blocking and all(q.ref in unset for q in blocking) and not v.upload_failed
+                        and self.stuck_rounds.get(page_key, 0) < 2):
+                    # Everything in the way is a field the program could not SET (no entry of a list means the answer, a
+                    # value refused) - not a question without an answer. The planner is told and decides: another listed
+                    # value, the "Delete" of a block it added, or the click that moves on. Twice per page at most.
+                    self.stuck_rounds[page_key] = self.stuck_rounds.get(page_key, 0) + 1
+                    self.stuck_fields = list(dict.fromkeys(q.label[:60] for q in blocking))[:6]
+                    log.note = self._r("; ".join(x for x in (log.note, *v.notes, "champ impossible à renseigner : nouvelle décision") if x))[:900]
                     await self._shot(log)
                     continue
                 v.questions = [*blocking, *soft] if blocking else []
@@ -3953,6 +3967,7 @@ class _Run:
                 return self._end("failed", f"Clic impossible sur « {_label(field)} » ({e}).")
             log.clicked = self._r(field.label)
             self.replans.pop(page_key, None)  # (a multi-step form keeps its URL: each step gets its own re-reads)
+            self.stuck_rounds.pop(page_key, None)
             self.presend.pop(page_key, None)
             self.combo_options.clear()  # (and the lists of the next step are other lists, whatever their labels)
             self.combo_chosen.clear()
