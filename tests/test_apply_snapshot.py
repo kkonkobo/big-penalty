@@ -601,10 +601,11 @@ async def test_an_upload_named_after_the_cv_is_not_renamed_after_the_other_choic
 
 
 YES_NO_BUTTONS = """<form><div class="entry"><label class="heading _required_x1" for="q1">Votre école fournit-elle une convention ?</label>
-  <div class="yesno"><button type="button" aria-pressed="false" data-option="yes">Yes</button><button type="button" aria-pressed="false" data-option="no">No</button>
+  <div class="yesno"><button aria-pressed="false" data-option="yes">Yes</button><button aria-pressed="false" data-option="no">No</button>
   <input type="checkbox" tabindex="-1" name="q1" style="position:absolute;opacity:0;width:0;height:0"></div></div>
   <button>Submit Application</button></form>
-<script>for (const b of document.querySelectorAll('.yesno button')) b.addEventListener('click', () => {
+<script>document.querySelector('form').addEventListener('submit', (event) => event.preventDefault());
+for (const b of document.querySelectorAll('.yesno button')) b.addEventListener('click', (event) => { event.preventDefault();
   for (const o of b.parentElement.querySelectorAll('button')) o.setAttribute('aria-pressed', String(o === b)); });</script>"""
 
 

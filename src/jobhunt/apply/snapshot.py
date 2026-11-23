@@ -208,9 +208,12 @@ _JS = r"""
   // A yes / no question drawn as buttons: two or more toggle buttons (aria-pressed) side by side, nothing else to press
   // among them; pressing one answers the question.
   const toggleChoice = (el) => {
-    if (el.tagName !== 'BUTTON' || !el.hasAttribute('aria-pressed') || el.type === 'submit' || !el.parentElement) return false;
+    // (a <button> without a type is a submit button for the browser; one that carries aria-pressed is a toggle unless its
+    // markup says "submit" in so many words)
+    const sends = (x) => (x.getAttribute('type') || '').toLowerCase() === 'submit';
+    if (el.tagName !== 'BUTTON' || !el.hasAttribute('aria-pressed') || sends(el) || !el.parentElement) return false;
     const peers = [...el.parentElement.children].filter((x) => x.tagName === 'BUTTON');
-    return peers.length >= 2 && peers.length <= 6 && peers.every((x) => x.hasAttribute('aria-pressed') && x.type !== 'submit'
+    return peers.length >= 2 && peers.length <= 6 && peers.every((x) => x.hasAttribute('aria-pressed') && !sends(x)
       && clean(x.innerText || x.textContent).length > 0 && clean(x.innerText || x.textContent).length <= 40)
       && !el.closest('[role=toolbar], [role=menubar], [role=tablist], nav, header, footer');
   };
