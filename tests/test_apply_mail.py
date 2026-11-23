@@ -245,3 +245,50 @@ def test_a_code_mailed_by_the_platform_vendor_for_an_employers_own_careers_domai
     assert mail.extract(other, page, html=True, sender_domain='eightfold.ai') is None
     assert mail.extract(body, page, html=True, sender_domain='unrelated.test') is None
     assert mail.extract(body.replace('15 minutes', '15 minutes. Reference 771203'), page, html=True, sender_domain='eightfold.ai') is None
+
+
+class ReceiptIMAP(FakeIMAP):
+    """Messages: uid -> (date, sender, subject, body)."""
+
+    def uid(self, action, uid, *args):
+        self.commands.append((action, uid, *args))
+        if action == 'SEARCH':
+            return 'OK', [b' '.join(self.messages)]
+        date, sender, subject, body = self.messages[uid]
+        if args[0].startswith('(INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)]'):
+            stamp = date.strftime('%d-%b-%Y %H:%M:%S %z').encode()
+            return 'OK', [(b'INTERNALDATE "' + stamp + b'" RFC822.SIZE 2000', f'From: {sender}\r\nSubject: {subject}\r\n\r\n'.encode())]
+        assert args[0] == '(BODY.PEEK[])'
+        return 'OK', [(b'BODY[]', f'From: {sender}\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}'.encode())]
+
+
+TITLE = 'Stage - Ingénieur conception de cartes électroniques embarquées F/H'
+
+
+@pytest.mark.parametrize(('sender', 'subject', 'body', 'minutes', 'found'), [
+    ('rh@employer.test', f'Votre candidature - {TITLE}', 'Nous avons bien reçu votre candidature.', 1, True),
+    ('noreply@talent-soft.com', 'Your application', f'Thank you for applying to: {TITLE}', 1, True),          # the platform's domain
+    ('rh@employer.test', 'Votre candidature - Stage assistant marketing digital', 'Bien reçue.', 1, False),   # another posting
+    ('rh@employer.test', f'Votre candidature - {TITLE}', 'Bien reçue.', -20, False),                           # older than the send
+    ('rh@employer.test', f'Finalisez votre candidature - {TITLE}', 'Votre candidature est incomplète.', 1, False),
+    ('news@unrelated.test', f'Votre candidature - {TITLE}', 'Bien reçue.', 1, False),
+])
+def test_a_receipt_mail_since_the_send_that_names_the_posting_confirms_it(monkeypatch, sender, subject, body, minutes, found):
+    """What a person checking the mailbox would conclude: a mail from the employer or its platform, received since the send
+    click, that speaks of an application and names this posting. Read-only (EXAMINE, PEEK)."""
+    clicked = datetime(2026, 11, 20, 10, 0, tzinfo=UTC)
+    clients = []
+
+    def create(*args, **opts):
+        clients.append(ReceiptIMAP(*args, **opts, messages={b'7': (clicked + timedelta(minutes=minutes), sender, subject, body)}))
+        return clients[-1]
+
+    monkeypatch.setattr(mail.imaplib, 'IMAP4_SSL', create)
+    assert mail._receipt_lookup(ADDRESS, PASSWORD, POSTING, clicked, TITLE) is found
+    assert ('EXAMINE', 'INBOX') in clients[0].commands and not any('STORE' in str(command) for command in clients[0].commands)
+
+
+def test_a_title_is_named_by_most_of_its_telling_words():
+    assert mail.names_posting('Candidature : ingénieur conception cartes électroniques embarquées', TITLE)
+    assert not mail.names_posting('Candidature : stage ingénieur', TITLE)       # only the words every posting carries
+    assert not mail.names_posting(f'Candidature - {TITLE}', 'Stage')            # a title that says nothing

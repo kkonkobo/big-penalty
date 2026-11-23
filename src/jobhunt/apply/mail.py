@@ -10,6 +10,7 @@ import os
 import re
 import ssl
 import sys
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -385,6 +386,97 @@ def _lookup(address, password, bound_url, started, examined, links_only):
     except Exception:
         pass
     raise MailUnavailable()
+
+
+# ---------------------------------------------------------------- receipt of an application, by mail
+_RECEIPT = re.compile(r'candidature|application|applying|applied|postul|bewerbung|candidatura|solicitud', re.I)
+_NOT_RECEIPT = re.compile(r'incompl|inachev|ach[eè]vement|finali[sz]|complete your|terminer votre|v[ée]rifi|verif|password|'
+                          r'mot de passe|r[ée]initialis|reset|activ|rappel|reminder|brouillon|draft|bloqu|blocked', re.I)
+_TITLE_NOISE = frozenset('stage stagiaire alternance alternant alternante internship intern apprentissage apprenti ingenieur '
+                         'ingenieure engineer avec pour dans chez'.split())
+
+
+def _words(text):
+    folded = ''.join(char for char in unicodedata.normalize('NFKD', str(text)) if not unicodedata.combining(char))
+    return re.sub(r'[^a-z0-9]+', ' ', folded.lower()).split()
+
+
+def names_posting(text, title):
+    """Does a mail name this posting: most of the telling words of its title (at least two) stand in it."""
+    words = [word for word in dict.fromkeys(_words(title)) if len(word) >= 4 and word not in _TITLE_NOISE]
+    if len(words) < 2:
+        return False
+    have = set(_words(text))
+    return sum(word in have for word in words) >= max(2, math.ceil(0.6 * len(words)))
+
+
+def _receipt_lookup(address, password, bound_url, since, title):
+    domains = search_domains(bound_url)
+    if not domains:
+        return False
+    parser = BytesParser(policy=policy.default)
+    terms = [f'FROM "{domain}"' for domain in sorted(domains)]
+    day = f'{since.day:02d}-{_MONTHS[since.month - 1]}-{since.year}'
+    with _inbox(address, password) as (client, _):
+        status, rows = client.uid('SEARCH', None, 'SINCE', day, 'OR ' * (len(terms) - 1) + ' '.join(terms))
+        if status != 'OK' or not rows or not rows[0]:
+            return False
+        uids = [item for item in rows[0].split() if re.fullmatch(rb'[0-9]{1,10}', item)]
+        for uid in sorted(uids, key=int, reverse=True)[:MAX_MESSAGES]:
+            status, data = client.uid('FETCH', uid, '(INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])')
+            meta, raw = _literal(data)
+            metadata = b' '.join([meta, *(item for item in data or () if isinstance(item, bytes))])
+            stamp = re.search(rb'INTERNALDATE "([^"]+)"', metadata)
+            size = re.search(rb'RFC822\.SIZE ([0-9]+)', metadata)
+            if status != 'OK' or not stamp:
+                continue
+            received = datetime.strptime(stamp[1].decode('ascii').strip(), '%d-%b-%Y %H:%M:%S %z')
+            if received < since - timedelta(seconds=30):
+                break  # (newest first: the rest is older than the send)
+            headers = parser.parsebytes(raw, headersonly=True)
+            senders = headers.get_all('From', [])
+            if len(senders) != 1 or senders[0].defects or len(senders[0].addresses) != 1:
+                continue
+            if not any(_under(senders[0].addresses[0].domain.lower(), domain) for domain in domains):
+                continue
+            subject = str(headers.get('Subject', ''))
+            if _NOT_RECEIPT.search(subject) or (size and int(size[1]) > 400_000):
+                continue
+            status, data = client.uid('FETCH', uid, '(BODY.PEEK[])')
+            _, whole = _literal(data)
+            if status != 'OK' or not whole:
+                continue
+            body = parser.parsebytes(whole).get_body(preferencelist=('plain', 'html'))
+            try:
+                text = re.sub(r'<[^>]+>', ' ', body.get_content()) if body is not None else ''
+            except Exception:
+                text = ''
+            if _RECEIPT.search(subject + ' ' + text[:3000]) and names_posting(subject + ' ' + text, title):
+                return True
+    return False
+
+
+async def receipt(address, bound_url, since, title):
+    """Did the site acknowledge the application by mail? True when a message received since the send click, from the
+    employer's own domain or its recruiting platform's, speaks of an application and names this posting. Read-only,
+    nothing is kept. Waits up to JOBHUNT_RECEIPT_MAIL_WAIT_S (90 s) for the mail to arrive; False on any doubt."""
+    try:
+        password = await asyncio.to_thread(_secret, address)
+    except MailUnavailable:
+        return False
+    if not password or not str(title or '').strip():
+        return False
+    interval = _seconds('JOBHUNT_MAIL_POLL_S', 10, 0.1, 180)
+    deadline = asyncio.get_running_loop().time() + _seconds('JOBHUNT_RECEIPT_MAIL_WAIT_S', 90, 0, 600)
+    while True:
+        try:
+            if await asyncio.wait_for(asyncio.to_thread(_receipt_lookup, address, password, bound_url, since, title), timeout=30):
+                return True
+        except (MailUnavailable, TimeoutError):
+            return False
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(interval)
 
 
 def _seconds(name, default, minimum, maximum):
