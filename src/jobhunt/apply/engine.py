@@ -75,6 +75,11 @@ CONFIRM_RE = re.compile(
 # (folded text) the posting's page tells the signed-in candidate that the application is already there
 ALREADY_APPLIED_RE = re.compile(
     r"vous avez deja (?:postule|candidate)|deja postule a (?:cette|l')|you(?: have|'ve)? already applied|already applied (?:to|for) this")
+# (folded text) the site says it mails a link that signs the visitor in
+MAIL_SIGN_IN_RE = re.compile(
+    r"(?:recevrez|avons envoye|venons de vous envoyer|vous a ete envoye|will receive|have sent|just sent|we sent|sent you)[^.!?]{0,80}"
+    r"\b(?:lien|link)\b[^.!?]{0,60}\b(?:connecter|connexion|sign in|log in|login)\b|\b(?:lien|link) (?:de connexion|magique)\b[^.!?]{0,80}"
+    r"(?:envoye|e-?mail|courriel)|\b(?:magic|sign-?in|login) link\b[^.!?]{0,80}(?:sent|e-?mail|inbox)")
 NEGATION_RE = re.compile(
     r"n'a pas (?:ete|pu)|pas (?:ete )?(?:envoyee|transmise|enregistree|recue)|not been|has not|was not|were not|could not|couldn't|"
     r"unable|erreur|error|echec|failed|failure|invalide|invalid|veuillez corriger|please correct|not (?:submitted|sent|received)|"
@@ -325,7 +330,9 @@ _BANNER_JS = r"""() => {
     if (SKIP.has(e.tagName) || (e.getAttribute('role') || '') === 'button' || !vis(e) || e.querySelector('input,select,textarea,button')) continue;
     const t = (e.textContent || '').replace(/\s+/g, ' ').trim();
     if (!t || t.length > 400 || (OK.test(t) && !NOT.test(t)) || SPOKEN.test(t)) continue;
-    const cls = e.getAttribute('class') || '';
+    // (a utility class that only APPLIES in a state - "aria-invalid:border-destructive", "hover:bg-error" - says nothing
+    // of the element as it stands: such "state:style" names are left out)
+    const cls = (e.getAttribute('class') || '').split(/\s+/).filter((name) => !name.includes(':')).join(' ');
     const alert = e.getAttribute('role') === 'alert' || e.getAttribute('aria-live') === 'assertive';
     if (alert || STYLED.test(cls) || ((WEAK.test(cls)) && WORDS.test(t))) return true;
   }
@@ -807,6 +814,7 @@ class _Run:
         self.code_entries = 0                # trusting mode: one-time codes read from the mailbox and typed
         self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
         self.email_login_tried = False       # trusting mode: at most one sign-in fallback from email verification
+        self.mail_sign_in_tried = False      # trusting mode: at most one sign-in through a mailed link (passwordless sites)
         self.rejected_submits = 0            # trusting mode: final clicks the page's own validation refused
         self.sent_url = ""                   # page URL of the last final click
         self.sent_empty: set[tuple[str, str]] = set()  # trusting mode: required fields left empty at the last guarded click
@@ -2546,6 +2554,15 @@ class _Run:
                 has_form = has_form or any(field.form and field.kind in FILLABLE for field in snap.fields)
             continuation = getattr(self.autonomous, 'continuation', None)
             proven_continuation = bool(continuation and continuation(snap))
+            if (self.trusting and self.nav_pending and self.nav_role == "login" and not self.final_awaiting
+                    and not self.final_clicked and not self.mail_sign_in_tried and self.email_verification is not None
+                    and not any(f.kind == "password" for f in snap.fields) and await self._says(MAIL_SIGN_IN_RE)):
+                # A site without passwords: the sign-in just asked for is a link it mails. The link is waited for and
+                # opened; the application then starts again from the posting, signed in. (A sign-in sends no application.)
+                self.mail_sign_in_tried = True
+                if await self._mail_sign_in():
+                    return await self._snapshot()
+                return await self._email_hold(log, "Le site envoie un lien de connexion par e-mail : lien non reçu ou inutilisable.")
             if self.last_sent is not None and not self.last_sent.final and not has_form and not proven_continuation:
                 self.final_clicked = True  # the form of a navigation click is gone: it may have been sent
             if snap.has_captcha:
@@ -2867,6 +2884,39 @@ class _Run:
     async def _email_hold(self, log: StepLog, note: str = '') -> RunResult:
         await self._shot(log)
         return self._end('needs_email', note or "Le site attend la validation d'un lien envoyé par e-mail.")
+
+    async def _says(self, wording: re.Pattern) -> bool:
+        """The visible page (any frame) holds this wording (matched on the folded text)."""
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                text = await fr.evaluate("() => (document.body && document.body.innerText || '').slice(0, 60000)")
+                if isinstance(text, str) and wording.search(fold(text)):
+                    return True
+        return False
+
+    async def _mail_sign_in(self) -> bool:
+        """Wait for the sign-in link the site mailed and open it (the page then comes back to the posting, signed in)."""
+        async def still_current():
+            if self.page.is_closed() or (self.before_submit is not None and await self.before_submit()):
+                return ['Connexion interrompue.']
+            return []
+
+        try:
+            verification, code = await self.email_verification.poll(sign_in=True)
+            if code:
+                self.diagnostics.email = code
+            if not verification or verification.kind != 'link' or await still_current():
+                return False
+            self.diagnostics.control = 'login_otp'
+            self.secrets.add(verification.value)
+            if not await self.email_verification.open(self.page, verification.value, still_current):
+                return False
+        except Exception:
+            return False
+        self.diagnostics.email = 'email_link_used'
+        self._release_account_click()
+        self.nav_role = None
+        return True
 
     async def _verify_email(self, snap: PageSnapshot, resolve: Resolver) -> bool:
         if (not self.email_verification or self.email_attempted or not self.autonomous or not self.before_submit

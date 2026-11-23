@@ -1177,6 +1177,10 @@ CONFIRMATION_TEXTS = [
     ('<div role="alert">Your application could not be submitted.</div>', True),
     ('<div role="alert">Le numéro de téléphone doit comporter dix chiffres.</div>', True),
     ('<div class="alert alert-danger">Format non reconnu</div>', True),
+    # a style that only applies in a state ("aria-invalid:...", "hover:...") does not make a plain label an error banner
+    ('<span class="inline-flex rounded-md border px-2 aria-invalid:ring-destructive/20 aria-invalid:border-destructive '
+     'focus-visible:ring-error">Lettre de motivation</span>', False),
+    ('<span class="inline-flex rounded-md border-destructive text-error px-2">Lettre de motivation</span>', True),
 ])
 async def test_an_error_banner_is_not_a_success_notice_nor_a_screen_reader_announcement(page, markup, error):
     await page.set_content(f"<main><h1>Offre</h1>{markup}</main>")
