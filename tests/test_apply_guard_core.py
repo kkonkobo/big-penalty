@@ -660,3 +660,22 @@ async def test_a_send_left_unconfirmed_says_in_its_trace_which_check_failed(core
 
     note = json.loads((Path(result.out_dir) / "failure-steps.json").read_text(encoding="utf-8"))[-1]["note"]
     assert "envoi non confirmé : " in note and "texte de réception non lu" in note and "formulaire encore présent" not in note, note
+
+
+async def test_a_send_the_site_is_still_working_on_is_watched_until_its_receipt(core, profile, tmp_path, fast, monkeypatch):
+    """The send button reads "Submitting..." for longer than the usual wait before the receipt shows: the run keeps watching
+    while the site shows the send in progress, and ends as a send - it used to leave on "unconfirmed" and close the window
+    on a send still under way."""
+    from jobhunt.apply import engine
+
+    monkeypatch.setattr(engine, "TRUSTING_OBSERVE_S", 1.0)
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        const button = event.target.querySelector('button'); button.disabled = true; button.textContent = 'Submitting...';
+        const data = new FormData(event.target);
+        setTimeout(() => fetch('/jobs/100/apply', {method: 'POST', body: data}).catch(() => {}).finally(() => {
+          document.querySelector('main').innerHTML = '<h1>Merci</h1><p>Votre candidature a bien été envoyée.</p>'; }), 2600); });</script>""")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "submitted", (result.status, result.message)
+    assert len(paths(core, "/site")) == 1 and store.outstanding_attempt(app.id) is None
