@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import logging
 import os
 import random
@@ -52,30 +51,70 @@ CHALLENGE_MARKERS = (
 
 
 _BUILTIN_JXA = """ObjC.import('AppKit'); ObjC.import('CoreGraphics');
-var s = $.NSScreen.screens, h0 = s.objectAtIndex(0).frame.size.height, out = '';
-for (var i = 0; i < s.count; i++) { var sc = s.objectAtIndex(i), f = sc.frame;
-  var id = sc.deviceDescription.objectForKey('NSScreenNumber').unsignedIntValue;
-  if ($.CGDisplayIsBuiltin(id)) out = [f.origin.x, h0 - (f.origin.y + f.size.height), f.size.width, f.size.height].join(','); }
+var screens = $.NSScreen.screens, out = '';
+if (screens.count > 0) {
+  var primary = screens.objectAtIndex(0).frame;
+  for (var i = 0; i < screens.count; i++) {
+    var screen = screens.objectAtIndex(i), frame = screen.visibleFrame;
+    var id = screen.deviceDescription.objectForKey('NSScreenNumber').unsignedIntValue;
+    if ($.CGDisplayIsBuiltin(id) && !$.CGDisplayIsInMirrorSet(id)) {
+      out = [frame.origin.x, primary.origin.y + primary.size.height - frame.origin.y - frame.size.height,
+             frame.size.width, frame.size.height].join(',');
+      break;
+    }
+  }
+}
 out"""
 
 
-@functools.lru_cache(maxsize=1)
+class BuiltinDisplayUnavailable(RuntimeError):
+    def __init__(self):
+        super().__init__("Impossible de placer la fenêtre sur l’écran intégré du Mac. "
+                         "Vérifiez que l’écran est actif et que la recopie vidéo est désactivée.")
+
+
+def _builtin_display() -> tuple[int, int, int, int] | None:
+    try:
+        out = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", _BUILTIN_JXA], capture_output=True, text=True,
+                             check=True, timeout=10).stdout.strip()
+        left, top, width, height = (int(float(value)) for value in out.split(","))
+    except (OSError, subprocess.SubprocessError, ValueError, OverflowError):
+        return None
+    return (left, top, width, height) if width > 40 and height > 80 else None
+
+
+def _display_args(display: tuple[int, int, int, int]) -> tuple[str, str]:
+    left, top, width, height = display
+    return (f"--window-position={left + 20},{top + 40}",
+            f"--window-size={min(1280, width - 40)},{min(1000, height - 80)}")
+
+
+async def _verify_builtin_window(ctx: BrowserContext, display: tuple[int, int, int, int]) -> None:
+    left, top, width, height = display
+    try:
+        session = await ctx.new_cdp_session(ctx.pages[0])
+        try:
+            bounds = (await session.send("Browser.getWindowForTarget"))["bounds"]
+        finally:
+            await session.detach()
+        if (bounds.get("windowState") == "normal" and bounds["width"] > 0 and bounds["height"] > 0
+                and left <= bounds["left"] and bounds["left"] + bounds["width"] <= left + width
+                and top <= bounds["top"] and bounds["top"] + bounds["height"] <= top + height):
+            return
+    except Exception as exc:
+        raise BuiltinDisplayUnavailable() from exc
+    raise BuiltinDisplayUnavailable()
+
+
 def window_args() -> tuple[str, ...]:
-    """Chrome flags placing a headful window. JOBHUNT_WINDOW_POSITION="x,y" wins; otherwise (macOS, default
-    JOBHUNT_WINDOW_SCREEN=builtin) the window opens on the Mac's built-in display, so automated windows do not pop up on
-    an external monitor. JOBHUNT_WINDOW_SCREEN=any, another OS, no built-in display or any error: Chrome decides."""
+    """Best-effort placement for non-application windows, with environment overrides."""
     pos = os.environ.get("JOBHUNT_WINDOW_POSITION", "").strip()
     if re.fullmatch(r"-?\d+,-?\d+", pos):
         return (f"--window-position={pos}",)
     if sys.platform != "darwin" or os.environ.get("JOBHUNT_WINDOW_SCREEN", "builtin").strip().lower() != "builtin":
         return ()
-    try:
-        out = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", _BUILTIN_JXA], capture_output=True, text=True,
-                             timeout=10).stdout.strip()
-        x, y, w, h = (int(float(v)) for v in out.split(","))
-    except Exception:  # noqa: BLE001 - placement is a comfort feature, never a failure
-        return ()
-    return (f"--window-position={x + 20},{y + 40}", f"--window-size={min(1280, w - 40)},{min(1000, h - 80)}")
+    display = _builtin_display()
+    return _display_args(display) if display else ()
 
 
 class DomainPacer:
@@ -145,8 +184,15 @@ class BrowserPool:
             # system language, and their buttons / field labels were not recognised.
             kwargs["extra_http_headers"] = {"Accept-Language": "fr-FR,fr;q=0.9,en;q=0.6"}
             kwargs["args"] = ["--lang=fr-FR", "--accept-lang=fr-FR,fr,en"]
+            display = None
             if not headless:
-                kwargs["args"] += list(window_args())
+                if sys.platform == "darwin" and site.startswith(("apply-", "applydry-")):
+                    display = await asyncio.to_thread(_builtin_display)
+                    if display is None:
+                        raise BuiltinDisplayUnavailable()
+                    kwargs["args"] += _display_args(display)
+                else:
+                    kwargs["args"] += await asyncio.to_thread(window_args)
                 # Keep Chrome's own sandbox: without this the driver adds --no-sandbox and every window shows the yellow
                 # "unsupported command-line flag" banner (and runs less safely).
                 kwargs["chromium_sandbox"] = True
@@ -155,6 +201,13 @@ class BrowserPool:
             except Exception as e:  # Chrome not installed -> bundled Chromium
                 log.info("Chrome channel unavailable (%s); using bundled Chromium", e)
                 ctx = await self._pw.chromium.launch_persistent_context(**kwargs)
+            if display is not None:
+                try:
+                    await _verify_builtin_window(ctx, display)
+                except (BuiltinDisplayUnavailable, asyncio.CancelledError):
+                    with contextlib.suppress(Exception):
+                        await ctx.close()
+                    raise
             self._contexts[key] = ctx
             return ctx
 
