@@ -468,7 +468,21 @@ def _retry_epoch(default: str, override: str | None) -> str:
     return moved.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
-ENGINE_RETRY_EPOCH = _retry_epoch("2026-11-20T21:05:00+00:00", os.environ.get("JOBHUNT_ENGINE_RETRY_EPOCH"))
+_BUILT_IN_EPOCH = "2026-11-20T21:05:00+00:00"
+ENGINE_RETRY_EPOCH = _retry_epoch(_BUILT_IN_EPOCH, os.environ.get("JOBHUNT_ENGINE_RETRY_EPOCH"))
+
+
+def start_pass_epoch() -> str:
+    """An automatic pass started with JOBHUNT_APPLY_RETRY_PAUSES=1 and no epoch of its own retries what paused BEFORE it
+    started: the epoch becomes the start of the pass (what pauses during the pass is not tried twice in it). A pass
+    launched without the variable used to keep the built-in epoch, and left every later pause waiting for a person."""
+    global ENGINE_RETRY_EPOCH
+    from jobhunt.config import get_settings  # noqa: PLC0415
+
+    given = _retry_epoch(_BUILT_IN_EPOCH, os.environ.get("JOBHUNT_ENGINE_RETRY_EPOCH"))
+    if get_settings().apply_retry_stale_pauses and given == _BUILT_IN_EPOCH:
+        ENGINE_RETRY_EPOCH = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    return ENGINE_RETRY_EPOCH
 
 # Pause codes the engine produced on its own (its guard refused a request, it could not read the page or find the apply
 # control): unlike a CAPTCHA, an e-mail or a login, nothing the candidate must do. Posting conflicts are not in this list.

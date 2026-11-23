@@ -612,3 +612,26 @@ def test_engine_retry_epoch_override_accepts_only_a_later_past_utc_instant(overr
     assert (apply_store._retry_epoch(default, override) != default) is moved
     if moved:
         assert apply_store._retry_epoch(default, override) == "2026-11-20T21:06:00+00:00"
+
+
+def test_a_pass_started_without_an_epoch_retries_what_paused_before_it_started(monkeypatch):
+    """With JOBHUNT_APPLY_RETRY_PAUSES on and no epoch given, the pass's own start is the epoch (a pass launched without the
+    variable left every later pause waiting for a person). An epoch given explicitly, or the switch off, changes nothing."""
+    from datetime import UTC, datetime, timedelta
+
+    from jobhunt.apply import store as apply_store
+    from jobhunt.config import get_settings
+
+    settings = get_settings()
+    built_in = apply_store._BUILT_IN_EPOCH
+    monkeypatch.setattr(apply_store, "ENGINE_RETRY_EPOCH", built_in)
+    monkeypatch.delenv("JOBHUNT_ENGINE_RETRY_EPOCH", raising=False)
+    monkeypatch.setattr(settings, "apply_retry_stale_pauses", False)
+    assert apply_store.start_pass_epoch() == built_in
+    monkeypatch.setattr(settings, "apply_retry_stale_pauses", True)
+    monkeypatch.setenv("JOBHUNT_ENGINE_RETRY_EPOCH", "2026-11-20T21:06:00+00:00")
+    assert apply_store.start_pass_epoch() == built_in  # (the module keeps the epoch it was loaded with)
+    monkeypatch.delenv("JOBHUNT_ENGINE_RETRY_EPOCH")
+    before = datetime.now(UTC) - timedelta(seconds=2)
+    moved = datetime.fromisoformat(apply_store.start_pass_epoch())
+    assert before <= moved <= datetime.now(UTC) and apply_store.ENGINE_RETRY_EPOCH == moved.strftime("%Y-%m-%dT%H:%M:%S+00:00")
