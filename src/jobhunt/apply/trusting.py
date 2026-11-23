@@ -640,6 +640,10 @@ def effective_role(run: _Run, field: FormField, role: str, snap: PageSnapshot) -
     """Resolve explicit send and pure navigation labels before dispatching the planner's click."""
     engine = _engine()
     label = fold(field.label)
+    if norm(field.label) in getattr(run, "agreement_buttons", ()) and not getattr(run, "data_typed", False):
+        # The "Submit" of an agreement dialog shown before the application (boxes to tick, nothing typed yet) sends the
+        # agreement, not the application: it is a step like any other.
+        return "next" if role == "submit" else role
     if role == "submit" and _PURE_MOVE.fullmatch(norm(label)) and not (engine.SUBMIT_RE.search(field.label) or _SENDS.search(label)):
         return "next"
     if role in ("next", "open_form", "other") and run.app_touched and (engine.SUBMIT_RE.search(field.label) or _SENDS.search(label)) \
@@ -810,6 +814,8 @@ async def dismiss_blocker(run: _Run) -> str:
 
 async def blocker_hint(run: _Run) -> str:
     found = await blocker(run.page)
+    run.agreement_buttons = ({norm(label) for label in found["buttons"] if label}
+                             if found and found["buttons"] and found.get("boxes") else set())
     if not found or not found["buttons"]:
         return ""
     head = (f"[A MODAL DIALOG COVERS THE PAGE and blocks every other control: « {found['text'][:240]} ». Its buttons: "

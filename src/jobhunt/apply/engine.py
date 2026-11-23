@@ -763,6 +763,9 @@ class _Run:
         self.attach_pending = False          # an "Ajouter"-style upload-confirm button was just clicked
         self.last_click_rec: tuple[str, str] | None = None  # (url, normalized label) of the last unguarded click made
         self.last_click_fields: frozenset[str] = frozenset()  # the fields of the page that click was made on (labels)
+        self.data_typed = False  # trusting mode: a text, a choice in a list or a file of the application was entered (not only boxes)
+        self.agreement_buttons: set[str] = set()  # trusting mode: the buttons of an agreement dialog that covers the page
+        self.last_click_group = ""  # the section that click's button belonged to ("Add" of education, then "Add" of languages)
         self.page_data = False      # the live page holds candidate data in the form of the clicked control (saved draft...)
         self.nav_ref: tuple[str, set[tuple[str, str]], str] | None = None  # (url, fillable labels, button) of the recorded nav click
         self.nav_role: str | None = None  # its role (login, signup, next)
@@ -3504,6 +3507,8 @@ class _Run:
                 self.touched = True  # (before the action: a handler may react while it runs; also closes the dry-run guard)
                 if plan.page_kind not in ACCOUNT_KINDS and not (it.fact and (it.fact.secret or it.fact.key.startswith("account_"))):
                     self.app_touched = True
+                    if it.field.kind not in ("checkbox", "radio"):
+                        self.data_typed = True  # (more than boxes ticked: something of the application itself was entered)
                 try:
                     if trust:
                         shown = await trusting.execute(self, it, target, resolve, snap)
@@ -3758,7 +3763,7 @@ class _Run:
             shown = frozenset(_norm(_label(f)) for f in snap.fields if f.kind not in ("button", "link"))
             same_page = not self.last_click_fields or not shown or (
                 len(shown & self.last_click_fields) * 2 >= min(len(shown), len(self.last_click_fields)))
-            if (v.click and not attach and same_page
+            if (v.click and not attach and same_page and _norm(field.group) == self.last_click_group
                     and self.last_click_rec == (urldefrag(self.page.url).url, _norm(field.label))):
                 loop_sig = [f for f in snap.fields if f.kind not in ("button", "link") and f.ref not in handled and not self._file_satisfied(f, snap)
                             and (f.error or (f.required and _is_empty(f) and (not field.form or not f.form or f.form == field.form)))]
@@ -3865,6 +3870,7 @@ class _Run:
             else:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
                 self.last_click_fields = frozenset(_norm(_label(f)) for f in snap.fields if f.kind not in ("button", "link"))
+                self.last_click_group = _norm(field.group)
                 self.last_click_passwords = sum(f.kind == "password" for f in snap.fields)
             if bound_account and role in ("login", "signup"):
                 self.account_try = (role, self._account_address(self.page.url))

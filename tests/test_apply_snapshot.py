@@ -648,3 +648,19 @@ async def test_a_button_that_only_shows_an_icon_is_named_by_the_icon_and_the_blo
     buttons = [(f.label, f.group) for f in snap.fields if f.kind == "button"]
     assert buttons == [("Modify", "Titre du profil ? Téléphone ?"), ("Delete", "Formation : École d'ingénieurs"), ("Next", "")]
     assert await live_button(resolve(snap.fields[0].ref)) == ("Modify", True, True)
+
+
+async def test_the_add_button_of_a_repeatable_section_says_which_section_it_adds_to(page):
+    """Several sections each end with a bare "Ajouter": the planner must know which one opens an education block. The
+    button's fuller aria-label names it, else the heading of its section."""
+    await page.set_content('''<form>
+      <div role="group" aria-labelledby="h-exp"><h3 id="h-exp">Expérience professionnelle</h3>
+        <button type="button" aria-label="Ajouter Expérience professionnelle">Ajouter</button></div>
+      <div role="group" aria-labelledby="h-edu"><h3 id="h-edu">Formation</h3>
+        <label>Établissement <input name="school"></label><button type="button">Ajouter un autre</button></div>
+      <section><h3>Langues</h3><button type="button">Ajouter</button></section>
+      <button>Enregistrer et continuer</button></form>''')
+    snap, _ = await take_snapshot(page)
+    assert [(f.label, f.group) for f in snap.fields if f.kind == "button"] == [
+        ("Ajouter", "Ajouter Expérience professionnelle"), ("Ajouter un autre", "Formation"), ("Ajouter", "Langues"),
+        ("Enregistrer et continuer", "")]

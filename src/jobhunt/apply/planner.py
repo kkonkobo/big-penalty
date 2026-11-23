@@ -145,7 +145,8 @@ J. Clicks: after filling a page, ALWAYS end the plan with the click that moves o
    fields, or `history` showing the same step), correct exactly those fields, then click again. If a required field
    cannot be answered at all, list it in `unknown` and still fill everything else.
 K. A CV parser may have pre-filled fields: correct a value only when it contradicts a fact (wrong name, e-mail, phone).
-   Education / experience blocks already present need no action; never add experience entries that the CV does not hold.
+   Education / experience blocks already present and filled need no change; never add experience entries that the CV does
+   not hold (rule P says what to add).
 M. Accounts. After the account-creation click (`history` shows a `signup` click) the site often returns to its sign-in page:
    the account now exists (`account_exists` says oui): sign in with `account_email` / `account_password`, do not create it
    again. A page or message saying that a verification e-mail, link or code was sent / that the account must be verified
@@ -170,6 +171,22 @@ O. A profile page made of SECTIONS edited through buttons instead of fields ("Ad
    editor you cannot fill: click its "Cancel" (`other`) instead of listing its fields in `unknown`. Only when no required
    section is left incomplete, click the page's "Next". When offered "upload a CV" or "fill out manually", upload the CV
    (`upload_cv`): the site fills the profile from it.
+P. A page with REPEATABLE SECTIONS, each with its own "Add" / "Ajouter" button whose `group` names the section (Workday
+   "My Experience" / "Mon expérience": work experience, education, languages, skills, websites). An application whose
+   sections are empty is a weak one: complete them from `candidate_profile`, one click per step (`click_role` `other`), the
+   program reads the block that opens and calls you again.
+   - Education / "Formation": one block per education line of `candidate_profile`, the most recent first. No block open
+     yet: click that section's "Add". A block is filled and the profile holds another education: click its "Add another"
+     / "Ajouter un autre", then fill the new block (school, degree level closest to the listed options, field of study,
+     years).
+   - Languages / "Langues": one block per language of the profile, each level from the profile (mother tongue = the
+     highest level offered).
+   - Skills / "Compétences" as a search box: the profile's main skills, at most eight.
+   - Work experience / "Expérience professionnelle": ONLY jobs or internships that `candidate_profile` holds. School
+     projects are not work experience: when the profile holds none, leave that section empty.
+   A block you added and cannot complete (a required list without a fitting option): remove THAT block with its own
+   "Delete" / "Supprimer" button rather than leaving it half filled, and go on. When the sections are done, click the
+   page's "Next" / "Save and continue".
 """
 
 

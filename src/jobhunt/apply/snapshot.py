@@ -489,6 +489,12 @@ _JS = r"""
       const f = base('f' + (++n), 'button', el);
       f.label = text.slice(0, 120);
       if (opener) f.group = groupOf(el);
+      // A bare "Add" / "Add another" / "Delete" of a repeatable section (work experience, education, languages...): which
+      // section it belongs to - its fuller aria-label ("Add Education"), else the section's own heading.
+      if (!f.group && /^(ajouter|add|hinzuf[uü]gen|a[ñn]adir|aggiungi|supprimer|delete|remove|l[oö]schen)( un autre| une autre| another| weitere[ns]?)?$/i.test(text)) {
+        const fuller = clean(el.getAttribute('aria-label'));
+        f.group = (fuller && fuller.toLowerCase() !== text.toLowerCase() ? fuller : groupOf(el)).slice(0, 80);
+      }
       if (!worded) {
         // What the icon acts on: the words of the block it sits in (the nearest box around it that shows any).
         for (let box = el.parentElement, depth = 0; box && depth < 4 && !f.group; box = box.parentElement, depth++) {

@@ -1994,3 +1994,16 @@ async def test_a_required_source_prompt_that_does_not_list_the_job_board_takes_t
     assert trusting.SOURCE_QUESTION.search(trusting.fold("Comment nous avez-vous connus ?"))
     assert trusting.SOURCE_QUESTION.search(trusting.fold("How did you hear about us?"))
     assert not trusting.SOURCE_QUESTION.search(trusting.fold("Dans quelle école êtes-vous ?"))
+
+
+def test_the_submit_of_an_agreement_dialog_before_the_application_is_not_the_send():
+    """A dialog asks to agree (boxes, "Submit") before the form is even reached: its button sends the agreement. Once
+    something of the application was entered, a "Submit" is a send again."""
+    button = field(ref="b1", kind="button", label="Submit")
+    run = run_of(app_touched=True)  # (the required box of the dialog was ticked)
+    run.agreement_buttons = {trusting.norm("Close the dialog"), trusting.norm("Submit")}
+    assert trusting.effective_role(run, button, "next", snap_of(button)) == "next"
+    assert trusting.effective_role(run, button, "submit", snap_of(button)) == "next"
+    run.data_typed = True
+    assert trusting.effective_role(run, button, "next", snap_of(button)) == "submit"
+    assert trusting.effective_role(run_of(app_touched=True), button, "other", snap_of(button)) == "submit"
