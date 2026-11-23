@@ -43,7 +43,7 @@ from jobhunt.apply.store import ApplyRun
 from jobhunt.apply.supervised import FillPreview, Session, UNAVAILABLE, local_bridge, require_posting
 from jobhunt.apply.types import DispatchDiagnostics, FilledField, Mode, Question, RunResult
 from jobhunt.apply.unattended import handoff_result
-from jobhunt.browser import BrowserPool
+from jobhunt.browser import BrowserPool, BuiltinDisplayUnavailable
 from jobhunt.config import get_settings
 from jobhunt.cv import service as cvs
 from jobhunt.cv import store as cvstore
@@ -1215,7 +1215,7 @@ async def _run_locked(app: Application, job, *, mode: Mode, trigger: str, headle
                                   llm=shared_llm, verifier=verifier, out=returned, receipts=receipts,
                                   confirmed_distinct=confirmed_distinct, duplicate_confirmations=duplicate_confirmations, browser=browser,
                                   diagnostics=diagnostics)
-        except ApplyError as e:
+        except (ApplyError, BuiltinDisplayUnavailable) as e:
             result = _blocked_result([str(e)])
         except Exception as e:  # noqa: BLE001 - never re-raised: the run is finished as failed (type name only, no page content)
             crash_reason = f"{type(e).__name__}: {e}"

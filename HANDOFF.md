@@ -133,7 +133,7 @@ uv run big-penalty apply accounts | accounts-export FILE | accounts-import FILE 
   `submitted` needs the form gone + explicit receipt wording + the planner's verdict, anything else after such a click = "envoi non confirmé" (application `failed`,
   never retried until the user resolves it). Passwords never reach the LLM, logs, DB or screenshots (no screenshot after a password was typed).
 - **Pauses** (bucket `paused` on /apply): unknown hard fact (`needs_input`), e-mail verification link (`needs_email`), visible CAPTCHA (`needs_human`, resume in a
-  visible window), untrusted host. Headful windows open on the Mac's built-in display (`browser.window_args`, `JOBHUNT_WINDOW_SCREEN` / `JOBHUNT_WINDOW_POSITION`).
+  visible window), untrusted host. On macOS, visible application windows require an active, non-mirrored built-in display. If Chrome opens outside that display, the application is blocked before navigation. `JOBHUNT_WINDOW_SCREEN` / `JOBHUNT_WINDOW_POSITION` only affect non-application windows.
 - **Web guard**: `origin_guard` in `web/app.py` (loopback Host on every request; writes need same-origin evidence). DB migrations 4-7.
 - **Supervised dry runs so far** (2026-11-17/18, nothing sent): complete on a company careers site, Recruitee, a Teamtailor-style site and an in-house ATS;
   Talentsoft stops at the account page (accounts are created only on a real send); a Phenom/Workday flow reaches the form but pauses on address fields;
