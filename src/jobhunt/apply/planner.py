@@ -187,6 +187,11 @@ P. A page with REPEATABLE SECTIONS, each with its own "Add" / "Ajouter" button w
    A block you added and cannot complete (a required list without a fitting option): remove THAT block with its own
    "Delete" / "Supprimer" button rather than leaving it half filled, and go on. When the sections are done, click the
    page's "Next" / "Save and continue".
+Q. A REQUIRED list of geographic zones (mobility, preferred location) that offers nothing as narrow as the fact: choose
+   the SMALLEST zone offered that contains it ("Europe" when the fact is France or a French region and the list only
+   has continents or world regions; the candidate's own region when regions are listed; every French region when the
+   fact is the whole of France and regions are listed). Never leave such a required list empty because the fit is not
+   exact, and never choose a zone that does not contain the fact.
 """
 
 

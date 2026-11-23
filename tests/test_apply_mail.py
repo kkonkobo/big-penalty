@@ -230,3 +230,18 @@ def test_cli_password_stdin_never_argv(monkeypatch):
     rejected = runner.invoke(cli, ['mail', 'set-password', '1', secret])
     assert rejected.exit_code and secret not in rejected.output
     backend.set.assert_called_once()
+
+
+def test_a_code_mailed_by_the_platform_vendor_for_an_employers_own_careers_domain_is_read():
+    """The employer's careers site runs on a vendor's platform under the employer's domain: the vendor mails the code and
+    links to the employer's space on its own domain. The lone number of such a mail is the code. A vendor mail that does
+    not point at this employer, or one with two numbers, gives nothing."""
+    page = 'https://careers.exempleco.test/careers/apply'
+    body = ('<h1>Verify your email</h1><p>Enter the following code below to complete the verification process:</p>'
+            '<p>482913</p><p>The code will expire after 15 minutes.</p><a href="https://exempleco.eightfold.ai/privacy">Privacy Policy</a>')
+    found = mail.extract(body, page, html=True, sender_domain='eightfold.ai')
+    assert found == mail.Verification('code', '482913')
+    other = body.replace('exempleco.eightfold.ai', 'autreco.eightfold.ai')
+    assert mail.extract(other, page, html=True, sender_domain='eightfold.ai') is None
+    assert mail.extract(body, page, html=True, sender_domain='unrelated.test') is None
+    assert mail.extract(body.replace('15 minutes', '15 minutes. Reference 771203'), page, html=True, sender_domain='eightfold.ai') is None

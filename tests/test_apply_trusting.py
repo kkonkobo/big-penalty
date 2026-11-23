@@ -2007,3 +2007,32 @@ def test_the_submit_of_an_agreement_dialog_before_the_application_is_not_the_sen
     run.data_typed = True
     assert trusting.effective_role(run, button, "next", snap_of(button)) == "submit"
     assert trusting.effective_role(run_of(app_touched=True), button, "other", snap_of(button)) == "submit"
+
+
+async def test_an_emailed_code_is_typed_into_one_character_boxes(page):  # noqa: F811
+    """The site e-mailed a six-digit code and shows six one-character boxes that move on as one types and take the code
+    as soon as it is complete: the code read from the mailbox is typed there, once."""
+    from unittest.mock import AsyncMock
+
+    from jobhunt.apply import mail
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content('''<div role="dialog"><h2>Check your email</h2><div id="otp">''' + "".join(
+        f'<input type="text" maxlength="1" aria-label="Please enter OTP character {rank}">' for rank in range(1, 7)) + '''</div>
+      <button type="button">Resend code</button></div>
+      <script>const boxes = [...document.querySelectorAll('#otp input')];
+        boxes.forEach((box, index) => box.addEventListener('input', () => {
+          if (box.value && boxes[index + 1]) boxes[index + 1].focus();
+          if (boxes.every((other) => other.value)) { document.title = boxes.map((other) => other.value).join(''); document.getElementById('otp').remove(); } }));
+      </script>''')
+    snap, resolve = await take_snapshot(page)
+    run = SimpleNamespace(page=page, code_entries=0, secrets=set(), diagnostics=SimpleNamespace(email=None),
+                          email_verification=SimpleNamespace(poll=AsyncMock(return_value=(mail.Verification("code", "482913"), None))),
+                          _el=lambda found, ref: found.element(ref), _before_mutation=AsyncMock(), autonomous=SimpleNamespace(target=AsyncMock()))
+    assert await trusting.enter_emailed_code(run, snap, resolve) is True
+    assert await page.title() == "482913" and run.diagnostics.email == "email_code_used" and run.code_entries == 1
+    # a code of another length is not forced into the boxes
+    await page.set_content('<div id="otp">' + "".join(f'<input type="text" maxlength="1" aria-label="Code digit {rank}">' for rank in range(1, 5)) + '</div>')
+    snap, resolve = await take_snapshot(page)
+    assert await trusting.enter_emailed_code(run, snap, resolve) is False
+    assert await page.evaluate("[...document.querySelectorAll('input')].map((box) => box.value).join('')") == ""
