@@ -664,7 +664,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         if email and (not browser_adapter or match.adapter.boundaries.get("account_creation") == "auto"):
             password, account_known = accounts.guarded_account_callbacks(
                 email, account_host,
-                posting_url=target,
+                posting_url=target, employer_url=attempt.url,
             )
 
     def live_password():

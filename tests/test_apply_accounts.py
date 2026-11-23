@@ -614,3 +614,17 @@ def test_accounts_on_a_host_that_employers_share_are_kept_per_employer(mem):
     assert A.shared_employer("https://careers.first-example.test/job/100") == "first-example.test"
     with pytest.raises(A.ApplyError):
         A.create_password("jobs.lever.co", email, site="first-example.test")  # (no employer scope on a host of its own)
+
+
+def test_the_employer_of_a_shared_host_is_the_posting_the_run_started_from(mem):
+    """The run moves from the employer's posting to the shared host; the address it is on there may name the employer's
+    tenant or not. The account key is taken from the posting it started from, so it is the same at every step and run."""
+    host, email = "career5.successfactors.eu", "camille@example.test"
+    start = "https://careers.first-example.test/job/100"
+    accept = {host}.__contains__
+    on_tenant, _ = A.guarded_account_callbacks(email, accept, posting_url=f"https://{host}/careers?company=TENANT1", employer_url=start)
+    bare, known = A.guarded_account_callbacks(email, accept, posting_url=f"https://{host}/career", employer_url=start)
+    first = on_tenant(f"https://{host}/careers?company=TENANT1")
+    assert first and bare(f"https://{host}/career") == first
+    assert (A.service_name(host, site="first-example.test"), email) in mem.items
+    assert not any(key[0].endswith(":employer:tenant1") for key in mem.items)
