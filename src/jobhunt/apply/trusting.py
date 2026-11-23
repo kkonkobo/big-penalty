@@ -995,7 +995,14 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
     typed = bool(await loc.evaluate("e => e.matches('input,textarea')"))
 
     def pick(found, loose=False):
-        labels = [text for _, text in found]
+        # (a list that renders each entry twice - a visible row and its screen-reader twin - offers each answer once:
+        # "the one entry that means it" is looked for among the distinct labels, and the first row carrying it is taken)
+        rows = [text for _, text in found]
+        labels = list(dict.fromkeys(rows))
+        index = _pick_label(labels, loose)
+        return rows.index(labels[index]) if index >= 0 else -1
+
+    def _pick_label(labels, loose):
         if code:
             hits = [index for index, text in enumerate(labels) if re.findall(r"\+\s*[0-9]+", text) == [code]]
             if not hits and not any(re.search(r"\+\s*[0-9]", text) for text in labels):  # a list of country names only

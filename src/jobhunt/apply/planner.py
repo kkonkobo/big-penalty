@@ -192,6 +192,9 @@ Q. A REQUIRED list of geographic zones (mobility, preferred location) that offer
    has continents or world regions; the candidate's own region when regions are listed; every French region when the
    fact is the whole of France and regions are listed). Never leave such a required list empty because the fit is not
    exact, and never choose a zone that does not contain the fact.
+R. A salary / allowance field that takes a NUMBER (a currency sign beside it, "chiffre", "montant", type number): type
+   digits only, and only when a fact gives a figure. When no fact gives one and the field is optional, leave it empty;
+   never type words ("gratification légale", "selon profil") into it.
 """
 
 
