@@ -509,10 +509,17 @@ def _retry_pauses() -> bool:
 CHALLENGE_RETRY_AFTER = timedelta(hours=24)
 
 
+# Until this instant the challenge detector took what an INVISIBLE bot check leaves on a page (its badge, its legal line,
+# its script) for a challenge. A pass that starts after it tries those stops again at once instead of after a day.
+CHALLENGE_DETECTION_FIXED = "2026-11-23T19:48:30+00:00"
+
+
 def _challenge_cutoff() -> str:
     """A CAPTCHA pause older than this (a day before the pass began) is tried again when the owner switched
-    `apply_retry_stale_pauses` on: such walls come and go with the session, and one that still stands only pauses again."""
-    return (datetime.fromisoformat(ENGINE_RETRY_EPOCH) - CHALLENGE_RETRY_AFTER).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    `apply_retry_stale_pauses` on: such walls come and go with the session, and one that still stands only pauses again.
+    So is one judged by the detector that has since been corrected (see CHALLENGE_DETECTION_FIXED)."""
+    day_old = (datetime.fromisoformat(ENGINE_RETRY_EPOCH) - CHALLENGE_RETRY_AFTER).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    return max(day_old, CHALLENGE_DETECTION_FIXED) if CHALLENGE_DETECTION_FIXED <= ENGINE_RETRY_EPOCH else day_old
 
 
 def _site_handoff(t: str) -> str:
