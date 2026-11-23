@@ -1027,9 +1027,10 @@ class _Run:
         return FactSheet(facts=[*facts, extra])
 
     def _left_page(self, trust: bool, snap: PageSnapshot) -> bool:
-        """Trusting mode: a field could not be reached because the browser is no longer on the page that was read (three such
-        re-reads per run at most)."""
-        return bool(trust and self.moved_rereads < 3 and urldefrag(self.page.url).url != urldefrag(snap.url).url)
+        """Trusting mode: a field could not be reached because what was read is gone - the browser is on another page, or
+        the page replaced the element (an upload control its script builds again). Three such re-reads per run at most;
+        after that the field is reported."""
+        return bool(trust and self.moved_rereads < 3)
 
     def _account_exists(self) -> bool:
         """Does the candidate have an account on the CURRENT page: the store says so and no login with it failed in this run.
@@ -3580,7 +3581,7 @@ class _Run:
                 # The site took the browser elsewhere between the read and the typing (a posting that redirects to its
                 # sign-in page): what was read is gone, nothing is asked of anyone - the new page is read.
                 self.moved_rereads += 1
-                log.note = self._r("; ".join(x for x in (log.note, "la page a changé pendant la saisie : relecture") if x))[:900]
+                log.note = self._r("; ".join(x for x in (log.note, "champ disparu ou page changée pendant la saisie : relecture") if x))[:900]
                 await self._settle()
                 continue
             if self.mode == "dry_run" and self.blocked_requests:
