@@ -651,6 +651,19 @@ async def test_with_the_owners_switch_a_captcha_pause_more_than_a_day_old_is_tri
     assert [a for a, _ in env.runs] == [app.id] and s.paused == 0
 
 
+@pytest.mark.parametrize(("minutes", "retried"), [(-60, True), (60, False)])
+async def test_a_captcha_pause_judged_before_the_detector_was_corrected_is_tried_again_at_once(env, profile, retry_pauses, monkeypatch,
+                                                                                               minutes, retried):
+    """The detector took invisible bot checks for challenges until a known instant. A pass started after it tries a stop
+    judged before it again without waiting a day; a stop judged since still waits its day."""
+    fixed = datetime.fromisoformat(astore.CHALLENGE_DETECTION_FIXED)
+    monkeypatch.setattr(astore, "ENGINE_RETRY_EPOCH", (fixed + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S+00:00"))
+    app = engine_paused_run(env, env.job(1), "challenge", started=(fixed + timedelta(minutes=minutes)).isoformat())
+    assert astore.has_site_handoff(app.id) is not retried
+    s, _ = await daily(profile)
+    assert ([a for a, _ in env.runs] == [app.id] and s.paused == 0) if retried else (not env.runs and s.paused == 1)
+
+
 async def test_with_the_owners_switch_an_old_wait_for_an_email_is_tried_again(env, profile, retry_pauses):
     """An application once left "waiting for an e-mail" (when a person had to follow the link) is run again: the engine reads
     the mailbox itself now. One paused by the current pass still waits for its mail."""

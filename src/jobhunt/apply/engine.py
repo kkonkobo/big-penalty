@@ -346,7 +346,9 @@ assert "return true" not in _BANNER_TEXTS_JS and _BANNER_TEXTS_JS.count("return 
 # A notice the site floats over the page (fixed / sticky, a few lines, maybe a close button, no field): what a form sent
 # back says is missing when nothing marks it as an error. Read only for a page whose title says "error", or when the
 # notice itself is worded like one (two at most; cookie bars and help widgets are not notices).
-_NOTICE_TEXTS_JS = r"""(titled) => {
+_NOTICE_TEXTS_JS = r"""(asked) => {
+  let titled = Array.isArray(asked) ? asked[0] : asked;   // (asked: `titled`, or [titled, how many notices at most])
+  const most = Array.isArray(asked) ? asked[1] : 2;
   const WORDS = /erreur|error|errore|fehler|obligatoire|obbligator|required|requis|erforderlich|pflicht|inserire|compilare|renseign|veuillez|invalid|manquant|missing|mancant/i;
   const NOT_NOTICE = /cookie|traceur|consent|chat|assistan|besoin d'aide|need help|newsletter/i;
   const out = [];
@@ -362,7 +364,7 @@ _NOTICE_TEXTS_JS = r"""(titled) => {
     if (t.length < 12 || t.length > 400 || NOT_NOTICE.test(t + ' ' + e.id + ' ' + (e.getAttribute('class') || ''))) continue;
     if (!titled && !WORDS.test(t)) continue;
     if (!out.some((seen) => seen.includes(t) || t.includes(seen))) out.push(t);
-    if (out.length >= 2) break;
+    if (out.length >= most) break;
   }
   return out;
 }"""
@@ -1212,7 +1214,8 @@ class _Run:
         # "errors" must not hide it).
         for fr in self.page.frames:
             with contextlib.suppress(Exception):
-                if any(isinstance(text, str) and confirmation_evidence(text) for text in await fr.evaluate(_NOTICE_TEXTS_JS, True)):
+                # (every floating block is looked at: a sticky header or a help button must not use up the places)
+                if any(isinstance(text, str) and confirmation_evidence(text) for text in await fr.evaluate(_NOTICE_TEXTS_JS, [True, 10])):
                     return True
         return False
 
@@ -2498,6 +2501,8 @@ class _Run:
             await save_failure_diagnostics(page, self.out_dir, status=res.status, diagnostic_code=res.diagnostic_code or "",
                                            step=len(self.steps), reason=self._stop_reason(res),
                                            screenshot=not self.secrets or self.trusting, redact=self._r)  # (every input is masked in it)
+            if self.trusting and (self.final_clicked or self.final_awaiting) and res.status != "submitted" and page is self.page:
+                await self._note_unconfirmed(page)
             if self.trusting:  # the step trace (kinds, clicked labels, what failed and why; never a value), local only
                 trace = [{"step": s.index, "page_kind": s.page_kind, "url": bare_url(s.url), "clicked": safe_reason(s.clicked, self._r, 80),
                           "filled": [safe_reason(f.label, self._r, 60) for f in s.filled][:60],
@@ -2880,6 +2885,23 @@ class _Run:
 
     def _unconfirmed(self) -> RunResult:
         return self._end("failed", UNCONFIRMED_MSG)
+
+    async def _note_unconfirmed(self, page: Page) -> None:
+        """Why the page that followed the send click was not taken for a receipt, for the run's trace (no value): what is
+        still there of the form, field errors, error banners, and whether the page's wording reads as a receipt."""
+        if not self.steps:
+            return
+        with contextlib.suppress(Exception):
+            snap, _ = await take_snapshot(page, read_only=True)
+            parts = []
+            if self._has_form(snap) and not self._form_gone(snap):
+                parts.append("formulaire encore présent")
+            if any(f.error for f in snap.fields):
+                parts.append("champ en erreur")
+            if banners := await self._banner_texts():
+                parts.append("bannière : " + " / ".join(self._r(text)[:80] for text in banners[:2]))
+            parts.append("texte de réception " + ("lu" if await self._page_says_received() else "non lu"))
+            self.steps[-1].note += "; envoi non confirmé : " + ", ".join(parts)
 
     async def _email_hold(self, log: StepLog, note: str = '') -> RunResult:
         await self._shot(log)

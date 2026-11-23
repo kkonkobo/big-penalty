@@ -189,9 +189,23 @@ def _shared_host(host):
     return host.split('.')[0] in {'www', 'jobs', 'careers', 'apply', 'boards', 'job-boards', 'recruiting', 'recruitment'}
 
 
+# An employer often mails from its name under another ending than the one of its careers site ("employer.fr" for a site
+# on "employer.com"). Those sibling domains are searched too - for names long enough to be a brand, never for a
+# platform's own name. What is read from such a mail is still checked against the site itself (`same_recipient`).
+_SIBLING_ENDINGS = ('com', 'fr', 'eu', 'net', 'org', 'io', 'co', 'de', 'ch', 'be')
+
+
+def _siblings(bound):
+    domain = accounts.registrable_host(bound.hostname)
+    label, _, ending = domain.partition('.')
+    if len(label) < 5 or '.' in ending or any(_under(bound.hostname, provider_domain) for provider_domain in ATS_DOMAINS):
+        return frozenset()
+    return frozenset(f'{label}.{other}' for other in _SIBLING_ENDINGS if other != ending)
+
+
 def search_domains(bound_url):
     bound = _url(bound_url)
-    return ATS_DOMAINS | {accounts.registrable_host(bound.hostname)} if bound else frozenset()
+    return ATS_DOMAINS | {accounts.registrable_host(bound.hostname)} | _siblings(bound) if bound else frozenset()
 
 
 class _HTML(HTMLParser):
@@ -262,7 +276,7 @@ def extract(text, bound_url, *, html=False, links_only=False, sender_domain=None
             vendor = any(_under(host, domain) and _under(sender_domain, domain) for domain in ATS_DOMAINS)
             if not vendor and not _under(sender_domain, host) and not any(same_recipient(bound_url, link) for link, _ in links):
                 return None
-        elif not _under(sender_domain, bound_domain):
+        elif not _under(sender_domain, bound_domain) and not any(_under(sender_domain, sibling) for sibling in _siblings(urlsplit(bound_url))):
             # An employer whose careers site runs on a vendor's platform under the employer's own domain: the vendor
             # mails the code from its domain, and the mail links to the employer's space there ("<employer>.<vendor>").
             label = bound_domain.split('.')[0]
