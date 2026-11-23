@@ -3246,3 +3246,23 @@ def test_a_tick_all_that_apply_list_is_answered_once_one_box_is_ticked():
     release_answered_box_lists(fields)
     assert [f.required for f in regions] == [False, True, False, True]
     assert all(f.required for f in [*empty, *consents]) and fields[4].required
+
+
+def test_an_account_kept_in_the_frame_of_an_embedded_ats_counts_for_the_page():
+    """A career site shows its applicant-tracking system in a frame: the account (and its password field) is the frame
+    host's. The planner is told the account exists; a sign-in refused in this run takes that back."""
+    from types import SimpleNamespace
+
+    from jobhunt.apply import engine
+
+    page = SimpleNamespace(url="https://www.example.test/offres/100/jobapplication",
+                           frames=[SimpleNamespace(url="https://www.example.test/offres/100/jobapplication"),
+                                   SimpleNamespace(url="about:blank"), SimpleNamespace(url="https://careers.example.test/apply?x=1")])
+    run = SimpleNamespace(page=page, account_exists_hosts=set(), login_failed=set(), _account_address=engine._Run._account_address,
+                          account_known=lambda address: address == "careers.example.test")
+    assert engine._Run._account_exists(run) is True
+    run.login_failed.add("careers.example.test")
+    assert engine._Run._account_exists(run) is False
+    run.login_failed.clear()
+    run.account_known = lambda address: False
+    assert engine._Run._account_exists(run) is False

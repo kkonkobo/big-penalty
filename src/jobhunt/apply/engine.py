@@ -790,6 +790,7 @@ class _Run:
         self.combo_options: dict[str, list[str]] = {}  # trusting mode: options an opened list showed, by field label
         self.combo_chosen: dict[str, str] = {}  # trusting mode: what a multiple-choice box took as a tag, by field label
         self.page_messages: list[str] = []  # trusting mode: the error messages the page shows at this step
+        self.moved_rereads = 0  # trusting mode: steps read again because the page changed address while fields were being typed
         self.code_entries = 0                # trusting mode: one-time codes read from the mailbox and typed
         self.back_to_posting = False         # trusting mode: returned to the posting after a login that led elsewhere
         self.email_login_tried = False       # trusting mode: at most one sign-in fallback from email verification
@@ -1022,12 +1023,26 @@ class _Run:
         extra = Fact(key="account_exists", label="Un compte existe déjà sur ce site pour le candidat", value="oui" if known else "non")
         return FactSheet(facts=[*facts, extra])
 
+    def _left_page(self, trust: bool, snap: PageSnapshot) -> bool:
+        """Trusting mode: a field could not be reached because the browser is no longer on the page that was read (three such
+        re-reads per run at most)."""
+        return bool(trust and self.moved_rereads < 3 and urldefrag(self.page.url).url != urldefrag(snap.url).url)
+
     def _account_exists(self) -> bool:
-        """Does the candidate have an account on the CURRENT page host: the store says so and no login with it failed in this run."""
-        address = self._account_address(self.page.url)
-        if address in self.account_exists_hosts and address not in self.login_failed:
-            return True
-        return bool(self.account_known and self.account_known(address) and address not in self.login_failed)
+        """Does the candidate have an account on the CURRENT page: the store says so and no login with it failed in this run.
+        The page's own host, or the host of a frame it shows (a career site that embeds its applicant-tracking system in a
+        frame keeps the account - and the password field - there)."""
+        addresses = [self._account_address(self.page.url)]
+        for frame in getattr(self.page, "frames", [])[1:]:
+            url = getattr(frame, "url", "") or ""
+            if url.startswith(("https://", "http://")):
+                addresses.append(self._account_address(url))
+        for address in dict.fromkeys(addresses):
+            if address in self.login_failed:
+                continue
+            if address in self.account_exists_hosts or (self.account_known and self.account_known(address)):
+                return True
+        return False
 
     async def _says_account_exists(self) -> bool:
         """The page (any frame) says the e-mail / identifier is already registered."""
@@ -3441,6 +3456,7 @@ class _Run:
                 if bad is not None:
                     return bad
             dirty = False
+            moved = False
             pending_choices = {item.field.ref for item in v.items if item.field.kind in CHOICE_KINDS}
             for it in v.items if not self._inspection_only else ():
                 self.diagnostics.control = ("upload" if it.act.op.startswith("upload_") else
@@ -3476,6 +3492,9 @@ class _Run:
                     return hold.result
                 except ManualField:
                     pending_choices.discard(it.field.ref)
+                    if self._left_page(trust, snap):
+                        moved = True
+                        break
                     v.notes.append(f"{_label(it.field)} : à remplir à la main")
                     v.questions.append(_question(it.field))
                     continue
@@ -3493,6 +3512,9 @@ class _Run:
                 except _DecisionHold as hold:
                     return hold.result
                 except ManualField:
+                    if self._left_page(trust, snap):
+                        moved = True
+                        break
                     v.notes.append(f"{_label(it.field)} : à remplir à la main")
                     v.questions.append(_question(it.field))
                     continue
@@ -3546,6 +3568,13 @@ class _Run:
                                                   inferred=it.inferred, basis=self._r(it.basis)))
                 if self.mode == "dry_run" and self.blocked_requests:  # (also when the aborted navigation made the action fail)
                     break
+            if moved:
+                # The site took the browser elsewhere between the read and the typing (a posting that redirects to its
+                # sign-in page): what was read is gone, nothing is asked of anyone - the new page is read.
+                self.moved_rereads += 1
+                log.note = self._r("; ".join(x for x in (log.note, "la page a changé pendant la saisie : relecture") if x))[:900]
+                await self._settle()
+                continue
             if self.mode == "dry_run" and self.blocked_requests:
                 await self._shot(log)
                 return self._auto_submit_result(log)

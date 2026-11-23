@@ -438,3 +438,16 @@ async def test_the_next_button_of_a_stepped_form_that_keeps_its_address_is_not_a
     assert result.status == "submitted", (result.message, result.result.diagnostic_code)
     body = core.posts_to("/site/jobs/100")[0]["body"]
     assert body.count(b'name="r"') == 3 and b'name="r"\r\n\r\n0' not in body
+
+
+async def test_a_page_that_moves_between_the_read_and_the_typing_is_read_again(core, profile, tmp_path, fast):
+    """The posting shows its form, then takes the browser to the form's own address a moment after it was read: the fields
+    that were read are gone. Nothing is "to be filled by hand": the page the browser is on is read and filled."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      new MutationObserver(() => location.replace('/jobs/100/apply'))
+        .observe(document.getElementById('name'), {attributes: true, attributeFilter: ['data-bp-ref']});</script>""")
+    core.html["/site/jobs/100/apply"] = form_page("/jobs/100/apply")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code)
+    assert paths(core, "/site") == ["/site/jobs/100/apply"]
