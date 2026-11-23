@@ -3266,3 +3266,11 @@ def test_an_account_kept_in_the_frame_of_an_embedded_ats_counts_for_the_page():
     run.login_failed.clear()
     run.account_known = lambda address: False
     assert engine._Run._account_exists(run) is False
+
+
+def test_a_tenant_of_zoho_recruit_is_a_recognised_applicant_tracking_site():
+    from jobhunt import origin
+
+    assert "zoho_recruit" in origin.KNOWN_ATS_IDS
+    assert any(rule[0] == "zoho_recruit" and rule[1].search("exempleco.zohorecruit.eu") for rule in origin._ATS_RULES)
+    assert not any(rule[0] == "zoho_recruit" and rule[1].search("zohorecruit.eu.unrelated.test") for rule in origin._ATS_RULES)

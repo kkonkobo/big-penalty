@@ -2048,3 +2048,24 @@ async def test_the_button_that_opens_the_cookie_preferences_is_not_the_way_out_o
     await page.set_content(dialog("Nous utilisons des cookies pour améliorer votre expérience.",
                                   '<button>Paramétrer les cookies</button>' + CONTINUE.replace("Continue to site", "Continuer sans accepter")))
     assert await trusting.dismiss_blocker(SimpleNamespace(page=page)) == "Continuer sans accepter"
+
+
+async def test_a_list_that_renders_each_entry_twice_still_offers_each_answer_once(page):  # noqa: F811
+    """A design-system list shows every option as a visible row and a twin for screen readers: "Monsieur" stands twice.
+    The civility "M." means the one entry "Monsieur"; it is chosen (it used to be "not found", being there twice)."""
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content('''<form><label for="civ">Civilité *</label><input id="civ" role="combobox" aria-autocomplete="list" aria-required="true">
+      <div id="pop"></div></form>
+      <script>
+        const ALL = ['Madame', 'Monsieur', 'Ne se prononce pas'];
+        civ.addEventListener('click', () => {
+          pop.innerHTML = '<div role="listbox">' + ALL.map((name) => `<div role="option">${name}</div><div role="option" style="font-size:1px">${name}</div>`).join('') + '</div>';
+          for (const row of pop.querySelectorAll('[role=option]')) row.onclick = () => { civ.value = row.textContent; pop.innerHTML = ''; }; });
+      </script>''')
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, combo_chosen={}, _combo_value=engine._Run._combo_value,
+                          _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select", fact="civility"), combo, None, value="M.")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Monsieur"

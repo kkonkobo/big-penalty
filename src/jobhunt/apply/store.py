@@ -506,18 +506,31 @@ def _retry_pauses() -> bool:
     return bool(get_settings().apply_retry_stale_pauses)
 
 
+CHALLENGE_RETRY_AFTER = timedelta(hours=24)
+
+
+def _challenge_cutoff() -> str:
+    """A CAPTCHA pause older than this (a day before the pass began) is tried again when the owner switched
+    `apply_retry_stale_pauses` on: such walls come and go with the session, and one that still stands only pauses again."""
+    return (datetime.fromisoformat(ENGINE_RETRY_EPOCH) - CHALLENGE_RETRY_AFTER).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
 def _site_handoff(t: str) -> str:
     """SQL: run `t` hands the application over to the candidate on the site (a stale engine pause does not; nor, when the
-    owner switched `apply_retry_stale_pauses` on, any stale pause other than a CAPTCHA)."""
+    owner switched `apply_retry_stale_pauses` on, any stale pause other than a CAPTCHA less than a day old - an old
+    "waiting for an e-mail" included: the engine now reads the mailbox itself)."""
     code = f"COALESCE(json_extract({t}.result_json, '$.diagnostic_code'), '')"
+    unclicked = (f"{t}.started_at < '{ENGINE_RETRY_EPOCH}' AND {t}.submit_clicked_at IS NULL"
+                 f" AND COALESCE(json_extract({t}.result_json, '$.submit_clicked'), 0) = 0")
     if _retry_pauses():
-        retried = (f"{code} NOT IN {_HUMAN_ONLY_CODES!r} AND COALESCE({t}.message, '') NOT LIKE '%captcha%'"
-                   f" AND COALESCE({t}.message, '') NOT LIKE '%anti-robot%'")  # (LIKE is case-insensitive on ASCII)
+        retried = (f"(({code} NOT IN {_HUMAN_ONLY_CODES!r} AND COALESCE({t}.message, '') NOT LIKE '%captcha%'"
+                   f" AND COALESCE({t}.message, '') NOT LIKE '%anti-robot%')"  # (LIKE is case-insensitive on ASCII)
+                   f" OR {t}.started_at < '{_challenge_cutoff()}')")
+        mail = f"({t}.status='needs_email' AND {t}.email_resumed=0 AND NOT ({unclicked}))"
     else:
         retried = f"{code} IN ({', '.join(repr(known) for known in sorted(ENGINE_PAUSE_CODES))})"
-    return (f"(({t}.status='needs_human' AND NOT ({t}.started_at < '{ENGINE_RETRY_EPOCH}' AND {t}.submit_clicked_at IS NULL"
-            f" AND COALESCE(json_extract({t}.result_json, '$.submit_clicked'), 0) = 0 AND {retried}))"
-            f" OR ({t}.status='needs_email' AND {t}.email_resumed=0))")
+        mail = f"({t}.status='needs_email' AND {t}.email_resumed=0)"
+    return f"(({t}.status='needs_human' AND NOT ({unclicked} AND {retried})) OR {mail})"
 
 
 def _outstanding_runs() -> str:
@@ -810,21 +823,31 @@ def stale_engine_pause(run: ApplyRun | None) -> bool:
         # may answer it itself (new standing facts, widget fixes, account creation). Nothing was clicked, so a retry is
         # safe; a question that really needs the candidate comes back as a new pause.
         return True
-    if (run is None or run.status != "needs_human" or run.result is None or run.result.submit_clicked
+    if (run is None or run.status not in ("needs_human", "needs_email") or run.result is None or run.result.submit_clicked
             or run.submit_clicked_at is not None or _iso(run.started_at) >= ENGINE_RETRY_EPOCH):
         return False
+    if run.status == "needs_email":
+        return _retry_pauses()  # (an old "waiting for an e-mail": the engine reads the mailbox itself now)
     if run.result.diagnostic_code in ENGINE_PAUSE_CODES:
         return True
     # (the owner's switch: an old pause that is not a CAPTCHA - an account the engine has since learnt to open, a guard
-    # rule since dropped - is tried again; the send click was never reached, so nothing can be sent twice)
-    return (_retry_pauses() and run.result.diagnostic_code not in _HUMAN_ONLY_CODES
-            and not _HUMAN_ONLY.search(f"{run.message or ''} {run.result.message or ''}"))
+    # rule since dropped - is tried again; the send click was never reached, so nothing can be sent twice. A CAPTCHA
+    # pause is tried again once it is a day old.)
+    if not _retry_pauses():
+        return False
+    challenge = (run.result.diagnostic_code in _HUMAN_ONLY_CODES
+                 or bool(_HUMAN_ONLY.search(f"{run.message or ''} {run.result.message or ''}")))
+    return not challenge or _iso(run.started_at) < _challenge_cutoff()
 
 
 def counts_as_failure(run: ApplyRun) -> bool:
     """`run` counts towards the two failed attempts that end automatic retries: a failure judged by code older than
     ENGINE_RETRY_EPOCH that never reached a click (nothing can have been sent) does not."""
     if run.status != "failed":
+        return False
+    if run.operator_not_sent_at is not None and _auto_retry_allowed() and _iso(run.started_at) < ENGINE_RETRY_EPOCH:
+        # (settled "not sent" on evidence, before this pass: with the owner's switch such an attempt is to be made again,
+        # so it does not use up one of the two tries)
         return False
     clicked = (run.submit_clicked_at is not None or run.nav_clicked_at is not None
                or bool(run.result is not None and run.result.submit_clicked))

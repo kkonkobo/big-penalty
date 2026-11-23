@@ -241,6 +241,7 @@ _ATS_RULES: list[tuple[str, re.Pattern, re.Pattern | None]] = [
         ("altays", r"(^|\.)altays\.(com|fr|net)$", None),
         ("gestmax", r"(^|\.)gestmax\.(fr|eu|com)$", None),
         ("talentview", r"(^|\.)talentview\.io$", None),
+        ("zoho_recruit", r"(^|\.)zohorecruit\.(com|eu|in)$", None),
         ("oracle_cloud", r"(^|\.)oraclecloud\.com$", r"candidateexperience|hcmui"),
         ("eightfold", r"(^|\.)eightfold\.ai$", None),
         ("avature", r"(^|\.)avature\.net$", None),

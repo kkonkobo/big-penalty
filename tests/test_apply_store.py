@@ -635,3 +635,23 @@ def test_a_pass_started_without_an_epoch_retries_what_paused_before_it_started(m
     before = datetime.now(UTC) - timedelta(seconds=2)
     moved = datetime.fromisoformat(apply_store.start_pass_epoch())
     assert before <= moved <= datetime.now(UTC) and apply_store.ENGINE_RETRY_EPOCH == moved.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
+def test_an_attempt_settled_not_sent_before_the_pass_does_not_use_up_a_try(monkeypatch):
+    """Two failed tries end the automatic retries. An attempt a person (or the receipt check) settled "not sent" before this
+    pass is to be made again when the owner allows it: it is not one of the two. Unsettled, or without the switch, it is."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from jobhunt.apply import store as apply_store
+    from jobhunt.config import get_settings
+
+    old = datetime.fromisoformat(apply_store.ENGINE_RETRY_EPOCH) - timedelta(hours=3)
+    clicked = SimpleNamespace(status="failed", started_at=old, submit_clicked_at=old, nav_clicked_at=None, result=None,
+                              operator_not_sent_at=None)
+    settled = SimpleNamespace(**{**vars(clicked), "operator_not_sent_at": old + timedelta(minutes=5)})
+    monkeypatch.setattr(get_settings(), "apply_retry_verified_not_sent", True)
+    assert apply_store.counts_as_failure(clicked) and not apply_store.counts_as_failure(settled)
+    monkeypatch.setattr(get_settings(), "apply_retry_verified_not_sent", False)
+    assert apply_store.counts_as_failure(settled)
+    assert UTC is not None
