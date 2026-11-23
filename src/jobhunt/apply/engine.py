@@ -1197,6 +1197,12 @@ class _Run:
                 text = await fr.evaluate("() => (document.body && document.body.innerText || '').slice(0, 60000)")
                 if isinstance(text, str) and confirmation_evidence(text):
                     return True
+        # A notice floating over the page says so by itself, whatever else the page holds (the text of an ad that speaks of
+        # "errors" must not hide it).
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                if any(isinstance(text, str) and confirmation_evidence(text) for text in await fr.evaluate(_NOTICE_TEXTS_JS, True)):
+                    return True
         return False
 
     async def _page_says_gone(self) -> bool:
@@ -2541,6 +2547,7 @@ class _Run:
                 self.final_clicked = True  # the form of a navigation click is gone: it may have been sent
             if snap.has_captcha:
                 await self._shot(log)
+                await self._withdraw_unsent_click()
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if self.autonomous and self.final_awaiting:
                 trace = self.diagnostics
@@ -2588,6 +2595,13 @@ class _Run:
                             and await self._page_says_received()):
                         # The site left the form's page for one that says the application was received, and shows ANOTHER
                         # form there (an invitation to create an account): that form is not the one that was sent.
+                        trace.receipt_kind, trace.receipt_reason = "first_party_confirmation", "confirmation_text"
+                        return self._end("submitted", "Candidature envoyée.")
+                    if (not gone and self._form_mostly_gone(snap) and not any(f.error for f in snap.fields)
+                            and not await self._banner_error() and await self._page_says_received()):
+                        # Same address, the application's fields and its send button are gone and the page says the
+                        # application was received: what is left of the click's page (a search box that sits on every
+                        # page of the site) is not the form that was sent.
                         trace.receipt_kind, trace.receipt_reason = "first_party_confirmation", "confirmation_text"
                         return self._end("submitted", "Candidature envoyée.")
                     if gone and not any(f.error for f in snap.fields) and not await self._banner_error():
@@ -2655,6 +2669,7 @@ class _Run:
                     return await self._email_hold(log, plan.note if not self.email_verification else '')
                 if plan.page_kind == "captcha":
                     await self._shot(log)
+                    await self._withdraw_unsent_click()
                     return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
                 if plan.page_kind == "closed":
                     await self._shot(log)
@@ -2674,6 +2689,26 @@ class _Run:
                 return self._end("failed", FIELD_ERROR_MSG) if errors_seen else self._unconfirmed()
             await asyncio.sleep(OBSERVE_POLL_S)
             snap, resolve = await self._snapshot()
+
+    async def _withdraw_unsent_click(self) -> bool:
+        """A CAPTCHA stands between the send click and the site (a challenge raised BY that click): when the browser has sent
+        the employer's site or its ATS no write since the click and got no answer to one (the challenge's own exchanges with
+        its vendor are not the application), the click is withdrawn - nothing was sent, so the application pauses for the
+        challenge instead of being held as a possible send that a person must check."""
+        withdraw = getattr(self.autonomous, "unmark_submit", None)
+        if (not self.trusting or self.autonomous is None or withdraw is None or not (self.final_awaiting or self.final_clicked)
+                or getattr(self.autonomous, "click_write", object()) is not None
+                or getattr(self.autonomous, "final_response", True)):
+            return False
+        try:
+            await withdraw()
+        except Exception:
+            return False
+        self.final_awaiting = self.final_clicked = False
+        self.submit_clicks = max(0, self.submit_clicks - 1)
+        self.pending = self.last_sent = self.last_click_rec = None
+        self.diagnostics.receipt_reason = "before_submit"
+        return True
 
     def _application_ahead(self, snap: PageSnapshot, sent, present: set) -> bool:
         """After a click recorded as the send: the page shows ANOTHER form that is plainly the application itself - a file
@@ -2953,6 +2988,18 @@ class _Run:
             return False
         return not any(f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
 
+    def _form_mostly_gone(self, snap: PageSnapshot) -> bool:
+        """The clicked button is gone and so are most of the fields of the page it was clicked on. When nothing had to be
+        filled there (a form the site had filled in already), every field of that page was noted, the site's own search box
+        included: those few are still there after a send, the application's are not."""
+        sent = self.last_sent
+        if sent is None or len(sent.fields) < 2:
+            return False
+        if any(f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields):
+            return False
+        left = sent.fields & {(_norm(_label(f)), f.kind) for f in snap.fields}
+        return len(left) * 2 <= len(sent.fields)
+
     @staticmethod
     def _confirmed(snap: PageSnapshot, sent: _Sent | None) -> bool:
         """Positive proof of a received application: the form of the click is gone (none of the fields filled there, nor the
@@ -3075,6 +3122,7 @@ class _Run:
                     return self._end("needs_human", "CAPTCHA non résolu dans le délai : rouvrir avec « Reprendre dans une fenêtre » depuis la page Envois "
                                                     f"(la fenêtre reste ouverte environ {minutes} minutes) ; si un clic d'envoi avait déjà eu lieu, "
                                                     "vérifier d'abord sur le site de l'entreprise.")
+                await self._withdraw_unsent_click()
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if self.attach_pending:  # an upload-confirm click ("Ajouter"): an error now is an UPLOAD problem, nothing was sent
                 self.attach_pending = False
@@ -3254,6 +3302,7 @@ class _Run:
 
             if kind == "captcha":
                 await self._shot(log)
+                await self._withdraw_unsent_click()
                 return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
             if kind == "email_verification":
                 if self.trusting:

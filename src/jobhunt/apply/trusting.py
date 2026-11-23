@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import difflib
 import re
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urldefrag, urlsplit
@@ -1544,6 +1545,78 @@ def short_message(run: _Run) -> str:
             f"disposition pour échanger sur mon profil.\n\nCordialement,\n{name}")
 
 
+def _as_date(text: str) -> date | None:
+    """The day a date answer names ("2027-02-01", "01/02/2027", "1er février 2027"), None for anything else."""
+    from jobhunt.apply.facts import from_french_date  # noqa: PLC0415
+
+    text = " ".join((text or "").split())
+    if m := re.fullmatch(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})", text):
+        text = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    try:
+        return date.fromisoformat(from_french_date(text) or text)
+    except ValueError:
+        return None
+
+
+# One step in the calendar a read-only date box opened: reads the month it shows and marks (data-bp-cal) what to click next -
+# the wanted day when its month is shown, else the arrow towards it. {state: 'none' | 'day' | 'move' | 'stuck', shown}.
+_CALENDAR_JS = r"""(el, [year, month, day]) => {
+  const vis = (n) => { const r = n.getBoundingClientRect(), s = getComputedStyle(n);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const off = /disabled|blank|muted|other|outside|adjacent|\bold\b|\bnew\b|prev|next|header/i;
+  const days = (root) => [...root.querySelectorAll('*')].filter((n) => !n.children.length && /^\d{1,2}$/.test(n.textContent.trim())
+    && vis(n) && !off.test(String(n.className)) && n.getAttribute('aria-disabled') !== 'true' && !n.disabled);
+  const doc = el.getRootNode();
+  for (const old of doc.querySelectorAll('[data-bp-cal]')) old.removeAttribute('data-bp-cal');
+  const boxes = (scope) => [...scope.querySelectorAll('[class*="calendar" i], [class*="datepicker" i], [class*="flatpickr" i], [role="dialog"], [role="grid"]')]
+    .filter((c) => !c.contains(el) && vis(c) && days(c).length >= 20).sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+  let root = null;
+  for (let up = el.parentElement, n = 0; up && n < 4 && !root; up = up.parentElement, n++) root = boxes(up)[0] || null;
+  root = root || boxes(doc)[0] || null;
+  if (!root) return {state: 'none', shown: ''};
+  const names = ['jan', 'f[eé]v|feb', 'mar', 'avr|apr', 'mai|may', 'juin|jun', 'juil|jul', 'ao[uû]|aug', 'sep', 'oct', 'nov', 'd[eé]c'];
+  const said = (root.innerText || root.textContent || '').slice(0, 400);
+  const head = said.match(/([A-Za-zÀ-ÿ]{3,})\.?\s+(\d{4})/);
+  const shownMonth = head ? names.findIndex((name) => new RegExp('^(?:' + name + ')', 'i').test(head[1])) + 1 : 0;
+  if (!head || !shownMonth) return {state: 'stuck', shown: said.slice(0, 40)};
+  const gap = (year - Number(head[2])) * 12 + (month - shownMonth);
+  const mark = (node) => { node.setAttribute('data-bp-cal', '1'); return true; };
+  if (gap === 0) {
+    const cell = days(root).find((n) => Number(n.textContent.trim()) === day);
+    return {state: cell && mark(cell) ? 'day' : 'stuck', shown: head[0]};
+  }
+  const arrow = [...root.querySelectorAll('*')].filter(vis).find((n) => (gap > 0 ? /next|suivant|forward/i : /prev|pr[eé]c[eé]dent|back/i)
+    .test(String(n.className) + ' ' + (n.getAttribute('aria-label') || '') + ' ' + (n.getAttribute('title') || '')));
+  return {state: arrow && mark(arrow) ? 'move' : 'stuck', shown: head[0]};
+}"""
+
+
+async def _calendar_pick(run: _Run, target, wanted: date) -> str:
+    """Choose `wanted` in the calendar that a read-only date box opens (month arrows, then the day). Returns what the box
+    shows afterwards, "" when no calendar opened or the day could not be reached (the caller then tries to type)."""
+    engine = _engine()
+    with contextlib.suppress(Exception):
+        await target.click(timeout=engine.ACTION_TIMEOUT_MS)
+    for _ in range(40):  # (the month arrows: three years either way at most)
+        await asyncio.sleep(0.15)
+        try:
+            step = await target.evaluate(_CALENDAR_JS, [wanted.year, wanted.month, wanted.day])
+        except Exception:
+            return ""
+        if step["state"] not in ("day", "move"):
+            break
+        marked = (await target.evaluate_handle("e => e.getRootNode().querySelector('[data-bp-cal]')")).as_element()
+        if marked is None:
+            break
+        await marked.click(timeout=engine.ACTION_TIMEOUT_MS)
+        if step["state"] == "day":
+            await asyncio.sleep(0.2)
+            return str(await target.evaluate("e => e.value ?? ''") or "").strip()
+    with contextlib.suppress(Exception):
+        await run.page.keyboard.press("Escape")
+    return ""
+
+
 async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> str:
     """Carry out one item on the live page. `target` is the exact element of the snapshot (the first radio of a group)."""
     engine = _engine()
@@ -1646,6 +1719,10 @@ async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> 
                                   source=it.used == "job_source" or bool(SOURCE_QUESTION.search(fold(field.label))))
     if note := getattr(run.autonomous, "note_value", None):
         note(text)
+    if field.kind in ("text", "date") and (wanted := _as_date(text)) and await target.evaluate("e => e.readOnly === true"):
+        # A box that cannot be typed in and opens a calendar: the day is chosen in the calendar itself.
+        if shown := await _calendar_pick(run, target, wanted):
+            return shown
     try:
         await target.fill(text, timeout=timeout)
     except Exception:
