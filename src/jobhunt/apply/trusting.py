@@ -1411,10 +1411,20 @@ async def is_search_prompt(target) -> bool:
     return False
 
 
-async def _search_pick(run: _Run, target, field: FormField, want: str) -> str:
+# "How did you hear about us?": the question a site asks to learn where its applicants come from.
+SOURCE_QUESTION = re.compile(r"comment (?:nous )?avez[- ]vous (?:connu|entendu|eu connaissance|decouvert)|how did you (?:hear|find|learn)|"
+                             r"ou avez[- ]vous (?:vu|trouve|decouvert)|source (?:de (?:la |votre )?candidature|of (?:your )?application)|"
+                             r"wie (?:haben sie|sind sie auf)")
+# (what such a list calls the employer's own careers site, the way every application made here arrives)
+_OWN_SITE_QUERIES = ("Site carrière", "Carrière", "Career", "Site web", "Website", "Internet")
+
+
+async def _search_pick(run: _Run, target, field: FormField, want: str, *, source: bool = False) -> str:
     """A search prompt (a text box whose typed text is only a query: the answer is the result picked from the list it
     returns, shown beside the box as a chosen item). Type the answer, then its most telling words, and pick the result that
-    means it; a required prompt that knows nothing of the answer takes its "other" entry when it has one."""
+    means it; a required prompt that knows nothing of the answer takes its "other" entry when it has one. A required
+    "how did you hear about us" prompt (`source`) that does not list where the ad was seen takes the entry for the
+    employer's own careers site first: that is where the application is made."""
     engine = _engine()
 
     async def results() -> list[tuple[object, str]]:
@@ -1454,6 +1464,16 @@ async def _search_pick(run: _Run, target, field: FormField, want: str) -> str:
         index = search_choice([label for _, label in found], want, text)
         if index >= 0 and (done := await take(found[index])):
             return done
+    if field.required and source:
+        for text in _OWN_SITE_QUERIES:
+            with contextlib.suppress(Exception):
+                await target.fill("", timeout=3000)
+            await target.type(text, delay=30, timeout=8000)
+            await asyncio.sleep(0.8)
+            found = await results()
+            sites = [entry for entry in found if norm(text) in norm(entry[1])]
+            if sites and (done := await take(min(sites, key=lambda entry: len(entry[1])))):
+                return done
     if field.required:
         for text in ("Autre", "Other", "Sonstige"):
             with contextlib.suppress(Exception):
@@ -1580,7 +1600,8 @@ async def execute(run: _Run, it: _Item, target, resolve, snap: PageSnapshot) -> 
         text = text.replace("\r", " ").replace("\n", " ")
     await run._before_mutation(action.op, target)
     if field.kind in ("text", "search") and text and await is_search_prompt(target):
-        return await _search_pick(run, target, field, text)
+        return await _search_pick(run, target, field, text,
+                                  source=it.used == "job_source" or bool(SOURCE_QUESTION.search(fold(field.label))))
     if note := getattr(run.autonomous, "note_value", None):
         note(text)
     try:

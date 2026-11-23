@@ -1971,3 +1971,26 @@ def test_a_phone_the_page_message_calls_invalid_is_respelled_without_its_trunk_z
     made = trusting.check(run, action, phone, engine._Validated(), snap, None)
     assert made is not None and made.forced == "600000000"
     assert trusting.phone_refused(["Le numéro de téléphone est incorrect."]) and not trusting.phone_refused(["Veuillez renseigner le champ 'Mobilité'."])
+
+
+async def test_a_required_source_prompt_that_does_not_list_the_job_board_takes_the_employers_own_site(page):  # noqa: F811
+    """"How did you hear about us?" as a search prompt whose list knows neither the board the ad was seen on nor "other":
+    the entry for the employer's careers site is taken (the application is made there). Another required prompt gets no
+    such answer."""
+    from jobhunt.apply.snapshot import take_snapshot
+
+    content = SEARCH_PROMPT.replace("REQUIRED", "required").replace(
+        "['École Centrale de Testville', 'Institut Polytechnique de Testville', 'Université de Testville', 'Université de Fauxbourg', 'Autre']",
+        "['Salon étudiant', 'Cooptation', 'Site carrière ExempleCo', 'Réseaux sociaux']")
+    assert "Site carrière ExempleCo" in content
+    await page.set_content(content)
+    snap, resolve = await take_snapshot(page)
+    box = next(f for f in snap.fields if f.kind == "text")
+    target = await resolve.element(box.ref)
+    run = SimpleNamespace(page=page)
+    with pytest.raises(engine._Skip):
+        await trusting._search_pick(run, target, box, "Jobboard Quelconque")
+    assert await trusting._search_pick(run, target, box, "Jobboard Quelconque", source=True) == "Site carrière ExempleCo"
+    assert trusting.SOURCE_QUESTION.search(trusting.fold("Comment nous avez-vous connus ?"))
+    assert trusting.SOURCE_QUESTION.search(trusting.fold("How did you hear about us?"))
+    assert not trusting.SOURCE_QUESTION.search(trusting.fold("Dans quelle école êtes-vous ?"))
