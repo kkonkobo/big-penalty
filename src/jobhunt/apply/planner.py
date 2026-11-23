@@ -195,6 +195,10 @@ Q. A REQUIRED list of geographic zones (mobility, preferred location) that offer
 R. A salary / allowance field that takes a NUMBER (a currency sign beside it, "chiffre", "montant", type number): type
    digits only, and only when a fact gives a figure. When no fact gives one and the field is optional, leave it empty;
    never type words ("gratification légale", "selon profil") into it.
+S. Birth details asked separately (French forms): `birth_place` gives the city and the country. "Pays de naissance":
+   that country; "Ville / commune de naissance": that city; "Département de naissance" for someone born OUTSIDE France:
+   the list's own entry for abroad ("Étranger", "99", "Hors de France", "Né(e) à l'étranger"), citing `birth_place`. For
+   someone born in France the département is a hard fact: answer it only from a fact.
 """
 
 
