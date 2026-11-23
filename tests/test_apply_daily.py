@@ -569,6 +569,7 @@ def engine_paused_run(env, job, code, *, started, submit_clicked=False):
 
 OLD = "2026-11-19T19:50:00+00:00"   # before astore.ENGINE_RETRY_EPOCH
 NEW = (datetime.fromisoformat(astore.ENGINE_RETRY_EPOCH) + timedelta(minutes=1)).isoformat()   # after it (moves with it)
+RECENT = (datetime.fromisoformat(astore.ENGINE_RETRY_EPOCH) - timedelta(hours=2)).isoformat()   # before it, less than a day
 
 
 @pytest.mark.parametrize("code", ["recipient_refused_same_site_write", "recipient_refused_redirect", "public_page_shell",
@@ -604,7 +605,7 @@ async def test_the_owners_switch_reads_a_captcha_in_the_message_of_a_pause_witho
     r = astore.start_run(app.id, 1, "submit", "auto", lambda rid: env.tmp / "runs" / str(rid))
     astore.finish_run(r.id, RunResult(status="needs_human", message="Un CAPTCHA doit être résolu à la main."))
     with db.connect() as c:
-        c.execute("UPDATE application_runs SET started_at=? WHERE id=?", (OLD, r.id))
+        c.execute("UPDATE application_runs SET started_at=? WHERE id=?", (RECENT, r.id))
     s, _ = await daily(profile)
     assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
 
@@ -626,7 +627,7 @@ async def test_with_the_owners_switch_an_old_pause_that_is_not_a_captcha_is_retr
 
 
 @pytest.mark.parametrize(("code", "started", "clicked"), [
-    ("challenge", OLD, False), ("challenge_or_rate_limited", OLD, False),  # a CAPTCHA always waits for a person
+    ("challenge", RECENT, False), ("challenge_or_rate_limited", RECENT, False),  # a CAPTCHA of the last day waits for a person
     ("posting_mismatch", NEW, False),  # judged by the current code: it waits
     ("posting_mismatch", OLD, True),  # the send click was reached: never retried
 ])
@@ -635,6 +636,33 @@ async def test_the_owners_switch_never_retries_a_captcha_a_fresh_pause_or_a_poss
     app = engine_paused_run(env, job, code, started=started, submit_clicked=clicked)
     s, _ = await daily(profile)
     assert not env.runs and s.paused == 1 and astore.has_site_handoff(app.id)
+
+
+@pytest.mark.parametrize("code", ["challenge", "challenge_or_rate_limited"])
+async def test_with_the_owners_switch_a_captcha_pause_more_than_a_day_old_is_tried_again(env, profile, retry_pauses, code):
+    """Such walls come and go with the session; one that still stands only pauses the application again. Without the
+    switch it waits for a person, whatever its age."""
+    job = env.job(1)
+    app = engine_paused_run(env, job, code, started=OLD)
+    assert not astore.has_site_handoff(app.id)
+    s, _ = await daily(profile)
+    assert [a for a, _ in env.runs] == [app.id] and s.paused == 0
+
+
+async def test_with_the_owners_switch_an_old_wait_for_an_email_is_tried_again(env, profile, retry_pauses):
+    """An application once left "waiting for an e-mail" (when a person had to follow the link) is run again: the engine reads
+    the mailbox itself now. One paused by the current pass still waits for its mail."""
+    app = cvs.approve(env.draft(env.job(1)).id, 1)
+    r = astore.start_run(app.id, 1, "submit", "auto", lambda rid: env.tmp / "runs" / str(rid))
+    astore.finish_run(r.id, RunResult(status="needs_email"))
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET started_at=? WHERE id=?", (NEW, r.id))
+    assert astore.has_site_handoff(app.id)
+    with db.connect() as c:
+        c.execute("UPDATE application_runs SET started_at=? WHERE id=?", (OLD, r.id))
+    assert not astore.has_site_handoff(app.id)
+    s, _ = await daily(profile)
+    assert [a for a, _ in env.runs] == [app.id] and s.paused == 0
 
 
 async def test_an_old_engine_pause_after_a_submit_click_is_never_retried(env, profile):
