@@ -517,3 +517,32 @@ async def test_the_submit_of_a_step_before_the_application_is_not_the_send(core,
     result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
     assert result.status == "submitted", (result.message, result.result.diagnostic_code)
     assert paths(core, "/site") == ["/site/jobs/100/profile", "/site/jobs/100/apply"]
+
+
+async def test_a_captcha_raised_by_the_send_click_pauses_the_application_and_holds_no_send(core, profile, tmp_path, fast):
+    """The send click brings up a challenge and the browser sends the site nothing: the application waits for the challenge
+    (it will be tried again), it is not held as a possible send that a person must check on the employer's site."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        const wall = document.createElement('div'); wall.className = 'g-recaptcha';
+        wall.style.cssText = 'width:304px;height:78px;border:1px solid #999'; wall.textContent = 'Je ne suis pas un robot';
+        document.querySelector('main').append(wall); });</script>""")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "needs_human" and "anti-robot" in result.message, (result.status, result.message)
+    assert store.outstanding_attempt(app.id) is None and not paths(core, "/site")
+
+
+async def test_a_captcha_shown_after_the_site_received_the_send_keeps_the_send_on_record(core, profile, tmp_path, fast):
+    """The other way round: the click's request reached the site and a challenge came up afterwards. Something may have been
+    received, so the click stays on record and the application is not tried again by itself."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        fetch('/site/jobs/100/apply', {method: 'POST', body: new FormData(event.target)}).catch(() => {}).finally(() => {
+          const wall = document.createElement('div'); wall.className = 'g-recaptcha';
+          wall.style.cssText = 'width:304px;height:78px;border:1px solid #999'; wall.textContent = 'Je ne suis pas un robot';
+          document.querySelector('main').append(wall); }); });</script>""")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "failed" and "Envoi non confirmé" in result.message, (result.status, result.message)
+    assert store.outstanding_attempt(app.id) is not None and len(paths(core, "/site")) == 1
