@@ -1241,21 +1241,39 @@ async def enter_emailed_code(run: _Run, snap: PageSnapshot, resolve) -> bool:
     fields = [field for field in snap.fields if field.kind in ("text", "number", "tel", "password") and engine._is_empty(field)
               and (field.autocomplete == "one-time-code" or mail.CODE_LABEL.search(field.label))
               and not _CODE_FIELD_NOT.search(fold(field.label))]
-    if len(fields) != 1 or any(other.kind == "password" and other is not fields[0] for other in snap.fields):
+    # (a code typed one character per box: four to eight boxes named alike but for their rank)
+    split = 4 <= len(fields) <= 8 and len({re.sub(r"\d+", "", norm(field.label)) for field in fields}) == 1
+    if (len(fields) != 1 and not split) or any(other.kind == "password" and other not in fields for other in snap.fields):
         return False  # (a password + code login box is a login, not a lone code prompt)
     run.code_entries += 1
     verification, code = await flow.poll()
     if code:
         run.diagnostics.email = code
-    if not verification or verification.kind != "code":
+    if not verification or verification.kind != "code" or (split and len(verification.value) != len(fields)):
         return False
     target = await run._el(resolve, fields[0].ref)
     if target is None:
         return False
     await run._before_mutation("fill", target)
     run.secrets.add(verification.value)
-    await target.fill(verification.value, timeout=engine.ACTION_TIMEOUT_MS)
+    if split:
+        boxes = [await run._el(resolve, field.ref) for field in fields]
+        if any(box is None for box in boxes):
+            return False
+        await target.click(timeout=engine.ACTION_TIMEOUT_MS)
+        await run.page.keyboard.type(verification.value, delay=90)  # (such boxes move on by themselves as one types)
+        await asyncio.sleep(0.5)
+        typed = "".join([str(await box.evaluate("e => e.isConnected ? e.value : ''")) for box in boxes])
+        if typed and typed != verification.value:  # (boxes that do not move on: one character each)
+            for box, char in zip(boxes, verification.value):
+                await box.fill(char, timeout=engine.ACTION_TIMEOUT_MS)
+    else:
+        await target.fill(verification.value, timeout=engine.ACTION_TIMEOUT_MS)
     run.diagnostics.email = "email_code_used"
+    if split:
+        await asyncio.sleep(1.5)
+        if not await _shown(target):
+            return True  # (the boxes are gone: the site took the code as soon as it was complete)
     buttons = [field for field in snap.fields if field.kind == "button" and _CODE_BUTTON.search(fold(field.label))]
     scoped = [field for field in buttons if fields[0].form and field.form == fields[0].form] or buttons
     control = await run._el(resolve, scoped[-1].ref) if scoped else None

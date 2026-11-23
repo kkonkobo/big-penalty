@@ -25,7 +25,8 @@ SERVICE = 'big-penalty-imap'
 PROVIDERS = {'gmail.com': ('imap.gmail.com', 993), 'googlemail.com': ('imap.gmail.com', 993)}
 ATS_DOMAINS = frozenset('''myworkday.com myworkdayjobs.com myworkdaysite.com successfactors.com successfactors.eu sap.com
 talent-soft.com profils.org smartrecruiters.com teamtailor.com greenhouse.io greenhouse.com lever.co workable.com
-recruitee.com icims.com taleo.net oracle.com oraclecloud.com digitalrecruiters.com gestmax.fr gestmax.com flatchr.io'''.split())
+recruitee.com icims.com taleo.net oracle.com oraclecloud.com digitalrecruiters.com gestmax.fr gestmax.com flatchr.io
+eightfold.ai'''.split())
 SKEW = timedelta(minutes=2)
 RESUME_WINDOW = timedelta(hours=24)
 _MONTHS = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split()
@@ -255,8 +256,18 @@ def extract(text, bound_url, *, html=False, links_only=False, sender_domain=None
             if not vendor and not _under(sender_domain, host) and not any(same_recipient(bound_url, link) for link, _ in links):
                 return None
         elif not _under(sender_domain, bound_domain):
-            return None
+            # An employer whose careers site runs on a vendor's platform under the employer's own domain: the vendor
+            # mails the code from its domain, and the mail links to the employer's space there ("<employer>.<vendor>").
+            label = bound_domain.split('.')[0]
+            vendor = next((domain for domain in ATS_DOMAINS if _under(sender_domain, domain)), None)
+            spaces = [(urlsplit(link).hostname or '').lower() for link, _ in links]
+            if not (vendor and len(label) >= 4 and any(_under(space, vendor) and label in space.split('.') for space in spaces)):
+                return None
     codes = {match[1] for match in _CODE.finditer(text) if any(char.isdigit() for char in match[1]) or match[1].isupper()}
+    if not codes and re.search(r'\bcode\b', text, re.I):
+        # ("Enter the following code below to complete the verification process: 123456": the one number of the mail
+        # that stands alone - two of them and nothing is read)
+        codes = {match.group() for match in re.finditer(r'(?<![\w#/=.:-])\d{5,8}(?![\w/:-]|\.\w)', text)}
     return Verification('code', codes.pop()) if len(codes) == 1 else None
 
 
