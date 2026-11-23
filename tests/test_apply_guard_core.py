@@ -578,3 +578,23 @@ async def test_a_receipt_shown_over_the_same_page_counts_when_only_the_sites_sea
     result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
     assert result.status == "submitted", (result.status, result.message)
     assert len(paths(core, "/site")) == 1 and store.outstanding_attempt(app.id) is None
+
+
+async def test_a_receipt_left_by_the_click_that_used_the_last_step_is_read_and_counts_as_the_send(core, profile, tmp_path, fast, monkeypatch):
+    """A wizard whose last "next" click sends the application, clicked on the last step the run was allowed: the page it left
+    is read once. It shows no form and says the application was taken into account, so the run is a send - it used to end
+    "too many steps" with nothing on record, and the application was started again at the next pass."""
+    monkeypatch.setattr(service, "TRUSTING_MIN_STEPS", 1)
+    monkeypatch.setattr(service.get_settings(), "apply_max_steps", 1)
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        fetch('/site/jobs/100/apply', {method: 'POST', body: new FormData(event.target)}).catch(() => {}).finally(() => {
+          document.querySelector('main').innerHTML = '<h1>Votre candidature a été prise en compte</h1>'; }); });</script>""").replace(
+        "<button>Envoyer</button>", "<button>Suivant</button>")
+    plan = lambda snapshot: StepPlan(page_kind="form", actions=[  # noqa: E731
+        act(snapshot, "Prénom", "fill", "first_name"), act(snapshot, "CV", "upload_cv", kind="file"),
+        act(snapshot, "Suivant", "click", role="next")])
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.message)
+    assert len(paths(core, "/site")) == 1 and store.outstanding_attempt(app.id) is None

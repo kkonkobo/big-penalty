@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import difflib
 import re
+import secrets
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -703,6 +704,34 @@ async def _state(loc) -> bool:
     return bool(await loc.evaluate(_STATE_JS))
 
 
+# Some sites redraw a box - or the whole form around it - when it is clicked: the element that was clicked leaves the page
+# and a new one takes its place. Before the click the box's place among the boxes of its document and its name are noted;
+# afterwards the box found at that place, under that name, tells what the click did.
+_BOX_SIG = """const BOXES = 'input[type=checkbox], input[type=radio], [role=checkbox], [role=radio], [role=switch]';
+  const named = (e) => { const ids = (e.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean);
+    const said = ids.map((id) => (document.getElementById(id) || {}).textContent || '').join(' ')
+      || [...(e.labels || [])].map((l) => l.textContent).join(' ') || e.getAttribute('aria-label') || (e.closest('label') || {}).textContent || '';
+    return said.replace(/\\s+/g, ' ').trim().slice(0, 200) + '|' + (e.getAttribute('name') || '') + '|' + (e.getAttribute('value') || ''); };"""
+_BOX_PLACE_JS = "e => { " + _BOX_SIG + " const all = [...e.ownerDocument.querySelectorAll(BOXES)]; return [all.indexOf(e), all.length, named(e)]; }"
+_BOX_TWIN_JS = "([index, count, name]) => { " + _BOX_SIG + """ const all = [...document.querySelectorAll(BOXES)];
+  const twin = all.length === count ? all[index] : null;
+  if (!twin || named(twin) !== name) return null;
+  return twin.checked === true || twin.getAttribute('aria-checked') === 'true'; }"""
+
+
+async def _twin_state(run: _Run, loc, place: list) -> bool | None:
+    """The state of the box now standing where the clicked one stood (None: no such box)."""
+    frames = []
+    with contextlib.suppress(Exception):
+        frames = [await loc.owner_frame()]
+    for frame in [f for f in frames if f is not None] or list(getattr(run.page, "frames", [])):
+        with contextlib.suppress(Exception):
+            found = await frame.evaluate(_BOX_TWIN_JS, place)
+            if found is not None:
+                return bool(found)
+    return None
+
+
 async def _toggle(run: _Run, loc, want: bool) -> None:
     """Bring a box / radio to the wanted state whatever hides it (a styled label, an overlay, a custom widget)."""
     engine = _engine()
@@ -714,12 +743,24 @@ async def _toggle(run: _Run, loc, want: bool) -> None:
         lambda: (loc.check if want else loc.uncheck)(force=True, timeout=2500),
         lambda: loc.evaluate("e => e.click()"),
     )
+    place = None
+    with contextlib.suppress(Exception):
+        place = await loc.evaluate(_BOX_PLACE_JS)
     for attempt in attempts:
         with contextlib.suppress(Exception):
             await attempt()
+        there = False
         with contextlib.suppress(Exception):
             if await _state(loc) == want:
                 return
+            there = bool(await loc.evaluate("e => e.isConnected"))
+        if there or not place or place[0] < 0:
+            continue
+        twin = await _twin_state(run, loc, place)  # (the click redrew the box: the one in its place is read)
+        if twin == want:
+            return
+        if twin is not None:
+            break  # (a further click would be made on an element that is no longer on the page)
     raise engine._Skip("case impossible à cocher")
 
 

@@ -80,6 +80,7 @@ class PageSnapshot(BaseModel):
     text: str = ""                # visible text excerpt (headings, notices, errors), capped
     fields: list[FormField] = Field(default_factory=list)
     has_captcha: bool = False     # a VISIBLE captcha challenge widget (not an invisible reCAPTCHA v3 badge)
+    captcha_why: str = ""         # what was taken for that challenge (kept in the step's note: a wrong stop can be traced)
 
 
 # ---------------------------------------------------------------- plan of one step

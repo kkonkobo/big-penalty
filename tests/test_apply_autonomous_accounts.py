@@ -617,3 +617,31 @@ async def test_a_login_asked_for_in_answer_to_the_send_click_is_followed_by_one_
     assert result.status == "submitted", (result.status, result.result.diagnostic_code, result.message,
                                           [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
     assert [len(server.posts_to(path)) for path in ("/jobs/100/apply", "/login", "/jobs/100/send")] == [1, 1, 1]
+
+
+async def test_a_posting_that_says_the_signed_in_candidate_already_applied_is_on_record_as_sent(server, profile, tmp_path, monkeypatch, fast):  # noqa: F811
+    """Signed in to the candidate's account, the posting's page says - before anything is entered - that the application is
+    already there (a send whose receipt was never read). The run records it as sent instead of failing on an "unexpected
+    confirmation" and meeting the same page again at every pass. A page that only greets the candidate changes nothing."""
+    monkeypatch.setattr(service.get_settings(), "apply_guard_mode", "core")
+    app = setup(server, profile, tmp_path, monkeypatch, known=True)
+    server.html["/jobs/100"] = ('<title>Ingénieur systèmes embarqués</title><main><h1>Ingénieur systèmes embarqués</h1>'
+                                '<form action="/login" method="post"><label for="id">Identifiant</label><input id="id" name="login">'
+                                '<label for="pw">Mot de passe du compte</label><input id="pw" type="password" name="password">'
+                                '<button>Se connecter</button></form></main>')
+    server.post_redirects["/login"] = "/jobs/100/signed-in"
+    page = '<title>Ingénieur systèmes embarqués</title><main><h1>{said}</h1><a href="/jobs">Toutes nos offres</a></main>'
+    server.html["/jobs/100/signed-in"] = page.format(said="Vous avez déjà postulé à cette offre")
+
+    def plan(snap):
+        if any(f.kind == "password" for f in snap.fields):
+            return StepPlan(page_kind="account_login", actions=[
+                act(snap, "^Identifiant", "fill", "account_email"), act(snap, "Mot de passe du compte", "fill", "account_password"),
+                act(snap, "Se connecter", "click", "account_exists", role="login")])
+        return StepPlan(page_kind="confirmation")
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.message, [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
+    assert len(server.posts_to("/login")) == 1
+    assert engine.ALREADY_APPLIED_RE.search(engine.fold("You have already applied for this job"))
+    assert not engine.ALREADY_APPLIED_RE.search(engine.fold("Bienvenue dans votre espace candidat. Postulez à nos offres."))

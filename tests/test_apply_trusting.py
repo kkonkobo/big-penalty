@@ -2112,3 +2112,31 @@ async def test_a_read_only_date_box_takes_its_day_from_the_calendar_it_opens(pag
     await page.evaluate("window.NO_CALENDAR = true", isolated_context=False)
     assert await trusting._calendar_pick(run, await resolve.element(box.ref), trusting._as_date("2027-03-02")) == ""
     assert trusting._as_date("dès que possible") is None and trusting._as_date("1er février 2027") == trusting._as_date("01/02/2027")
+
+
+async def test_a_box_the_site_redraws_when_it_is_clicked_is_read_where_it_stands_now(page):  # noqa: F811
+    """A click on the terms box makes the site draw its whole form again: the element that was clicked is gone and a new,
+    ticked one stands in its place. The box is ticked - it used to be reported as impossible to tick, which threw the rest
+    of the form away. A box that the redraw leaves unticked is still reported."""
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content('''<main id="app"></main><script>
+      let ticked = false, stubborn = false;
+      const draw = () => { app.innerHTML = `<form><div><div><button type="button" role="checkbox" aria-checked="${ticked}" aria-labelledby="said"
+          style="width:20px;height:20px"></button><span id="said">J'accepte les conditions générales</span></div></div>
+        <div><button type="button" role="checkbox" aria-checked="false" aria-labelledby="other" style="width:20px;height:20px"></button>
+          <span id="other">Recevoir les nouvelles offres</span></div></form>`;
+        app.querySelector('[role=checkbox]').onclick = () => { ticked = !stubborn; draw(); }; };
+      draw();
+    </script>''')
+    run = SimpleNamespace(page=page)
+    snap, resolve = await take_snapshot(page)
+    box = next(f for f in snap.fields if f.kind == "checkbox" and "conditions" in f.label)
+    await trusting._toggle(run, await resolve.element(box.ref), True)
+    assert await page.locator("[role=checkbox]").first.get_attribute("aria-checked") == "true"
+    assert await page.locator("[role=checkbox]").nth(1).get_attribute("aria-checked") == "false"
+    await page.evaluate("ticked = false; stubborn = true; draw()", isolated_context=False)
+    snap, resolve = await take_snapshot(page)
+    box = next(f for f in snap.fields if f.kind == "checkbox" and "conditions" in f.label)
+    with pytest.raises(engine._Skip):
+        await trusting._toggle(run, await resolve.element(box.ref), True)

@@ -72,6 +72,9 @@ CONFIRM_RE = re.compile(
     # ("Your application for the offer 2026-1 ... as been send": a site's own spelling of "has been sent")
     r"application [^.!?\n]{1,200}? (?:h?as been|was) (?:successfully )?(?:received|submitted|sent|send|recorded)|"
     r"successfully (?:submitted|applied|sent)")
+# (folded text) the posting's page tells the signed-in candidate that the application is already there
+ALREADY_APPLIED_RE = re.compile(
+    r"vous avez deja (?:postule|candidate)|deja postule a (?:cette|l')|you(?: have|'ve)? already applied|already applied (?:to|for) this")
 NEGATION_RE = re.compile(
     r"n'a pas (?:ete|pu)|pas (?:ete )?(?:envoyee|transmise|enregistree|recue)|not been|has not|was not|were not|could not|couldn't|"
     r"unable|erreur|error|echec|failed|failure|invalide|invalid|veuillez corriger|please correct|not (?:submitted|sent|received)|"
@@ -3097,6 +3100,15 @@ class _Run:
                     return result
             if self.current_step:
                 await self._supervised_checkpoint()
+            if snap.has_captcha and self.captcha_wait_s <= 0 and self.trusting:
+                # A check that asks nothing of the visitor ticks itself within seconds in a real browser: it is given that
+                # time, nothing is touched.
+                from jobhunt import browser as _browser  # noqa: PLC0415
+
+                deadline = asyncio.get_running_loop().time() + _browser.CHALLENGE_AUTO_CLEAR_S
+                while snap.has_captcha and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(min(CAPTCHA_POLL_S, max(0.1, _browser.CHALLENGE_AUTO_CLEAR_S / 4)))
+                    snap, resolve = await self._snapshot()
             if snap.has_captcha and self.captcha_wait_s > 0:  # visible window: give the human time to solve it, touching nothing
                 deadline = asyncio.get_running_loop().time() + self.captcha_wait_s
                 while snap.has_captcha and asyncio.get_running_loop().time() < deadline:
@@ -3116,6 +3128,8 @@ class _Run:
                 self.final_clicked = True  # a click made with application data: the form is gone, it may have been sent
             if snap.has_captcha:
                 log.page_kind = "captcha"
+                if snap.captcha_why:
+                    log.note += "; défi vu : " + self._r(snap.captcha_why)[:140]
                 await self._shot(log)
                 if self.captcha_wait_s > 0:  # waited for in vain (or its completion cannot be detected): no automatic retry
                     minutes = max(1, round(self.captcha_wait_s / 60))
@@ -3362,6 +3376,20 @@ class _Run:
                             await self.on_submit_click()
                         self.final_clicked = True
                     return self._unconfirmed()
+                if (self.trusting and self.mode == "submit" and not self.app_touched and self.account_clicks
+                        and not self._has_form(snap) and not any(f.error for f in snap.fields)
+                        and (confirmation_evidence(f"{snap.title} {snap.text}") or ALREADY_APPLIED_RE.search(fold(snap.text)))):
+                    # Signed in to the candidate's account, and before anything was entered the posting's own page says the
+                    # application is there (an earlier send whose receipt was never read, or one made by hand): it is on
+                    # record as sent - trying again every pass would only meet this page again.
+                    with contextlib.suppress(Exception):
+                        if self.on_submit_click is not None:
+                            await self.on_submit_click()
+                        self.final_clicked = True
+                        self.diagnostics.control = "final_submit"
+                        self.diagnostics.receipt_kind, self.diagnostics.receipt_reason = "first_party_confirmation", "confirmation_text"
+                        log.note = (log.note + "; " if log.note else "") + "candidature déjà enregistrée sur le site"
+                        return self._end("submitted", "Candidature envoyée.")
                 return self._end("failed", "Page de confirmation inattendue")
             if self.final_clicked:
                 await self._shot(log)
@@ -4059,6 +4087,20 @@ class _Run:
             if self.autonomous:
                 if await self.autonomous.after_click(self.page, observing=self.final_awaiting or self.nav_pending):
                     self.nav_pending = False
+        if self.trusting and self.mode == "submit" and self.app_touched and not self.final_clicked:
+            # The step budget ran out ON a click: what that click left is read once. A page without the form that says
+            # the application was received means that click was the send (unread, it would be sent again next pass).
+            with contextlib.suppress(Exception):
+                snap, _ = await self._snapshot()
+                if ((not self._has_form(snap) or self._form_gone(snap)) and not snap.has_captcha
+                        and not any(f.error for f in snap.fields) and not await self._banner_error()
+                        and (confirmation_evidence(f"{snap.title} {snap.text}") or await self._page_says_received())):
+                    if self.on_submit_click is not None:
+                        await self.on_submit_click()
+                    self.final_clicked = True
+                    self.diagnostics.control = "final_submit"
+                    self.diagnostics.receipt_kind, self.diagnostics.receipt_reason = "first_party_confirmation", "confirmation_text"
+                    return self._end("submitted", "Candidature envoyée.")
         if self.autonomous:
             return self._end("needs_human", "Trop d'étapes : limite atteinte.")
         return self._unconfirmed() if self.final_clicked or self.nav_pending else self._end("failed", "Trop d'étapes : limite atteinte.")
