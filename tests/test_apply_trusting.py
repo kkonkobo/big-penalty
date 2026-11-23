@@ -2069,3 +2069,46 @@ async def test_a_list_that_renders_each_entry_twice_still_offers_each_answer_onc
                           _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
     item = engine._Item(Action(ref=combo.ref, op="select", fact="civility"), combo, None, value="M.")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "Monsieur"
+
+
+CALENDAR_BOX = '''<form><p>Date de disponibilité au plus tôt</p>
+  <div class="vdp-datepicker"><div class="input-group"><input id="avail" type="text" required readonly autocomplete="off" class="form-control"></div>
+    <div class="vdp-datepicker__calendar" id="cal" style="display:none"><header><span class="prev">&lt;</span>
+      <span class="day__month_btn up" id="shown"></span> <span class="next">&gt;</span></header><div id="days"></div></div></div></form>
+  <script>
+    const NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    let year = 2026, month = 10;
+    const draw = () => { shown.textContent = NAMES[month] + ' ' + year;
+      const last = new Date(year, month + 1, 0).getDate();
+      days.innerHTML = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((name) => `<span class="cell day-header">${name}</span>`).join('')
+        + '<span class="cell day blank"></span>' + Array.from({length: last}, (_, rank) => `<span class="cell day">${rank + 1}</span>`).join('');
+      for (const cell of days.querySelectorAll('.cell.day:not(.blank)')) cell.onclick = () => {
+        avail.value = String(cell.textContent).padStart(2, '0') + ' ' + NAMES[month] + ' ' + year; cal.style.display = 'none'; }; };
+    const move = (by) => { month += by; if (month > 11) { month = 0; year++; } if (month < 0) { month = 11; year--; } draw(); };
+    document.querySelector('.prev').onclick = () => move(-1); document.querySelector('.next').onclick = () => move(1);
+    avail.addEventListener('click', () => { if (!window.NO_CALENDAR) { cal.style.display = ''; draw(); } });
+  </script>'''
+
+
+async def test_a_read_only_date_box_takes_its_day_from_the_calendar_it_opens(page):  # noqa: F811
+    """A date box that cannot be typed in (read-only; a click opens a month calendar with arrows): the day is chosen in the
+    calendar - the arrows to its month, then the day - instead of typing a text the box never takes. Without a calendar
+    the box is typed in as before."""
+    from unittest.mock import AsyncMock
+
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(CALENDAR_BOX)
+    snap, resolve = await take_snapshot(page)
+    box = next(f for f in snap.fields if f.kind == "text")
+    run = SimpleNamespace(page=page, _before_mutation=AsyncMock(), autonomous=None, secrets=set())
+    item = SimpleNamespace(act=SimpleNamespace(op="fill"), field=box, fact=None, value="2027-02-15", dial_code="", used="available_from",
+                           forced="", national=False, option_index=None, frame_url="")
+    assert await trusting.execute(run, item, await resolve.element(box.ref), resolve, snap) == "15 Feb 2027"
+    assert await page.locator("#avail").input_value() == "15 Feb 2027" and not await page.locator("#cal").is_visible()
+    item.value = "01/09/2026"  # (a day before the month shown: the other arrow)
+    assert await trusting.execute(run, item, await resolve.element(box.ref), resolve, snap) == "01 Sep 2026"
+    # no calendar opens: nothing is invented, the usual typing is tried (and a read-only box keeps what it held)
+    await page.evaluate("window.NO_CALENDAR = true", isolated_context=False)
+    assert await trusting._calendar_pick(run, await resolve.element(box.ref), trusting._as_date("2027-03-02")) == ""
+    assert trusting._as_date("dès que possible") is None and trusting._as_date("1er février 2027") == trusting._as_date("01/02/2027")
