@@ -167,10 +167,15 @@ O. A profile page made of SECTIONS edited through buttons instead of fields ("Ad
    the facts (identity facts for the profile block, the candidate's current school and degree for a training,
    `candidate_profile` for a level; a student's professional experience is 0 years), then click the editor's own save
    button ("Save", "Enregistrer", "Valider"; `click_role` `next`). Leave optional empty sections ("Professional
-   experiences", "Skills") alone, never click a "Delete" button, and add nothing the CV or the facts do not hold. An
+   experiences", "Skills") alone, never delete a complete block, and add nothing the CV or the facts do not hold. An
    editor you cannot fill: click its "Cancel" (`other`) instead of listing its fields in `unknown`. Only when no required
    section is left incomplete, click the page's "Next". When offered "upload a CV" or "fill out manually", upload the CV
    (`upload_cv`): the site fills the profile from it.
+   A block the site read from the CV whose editor demands details the facts do not hold: the months of a school year
+   are September (start) and June (end) of the years known; the city is the one in the school's name or address when
+   given. If a demanded detail is still unknown after ONE attempt, and the section keeps another complete block, remove
+   the incomplete block with its own "Delete" button (`other`) and go on. Never go round Modify / Cancel / Next twice
+   on the same block: `history` shows what was already tried.
 P. A page with REPEATABLE SECTIONS, each with its own "Add" / "Ajouter" button whose `group` names the section (Workday
    "My Experience" / "Mon expérience": work experience, education, languages, skills, websites). An application whose
    sections are empty is a weak one: complete them from `candidate_profile`, one click per step (`click_role` `other`), the
