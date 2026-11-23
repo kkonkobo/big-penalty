@@ -48,7 +48,7 @@ from jobhunt.apply.store import binding_active
 from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FieldOption, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan, ACCOUNT_REASONS)
 from jobhunt.apply.unattended import ClickUncertain as _Dispatched, click_once, handoff_result, trial_click
-from jobhunt.browser import human_pause
+from jobhunt.browser import human_pause, keep_focus
 from jobhunt.llm import LLMError
 
 SUBMIT_RE = re.compile(r"postuler|envoyer|soumettre|valider ma candidature|je postule|submit|send|apply|finish|terminer|confirmer", re.I)
@@ -2166,6 +2166,7 @@ class _Run:
         if usable:
             self.page = usable[-1]
             with contextlib.suppress(Exception):
+                keep_focus(4.0)  # (showing the tab the run moved to must not take the foreground from the person)
                 await self.page.bring_to_front()
         elif self.page.is_closed():
             alive = [p for p in self.page.context.pages if not p.is_closed()]
@@ -3060,7 +3061,9 @@ class _Run:
                     self.stuck_fields = []
                 with contextlib.suppress(Exception):
                     # (a banner that lists what is missing may stand far below the part of the page the planner reads)
-                    messages = await self._banner_texts() or await self._notice_texts(pub.title)
+                    # (both kinds are read: a standing warning box of the site - "beware of fake recruiters" - is a banner
+                    # too, and must not hide the notice that names the missing field)
+                    messages = list(dict.fromkeys([*await self._notice_texts(pub.title), *await self._banner_texts()]))[:4]
                     self.page_messages = list(messages)  # (what the site says is wrong, for the filler: a refused phone)
                     said = [text for text in map(self._r, messages) if text[:80] not in pub.text]
                     if said:
