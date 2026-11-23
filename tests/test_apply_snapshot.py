@@ -377,6 +377,13 @@ async def test_icon_captcha_widget_is_detected_and_a_solved_one_is_not(page, ser
     ('<div class="grecaptcha-badge" style="width:70px;height:60px">badge</div>', False),
     ('<div style="display:none" class="captcha-box">hidden</div>', False),
     ('<p>Merci de vérifier vos informations avant l\'envoi.</p>', False),
+    # what an INVISIBLE check leaves on the page asks nothing of the visitor: its badge, its legal line, the box kept for
+    # its error message, an empty holder
+    ('<div id="hCaptcha-attribution" style="width:260px;height:39px">Protected by hCaptcha <a href="#">Privacy</a> | <a href="#">Terms</a></div>', False),
+    ('<div id="input-captchaToken-radix-1-error" class="sc-1 dV" style="width:600px;height:32px"></div>', False),
+    ('<div class="c-form__captcha" style="width:398px;height:38px">Ce site est protégé par reCAPTCHA : la politique de confidentialité de Google s\'applique.</div>', False),
+    ('<div class="captcha-holder" style="width:200px;height:50px"></div>', False),
+    ('<div class="captcha-holder" style="width:200px;height:50px"><canvas width="200" height="50"></canvas></div>', True),
 ])
 async def test_generic_captcha_detection(page, body, captcha):
     await page.set_content(f'<form class="captcha-enabled"><label for=a>Prénom</label><input id=a name=a>{body}<button type="submit">Envoyer</button></form>')
@@ -699,3 +706,18 @@ async def test_a_row_of_stars_is_one_question_whose_options_are_the_levels(page)
     snap, _ = await take_snapshot(page)
     assert [(f.label, f.value, f.selected) for f in snap.fields if f.kind == "radio"] == [
         ("English", "Fluent or bilingual", [2]), ("French", "Mother tongue", [3])]
+
+
+async def test_a_page_that_only_loads_a_bot_check_script_beside_its_form_is_not_a_challenge(page):
+    """A bot-check page ("Just a moment...") holds nothing to fill. A form that is there to be filled and merely loads the
+    check's script (an invisible check run at the send) is not a challenge; what was taken for one is kept for the trace."""
+    marker = '<div hidden data-script="https://challenges.cloudflare.com/turnstile/v0/api.js"></div>'
+    await page.set_content(f'<form><label for=a>Prénom</label><input id=a name=a><label for=b>Nom</label><input id=b name=b>{marker}<button>Envoyer</button></form>')
+    snap, _ = await take_snapshot(page)
+    assert not snap.has_captcha and snap.captcha_why == ""
+    await page.set_content(f"<title>Un instant...</title><main><h1>Vérification en cours</h1>{marker}</main>")
+    snap, _ = await take_snapshot(page)
+    assert snap.has_captcha and snap.captcha_why
+    await page.set_content('<form><label for=a>Prénom</label><input id=a name=a><div class="captcha-box" style="width:200px;height:50px">?</div><button>Envoyer</button></form>')
+    snap, _ = await take_snapshot(page)
+    assert snap.has_captcha and "captcha-box" in snap.captcha_why

@@ -26,6 +26,7 @@ MAX_LINKS = 15
 MAX_CLICKS = 30
 MAX_PRIO_CLICKS = 45
 MAX_TEXT = 4000
+_FORM_KINDS = frozenset({"text", "email", "tel", "textarea", "select", "combobox", "radio", "checkbox", "date", "number", "url", "file", "password"})
 
 Resolver = Callable[[str], Locator]  # the returned object also has `.frame_url(ref)` (URL of the frame holding the element)
 
@@ -651,21 +652,32 @@ _JS = r"""
   };
   const labelOf2 = (x) => [x.getAttribute('name'), x.id, x.getAttribute('placeholder'), x.getAttribute('aria-label'),
     ...[...(x.labels || [])].map((l) => l.textContent)].join(' ');
+  // A line that only says the form is protected (the badge or legal notice of an INVISIBLE check), the box kept for the
+  // check's error message, or an empty holder: nothing there is asked of the visitor, so it is no challenge.
+  const CAP_NOTICE = /(?:protected|prot[eé]g[eé]e?|protection|secured|s[eé]curis[eé]e?) (?:by|par) (?:google )?(?:re|h)captcha|this site is protected|ce site est prot[eé]g[eé]/i;
+  const CAP_ASIDE = /attribution|badge|error|erreur|legal|notice|disclaimer|policy|terms|token/i;
+  const aside = (el) => {
+    if (el.tagName === 'INPUT') return false;
+    const said = clean(el.textContent);
+    return CAP_ASIDE.test((el.getAttribute('class') || '') + ' ' + (el.id || '')) || CAP_NOTICE.test(said)
+      || (!said && !el.querySelector('iframe, img, canvas, svg, input, button, [role=checkbox]'));
+  };
   let captcha = false;
+  let why = null;
   for (const el of els) {
-    if (el.tagName === 'IFRAME' && CAP.test(el.getAttribute('src') || '') && shown(el) && !solved(el)) { captcha = true; break; }
+    if (el.tagName === 'IFRAME' && CAP.test(el.getAttribute('src') || '') && shown(el) && !solved(el)) { captcha = true; why = el; break; }
     if (el.matches('.g-recaptcha,.h-captcha,.cf-turnstile') && !['BUTTON', 'INPUT', 'A'].includes(el.tagName)
-        && el.getAttribute('data-size') !== 'invisible' && !el.closest('.grecaptcha-badge') && shown(el) && !solved(el)) { captcha = true; break; }
+        && el.getAttribute('data-size') !== 'invisible' && !el.closest('.grecaptcha-badge') && shown(el) && !solved(el)) { captcha = true; why = el; break; }
     if (el.closest('.grecaptcha-badge') || el.getAttribute('data-size') === 'invisible') continue;
     // (1) a visible element whose class / id says "captcha"
-    if (!NOT_WIDGET.has(el.tagName) && /captcha/i.test((el.getAttribute('class') || '') + ' ' + (el.id || ''))) {
+    if (!NOT_WIDGET.has(el.tagName) && /captcha/i.test((el.getAttribute('class') || '') + ' ' + (el.id || '')) && !aside(el)) {
       const ok = el.tagName === 'INPUT' ? ((el.getAttribute('type') || 'text').toLowerCase() === 'text' && vis(el)) : (shown(el) && !heavy(el));
-      if (ok && !(el.tagName === 'INPUT' ? !!el.value : solvedNear(el))) { captcha = true; break; }
+      if (ok && !(el.tagName === 'INPUT' ? !!el.value : solvedNear(el))) { captcha = true; why = el; break; }
     }
     // (2) a short visible block saying "I am not a robot" / "security check" / "click here to verify"...
     if (!NOT_WIDGET.has(el.tagName) && el.children.length < 6) {
       const t = clean(el.textContent);
-      if (t.length <= 120 && GEN_TXT.test(t) && vis(el) && !solvedNear(el)) { captcha = true; break; }
+      if (t.length <= 120 && GEN_TXT.test(t) && vis(el) && !solvedNear(el)) { captcha = true; why = el; break; }
     }
     if (el.tagName === 'IMG' && /captcha/i.test([el.getAttribute('src'), el.getAttribute('alt'), el.id, el.getAttribute('class')].join(' ')) && vis(el)) {
       const near = [];
@@ -675,11 +687,11 @@ _JS = r"""
       if (par && par.tagName !== 'FORM' && !heavy(par)) near.push(par);
       const isText = (x) => x.tagName === 'INPUT' && ['text', 'search', ''].includes((x.getAttribute('type') || '').toLowerCase()) && vis(x);
       const boxes = near.flatMap((x) => (x.tagName === 'INPUT' ? [x] : [...x.querySelectorAll('input')])).filter(isText);
-      if (boxes.length && boxes.every((b) => !b.value)) { captcha = true; break; }
+      if (boxes.length && boxes.every((b) => !b.value)) { captcha = true; why = el; break; }
     }
     // (3) an image captcha: a text box for the code (never auto-solved: filled by the human = completed)
     if (el.tagName === 'INPUT' && ['text', 'search', ''].includes((el.getAttribute('type') || '').toLowerCase()) && vis(el)
-        && CODE_TXT.test(labelOf2(el)) && !el.value) { captcha = true; break; }
+        && CODE_TXT.test(labelOf2(el)) && !el.value) { captcha = true; why = el; break; }
   }
   if (choice) {
     const field = out.find(entry => entry.ref === reg.target);
@@ -704,7 +716,9 @@ _JS = r"""
     option.click();
     return true;
   }
-  return {fields: out, text: document.body ? clean(document.body.innerText) : '', captcha, next: n};
+  const seen = why ? clean(why.tagName.toLowerCase() + (why.id ? '#' + why.id : '') + ' ' + (why.getAttribute('class') || '') + ' '
+    + (why.tagName === 'IFRAME' ? new URL(why.getAttribute('src') || '', location.href).hostname : clean(why.textContent).slice(0, 50))).slice(0, 140) : '';
+  return {fields: out, text: document.body ? clean(document.body.innerText) : '', captcha, why: seen, next: n};
 }
 """
 
@@ -847,6 +861,7 @@ async def take_snapshot(page: Page, *, read_only: bool = False) -> tuple[PageSna
     owners: dict[str, Frame] = {}
     prio: set[str] = set()
     captcha = False
+    why = ""
     start = 0
     for frame in page.frames:
         if frame.is_detached() or not await _frame_shown(frame, page):
@@ -869,6 +884,8 @@ async def take_snapshot(page: Page, *, read_only: bool = False) -> tuple[PageSna
             owners[d["ref"]] = frame
         if res["text"]:
             texts.append(res["text"])
+        if res["captcha"] and not captcha:
+            why = str(res.get("why") or "")
         captcha = captcha or res["captcha"]
     if not read_only:
         fields = _cap(fields, prio)
@@ -877,5 +894,9 @@ async def take_snapshot(page: Page, *, read_only: bool = False) -> tuple[PageSna
     except Exception:
         title = ""
     text = re.sub(r"\s+", " ", " ".join(texts)).strip()[:MAX_TEXT]
-    snap = PageSnapshot(url=page.url, title=title, text=text, fields=fields, has_captcha=captcha or await is_challenge(page))
+    if not captcha and await is_challenge(page) and not any(f.kind in _FORM_KINDS for f in fields):
+        # A bot-check page ("Just a moment...") holds nothing to fill. A page whose form is there only LOADS the check's
+        # script (an invisible check that runs at the send): that is not a challenge to stop on.
+        captcha, why = True, "page de contrôle anti-robot"
+    snap = PageSnapshot(url=page.url, title=title, text=text, fields=fields, has_captcha=captcha, captcha_why=why)
     return snap, _Resolver(owners)

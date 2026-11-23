@@ -3100,6 +3100,15 @@ class _Run:
                     return result
             if self.current_step:
                 await self._supervised_checkpoint()
+            if snap.has_captcha and self.captcha_wait_s <= 0 and self.trusting:
+                # A check that asks nothing of the visitor ticks itself within seconds in a real browser: it is given that
+                # time, nothing is touched.
+                from jobhunt import browser as _browser  # noqa: PLC0415
+
+                deadline = asyncio.get_running_loop().time() + _browser.CHALLENGE_AUTO_CLEAR_S
+                while snap.has_captcha and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(min(CAPTCHA_POLL_S, max(0.1, _browser.CHALLENGE_AUTO_CLEAR_S / 4)))
+                    snap, resolve = await self._snapshot()
             if snap.has_captcha and self.captcha_wait_s > 0:  # visible window: give the human time to solve it, touching nothing
                 deadline = asyncio.get_running_loop().time() + self.captcha_wait_s
                 while snap.has_captcha and asyncio.get_running_loop().time() < deadline:
@@ -3119,6 +3128,8 @@ class _Run:
                 self.final_clicked = True  # a click made with application data: the form is gone, it may have been sent
             if snap.has_captcha:
                 log.page_kind = "captcha"
+                if snap.captcha_why:
+                    log.note += "; défi vu : " + self._r(snap.captcha_why)[:140]
                 await self._shot(log)
                 if self.captcha_wait_s > 0:  # waited for in vain (or its completion cannot be detected): no automatic retry
                     minutes = max(1, round(self.captcha_wait_s / 60))
