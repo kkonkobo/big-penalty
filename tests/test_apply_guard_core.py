@@ -644,3 +644,19 @@ async def test_a_passwordless_sign_in_waits_for_the_mailed_link_and_resumes_sign
     result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
     assert result.status == "submitted", (result.status, result.message, [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
     assert asked == [True] and paths(core, "/site") == ["/site/login", "/site/jobs/100"]
+
+
+async def test_a_send_left_unconfirmed_says_in_its_trace_which_check_failed(core, profile, tmp_path, fast):
+    """The page that follows the send click says nothing of a receipt: the run is held as a possible send, and its last
+    step notes what was looked at (form, field errors, banners, receipt wording) so the cause can be read afterwards."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        fetch('/jobs/100/apply', {method: 'POST', body: new FormData(event.target)}).catch(() => {}).finally(() => {
+          document.querySelector('main').innerHTML = '<h1>Nos offres</h1><p>Retrouvez toutes nos offres de stage.</p>'; }); });</script>""")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "failed" and "Envoi non confirmé" in result.message, (result.status, result.message)
+    from pathlib import Path
+
+    note = json.loads((Path(result.out_dir) / "failure-steps.json").read_text(encoding="utf-8"))[-1]["note"]
+    assert "envoi non confirmé : " in note and "texte de réception non lu" in note and "formulaire encore présent" not in note, note
