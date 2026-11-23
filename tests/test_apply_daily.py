@@ -48,6 +48,7 @@ class Env:
         self.prepared: list[int] = []
         self.runs: list[tuple[int, dict]] = []
         self.run_status = "submitted"
+        self.diagnostic_code = None
         self.untrusted_host = ""
         self.reserve_click = False
         self.raises: dict[int, Exception] = {}
@@ -89,7 +90,8 @@ class Env:
             job = db.get_job(app.job_id)
             astore.reserve_send(r.id, profile_id=app.profile_id, application_id=app_id, trigger=trigger,
                                 role_key=policy.normalize_role(job.company, job.title), url_key="", daily_cap=99)
-        res = astore.finish_run(r.id, RunResult(status=self.run_status, message="msg", untrusted_host=self.untrusted_host))
+        res = astore.finish_run(r.id, RunResult(status=self.run_status, message="msg", untrusted_host=self.untrusted_host,
+                                                **({"diagnostic_code": self.diagnostic_code} if self.diagnostic_code else {})))
         if res.status == "submitted":
             store.mark_submitted(app_id, app.current_rev)
         return res
@@ -1025,5 +1027,20 @@ async def test_a_question_stop_from_before_the_epoch_is_retried_once_then_waits(
     assert len(env.runs) == 2            # the new pause (current code) waits for an answer
     with db.connect() as conn:            # an old pause after a click: never retried
         conn.execute("UPDATE application_runs SET started_at=?, nav_clicked_at=?", (OLD, OLD))
+    await daily(profile)
+    assert len(env.runs) == 2
+
+
+async def test_an_offer_the_site_closed_twice_in_a_row_leaves_the_queue(env, profile):
+    """A closed offer was opened again at every pass and stayed in the to-do lists. After the second "closed" in a row the
+    application is withdrawn and the job set aside; the next pass no longer opens it."""
+    job = env.job(1)
+    app = cvs.approve(env.draft(job).id, 1)
+    env.run_status, env.diagnostic_code = "blocked", "job_closed"
+    await daily(profile)
+    assert store.get_application(app.id).status == "approved" and len(env.runs) == 1
+    _, lines = await daily(profile)
+    assert store.get_application(app.id).status == "withdrawn" and db.get_job(job.id).status == "rejected"
+    assert len(env.runs) == 2 and any("retirée de la file" in line for line in lines)
     await daily(profile)
     assert len(env.runs) == 2

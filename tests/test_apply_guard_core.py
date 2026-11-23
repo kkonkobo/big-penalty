@@ -491,3 +491,29 @@ async def test_a_block_the_run_added_and_cannot_complete_is_given_back_to_the_pl
     result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
     assert result.status == "submitted", (result.message, result.result.diagnostic_code, told)
     assert True in told and b"field=" not in core.posts_to("/site/jobs/100")[0]["body"]
+
+
+async def test_the_submit_of_a_step_before_the_application_is_not_the_send(core, profile, tmp_path, fast):
+    """A site first has a short profile created ("Submit"), then shows the application form itself. The first click was
+    recorded as the send and the run ended "unconfirmed" in front of the untouched form; it is a step like any other: the
+    form that follows (a CV field, new required fields still empty, no word of a receipt) is filled and sent."""
+    core.html["/site/jobs/100"] = (
+        '<title>Ingénieur systèmes embarqués</title><main><h1>Créer votre profil</h1>'
+        '<form action="/jobs/100/profile" method="post"><label for="name">Prénom</label><input id="name" name="first_name">'
+        '<button>Submit</button></form></main>')
+    core.post_pages["/site/jobs/100/profile"] = "application_after_profile.html"
+
+    def plan(snapshot):
+        labels = {field.label for field in snapshot.fields}
+        if "CV" not in labels:
+            return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"),
+                                                       act(snapshot, "Submit", "click", role="submit")])
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Nom", "fill", "last_name"),
+                                                   act(snapshot, "CV", "upload_cv", kind="file"),
+                                                   act(snapshot, "J'accepte", "check"),
+                                                   act(snapshot, "Envoyer ma candidature", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.message, result.result.diagnostic_code)
+    assert paths(core, "/site") == ["/site/jobs/100/profile", "/site/jobs/100/apply"]
