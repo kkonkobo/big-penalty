@@ -3274,3 +3274,14 @@ def test_a_tenant_of_zoho_recruit_is_a_recognised_applicant_tracking_site():
     assert "zoho_recruit" in origin.KNOWN_ATS_IDS
     assert any(rule[0] == "zoho_recruit" and rule[1].search("exempleco.zohorecruit.eu") for rule in origin._ATS_RULES)
     assert not any(rule[0] == "zoho_recruit" and rule[1].search("zohorecruit.eu.unrelated.test") for rule in origin._ATS_RULES)
+
+
+def test_the_recruiting_site_of_nibelis_is_a_recognised_applicant_tracking_site():
+    """Employers that run their hiring on this HR suite send candidates to its recruiting host: a form there is the
+    employer's own application form, not an unknown third party."""
+    from jobhunt import origin
+
+    assert "nibelis" in origin.KNOWN_ATS_IDS
+    assert any(rule[0] == "nibelis" and rule[1].search("recrutement.nibelis.com") for rule in origin._ATS_RULES)
+    assert not any(rule[0] == "nibelis" and rule[1].search("recrutement.nibelis.com.unrelated.test") for rule in origin._ATS_RULES)
+    assert not any(rule[0] == "nibelis" and rule[1].search("www.nibelis.com") for rule in origin._ATS_RULES)
