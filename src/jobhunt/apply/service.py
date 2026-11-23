@@ -664,7 +664,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
         if email and (not browser_adapter or match.adapter.boundaries.get("account_creation") == "auto"):
             password, account_known = accounts.guarded_account_callbacks(
                 email, account_host,
-                posting_url=target,
+                posting_url=target, employer_url=attempt.url,
             )
 
     def live_password():
@@ -1803,6 +1803,26 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
     return summary
 
 
+async def _receipt_by_mail(app: Application, job, res: ApplyRun) -> bool:
+    """The send click was made and the site showed no receipt page: when its acknowledgement arrives by mail (from the
+    employer's or its platform's domain, since the click, naming this posting), the attempt is settled as sent - what a
+    person checking the mailbox would conclude. Any doubt leaves the attempt to be verified."""
+    outstanding = apply_store.outstanding_attempt(app.id)
+    clicked = (outstanding.submit_clicked_at if outstanding is not None else None) or res.submit_clicked_at
+    if outstanding is None or not clicked or outstanding.id != res.id:
+        return False
+    try:
+        since = clicked if isinstance(clicked, datetime) else datetime.fromisoformat(str(clicked))
+        address = mail.profile_address(app.profile_id)
+        site = (res.result.final_url if res.result and res.result.final_url else "") or posting_url(job.origin_url) or ""
+        if not site or not await mail.receipt(address, site, since.astimezone(UTC), job.title or app.job_title or ""):
+            return False
+        apply_store.resolve_attempt(app.id, sent=True, run_id=outstanding.id)
+        return True
+    except Exception:
+        return False
+
+
 async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit, *, lock_held: bool, pool: _Pool, llm: _Llm,
                     planner, verifier, headless: bool, attended: bool, min_score: float | None, regenerate=None,
                     refresh=None, master_hash: str | None = None) -> None:
@@ -1890,6 +1910,10 @@ async def _auto_one(app: Application, job, tag: str, summary: ApplySummary, emit
         summary.sent += 1
         emit(f"{tag} : envoyée")
     elif apply_store.outstanding_attempt(app.id) is not None:
+        if await _receipt_by_mail(app, job, res):
+            summary.sent += 1
+            emit(f"{tag} : envoyée (accusé de réception reçu par e-mail)")
+            return
         summary.to_check += 1
         emit(f"{tag} : à vérifier (envoi non confirmé : {res.message})")
     elif res.status in PAUSE_REASON or untrusted_host_of(res):  # the pass never trusts a host by itself

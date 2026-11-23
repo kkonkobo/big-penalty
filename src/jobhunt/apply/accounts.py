@@ -534,11 +534,14 @@ def _seed_employer(host: str, email: str, employer: str) -> None:
     _index_add(host, email, "pending", site=employer)
 
 
-def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *, posting_url: str = "") -> tuple[Callable[[str], str], Callable[[str], bool]]:
-    """For Workday, require a live URL matching the reserved host and explicit career-site path."""
+def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *, posting_url: str = "",
+                              employer_url: str = "") -> tuple[Callable[[str], str], Callable[[str], bool]]:
+    """For Workday, require a live URL matching the reserved host and explicit career-site path. On a host that employers
+    share, the employer is read from `employer_url` - the posting the run STARTED from, the same at every step of a run and
+    at every run - rather than from the address the run happens to be on (which may or may not name the employer)."""
     reserved_host = _hostname(posting_url)
     reserved_site = workday_site(posting_url, posting=True)
-    employer = shared_employer(posting_url)
+    employer = shared_employer(employer_url or posting_url)
 
     def scope(url):
         host = _hostname(url)
