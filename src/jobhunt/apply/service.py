@@ -616,7 +616,9 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                     started = min(started, earlier.started_at)
         return started
 
-    async def verify_mail():
+    async def verify_mail(sign_in=False):
+        if sign_in:  # (a link that signs in is only ever taken from a mail that arrived after the sign-in was asked for)
+            return await mail.poll(email, audience.recipient_url, datetime.now(UTC) - timedelta(minutes=3), sign_in=True)
         found = await mail.poll(email, audience.recipient_url, mail_since())
         live = getattr(audience, "page_url", "")
         if (not found[0] and getattr(audience, "trusting", False) and live and _host(live) != _host(audience.recipient_url)

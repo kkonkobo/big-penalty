@@ -292,3 +292,19 @@ def test_a_title_is_named_by_most_of_its_telling_words():
     assert mail.names_posting('Candidature : ingénieur conception cartes électroniques embarquées', TITLE)
     assert not mail.names_posting('Candidature : stage ingénieur', TITLE)       # only the words every posting carries
     assert not mail.names_posting(f'Candidature - {TITLE}', 'Stage')            # a title that says nothing
+
+
+def test_a_link_that_signs_in_is_read_only_when_a_sign_in_was_asked_for():
+    """A passwordless site mails a link that signs the candidate in, on the employer's own space of the platform. It is
+    taken only when the engine has just asked for that sign-in, and only from that space; a verification or reset link of
+    the same mail is not taken for it."""
+    page = 'https://exempleco.softy.pro/offers/100'
+    link = 'https://exempleco.softy.pro/login-link/12345?expires=1&redirect=%2Foffers%2F100&signature=abcdef'
+    body = f'<p>Bonjour,</p><a href="{link}">Se connecter</a><a href="https://exempleco.softy.pro/privacy">Confidentialité</a>'
+    assert mail.extract(body, page, html=True, sender_domain='softymails.fr') is None
+    assert mail.extract(body, page, html=True, sender_domain='softymails.fr', sign_in=True) == mail.Verification('link', link)
+    other = body.replace('exempleco.softy.pro/login-link', 'autreco.softy.pro/login-link')
+    assert mail.extract(other, page, html=True, sender_domain='softymails.fr', sign_in=True) is None
+    reset = body.replace('/login-link/12345', '/password/reset/12345')
+    assert mail.extract(reset, page, html=True, sender_domain='softymails.fr', sign_in=True) is None
+    assert 'softymails.fr' in mail.search_domains(page)

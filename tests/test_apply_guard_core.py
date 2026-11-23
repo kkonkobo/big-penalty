@@ -598,3 +598,49 @@ async def test_a_receipt_left_by_the_click_that_used_the_last_step_is_read_and_c
     result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
     assert result.status == "submitted", (result.status, result.message)
     assert len(paths(core, "/site")) == 1 and store.outstanding_attempt(app.id) is None
+
+
+async def test_a_passwordless_sign_in_waits_for_the_mailed_link_and_resumes_signed_in(core, profile, tmp_path, fast, monkeypatch):
+    """A site without passwords: the sign-in asks for the e-mail only and says a link is on its way. The link is read from
+    the mailbox (only a sign-in link is asked for), opened, and the application is made from the posting, signed in. The
+    run used to end as a possible send to check, on the page that announces the link."""
+    from jobhunt.apply import mail
+
+    signed_out = ('<title>Ingénieur systèmes embarqués</title><main><h1>Ingénieur systèmes embarqués</h1>'
+                  '<button type="button" id="open">Se connecter</button>'
+                  '<div role="dialog" id="box" hidden><h2>Connexion</h2><p id="said"></p><form id="login">'
+                  '<label for="mail">E-mail</label><input id="mail" type="email" name="email" required><button>Valider</button></form></div></main>'
+                  """<script>document.getElementById('open').onclick = () => { document.getElementById('box').hidden = false; };
+                  document.getElementById('login').addEventListener('submit', (event) => { event.preventDefault();
+                    fetch('/login', {method: 'POST', body: new FormData(event.target)}).catch(() => {}).finally(() => {
+                      document.getElementById('said').textContent = 'Si un compte est associé à cet email, vous recevrez un lien pour vous connecter.'; }); });
+                  </script>""")
+    core.html["/site/jobs/100"] = signed_out
+    asked = []
+
+    async def poll(address, bound_url, started, *, links_only=False, sign_in=False):
+        asked.append(sign_in)
+        return (mail.Verification("link", f"{CAREERS}/login-link/1?signature=fixture"), None) if sign_in else (None, "email_not_found")
+
+    async def open_link(context, bound_url, link, recheck):
+        assert "/login-link/" in link and not await recheck()
+        core.html["/site/jobs/100"] = form_page("/jobs/100")  # (the session is signed in from here on)
+        return True
+
+    monkeypatch.setattr(mail, "provider", lambda address: ("imap.example.test", 993))
+    monkeypatch.setattr(mail, "poll", poll)
+    monkeypatch.setattr(mail, "open_link", open_link)
+
+    def plan(snapshot):
+        labels = {field.label for field in snapshot.fields}
+        if "CV" in labels:
+            return entry_form(snapshot)
+        if "Valider" in labels and any(field.kind == "email" for field in snapshot.fields):
+            return StepPlan(page_kind="account_login", actions=[act(snapshot, "E-mail", "fill", "account_email"),
+                                                                act(snapshot, "Valider", "click", role="login")])
+        return StepPlan(page_kind="job_page", actions=[act(snapshot, "Se connecter", "click", role="open_form")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.message, [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
+    assert asked == [True] and paths(core, "/site") == ["/site/login", "/site/jobs/100"]

@@ -27,12 +27,14 @@ PROVIDERS = {'gmail.com': ('imap.gmail.com', 993), 'googlemail.com': ('imap.gmai
 ATS_DOMAINS = frozenset('''myworkday.com myworkdayjobs.com myworkdaysite.com successfactors.com successfactors.eu sap.com
 talent-soft.com profils.org smartrecruiters.com teamtailor.com greenhouse.io greenhouse.com lever.co workable.com
 recruitee.com icims.com taleo.net oracle.com oraclecloud.com digitalrecruiters.com gestmax.fr gestmax.com flatchr.io
-eightfold.ai'''.split())
+eightfold.ai softy.pro softymails.fr'''.split())
 SKEW = timedelta(minutes=2)
 RESUME_WINDOW = timedelta(hours=24)
 _MONTHS = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split()
 _VERIFY = re.compile(r'verif(?:y|ication|izieren)|vérifi|confirm|activat|activ[ea]r|valid[ae]|bestätig', re.I)
 _ACCOUNT = re.compile(r'account|compte|konto|e-?mail|courriel', re.I)
+# (the path of a link that signs the candidate in: asked for only after a passwordless sign-in was requested on the site)
+_SIGN_IN = re.compile(r'(?:^|/)(?:login|log-in|signin|sign-in|magic|auth|connexion)[-_]?link(?:/|$)|(?:^|/)magic[-_]?(?:login|signin)(?:/|$)|passwordless', re.I)
 _NOT_ACTIVATION = re.compile(r'reset|password|mot de passe|passwort|sign[ -]?in|log[ -]?in|connexion|anmeld|magic|otp', re.I)
 CODE_LABEL = re.compile(r'code|one.time.password|\botp\b|verif|vérifi|bestätig', re.I)
 VERIFY_ENDPOINT = re.compile(r'(?:^|/)(?:verify(?:[-_]?email|[-_]?code)?|confirm(?:[-_]?email|[-_]?code)?|'
@@ -226,7 +228,7 @@ class Verification:
     value: str = field(repr=False)
 
 
-def extract(text, bound_url, *, html=False, links_only=False, sender_domain=None):
+def extract(text, bound_url, *, html=False, links_only=False, sender_domain=None, sign_in=False):
     if html:
         markup = _HTML()
         markup.feed(text)
@@ -240,13 +242,17 @@ def extract(text, bound_url, *, html=False, links_only=False, sender_domain=None
         parsed = _url(link)
         if not parsed or not same_recipient(bound_url, link):
             continue
+        if sign_in:
+            if _SIGN_IN.search(unquote(parsed.path)):
+                found.add(link)
+            continue
         evidence = unquote(parsed.path) + ' ' + label
         if (_VERIFY.search(evidence) and not re.search(r'reset|forgot|unsubscribe|désabonn', evidence, re.I)
                 and (not links_only or (_ACCOUNT.search(evidence) and not _NOT_ACTIVATION.search(evidence)))):
             found.add(link)
     if len(found) == 1:
         return Verification('link', found.pop())
-    if links_only or found:
+    if links_only or found or sign_in:
         return None
     if sender_domain is not None:
         host = urlsplit(bound_url).hostname
@@ -321,7 +327,7 @@ def _text_parts(node, section=''):
             yield section or '1', node[1].lower(), charset, encoding
 
 
-def _search(client, bound_url, started, examined, *, links_only=False):
+def _search(client, bound_url, started, examined, *, links_only=False, sign_in=False):
     since = started.astimezone(UTC) - SKEW
     domains = search_domains(bound_url)
     if not domains or len(examined) >= MAX_MESSAGES:
@@ -367,7 +373,7 @@ def _search(client, bound_url, started, examined, *, links_only=False):
             part = parser.parsebytes(b'Content-Type: text/' + subtype + b'; charset=' + charset +
                                      b'\r\nContent-Transfer-Encoding: ' + encoding + b'\r\n\r\n' + raw)
             result = extract(part.get_content(errors='replace'), bound_url, html=subtype == b'html',
-                             links_only=links_only, sender_domain=sender)
+                             links_only=links_only, sender_domain=sender, sign_in=sign_in)
             if result:
                 matches.add(result)
         links = {result for result in matches if result.kind == 'link'}
@@ -379,10 +385,10 @@ def _search(client, bound_url, started, examined, *, links_only=False):
     return None
 
 
-def _lookup(address, password, bound_url, started, examined, links_only):
+def _lookup(address, password, bound_url, started, examined, links_only, sign_in=False):
     try:
         with _inbox(address, password) as (client, _):
-            return _search(client, bound_url, started, examined, links_only=links_only)
+            return _search(client, bound_url, started, examined, links_only=links_only, sign_in=sign_in)
     except Exception:
         pass
     raise MailUnavailable()
@@ -489,8 +495,9 @@ def _seconds(name, default, minimum, maximum):
     return default
 
 
-async def poll(address, bound_url, started, *, links_only=False):
-    """Return one ephemeral verification and, on failure, a fixed diagnostic code."""
+async def poll(address, bound_url, started, *, links_only=False, sign_in=False):
+    """Return one ephemeral verification and, on failure, a fixed diagnostic code. `sign_in`: the site was just asked for a
+    passwordless sign-in and mails a link that signs in - only such a link is looked for."""
     try:
         password = await asyncio.to_thread(_secret, address)
     except MailUnavailable:
@@ -504,7 +511,7 @@ async def poll(address, bound_url, started, *, links_only=False):
     examined: set[bytes] = set()
     while True:
         try:
-            result = await asyncio.wait_for(asyncio.to_thread(_lookup, address, password, bound_url, started, examined, links_only),
+            result = await asyncio.wait_for(asyncio.to_thread(_lookup, address, password, bound_url, started, examined, links_only, sign_in),
                                             timeout=10 if links_only else max(0.05, deadline - loop.time()))
         except MailUnavailable:
             return None, 'email_auth_failed'
@@ -545,8 +552,8 @@ class BrowserVerification:
     lookup: Callable[[], Awaitable[tuple[Verification | None, str | None]]]
     follow: Callable[..., Awaitable[bool]]
 
-    async def poll(self):
-        return await self.lookup()
+    async def poll(self, *, sign_in=False):
+        return await (self.lookup(sign_in=True) if sign_in else self.lookup())
 
     async def open(self, page, link, recheck):
         return await self.follow(page, link, recheck)
