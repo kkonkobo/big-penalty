@@ -325,7 +325,9 @@ _BANNER_JS = r"""() => {
     if (SKIP.has(e.tagName) || (e.getAttribute('role') || '') === 'button' || !vis(e) || e.querySelector('input,select,textarea,button')) continue;
     const t = (e.textContent || '').replace(/\s+/g, ' ').trim();
     if (!t || t.length > 400 || (OK.test(t) && !NOT.test(t)) || SPOKEN.test(t)) continue;
-    const cls = e.getAttribute('class') || '';
+    // (a utility class that only APPLIES in a state - "aria-invalid:border-destructive", "hover:bg-error" - says nothing
+    // of the element as it stands: such "state:style" names are left out)
+    const cls = (e.getAttribute('class') || '').split(/\s+/).filter((name) => !name.includes(':')).join(' ');
     const alert = e.getAttribute('role') === 'alert' || e.getAttribute('aria-live') === 'assertive';
     if (alert || STYLED.test(cls) || ((WEAK.test(cls)) && WORDS.test(t))) return true;
   }
