@@ -308,3 +308,19 @@ def test_a_link_that_signs_in_is_read_only_when_a_sign_in_was_asked_for():
     reset = body.replace('/login-link/12345', '/password/reset/12345')
     assert mail.extract(reset, page, html=True, sender_domain='softymails.fr', sign_in=True) is None
     assert 'softymails.fr' in mail.search_domains(page)
+
+
+def test_the_employers_name_under_another_ending_is_a_sender_that_is_searched():
+    """The careers site is on "exempleco.com" and its mails come from "exempleco.fr": that sender is searched, and its
+    verification link - which still has to point at the site itself - is read. A short name, a platform's own name and an
+    unrelated sender get no such treatment."""
+    site = 'https://recrutement.exempleco.com/my-account/log-in.aspx'
+    assert {'exempleco.com', 'exempleco.fr', 'exempleco.eu'} <= mail.search_domains(site)
+    assert 'abcd.fr' not in mail.search_domains('https://jobs.abcd.com/apply')
+    assert 'recruitee.fr' not in mail.search_domains('https://exempleco.recruitee.com/o/poste')
+    link = 'https://recrutement.exempleco.com/my-account/confirm-registration.aspx?LCID=1036&TOKEN=abcdef'
+    assert mail.extract(f'<a href="{link}">Confirmer mon inscription</a>', site, html=True, sender_domain='exempleco.fr') == mail.Verification('link', link)
+    elsewhere = link.replace('recrutement.exempleco.com', 'recrutement.exempleco.fr.unrelated.test')
+    assert mail.extract(f'<a href="{elsewhere}">Confirmer mon inscription</a>', site, html=True, sender_domain='exempleco.fr') is None
+    assert mail.extract('Votre code de vérification : 482913', site, sender_domain='exempleco.fr') == mail.Verification('code', '482913')
+    assert mail.extract('Votre code de vérification : 482913', site, sender_domain='unrelated.test') is None
