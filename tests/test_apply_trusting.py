@@ -2157,3 +2157,47 @@ async def test_a_receipt_notice_is_read_even_behind_other_floating_blocks_and_an
     assert await engine._Run._page_says_received(SimpleNamespace(page=page))
     await page.set_content(blocks + ad)
     assert not await engine._Run._page_says_received(SimpleNamespace(page=page))
+
+
+WRAPPED_SELECT = '''<style>label.required::after { content: " *"; color: red }</style>
+<form><div class="field"><label class="required"><span>Prénom</span></label><input type="text" maxlength="50"></div>
+  <div class="field"><label class="required"><span>Préavis</span></label>
+    <x-select><x-input><span class="material-symbols-rounded">search</span>
+      <div class="trigger"><span class="value placeholder">Choisir...</span></div>
+      <input type="text" placeholder="Rechercher"><span class="material-symbols-rounded">unfold_more</span></x-input><x-dropdown></x-dropdown></x-select></div>
+  <div class="field"><label><span>Votre expérience</span></label>
+    <x-select><x-input><div class="trigger"><span class="value placeholder">Choisir...</span></div>
+      <input type="text" placeholder="Rechercher"></x-input></x-select></div>
+  <button>Envoyer ma candidature</button></form>
+<div class="overlay-container"></div>
+<script>
+  const LISTS = [['Asap / Immédiatement', 'Préavis de 1 mois', 'Préavis de 3 mois'], ['Aucune expérience', "1 an d'expérience"]];
+  document.querySelectorAll('x-select').forEach((host, rank) => {
+    const box = host.querySelector('input'), shown = host.querySelector('.value'), pane = document.querySelector('.overlay-container');
+    const open = () => { pane.innerHTML = '<div class="pane"><span class="material-symbols-rounded">search</span>' + LISTS[rank].map((name) =>
+        `<button type="button" class="dropdown-item"><span class="option-label">${name}</span></button>`).join('') + '</div>';
+      for (const item of pane.querySelectorAll('button')) item.onclick = () => {
+        shown.textContent = item.textContent.trim(); shown.classList.remove('placeholder'); pane.innerHTML = ''; }; };
+    host.querySelector('.trigger').onclick = open; box.onfocus = open; });
+</script>'''
+
+
+async def test_a_text_box_wrapped_in_the_pages_own_select_element_is_a_list_with_its_label_and_choice(page):  # noqa: F811
+    """<x-select> with a trigger that shows the choice, a search box and a list drawn elsewhere on the page as plain buttons:
+    the reader calls it a list, names it after the label of its block (not after its "Choisir..." placeholder), takes the
+    required mark a style sheet draws from the label's class, and reads the shown choice as its value. The list handler
+    chooses an entry; an icon written as a word is not an entry."""
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(WRAPPED_SELECT)
+    snap, resolve = await take_snapshot(page)
+    seen = [(f.kind, f.label, f.required, f.value) for f in snap.fields if f.kind != "button"]
+    assert seen == [("text", "Prénom", True, ""), ("combobox", "Préavis", True, ""), ("combobox", "Votre expérience", False, "")], seen
+    notice = next(f for f in snap.fields if f.label == "Préavis")
+    run = SimpleNamespace(page=page, combo_options={}, combo_chosen={}, _combo_value=engine._Run._combo_value,
+                          _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=notice.ref, op="select"), notice, None, value="Préavis de 1 mois")
+    assert await trusting._combobox(run, await resolve.element(notice.ref), notice, item) == "Préavis de 1 mois"
+    assert run.combo_options[trusting.norm("Préavis")] == ["Asap / Immédiatement", "Préavis de 1 mois", "Préavis de 3 mois"]
+    snap, _ = await take_snapshot(page)
+    assert [(f.label, f.value) for f in snap.fields if f.kind == "combobox"] == [("Préavis", "Préavis de 1 mois"), ("Votre expérience", "")]

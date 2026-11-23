@@ -123,6 +123,17 @@ _JS = r"""
     if (!r || !r.host || r.querySelectorAll('input,select,textarea').length !== 1) return '';
     return clean(r.host.getAttribute('aria-label')) || clean(r.host.getAttribute('label'));
   };
+  // A <label> the page did not tie to its control, in the smallest block that holds this control alone. A label the page
+  // only STYLES as required (class "required", its star drawn by the style sheet) says so here with a star.
+  const blockLabelOf = (el) => {
+    for (let up = el.parentElement, d = 0; up && d < 5 && !['FORM', 'BODY', 'MAIN', 'FIELDSET'].includes(up.tagName); up = up.parentElement, d++) {
+      if (up.querySelectorAll('input:not([type=hidden]), select, textarea').length !== 1) return '';
+      const l = [...up.querySelectorAll('label')].find((x) => !x.htmlFor && !x.contains(el) && !x.querySelector('input, select, textarea'));
+      const t = l ? textOf(l) : '';
+      if (t) return t + (/(^|[\s_-])(required|mandatory|obligatoire)([\s_-]|$)/i.test(l.getAttribute('class') || '') && !t.includes('*') ? ' *' : '');
+    }
+    return '';
+  };
   const labelOf = (el, allowName = true) => {
     let t = '';
     if (el.labels && el.labels.length) t = clean([...el.labels].map(textOf).join(' '));
@@ -147,6 +158,7 @@ _JS = r"""
       }
     }
     if (!t) t = hostLabelOf(el);
+    if (!t && !el.matches('input[type=checkbox],input[type=radio]')) t = blockLabelOf(el);
     if (!t && el.matches('input[type=checkbox],input[type=radio]')) t = adjacentOf(el);
     if (!t) t = legendOf(el);
     if (!t) t = preceding(el);
@@ -201,6 +213,24 @@ _JS = r"""
     const openers = [...(host ? box.querySelectorAll('button, [role=button], [ui5-button]') : box.children)]
       .filter((b) => b.matches('button, [role=button], [ui5-button]') && b.getClientRects().length && !clean(b.innerText || b.textContent));
     return openers.length === 1;
+  };
+
+  // A text box the page wraps in its own "select" element (<x-select>: a trigger that shows the choice, this box to search
+  // with, a list drawn elsewhere on the page) is a closed list, not a box to type an answer in.
+  const selectHost = (el) => {
+    if (el.tagName !== 'INPUT' || !['', 'text', 'search'].includes((el.getAttribute('type') || '').toLowerCase())) return null;
+    for (let up = el.parentElement, d = 0; up && d < 4; up = up.parentElement, d++) {
+      if (up.tagName.includes('-') && /(^|-)select($|-)/i.test(up.tagName)) {
+        return up.querySelectorAll('input:not([type=hidden]), select, textarea').length === 1 ? up : null;
+      }
+    }
+    return null;
+  };
+  // what such an element shows as chosen (its placeholder is not a choice)
+  const selectShown = (host, el) => {
+    const shown = [...host.querySelectorAll('[class*=value i], [class*=selected i], [class*=trigger i]')].find((x) => !x.contains(el)
+      && !/placeholder/i.test(x.getAttribute('class') || '') && !x.querySelector('[class*=placeholder i]') && clean(x.textContent));
+    return shown ? clean(shown.textContent).slice(0, 120) : '';
   };
 
   const nativeRadioIn = (el) => !!(el.querySelector('input[type=radio]') || (el.shadowRoot && el.shadowRoot.querySelector('input[type=radio]')));
@@ -285,6 +315,7 @@ _JS = r"""
     if (tag === 'select') return 'select';
     if (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') return 'combobox';
     if (tag === 'input' && valueHelp(el)) return 'combobox';
+    if (tag === 'input' && selectHost(el)) return 'combobox';
     if (tag === 'textarea') return 'textarea';
     if (tag === 'input') {
       const t = (el.getAttribute('type') || 'text').toLowerCase();
@@ -557,7 +588,8 @@ _JS = r"""
           .map(([value, label]) => ({value, label}));
       }
       const inner = el.matches('input,textarea') ? el : el.querySelector('input');
-      f.value = inner ? inner.value : (/^(s[ée]lectionn|choisi|select|choose)/i.test(clean(el.textContent)) ? '' : clean(el.textContent).slice(0, 120));
+      const wrapped = selectHost(el);
+      f.value = wrapped ? selectShown(wrapped, el) : inner ? inner.value : (/^(s[ée]lectionn|choisi|select|choose)/i.test(clean(el.textContent)) ? '' : clean(el.textContent).slice(0, 120));
     } else if (kind === 'checkbox') {
       f.value = (el.tagName === 'INPUT' ? el.checked : el.getAttribute('aria-checked') === 'true') ? 'true' : 'false';
     } else if (kind === 'file') {
