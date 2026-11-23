@@ -665,3 +665,37 @@ async def test_the_add_button_of_a_repeatable_section_says_which_section_it_adds
     assert [(f.label, f.group) for f in snap.fields if f.kind == "button"] == [
         ("Ajouter", "Ajouter Expérience professionnelle"), ("Ajouter un autre", "Formation"), ("Ajouter", "Langues"),
         ("Enregistrer et continuer", "")]
+
+
+STAR_RATING = """<form><div class="select-language"><select aria-required="true"><option value="">Add a language</option><option>German</option></select>
+  <div class="choose"><ul class="rating no-plugin"><li class="has-tooltip" data-original-title="Beginner"></li>
+    <li class="has-tooltip" data-original-title="Professional"></li><li class="has-tooltip" data-original-title="Fluent or bilingual"></li>
+    <li class="has-tooltip" data-original-title="Mother tongue"></li></ul> English <button type="button" class="close"><span></span></button></div>
+  <div class="choose"><ul class="rating no-plugin"><li class="active has-tooltip" data-original-title="Beginner"></li>
+    <li class="active has-tooltip" data-original-title="Professional"></li><li class="active has-tooltip" data-original-title="Fluent or bilingual"></li>
+    <li class="active has-tooltip" data-original-title="Mother tongue"></li></ul> French <button type="button" class="close"><span></span></button></div></div>
+  <button>Save</button></form>
+<style>.rating { list-style: none; display: inline-flex; padding: 0 } .rating li { width: 16px; height: 16px; background: #ccc; margin: 1px } .rating li.active { background: #333 }</style>
+<script>for (const star of document.querySelectorAll('.rating li')) star.addEventListener('click', () => {
+  const items = [...star.parentElement.children], rank = items.indexOf(star);
+  items.forEach((item, index) => item.classList.toggle('active', index <= rank)); });</script>"""
+
+
+async def test_a_row_of_stars_is_one_question_whose_options_are_the_levels(page):
+    """A language added to a profile gets a row of stars for its level; a row without a star is refused by the site. Each
+    row is one radio question named after its language, its options named by the stars' tooltips."""
+    from jobhunt.apply import engine, trusting
+
+    await page.set_content(STAR_RATING)
+    snap, resolve = await take_snapshot(page)
+    rows = [f for f in snap.fields if f.kind == "radio"]
+    levels = ["Beginner", "Professional", "Fluent or bilingual", "Mother tongue"]
+    assert [(f.label, f.required, [o.label for o in f.options], f.value, f.selected) for f in rows] == [
+        ("English", True, levels, "", []), ("French", True, levels, "Mother tongue", [3])]
+    assert engine._is_empty(rows[0]) and not engine._is_empty(rows[1])
+    group = resolve(rows[0].ref)
+    assert [(r["label"], r["checked"]) for r in await group.evaluate_all(engine._RADIOS_JS)] == [(level, False) for level in levels]
+    await trusting._toggle(None, group.nth(2), True)
+    snap, _ = await take_snapshot(page)
+    assert [(f.label, f.value, f.selected) for f in snap.fields if f.kind == "radio"] == [
+        ("English", "Fluent or bilingual", [2]), ("French", "Mother tongue", [3])]

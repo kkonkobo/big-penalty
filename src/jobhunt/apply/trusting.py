@@ -692,8 +692,14 @@ def open_questions(run: _Run, plan: StepPlan, snap: PageSnapshot, v: _Validated,
 
 
 # ---------------------------------------------------------------- execution
+# (a star of a rating row is "set" when it is the last marked item of its list)
+_STATE_JS = r"""e => { if (e.checked === true || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true') return true;
+  const marked = (x) => !!x && /(^|[\s_-])(active|selected|checked|filled|full|on)([\s_-]|$)/i.test(x.getAttribute('class') || '');
+  return e.tagName === 'LI' && marked(e) && !marked(e.nextElementSibling); }"""
+
+
 async def _state(loc) -> bool:
-    return bool(await loc.evaluate("e => e.checked === true || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true'"))
+    return bool(await loc.evaluate(_STATE_JS))
 
 
 async def _toggle(run: _Run, loc, want: bool) -> None:

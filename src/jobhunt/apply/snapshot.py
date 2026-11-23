@@ -217,18 +217,31 @@ _JS = r"""
       && clean(x.innerText || x.textContent).length > 0 && clean(x.innerText || x.textContent).length <= 40)
       && !el.closest('[role=toolbar], [role=menubar], [role=tablist], nav, header, footer');
   };
-  const drawnRadio = (el) => toggleChoice(el) || (el.tagName !== 'INPUT' && el.getAttribute('role') === 'radio' && !nativeRadioIn(el));
+  // A rating drawn as a row of stars: three to ten empty items of a list whose class says "rating" / "stars"; clicking the
+  // n-th sets the level (the items up to it are then marked active). One question, one option per level.
+  const MARKED = /(^|[\s_-])(active|selected|checked|filled|full|on)([\s_-]|$)/i;
+  const ratingItem = (el) => {
+    const list = el.parentElement;
+    if (el.tagName !== 'LI' || !list || !/(^|[\s_-])(rating|stars?)([\s_-]|$)/i.test(list.getAttribute('class') || '')) return false;
+    const items = [...list.children];
+    return items.length >= 3 && items.length <= 10 && items.every((x) => x.tagName === 'LI' && !clean(x.innerText));
+  };
+  const ratingLabel = (el) => clean(el.getAttribute('data-original-title')) || clean(el.getAttribute('title')) || clean(el.getAttribute('aria-label'))
+    || ([...el.parentElement.children].indexOf(el) + 1) + ' / ' + el.parentElement.children.length;
+  const ratingSet = (el) => MARKED.test(el.getAttribute('class') || '')
+    && !(el.nextElementSibling && MARKED.test(el.nextElementSibling.getAttribute('class') || ''));
+  const drawnRadio = (el) => ratingItem(el) || toggleChoice(el) || (el.tagName !== 'INPUT' && el.getAttribute('role') === 'radio' && !nativeRadioIn(el));
   // the group of a drawn radio: the nearest role=radiogroup around it as rendered (a slotted radio sits, once rendered,
   // inside a fieldset of its group's shadow root), else its parent
   const drawnGroupOf = (el) => {
-    if (el.tagName === 'BUTTON') return el.parentElement;
+    if (el.tagName === 'BUTTON' || el.tagName === 'LI') return el.parentElement;
     for (let p = flatUp(el), d = 0; p && d < 12; p = flatUp(p), d++) if (p.getAttribute('role') === 'radiogroup') return p;
     return el.parentElement || el.getRootNode().host || el;
   };
-  const drawnRadioLabel = (el) => clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby')
+  const drawnRadioLabel = (el) => ratingItem(el) ? ratingLabel(el) : clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby')
     || (el.tagName === 'BUTTON' ? clean(el.innerText || el.textContent) : textOf(el)) || clean(el.getAttribute('label')) || adjacentOf(el);
   const drawnRadioValue = (el) => (typeof el.value === 'string' ? el.value : el.getAttribute('value') || '');
-  const drawnChecked = (el) => el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-pressed') === 'true' || el.checked === true;
+  const drawnChecked = (el) => (ratingItem(el) && ratingSet(el)) || el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-pressed') === 'true' || el.checked === true;
   // (a question whose own <label> is styled as required - the asterisk is drawn by the style sheet)
   const markedRequired = (rg) => { const q = rg.previousElementSibling;
     return !!q && q.tagName === 'LABEL' && /(^|[\s_-])required([\s_-]|$)/i.test(q.getAttribute('class') || ''); };
@@ -267,7 +280,7 @@ _JS = r"""
     // A radio drawn by the page (a custom element / div with role=radio, its state in aria-checked) is the radio, unless
     // it only wraps a native one.
     if (tag !== 'input' && role === 'radio') return nativeRadioIn(el) ? null : 'radio';
-    if (toggleChoice(el)) return 'radio';
+    if (toggleChoice(el) || ratingItem(el)) return 'radio';
     if (tag === 'select') return 'select';
     if (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') return 'combobox';
     if (tag === 'input' && valueHelp(el)) return 'combobox';
@@ -403,7 +416,8 @@ _JS = r"""
         const raw = drawnQuestion(rg, members);
         g = base('f' + (++n), 'radio', el);
         g.label = tidy(raw); g.wording = raw; g.group = groupOf(el); g.error = errorOf(rg);
-        g.required = rg.getAttribute('aria-required') === 'true' || reqOf(el, raw) || markedRequired(rg);
+        // (a rating row exists because something was chosen for it - a language: its level is asked for)
+        g.required = rg.getAttribute('aria-required') === 'true' || reqOf(el, raw) || markedRequired(rg) || ratingItem(el);
         g.choice_options = members.map((member) => [drawnRadioValue(member), drawnRadioLabel(member),
           member.getAttribute('aria-disabled') === 'true', groupOf(member)]);
         g.selected = members.flatMap((member, index) => drawnChecked(member) ? [index] : []);

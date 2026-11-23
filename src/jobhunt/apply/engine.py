@@ -396,6 +396,12 @@ _FORM_INFO_JS = r"""(e) => {
 # The live members of a radio group, in their CURRENT order (value, label as the snapshot reads it, checked).
 _RADIOS_JS = r"""(els) => els.map((e) => {
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  if (e.tagName === 'LI') {   // a star of a rating row: named by its tooltip, set when it is the last marked one
+    const marked = (x) => !!x && /(^|[\s_-])(active|selected|checked|filled|full|on)([\s_-]|$)/i.test(x.getAttribute('class') || '');
+    const items = [...e.parentElement.children];
+    return {value: '', label: clean(e.getAttribute('data-original-title')) || clean(e.getAttribute('title')) || clean(e.getAttribute('aria-label'))
+              || (items.indexOf(e) + 1) + ' / ' + items.length, checked: marked(e) && !marked(e.nextElementSibling)};
+  }
   if (e.tagName !== 'INPUT') {   // a radio drawn by the page (role=radio): its words may live in its shadow root
     const flat = (n) => n.nodeType === 3 ? n.textContent : (n.nodeType !== 1 && n.nodeType !== 11) || /^(SCRIPT|STYLE|TEMPLATE|INPUT|BUTTON|SELECT|TEXTAREA|NOSCRIPT)$/.test(n.tagName || '') ? ''
       : n.tagName === 'SLOT' && n.assignedNodes({flatten: true}).length ? n.assignedNodes({flatten: true}).map(flat).join(' ')
