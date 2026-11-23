@@ -2674,6 +2674,21 @@ class _Run:
             await asyncio.sleep(OBSERVE_POLL_S)
             snap, resolve = await self._snapshot()
 
+    def _application_ahead(self, snap: PageSnapshot, sent, present: set) -> bool:
+        """After a click recorded as the send: the page shows ANOTHER form that is plainly the application itself - a file
+        field for the CV, at least three required fields the earlier step did not have, one of them still empty - and no
+        word of a receipt. A page that asks for a password (an account offered after a send) is never that."""
+        inputs = [f for f in snap.fields if f.kind not in ("button", "link")]
+        if any(f.kind == "password" or f.error for f in inputs) or not any(f.kind == "file" for f in inputs):
+            return False
+        fresh = [f for f in inputs if f.required and (_norm(_label(f)), f.kind) not in sent.fields]
+        if len(fresh) < 3 or not any(_is_empty(f) and not (f.kind == "file" and self._file_satisfied(f, snap)) for f in fresh):
+            return False
+        said = fold(snap.text[:4000])
+        return not self._confirmed(snap, sent) and not re.search(
+            r"\bmerci\b|thank you|bien recu|(?:has been|have been|was|a bien ete|a ete|est bien) (?:successfully )?"
+            r"(?:received|submitted|sent|envoyee?|recue?|transmise?|enregistree?)|successfully submitted", said)
+
     async def _submit_rejected(self, snap: PageSnapshot, *, silent: bool = False) -> bool:
         """The final click did not send the application: same page, the form we filled and its send button are still there,
         and either fields show errors (the page's own validation refused it) or - `silent`, asked when the wait is over - the
@@ -2684,6 +2699,20 @@ class _Run:
         if sent is None or withdraw is None:
             return False
         present = {(_norm(_label(f)), f.kind) for f in snap.fields}
+        if self.trusting and not silent and self._application_ahead(snap, sent, present):
+            # The click only ended a step BEFORE the application (a profile to create, a questionnaire): the application
+            # form itself is what the page shows now, still to be filled. Nothing was sent.
+            try:
+                await withdraw()
+            except Exception:
+                return False
+            self.rejected_submits += 1
+            self.final_awaiting = self.final_clicked = False
+            self.submit_clicks = max(0, self.submit_clicks - 1)
+            self.pending = self.last_sent = self.last_click_rec = None
+            self.replans.pop(urldefrag(self.page.url).url, None)
+            self.diagnostics.receipt_reason = "before_submit"
+            return True
         intact = bool(sent.fields & present) and any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
         if urldefrag(self.page.url).url != self.sent_url:
