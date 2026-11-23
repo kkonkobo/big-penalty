@@ -346,7 +346,9 @@ assert "return true" not in _BANNER_TEXTS_JS and _BANNER_TEXTS_JS.count("return 
 # A notice the site floats over the page (fixed / sticky, a few lines, maybe a close button, no field): what a form sent
 # back says is missing when nothing marks it as an error. Read only for a page whose title says "error", or when the
 # notice itself is worded like one (two at most; cookie bars and help widgets are not notices).
-_NOTICE_TEXTS_JS = r"""(titled) => {
+_NOTICE_TEXTS_JS = r"""(asked) => {
+  let titled = Array.isArray(asked) ? asked[0] : asked;   // (asked: `titled`, or [titled, how many notices at most])
+  const most = Array.isArray(asked) ? asked[1] : 2;
   const WORDS = /erreur|error|errore|fehler|obligatoire|obbligator|required|requis|erforderlich|pflicht|inserire|compilare|renseign|veuillez|invalid|manquant|missing|mancant/i;
   const NOT_NOTICE = /cookie|traceur|consent|chat|assistan|besoin d'aide|need help|newsletter/i;
   const out = [];
@@ -362,7 +364,7 @@ _NOTICE_TEXTS_JS = r"""(titled) => {
     if (t.length < 12 || t.length > 400 || NOT_NOTICE.test(t + ' ' + e.id + ' ' + (e.getAttribute('class') || ''))) continue;
     if (!titled && !WORDS.test(t)) continue;
     if (!out.some((seen) => seen.includes(t) || t.includes(seen))) out.push(t);
-    if (out.length >= 2) break;
+    if (out.length >= most) break;
   }
   return out;
 }"""
@@ -1212,7 +1214,8 @@ class _Run:
         # "errors" must not hide it).
         for fr in self.page.frames:
             with contextlib.suppress(Exception):
-                if any(isinstance(text, str) and confirmation_evidence(text) for text in await fr.evaluate(_NOTICE_TEXTS_JS, True)):
+                # (every floating block is looked at: a sticky header or a help button must not use up the places)
+                if any(isinstance(text, str) and confirmation_evidence(text) for text in await fr.evaluate(_NOTICE_TEXTS_JS, [True, 10])):
                     return True
         return False
 

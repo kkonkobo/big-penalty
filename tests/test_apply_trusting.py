@@ -2140,3 +2140,20 @@ async def test_a_box_the_site_redraws_when_it_is_clicked_is_read_where_it_stands
     box = next(f for f in snap.fields if f.kind == "checkbox" and "conditions" in f.label)
     with pytest.raises(engine._Skip):
         await trusting._toggle(run, await resolve.element(box.ref), True)
+
+
+async def test_a_receipt_notice_is_read_even_behind_other_floating_blocks_and_an_ad_that_speaks_of_errors(page):  # noqa: F811
+    """The page keeps a sticky header, a floating help line and a back-to-top block; its job ad speaks of "error handling".
+    The notice that says the application was sent floats after them: it is still read as the receipt. The same page
+    without that notice says nothing of a receipt."""
+    floating = 'position:fixed;left:0;width:600px;height:30px;background:#fff'
+    blocks = (f'<div style="{floating};top:0">Espace candidat – Bonjour, bienvenue dans votre espace</div>'
+              f'<div style="{floating};top:40px">Une question sur le recrutement ? Écrivez-nous</div>'
+              f'<div style="{floating};top:80px">Retour en haut de la page des offres</div>')
+    ad = '<main style="margin-top:200px"><h1>Ingénieur systèmes embarqués</h1><p>Gestion des erreurs et des modes dégradés. Error handling.</p></main>'
+    notice = (f'<div style="{floating};top:120px">Personal information has been saved successfully. Your application to the 2026-00100 – '
+              'Stage - Ingénieur systèmes embarqués F/H job opening has been successfully sent</div>')
+    await page.set_content(blocks + notice + ad)
+    assert await engine._Run._page_says_received(SimpleNamespace(page=page))
+    await page.set_content(blocks + ad)
+    assert not await engine._Run._page_says_received(SimpleNamespace(page=page))
