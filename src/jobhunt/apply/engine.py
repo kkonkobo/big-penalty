@@ -48,7 +48,7 @@ from jobhunt.apply.store import binding_active
 from jobhunt.apply.types import (Action, DispatchDiagnostics, Fact, FactSheet, FieldOption, FilledField, FormField, Mode, PageSnapshot, Question, RunResult,
                                  RunStatus, StepLog, StepPlan, ACCOUNT_REASONS)
 from jobhunt.apply.unattended import ClickUncertain as _Dispatched, click_once, handoff_result, trial_click
-from jobhunt.browser import human_pause
+from jobhunt.browser import human_pause, keep_focus
 from jobhunt.llm import LLMError
 
 SUBMIT_RE = re.compile(r"postuler|envoyer|soumettre|valider ma candidature|je postule|submit|send|apply|finish|terminer|confirmer", re.I)
@@ -763,6 +763,9 @@ class _Run:
         self.attach_pending = False          # an "Ajouter"-style upload-confirm button was just clicked
         self.last_click_rec: tuple[str, str] | None = None  # (url, normalized label) of the last unguarded click made
         self.last_click_fields: frozenset[str] = frozenset()  # the fields of the page that click was made on (labels)
+        self.data_typed = False  # trusting mode: a text, a choice in a list or a file of the application was entered (not only boxes)
+        self.agreement_buttons: set[str] = set()  # trusting mode: the buttons of an agreement dialog that covers the page
+        self.last_click_group = ""  # the section that click's button belonged to ("Add" of education, then "Add" of languages)
         self.page_data = False      # the live page holds candidate data in the form of the clicked control (saved draft...)
         self.nav_ref: tuple[str, set[tuple[str, str]], str] | None = None  # (url, fillable labels, button) of the recorded nav click
         self.nav_role: str | None = None  # its role (login, signup, next)
@@ -1024,9 +1027,10 @@ class _Run:
         return FactSheet(facts=[*facts, extra])
 
     def _left_page(self, trust: bool, snap: PageSnapshot) -> bool:
-        """Trusting mode: a field could not be reached because the browser is no longer on the page that was read (three such
-        re-reads per run at most)."""
-        return bool(trust and self.moved_rereads < 3 and urldefrag(self.page.url).url != urldefrag(snap.url).url)
+        """Trusting mode: a field could not be reached because what was read is gone - the browser is on another page, or
+        the page replaced the element (an upload control its script builds again). Three such re-reads per run at most;
+        after that the field is reported."""
+        return bool(trust and self.moved_rereads < 3)
 
     def _account_exists(self) -> bool:
         """Does the candidate have an account on the CURRENT page: the store says so and no login with it failed in this run.
@@ -2163,6 +2167,7 @@ class _Run:
         if usable:
             self.page = usable[-1]
             with contextlib.suppress(Exception):
+                keep_focus(4.0)  # (showing the tab the run moved to must not take the foreground from the person)
                 await self.page.bring_to_front()
         elif self.page.is_closed():
             alive = [p for p in self.page.context.pages if not p.is_closed()]
@@ -3057,7 +3062,9 @@ class _Run:
                     self.stuck_fields = []
                 with contextlib.suppress(Exception):
                     # (a banner that lists what is missing may stand far below the part of the page the planner reads)
-                    messages = await self._banner_texts() or await self._notice_texts(pub.title)
+                    # (both kinds are read: a standing warning box of the site - "beware of fake recruiters" - is a banner
+                    # too, and must not hide the notice that names the missing field)
+                    messages = list(dict.fromkeys([*await self._notice_texts(pub.title), *await self._banner_texts()]))[:4]
                     self.page_messages = list(messages)  # (what the site says is wrong, for the filler: a refused phone)
                     said = [text for text in map(self._r, messages) if text[:80] not in pub.text]
                     if said:
@@ -3504,6 +3511,8 @@ class _Run:
                 self.touched = True  # (before the action: a handler may react while it runs; also closes the dry-run guard)
                 if plan.page_kind not in ACCOUNT_KINDS and not (it.fact and (it.fact.secret or it.fact.key.startswith("account_"))):
                     self.app_touched = True
+                    if it.field.kind not in ("checkbox", "radio"):
+                        self.data_typed = True  # (more than boxes ticked: something of the application itself was entered)
                 try:
                     if trust:
                         shown = await trusting.execute(self, it, target, resolve, snap)
@@ -3572,7 +3581,7 @@ class _Run:
                 # The site took the browser elsewhere between the read and the typing (a posting that redirects to its
                 # sign-in page): what was read is gone, nothing is asked of anyone - the new page is read.
                 self.moved_rereads += 1
-                log.note = self._r("; ".join(x for x in (log.note, "la page a changé pendant la saisie : relecture") if x))[:900]
+                log.note = self._r("; ".join(x for x in (log.note, "champ disparu ou page changée pendant la saisie : relecture") if x))[:900]
                 await self._settle()
                 continue
             if self.mode == "dry_run" and self.blocked_requests:
@@ -3758,7 +3767,7 @@ class _Run:
             shown = frozenset(_norm(_label(f)) for f in snap.fields if f.kind not in ("button", "link"))
             same_page = not self.last_click_fields or not shown or (
                 len(shown & self.last_click_fields) * 2 >= min(len(shown), len(self.last_click_fields)))
-            if (v.click and not attach and same_page
+            if (v.click and not attach and same_page and _norm(field.group) == self.last_click_group
                     and self.last_click_rec == (urldefrag(self.page.url).url, _norm(field.label))):
                 loop_sig = [f for f in snap.fields if f.kind not in ("button", "link") and f.ref not in handled and not self._file_satisfied(f, snap)
                             and (f.error or (f.required and _is_empty(f) and (not field.form or not f.form or f.form == field.form)))]
@@ -3865,6 +3874,7 @@ class _Run:
             else:
                 self.last_click_rec = (urldefrag(self.page.url).url, _norm(field.label))
                 self.last_click_fields = frozenset(_norm(_label(f)) for f in snap.fields if f.kind not in ("button", "link"))
+                self.last_click_group = _norm(field.group)
                 self.last_click_passwords = sum(f.kind == "password" for f in snap.fields)
             if bound_account and role in ("login", "signup"):
                 self.account_try = (role, self._account_address(self.page.url))

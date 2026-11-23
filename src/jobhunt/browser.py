@@ -67,6 +67,38 @@ if (screens.count > 0) {
 out"""
 
 
+# Gives the keyboard back to the application that was in front when a window opened by a pass takes its place. Such a
+# window is a Chrome started directly (it has no launch date, unlike the person's own Chrome); only its first seconds in
+# front are undone, so a person who clicks on that window later keeps it.
+_KEEP_FOCUS_JXA = """ObjC.import('AppKit');
+function run(argv) {
+  var seconds = parseFloat(argv[0]) || 8, ws = $.NSWorkspace.sharedWorkspace, real = null, seen = {};
+  var end = Date.now() + seconds * 1000;
+  while (Date.now() < end) {
+    $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.05));
+    var front = ws.frontmostApplication;
+    if (front.isNil()) continue;
+    var pid = front.processIdentifier, id = String(ObjC.unwrap(front.bundleIdentifier) || '');
+    if (!(/chrome|chromium/i.test(id) && front.launchDate.isNil())) { real = front; continue; }
+    if (!(pid in seen)) seen[pid] = Date.now();
+    if (real && !real.terminated && Date.now() - seen[pid] < 3000)
+      real.activateWithOptions($.NSApplicationActivateIgnoringOtherApps);
+  }
+}"""
+
+
+def keep_focus(seconds: float = 8.0) -> None:
+    """macOS: for the next `seconds`, a browser window opened by the program does not keep the foreground - the
+    application the person was working in gets it back at once. The window stays visible where it was placed.
+    JOBHUNT_WINDOW_FOCUS=1 lets windows take the foreground as before. Never raises, never waits."""
+    if (sys.platform != "darwin" or os.environ.get("JOBHUNT_WINDOW_FOCUS", "").strip() == "1"
+            or os.environ.get("JOBHUNT_FORCE_HEADLESS", "").strip() == "1"):
+        return
+    with contextlib.suppress(Exception):
+        subprocess.Popen(["/usr/bin/osascript", "-l", "JavaScript", "-e", _KEEP_FOCUS_JXA, str(seconds)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 class BuiltinDisplayUnavailable(RuntimeError):
     def __init__(self):
         super().__init__("Impossible de placer la fenêtre sur l’écran intégré du Mac. "
@@ -191,6 +223,7 @@ class BrowserPool:
                     if display is None:
                         raise BuiltinDisplayUnavailable()
                     kwargs["args"] += _display_args(display)
+                    keep_focus()  # (started before the window exists: it knows which application was in front)
                 else:
                     kwargs["args"] += await asyncio.to_thread(window_args)
                 # Keep Chrome's own sandbox: without this the driver adds --no-sandbox and every window shows the yellow

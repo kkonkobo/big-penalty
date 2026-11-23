@@ -208,9 +208,12 @@ _JS = r"""
   // A yes / no question drawn as buttons: two or more toggle buttons (aria-pressed) side by side, nothing else to press
   // among them; pressing one answers the question.
   const toggleChoice = (el) => {
-    if (el.tagName !== 'BUTTON' || !el.hasAttribute('aria-pressed') || el.type === 'submit' || !el.parentElement) return false;
+    // (a <button> without a type is a submit button for the browser; one that carries aria-pressed is a toggle unless its
+    // markup says "submit" in so many words)
+    const sends = (x) => (x.getAttribute('type') || '').toLowerCase() === 'submit';
+    if (el.tagName !== 'BUTTON' || !el.hasAttribute('aria-pressed') || sends(el) || !el.parentElement) return false;
     const peers = [...el.parentElement.children].filter((x) => x.tagName === 'BUTTON');
-    return peers.length >= 2 && peers.length <= 6 && peers.every((x) => x.hasAttribute('aria-pressed') && x.type !== 'submit'
+    return peers.length >= 2 && peers.length <= 6 && peers.every((x) => x.hasAttribute('aria-pressed') && !sends(x)
       && clean(x.innerText || x.textContent).length > 0 && clean(x.innerText || x.textContent).length <= 40)
       && !el.closest('[role=toolbar], [role=menubar], [role=tablist], nav, header, footer');
   };
@@ -489,6 +492,12 @@ _JS = r"""
       const f = base('f' + (++n), 'button', el);
       f.label = text.slice(0, 120);
       if (opener) f.group = groupOf(el);
+      // A bare "Add" / "Add another" / "Delete" of a repeatable section (work experience, education, languages...): which
+      // section it belongs to - its fuller aria-label ("Add Education"), else the section's own heading.
+      if (!f.group && /^(ajouter|add|hinzuf[uü]gen|a[ñn]adir|aggiungi|supprimer|delete|remove|l[oö]schen)( un autre| une autre| another| weitere[ns]?)?$/i.test(text)) {
+        const fuller = clean(el.getAttribute('aria-label'));
+        f.group = (fuller && fuller.toLowerCase() !== text.toLowerCase() ? fuller : groupOf(el)).slice(0, 80);
+      }
       if (!worded) {
         // What the icon acts on: the words of the block it sits in (the nearest box around it that shows any).
         for (let box = el.parentElement, depth = 0; box && depth < 4 && !f.group; box = box.parentElement, depth++) {

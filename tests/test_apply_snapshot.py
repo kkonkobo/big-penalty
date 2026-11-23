@@ -601,10 +601,11 @@ async def test_an_upload_named_after_the_cv_is_not_renamed_after_the_other_choic
 
 
 YES_NO_BUTTONS = """<form><div class="entry"><label class="heading _required_x1" for="q1">Votre école fournit-elle une convention ?</label>
-  <div class="yesno"><button type="button" aria-pressed="false" data-option="yes">Yes</button><button type="button" aria-pressed="false" data-option="no">No</button>
+  <div class="yesno"><button aria-pressed="false" data-option="yes">Yes</button><button aria-pressed="false" data-option="no">No</button>
   <input type="checkbox" tabindex="-1" name="q1" style="position:absolute;opacity:0;width:0;height:0"></div></div>
   <button>Submit Application</button></form>
-<script>for (const b of document.querySelectorAll('.yesno button')) b.addEventListener('click', () => {
+<script>document.querySelector('form').addEventListener('submit', (event) => event.preventDefault());
+for (const b of document.querySelectorAll('.yesno button')) b.addEventListener('click', (event) => { event.preventDefault();
   for (const o of b.parentElement.querySelectorAll('button')) o.setAttribute('aria-pressed', String(o === b)); });</script>"""
 
 
@@ -648,3 +649,19 @@ async def test_a_button_that_only_shows_an_icon_is_named_by_the_icon_and_the_blo
     buttons = [(f.label, f.group) for f in snap.fields if f.kind == "button"]
     assert buttons == [("Modify", "Titre du profil ? Téléphone ?"), ("Delete", "Formation : École d'ingénieurs"), ("Next", "")]
     assert await live_button(resolve(snap.fields[0].ref)) == ("Modify", True, True)
+
+
+async def test_the_add_button_of_a_repeatable_section_says_which_section_it_adds_to(page):
+    """Several sections each end with a bare "Ajouter": the planner must know which one opens an education block. The
+    button's fuller aria-label names it, else the heading of its section."""
+    await page.set_content('''<form>
+      <div role="group" aria-labelledby="h-exp"><h3 id="h-exp">Expérience professionnelle</h3>
+        <button type="button" aria-label="Ajouter Expérience professionnelle">Ajouter</button></div>
+      <div role="group" aria-labelledby="h-edu"><h3 id="h-edu">Formation</h3>
+        <label>Établissement <input name="school"></label><button type="button">Ajouter un autre</button></div>
+      <section><h3>Langues</h3><button type="button">Ajouter</button></section>
+      <button>Enregistrer et continuer</button></form>''')
+    snap, _ = await take_snapshot(page)
+    assert [(f.label, f.group) for f in snap.fields if f.kind == "button"] == [
+        ("Ajouter", "Ajouter Expérience professionnelle"), ("Ajouter un autre", "Formation"), ("Ajouter", "Langues"),
+        ("Enregistrer et continuer", "")]

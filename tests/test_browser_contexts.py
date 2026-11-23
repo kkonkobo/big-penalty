@@ -69,6 +69,9 @@ def mac_display(monkeypatch):
     monkeypatch.setattr(browser.sys, "platform", "darwin")
     monkeypatch.delenv("JOBHUNT_FORCE_HEADLESS", raising=False)
     monkeypatch.setattr(browser, "_builtin_display", lambda: (438, 1440, 1710, 1070))
+    guards = []
+    monkeypatch.setattr(browser, "keep_focus", lambda *args: guards.append(args))
+    return guards
 
 
 async def test_visible_apply_window_ignores_external_position_override(pool, mac_display, monkeypatch):
@@ -99,3 +102,33 @@ async def test_visible_apply_closes_window_outside_builtin_display(pool, mac_dis
         await pool.context(1, "apply-auto-exemple.test", headless=False)
     assert pool.chromium.closed
     assert not pool._contexts
+
+
+async def test_a_visible_apply_window_does_not_keep_the_foreground(pool, mac_display):
+    """The windows of a pass open on the built-in display without taking the keyboard from the person: the guard that
+    gives the foreground back is started before the window exists. A headless window needs none."""
+    await pool.context(1, "apply-exemple.test", headless=False)
+    assert mac_display == [()]
+    await pool.context(1, "apply-autre.test", headless=True)
+    assert mac_display == [()]
+
+
+def test_the_focus_guard_is_one_detached_script_and_can_be_switched_off(monkeypatch):
+    started = []
+    monkeypatch.setattr(browser.sys, "platform", "darwin")
+    monkeypatch.delenv("JOBHUNT_FORCE_HEADLESS", raising=False)
+    monkeypatch.delenv("JOBHUNT_WINDOW_FOCUS", raising=False)
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda command, **kw: started.append((command, kw)))
+    browser.keep_focus(4.0)
+    (command, kw), = started
+    assert command[:4] == ["/usr/bin/osascript", "-l", "JavaScript", "-e"] and command[-1] == "4.0" and kw["start_new_session"] is True
+    assert "launchDate.isNil()" in command[4] and "activateWithOptions" in command[4]
+    monkeypatch.setenv("JOBHUNT_WINDOW_FOCUS", "1")
+    browser.keep_focus()
+    monkeypatch.delenv("JOBHUNT_WINDOW_FOCUS")
+    monkeypatch.setenv("JOBHUNT_FORCE_HEADLESS", "1")
+    browser.keep_focus()
+    monkeypatch.setattr(browser.sys, "platform", "linux")
+    monkeypatch.delenv("JOBHUNT_FORCE_HEADLESS")
+    browser.keep_focus()
+    assert len(started) == 1

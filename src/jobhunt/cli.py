@@ -882,6 +882,9 @@ def apply_auto(
         raise typer.BadParameter(f"profil {profile_id} introuvable")
     if attended and not headful:
         raise typer.BadParameter("--attended demande des fenêtres visibles (--headful)")
+    from jobhunt.apply import store as apply_store
+
+    apply_store.start_pass_epoch()
     summary = asyncio.run(daily_apply(profile_id, emit=lambda line: console.print(line, markup=False, highlight=False),
                                       headless=not headful, limit=limit, min_score=min_score, attended=attended))
     console.print(apply_line(summary) + f" ({summary.prepared} CV préparé(s))", markup=False)
