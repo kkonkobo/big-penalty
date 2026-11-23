@@ -834,8 +834,10 @@ async def blocker_hint(run: _Run) -> str:
 
 
 def stuck_hint(labels: list[str]) -> str:
-    return (f"[The program could NOT set these fields (no matching option / refused value): {' | '.join(labels)}. Do not try them again: leave "
-            "them as they are and answer with ONLY the click that moves on (`next` or `submit`), unless a field it did not list is still empty.] ")
+    return (f"[The program could NOT set these fields (no matching option / refused value): {' | '.join(labels)}. Do not try the same "
+            "value again. A field of a block you added with an \"Add\" button: remove that block with its own \"Delete\" / "
+            "\"Supprimer\" button (`other`). A list that shows its options: choose another listed value. Otherwise leave them as "
+            "they are and answer with ONLY the click that moves on (`next` or `submit`), unless a field it did not list is still empty.] ")
 
 
 def banner_hint(texts: list[str]) -> str:
