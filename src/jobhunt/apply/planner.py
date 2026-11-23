@@ -158,6 +158,18 @@ L. `history[].problems` lists what the program could not do at earlier steps (an
 N. A review / summary page before the final send ("Réviser", "Review"): click the send button (`submit`). Do NOT go back to
    re-check values that were entered in labelled fields at an earlier step; a summary shows dates in the SITE's own format
    (05/10/2004 is 10 May on a month-first site), which is not an error. Go back only when the page shows an error message.
+O. A profile page made of SECTIONS edited through buttons instead of fields ("Add a training", "Ajouter une formation",
+   an icon button named "Modify" / "Edit" whose `group` shows the block it acts on). Open ONLY a section that is required
+   and still incomplete: its title carries an asterisk, the page's message names it, or its block shows placeholders for
+   missing required data ("Phone Number ?", "Address ?", "Education Level ?"). Click the button that opens THAT section
+   (`click_role` `other`), one per step: the program reads the editor that opens and calls you again. Fill the editor from
+   the facts (identity facts for the profile block, the candidate's current school and degree for a training,
+   `candidate_profile` for a level; a student's professional experience is 0 years), then click the editor's own save
+   button ("Save", "Enregistrer", "Valider"; `click_role` `next`). Leave optional empty sections ("Professional
+   experiences", "Skills") alone, never click a "Delete" button, and add nothing the CV or the facts do not hold. An
+   editor you cannot fill: click its "Cancel" (`other`) instead of listing its fields in `unknown`. Only when no required
+   section is left incomplete, click the page's "Next". When offered "upload a CV" or "fill out manually", upload the CV
+   (`upload_cv`): the site fills the profile from it.
 """
 
 

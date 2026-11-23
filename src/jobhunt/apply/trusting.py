@@ -427,7 +427,8 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     current = field.value.strip()
     # (a site that refused the form says "numéro invalide" in plain text, with nothing on the field itself: after a refused
     # send, the phone the field holds is typed in another spelling)
-    respell = bool(field.error) or (known is not None and known.key == "phone" and bool(getattr(run, "rejected_submits", 0)))
+    respell = bool(field.error) or (known is not None and known.key == "phone" and (
+        bool(getattr(run, "rejected_submits", 0)) or phone_refused(getattr(run, "page_messages", ()))))
     if current and norm(current) == norm(want) and not respell and not (national and current.startswith(("+", "00"))):
         return None
     if (national and current and not respell and not current.startswith(("+", "00"))
@@ -447,9 +448,13 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         # never one already tried in this run. The planner's own text counts when it is one of the fact's spellings.
         spellings = [known.value or "", *known.variants]
         digits = lambda text: re.sub(r"\D", "", text)  # noqa: E731
+        beside = []
         if known.key == "phone" and french_phone(known.value or ""):  # (the two compact spellings most validators take)
             local = "0" + digits(known.value or "")[-9:]
             spellings += [local, "+33" + local[1:]]
+            if national:  # (next to a calling-code list: the number without its trunk zero, then with it)
+                beside = [local[1:], local]
+                spellings += beside
         tried = getattr(run, "tried_spellings", None)
         if tried is None:
             tried = run.tried_spellings = set()
@@ -457,10 +462,20 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         others = [text for text in dict.fromkeys(spellings) if text.strip() and text.strip() not in tried]
         asked = [text for text in others if answer and (text.strip() == answer or (digits(answer) and digits(text) == digits(answer)))]
         flipped = [text for text in others if text.lstrip().startswith(("+", "00")) != current.startswith(("+", "00"))]
-        if asked or flipped or others:
-            out.forced = (asked or flipped or others)[0]
+        beside = [text for text in beside if text in others]
+        if asked or beside or flipped or others:
+            out.forced = (asked or beside or flipped or others)[0]
             tried.add(out.forced.strip())
     return out
+
+
+_PHONE_WORD = re.compile(r"\b(?:telephone|phone|telefon\w*|mobile|portable|numero|number|handy)\b")
+_REFUSED_WORD = re.compile(r"invalid|non valide|incorrect|not valid|format|ungultig|erron|errone|falsch")
+
+
+def phone_refused(messages) -> bool:
+    """Does one of the page's error messages say the phone number is refused ("The phone number is invalid")?"""
+    return any(_PHONE_WORD.search(fold(text)) and _REFUSED_WORD.search(fold(text)) for text in messages or ())
 
 
 _PASSWORD_REFUSED = re.compile(r"non valide|invalide|invalid|not valid|strategie|policy|politique de mot|exigence|requirement|"

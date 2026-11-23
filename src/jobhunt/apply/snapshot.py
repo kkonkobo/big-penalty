@@ -460,9 +460,16 @@ _JS = r"""
       // (a button inside a component's shadow root shows the text slotted into its host: "<x-button>Suivant</x-button>")
       const slotted = () => clean([...el.childNodes].map(flat).join(' '))
         || (el.getRootNode().host && el.getRootNode().querySelectorAll('button, [role=button]').length === 1 ? clean(el.getRootNode().host.textContent) : '');
-      const text = (tag === 'input' ? clean(el.value) : clean(el.innerText || el.textContent))
-        || clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby') || clean(el.getAttribute('title')) || clean(el.value)
-        || (tag === 'input' ? '' : slotted());
+      // (a button that only shows an icon is named by the icon: its title, aria-label or alt text - "Modify", "Delete")
+      const icon = () => { const c = el.querySelector('[title], [aria-label], img[alt], svg title');
+        return c ? clean(c.getAttribute('title') || c.getAttribute('aria-label') || c.getAttribute('alt') || c.textContent) : ''; };
+      const attrs = clean(el.getAttribute('aria-label')) || idsText(el, 'aria-labelledby') || clean(el.getAttribute('title')) || clean(el.value);
+      const slot = attrs || tag === 'input' ? '' : slotted();
+      const named = attrs || slot;
+      // (no words of its own are drawn and nothing names the button itself: only its icon says what it does)
+      const drawn = (n) => n.nodeType === 3 ? n.textContent : n.nodeType !== 1 || n.tagName.toLowerCase() === 'svg' ? '' : [...n.childNodes].map(drawn).join(' ');
+      const worded = (tag === 'input' ? !!clean(el.value) : !!clean(drawn(el))) || !!attrs || (!!slot && slot !== icon());
+      const text = (tag === 'input' ? clean(el.value) : clean(el.innerText || el.textContent)) || named || (tag === 'input' ? '' : icon());
       if (!text) continue;
       // a button that only opens a file dialog: when a file input stands behind it (its label's control, a data target, or the only
       // file input of a nearby container) the planner sees THAT input (labelled with the group heading), not the button
@@ -482,6 +489,13 @@ _JS = r"""
       const f = base('f' + (++n), 'button', el);
       f.label = text.slice(0, 120);
       if (opener) f.group = groupOf(el);
+      if (!worded) {
+        // What the icon acts on: the words of the block it sits in (the nearest box around it that shows any).
+        for (let box = el.parentElement, depth = 0; box && depth < 4 && !f.group; box = box.parentElement, depth++) {
+          const around = clean(box.innerText || '');
+          if (around.length >= 2) f.group = around.slice(0, 80);
+        }
+      }
       f.prio = (el.getAttribute('type') || '').toLowerCase() === 'submit' || PRIO_RE.test(text);
       btns.push([el, f]);
       tagRef(el, f.ref); out.push(f);
@@ -742,8 +756,10 @@ _LIVE_JS = r"""
 (e) => {
   const c = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const tag = e.tagName.toLowerCase();
+  const icon = tag === 'input' ? null : e.querySelector('[title], [aria-label], img[alt], svg title');
   const label = ((tag === 'input' ? c(e.value) : c(e.innerText || e.textContent)) || c(e.getAttribute('aria-label'))
-    || c(e.getAttribute('title')) || c(e.value)).slice(0, 120);
+    || c(e.getAttribute('title')) || c(e.value)
+    || (icon ? c(icon.getAttribute('title') || icon.getAttribute('aria-label') || icon.getAttribute('alt') || icon.textContent) : '')).slice(0, 120);
   const r = e.getBoundingClientRect();
   const visible = (!e.checkVisibility || e.checkVisibility({checkVisibilityCSS: true, visibilityProperty: true})) && r.width > 0 && r.height > 0;
   return {label, visible, enabled: !e.matches(':disabled') && e.getAttribute('aria-disabled') !== 'true'};

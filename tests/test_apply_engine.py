@@ -3226,3 +3226,23 @@ async def test_a_one_time_code_input_with_a_code_label_is_still_a_credential_que
                               '<button type="submit">Envoyer ma candidature</button></form>')
     res = await go(page, server, ScriptedPlanner([deduce_plan(click=False)]), tmp_path, cv_pdf, start="otpf", verifier=None)
     assert any(q.category == "credentials" for q in res.questions) and await page.input_value("#c") == ""
+
+
+def test_a_tick_all_that_apply_list_is_answered_once_one_box_is_ticked():
+    """Every box of such a list is marked required by the site; with one ticked, the others ("none" included) are not.
+    Consent boxes in a row are each required on their own, and a list nothing is ticked in stays required."""
+    from jobhunt.apply.engine import release_answered_box_lists
+    from jobhunt.apply.types import FormField
+
+    def box(ref, label, value="false", group="Régions"):
+        return FormField(ref=ref, kind="checkbox", label=label, required=True, value=value, group=group, form="0:0")
+
+    regions = [box("f1", "Aucune"), box("f2", "Bretagne", "true"), box("f3", "Occitanie"), box("f4", "Grand Est", "true")]
+    empty = [box("f5", "Lundi", group="Jours"), box("f6", "Mardi", group="Jours"), box("f7", "Jeudi", group="Jours")]
+    consents = [box("f8", "J'accepte la politique de confidentialité", "true", "Consentements"),
+                box("f9", "J'accepte les conditions générales", group="Consentements"),
+                box("f10", "Je certifie l'exactitude des informations", group="Consentements")]
+    fields = [*regions, FormField(ref="f20", kind="text", label="Ville", required=True, form="0:0"), *empty, *consents]
+    release_answered_box_lists(fields)
+    assert [f.required for f in regions] == [False, True, False, True]
+    assert all(f.required for f in [*empty, *consents]) and fields[4].required
