@@ -2036,3 +2036,15 @@ async def test_an_emailed_code_is_typed_into_one_character_boxes(page):  # noqa:
     snap, resolve = await take_snapshot(page)
     assert await trusting.enter_emailed_code(run, snap, resolve) is False
     assert await page.evaluate("[...document.querySelectorAll('input')].map((box) => box.value).join('')") == ""
+
+
+async def test_the_button_that_opens_the_cookie_preferences_is_not_the_way_out_of_a_notice(page):  # noqa: F811
+    """A small cookie notice whose only button opens the preferences dialog: clicking it brings the cookie dialog back at
+    every step. It is left to the planner; a notice with a real way out is still dismissed."""
+    await page.set_content(dialog("Nous utilisons des cookies pour améliorer votre expérience.",
+                                  '<button id="open">Ouvrir le modal des cookies</button>'))
+    assert await trusting.dismiss_blocker(SimpleNamespace(page=page)) == ""
+    assert await page.locator("#dlg").count() == 1
+    await page.set_content(dialog("Nous utilisons des cookies pour améliorer votre expérience.",
+                                  '<button>Paramétrer les cookies</button>' + CONTINUE.replace("Continue to site", "Continuer sans accepter")))
+    assert await trusting.dismiss_blocker(SimpleNamespace(page=page)) == "Continuer sans accepter"

@@ -760,6 +760,7 @@ _ACCEPT = re.compile(r"^(?:tout accepter|accepter.*|j.accepte.*|ok.*|accept.*|al
 
 
 _CLOSERS = frozenset({"fermer", "close", "×", "x"})
+_OPENS_SETTINGS = re.compile(r"(?:ouvrir|open|afficher|show|gerer|manage|parametr|personnaliser|customi[sz]e|settings|preferences|en savoir plus|learn more)\b")
 _PHOTO = re.compile(r"\b(?:photo|foto|picture|portrait|avatar)\b")
 _STATEMENT = re.compile(r"declaration de confidentialit|privacy statement|data privacy|protection des donnees|datenschutzerkl")
 _PRINT = frozenset({"imprimer", "print", "drucken"})
@@ -801,7 +802,9 @@ async def dismiss_blocker(run: _Run) -> str:
             choice = next((index for index in named if _ACCEPT.match(labels[index]) and labels[index] not in _CLOSERS), None)
         if choice is None and cookies:
             choice = next((index for index in named if labels[index] in _CLOSERS), None)
-        real = [index for index in named if not found["links"][index]]  # a link to the policy text is not the way out
+        # (a link to the policy text is not the way out, nor is the button that OPENS the preferences: clicking it brings
+        # the cookie dialog back at every step)
+        real = [index for index in named if not found["links"][index] and not _OPENS_SETTINGS.match(labels[index])]
         if choice is None and len(real) == 1:
             choice = real[0]
         if choice is None:

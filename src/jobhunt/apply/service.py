@@ -829,7 +829,7 @@ async def _drive_generic(app, job, run_, *, trigger, pool, planner, llm, verifie
                 email_verification=mail_flow,
                 diagnostics=diagnostics, apply_entry=None if browser_adapter else open_apply,
                 host_allowed=audience.trusted_host if audience.core else (lambda host: host == _host(audience.document)),
-                max_steps=max(30, get_settings().apply_max_steps) if getattr(audience, "trusting", False) else min(12, get_settings().apply_max_steps),
+                max_steps=max(45, get_settings().apply_max_steps) if getattr(audience, "trusting", False) else min(12, get_settings().apply_max_steps),
                 choices=scoped_choices.load(app.profile_id, app.id, app.current_rev, origin_digest(attempt.url)))
         except ChallengeRequired:
             result = handoff_result("human", diagnostics=diagnostics).model_copy(
