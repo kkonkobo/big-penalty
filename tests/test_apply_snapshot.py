@@ -721,3 +721,21 @@ async def test_a_page_that_only_loads_a_bot_check_script_beside_its_form_is_not_
     await page.set_content('<form><label for=a>Prénom</label><input id=a name=a><div class="captcha-box" style="width:200px;height:50px">?</div><button>Envoyer</button></form>')
     snap, _ = await take_snapshot(page)
     assert snap.has_captcha and "captcha-box" in snap.captcha_why
+
+
+async def test_a_page_with_real_content_that_embeds_a_bot_check_is_not_a_challenge_page(page):
+    """The navigation check: a posting or a form that loads a bot check's script (and carries its hidden answer box) is a
+    page to work on. A bot-check page - nothing to fill, next to no text - and a page that says "Just a moment..." are
+    challenges."""
+    from jobhunt.browser import is_challenge
+
+    embed = ('<div hidden data-script="https://challenges.cloudflare.com/turnstile/v0/api.js"></div>'
+             '<input type="hidden" name="cf-turnstile-response" id="cf-chl-widget-abc12_response">')
+    await page.set_content(f"<main><h1>Ingénieur systèmes embarqués</h1><p>{'Description du poste. ' * 120}</p>{embed}<button>Postuler</button></main>")
+    assert not await is_challenge(page)
+    await page.set_content(f"<form><label>Prénom <input name=a></label><label>Nom <input name=b></label>{embed}<button>Envoyer</button></form>")
+    assert not await is_challenge(page)
+    await page.set_content(f"<main><p>Vérification de sécurité en cours</p>{embed}</main>")
+    assert await is_challenge(page)
+    await page.set_content(f"<title>Just a moment...</title><main><p>{'Texte. ' * 400}</p></main>")
+    assert await is_challenge(page)

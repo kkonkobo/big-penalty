@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import json
 import pytest
 from apply_fakes import page, sample_facts  # noqa: F401
 
@@ -2201,3 +2202,57 @@ async def test_a_text_box_wrapped_in_the_pages_own_select_element_is_a_list_with
     assert run.combo_options[trusting.norm("Préavis")] == ["Asap / Immédiatement", "Préavis de 1 mois", "Préavis de 3 mois"]
     snap, _ = await take_snapshot(page)
     assert [(f.label, f.value) for f in snap.fields if f.kind == "combobox"] == [("Préavis", "Préavis de 1 mois"), ("Votre expérience", "")]
+
+
+def test_a_number_box_that_shows_a_bare_calling_code_takes_the_number_with_its_code():
+    """An international phone widget: the number box shows "+33" and a list of country NAMES stands beside it. The number
+    is typed with its code and the country list is left alone - looking the country up in that list used to fail (it only
+    renders a few rows) and the number went in without its code, which the site refused."""
+    country = field(ref="c1", kind="combobox", label="Sélectionner l'indicatif du pays: France", value="France", form="0:1")
+    number = field(ref="p1", kind="tel", label="Numéro de téléphone", value="+33", required=True, form="0:1")
+    snap = snap_of(country, number)
+    assert trusting.is_dial(country, snap) and trusting.carries_code(number) and not trusting.beside_dial(number, snap)
+    made = trusting.check(run_of(), Action(ref="p1", op="fill", fact="phone"), number, engine._Validated(), snap, None)
+    assert made is not None and made.national is False and made.value.replace(" ", "").startswith("+33")
+    assert trusting.check(run_of(), Action(ref="c1", op="select", fact="phone", value="France"), country, engine._Validated(), snap, None) is None
+    # a number box without a code beside a code list keeps the national spelling, and that list is still set
+    plain = field(ref="p1", kind="tel", label="Numéro de téléphone", required=True, form="0:1")
+    assert trusting.beside_dial(plain, snap_of(country, plain))
+    assert trusting.check(run_of(), Action(ref="c1", op="select", fact="phone", value="France"), country, engine._Validated(),
+                          snap_of(country, plain), None) is not None
+
+
+COUNTRIES = ["Afghanistan", "Albanie", "Algérie", "Allemagne", "Andorre", "Angola", "Argentine", "Arménie", "Australie", "Autriche",
+             "Belgique", "Bolivie", "Brésil", "Bulgarie", "Canada", "Chili", "Chine", "Colombie", "Danemark", "Espagne", "Estonie",
+             "Finlande", "France", "Gabon", "Grèce", "Hongrie", "Inde", "Irlande", "Italie", "Japon"]
+LAZY_LIST = '''<form><label id="lab">Pays de résidence</label>
+  <div class="dropdown-container"><a href="#" role="combobox" aria-labelledby="lab" id="pick"><span id="shown">— Effectuer une sélection —</span></a>
+    <div id="pane" hidden>SEARCH<ul role="listbox" id="rows"></ul></div></div></form>
+<script>
+  const ALL = %s; let from = 0, typed = '', filter = '';
+  const draw = () => { const rows = ALL.filter((name) => name.toLowerCase().startsWith(filter.toLowerCase())).slice(from, from + 6);
+    document.getElementById('rows').innerHTML = rows.map((name) => `<li role="option">${name}</li>`).join('');
+    for (const row of document.querySelectorAll('#rows li')) row.onclick = () => { shown.textContent = row.textContent; pane.hidden = true; }; };
+  pick.onclick = (event) => { event.preventDefault(); pane.hidden = false; from = 0; filter = ''; typed = ''; draw(); };
+  const box = document.getElementById('find');
+  if (box) box.oninput = () => { filter = box.value; draw(); };
+  else pick.onkeydown = (event) => { if (event.key.length !== 1) return; typed += event.key;
+    const at = ALL.findIndex((name) => name.toLowerCase().startsWith(typed.toLowerCase())); if (at >= 0) { from = at; draw(); } };
+</script>''' % json.dumps(COUNTRIES, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("search", ['<input type="text" id="find" class="dropdown-search">', ""])
+async def test_a_list_that_only_draws_a_few_rows_is_searched_or_typed_on_to_reach_the_answer(page, search):  # noqa: F811
+    """A country list opened by a link-like control draws six rows at a time. With a search box of its own (a plain text
+    box that came with the list), the answer is typed there; without one, its first letters are typed on the open list,
+    which brings its rows up. The answer is then chosen - it used to be "not found in the list" after the first rows."""
+    from jobhunt.apply.snapshot import take_snapshot
+
+    await page.set_content(LAZY_LIST.replace("SEARCH", search))
+    snap, resolve = await take_snapshot(page)
+    combo = next(f for f in snap.fields if f.kind == "combobox")
+    run = SimpleNamespace(page=page, combo_options={}, combo_chosen={}, _combo_value=engine._Run._combo_value,
+                          _abandon_combobox=lambda loc: engine._Run._abandon_combobox(None, loc))
+    item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="France")
+    assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "France"
+    assert await page.locator("#shown").inner_text() == "France"

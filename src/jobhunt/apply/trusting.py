@@ -420,6 +420,8 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     if not (want or "").strip():
         return drop("valeur manquante")
     if kind == "combobox":
+        if dial and code and number_sets_country(field, snap, code):
+            return None  # (the number, typed with its code in the box beside it, chooses the country)
         out = item(Action(ref=field.ref, op="select", fact=action.fact), field, known, value=answer or want, used=used,
                    inferred=inferred, basis=basis)
         if dial and code:
@@ -533,9 +535,28 @@ def _left_fact(field: FormField) -> str | None:
     return next((key for pattern, key in _LEFT_FACTS if pattern.search(label)), None)
 
 
+_BARE_CODE = re.compile(r"\+\s*\d{1,4}\s*")
+
+
+def carries_code(field: FormField) -> bool:
+    """A number box that already shows a bare calling code ("+33"): an international phone widget. The number is typed
+    there with its code, and the country shown beside it follows by itself."""
+    return field.kind in ("tel", "text") and bool(_BARE_CODE.fullmatch(field.value or ""))
+
+
 def beside_dial(field: FormField, snap: PageSnapshot) -> bool:
-    """A phone number field that stands next to a calling-code picker: the number goes in without the code."""
-    return any(other is not field and other.form == field.form and is_dial(other, snap) for other in snap.fields)
+    """A phone number field that stands next to a calling-code picker: the number goes in without the code - unless the
+    number box itself carries the code (see `carries_code`)."""
+    return not carries_code(field) and any(
+        other is not field and other.form == field.form and is_dial(other, snap) for other in snap.fields)
+
+
+def number_sets_country(field: FormField, snap: PageSnapshot, code: str) -> bool:
+    """The country picker of an international phone widget: the number box of its form shows a bare calling code, or
+    already the candidate's own. The picker is left alone - typing the number with its code sets it."""
+    return bool(code) and any(
+        other is not field and other.form == field.form and other.kind in ("tel", "text")
+        and (carries_code(other) or re.sub(r"\s", "", other.value or "").startswith(code)) for other in snap.fields)
 
 
 def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validated:
@@ -1209,9 +1230,20 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                 "() => { const a = document.activeElement; return a && a.matches('input:not([type=hidden]), [role=searchbox]') ? a : null; }"
             )).as_element()
             if box is None:
-                boxes = await run.page.locator("input[type=search]:visible, [role=searchbox]:visible").element_handles()
-                fresh = [handle for handle in boxes if not await handle.evaluate(_WAS_SHOWN_JS)]
-                box = fresh[0] if len(fresh) == 1 else None
+                # (the search box that came with the list: in the control's own frame too, and a plain text box counts when
+                # it was not on the page before the list opened)
+                frames = [run.page]
+                with contextlib.suppress(Exception):
+                    own = await loc.owner_frame()
+                    if own is not None and own != run.page.main_frame:
+                        frames.insert(0, own)
+                for frame in frames:
+                    boxes = await frame.locator("input[type=search]:visible, [role=searchbox]:visible, input[type=text]:visible, "
+                                                "input:not([type]):visible").element_handles()
+                    fresh = [handle for handle in boxes if not await handle.evaluate(_WAS_SHOWN_JS)]
+                    if len(fresh) == 1:
+                        box = fresh[0]
+                        break
             typer = box
     if typer is not None:
         words = want.split()
@@ -1238,6 +1270,21 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                     index = 0
                 if index < 0:
                     break
+                if done := await choose(found, index):
+                    return done
+    if typer is None and not typed:
+        # A list that only draws the rows in view and has no search box: typing the first letters of the answer on the
+        # open list brings its rows up (what a person does on such a list).
+        country = sorted(DIAL_COUNTRY_NAMES.get(code, ()), key=len)[:1] if code else []
+        for text in dict.fromkeys(text for text in ([name.title() for name in country] if code else [want]) if text):
+            with contextlib.suppress(Exception):
+                await run.page.keyboard.type(text[:8], delay=70)
+            await asyncio.sleep(0.8)
+            found = await _popup_options(run)
+            if found:
+                remember(found)
+            index = pick(found, loose=True)
+            if index >= 0:
                 if done := await choose(found, index):
                     return done
     if typed and not code:

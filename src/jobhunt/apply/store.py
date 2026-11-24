@@ -88,6 +88,7 @@ _DIAGNOSTICS = {
     "recipient_refused_response": RECIPIENT_REFUSED,
     "recipient_refused_transport": RECIPIENT_REFUSED,
     "required_fields": "Informations requises à compléter.",
+    "answer_not_offered": "Le site ne propose pas la réponse enregistrée pour un champ obligatoire : à choisir dans sa liste.",
     "verification_required": "Validation par e-mail ou par code requise.",
     "human_required": "Une intervention humaine est nécessaire.",
     "form_actions_missing": "Aucune action possible sur le formulaire.",
@@ -122,14 +123,28 @@ _DIAGNOSTIC_PATTERNS = (
 _HOST = re.compile(r"(?:[a-z0-9-]+\.)*[a-z0-9-]+|[a-f0-9:]+", re.I)
 
 
+_ACCOUNT_KINDS = frozenset({"account_login", "account_signup", "email_verification"})
+
+
+def _form_question_stop(result: RunResult) -> bool:
+    """The run signed in on the way and then stopped on questions of the FORM (its last page is no account page, nothing
+    in it reads like a verification code): what it asks is for the candidate to answer, not a credential matter. Such a
+    stop keeps its questions - they used to be dropped with everything else as soon as one step was an account page, and
+    the candidate could not see what the site wanted."""
+    return bool(result.status == "needs_input" and result.questions and result.steps
+                and result.steps[-1].page_kind not in _ACCOUNT_KINDS
+                and not contains_verification_code(result.message)
+                and not any(contains_verification_code(step.note) for step in result.steps))
+
+
 def _failure_result(result: RunResult, *, held: bool = False) -> RunResult:
     message = result.message
     explicit = result.diagnostic_code
     exception = re.fullmatch(r"exception:[A-Za-z_][A-Za-z_0-9]{0,63}@\d{1,5}/[a-z_]{1,32}", explicit)
     if explicit in _DIAGNOSTICS or exception:
         code = explicit
-    elif (contains_verification_code(message) or any(
-        step.page_kind in {"account_login", "account_signup", "email_verification"} or contains_verification_code(step.note)
+    elif not _form_question_stop(result) and (contains_verification_code(message) or any(
+        step.page_kind in _ACCOUNT_KINDS or contains_verification_code(step.note)
         for step in result.steps
     )):
         code = "credential_page"
@@ -194,7 +209,11 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
         if step["page_kind"] in sensitive or contains_verification_code(step["note"] or ""):
             credential_page = True
             step.update(note="credential_page", filled=[], clicked="", screenshot="")
-    if (credential_page or result.status == "needs_email") and result.diagnostic_code not in ACCOUNT_REASONS:
+    if credential_page and _form_question_stop(result):
+        # (account pages were passed on the way: the form's own questions stay, a password or code question never does)
+        payload["questions"] = [question for question in payload["questions"]
+                                if question.get("category") != "credentials" and question.get("kind") != "password"]
+    elif (credential_page or result.status == "needs_email") and result.diagnostic_code not in ACCOUNT_REASONS:
         payload.update(message="Vérification ou connexion manuelle requise (credential_page).", questions=[])
     return RunResult.model_validate(scrub(payload))
 
@@ -824,6 +843,10 @@ def bind_apply_landing(attempt: Attempt, target: str, *, method="requisition", c
 def stale_engine_pause(run: ApplyRun | None) -> bool:
     """`run` is an engine-caused pause judged by code older than ENGINE_RETRY_EPOCH, and it cannot have sent anything.
     With `apply_retry_stale_pauses`, so is any such pause that is not a CAPTCHA."""
+    if run is not None and run.result is not None and run.result.diagnostic_code == "answer_not_offered":
+        # The site's own list does not hold the candidate's recorded answer: trying again changes nothing (each try costs
+        # minutes of a pass). It waits for the candidate to choose an entry of that list, like any question put to them.
+        return False
     if (run is not None and run.status == "needs_input" and run.result is not None and not run.result.submit_clicked
             and run.submit_clicked_at is None and run.nav_clicked_at is None and _iso(run.started_at) < ENGINE_RETRY_EPOCH):
         # A question stop (missing answer, unfilled widget, account page) judged by older engine code: the newer engine

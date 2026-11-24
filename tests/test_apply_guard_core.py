@@ -724,3 +724,34 @@ async def test_a_form_that_comes_back_under_an_error_banner_was_refused_whatever
     result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
     assert result.status == "submitted", (result.status, result.message)
     assert paths(core, "/site") == ["/site/jobs/100/check", "/site/jobs/100"]
+
+
+async def test_a_list_that_does_not_offer_the_recorded_answer_ends_as_a_question_and_is_not_tried_again(core, profile, tmp_path, fast,
+                                                                                                        monkeypatch):
+    """The site requires a choice in a list that does not hold the candidate's answer and refuses the form without it.
+    The run stops at that first refusal with the list as a question to the candidate (its entries offered), instead of
+    sending the form three times; and the pause is not tried again by the next passes until the question is answered."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      const form = document.querySelector('form');
+      form.querySelector('button').insertAdjacentHTML('beforebegin', '<label for="nat">Nationalité</label><select id="nat" name="nationality">'
+        + '<option value="">Sélectionner une valeur</option><option>France</option><option>Belgique</option></select>');
+      form.addEventListener('submit', (event) => { event.preventDefault();
+        fetch('/jobs/100/check', {method: 'POST', body: new FormData(form)}).catch(() => {}).finally(() => {
+          if (document.querySelector('[role=alert]')) return;
+          const banner = document.createElement('div'); banner.setAttribute('role', 'alert');
+          banner.textContent = "Veuillez renseigner le champ 'Nationalité'."; document.querySelector('main').prepend(banner); }); });</script>""")
+    plan = lambda snapshot: StepPlan(page_kind="form", actions=[  # noqa: E731
+        act(snapshot, "Prénom", "fill", "first_name"), act(snapshot, "CV", "upload_cv", kind="file"),
+        act(snapshot, "Nationalité", "select", "nationality"), act(snapshot, "Envoyer", "click", role="submit")])
+    from jobhunt.apply.facts import save_answers
+
+    save_answers(profile.id, {"nationality": "Exemplelandaise"})  # (recorded, and not in the site's list)
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "needs_input" and result.result.diagnostic_code == "answer_not_offered", (result.status, result.message)
+    asked = result.result.questions
+    assert [(question.label, question.options) for question in asked] == [("Nationalité", ["France", "Belgique"])]
+    assert paths(core, "/site") == ["/site/jobs/100/check"] and store.outstanding_attempt(app.id) is None
+    monkeypatch.setattr(service.get_settings(), "apply_retry_stale_pauses", True)
+    monkeypatch.setattr(store, "ENGINE_RETRY_EPOCH", "2099-01-01T00:00:00+00:00")
+    assert not store.stale_engine_pause(store.get_run(result.id))
