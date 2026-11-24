@@ -420,6 +420,8 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
     if not (want or "").strip():
         return drop("valeur manquante")
     if kind == "combobox":
+        if dial and code and number_sets_country(field, snap, code):
+            return None  # (the number, typed with its code in the box beside it, chooses the country)
         out = item(Action(ref=field.ref, op="select", fact=action.fact), field, known, value=answer or want, used=used,
                    inferred=inferred, basis=basis)
         if dial and code:
@@ -533,9 +535,28 @@ def _left_fact(field: FormField) -> str | None:
     return next((key for pattern, key in _LEFT_FACTS if pattern.search(label)), None)
 
 
+_BARE_CODE = re.compile(r"\+\s*\d{1,4}\s*")
+
+
+def carries_code(field: FormField) -> bool:
+    """A number box that already shows a bare calling code ("+33"): an international phone widget. The number is typed
+    there with its code, and the country shown beside it follows by itself."""
+    return field.kind in ("tel", "text") and bool(_BARE_CODE.fullmatch(field.value or ""))
+
+
 def beside_dial(field: FormField, snap: PageSnapshot) -> bool:
-    """A phone number field that stands next to a calling-code picker: the number goes in without the code."""
-    return any(other is not field and other.form == field.form and is_dial(other, snap) for other in snap.fields)
+    """A phone number field that stands next to a calling-code picker: the number goes in without the code - unless the
+    number box itself carries the code (see `carries_code`)."""
+    return not carries_code(field) and any(
+        other is not field and other.form == field.form and is_dial(other, snap) for other in snap.fields)
+
+
+def number_sets_country(field: FormField, snap: PageSnapshot, code: str) -> bool:
+    """The country picker of an international phone widget: the number box of its form shows a bare calling code, or
+    already the candidate's own. The picker is left alone - typing the number with its code sets it."""
+    return bool(code) and any(
+        other is not field and other.form == field.form and other.kind in ("tel", "text")
+        and (carries_code(other) or re.sub(r"\s", "", other.value or "").startswith(code)) for other in snap.fields)
 
 
 def validate(run: _Run, plan: StepPlan, snap: PageSnapshot, resolve) -> _Validated:

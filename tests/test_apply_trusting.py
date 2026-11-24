@@ -2201,3 +2201,21 @@ async def test_a_text_box_wrapped_in_the_pages_own_select_element_is_a_list_with
     assert run.combo_options[trusting.norm("Préavis")] == ["Asap / Immédiatement", "Préavis de 1 mois", "Préavis de 3 mois"]
     snap, _ = await take_snapshot(page)
     assert [(f.label, f.value) for f in snap.fields if f.kind == "combobox"] == [("Préavis", "Préavis de 1 mois"), ("Votre expérience", "")]
+
+
+def test_a_number_box_that_shows_a_bare_calling_code_takes_the_number_with_its_code():
+    """An international phone widget: the number box shows "+33" and a list of country NAMES stands beside it. The number
+    is typed with its code and the country list is left alone - looking the country up in that list used to fail (it only
+    renders a few rows) and the number went in without its code, which the site refused."""
+    country = field(ref="c1", kind="combobox", label="Sélectionner l'indicatif du pays: France", value="France", form="0:1")
+    number = field(ref="p1", kind="tel", label="Numéro de téléphone", value="+33", required=True, form="0:1")
+    snap = snap_of(country, number)
+    assert trusting.is_dial(country, snap) and trusting.carries_code(number) and not trusting.beside_dial(number, snap)
+    made = trusting.check(run_of(), Action(ref="p1", op="fill", fact="phone"), number, engine._Validated(), snap, None)
+    assert made is not None and made.national is False and made.value.replace(" ", "").startswith("+33")
+    assert trusting.check(run_of(), Action(ref="c1", op="select", fact="phone", value="France"), country, engine._Validated(), snap, None) is None
+    # a number box without a code beside a code list keeps the national spelling, and that list is still set
+    plain = field(ref="p1", kind="tel", label="Numéro de téléphone", required=True, form="0:1")
+    assert trusting.beside_dial(plain, snap_of(country, plain))
+    assert trusting.check(run_of(), Action(ref="c1", op="select", fact="phone", value="France"), country, engine._Validated(),
+                          snap_of(country, plain), None) is not None
