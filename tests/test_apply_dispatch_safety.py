@@ -1887,3 +1887,23 @@ def test_a_settled_not_sent_attempt_may_be_retried_automatically_when_the_owner_
     finally:
         monkeypatch.delenv("JOBHUNT_APPLY_RETRY_VERIFIED_NOT_SENT")
         get_settings.cache_clear()
+
+
+def test_questions_of_the_form_reached_after_a_sign_in_are_kept_and_account_stops_still_hide_everything():
+    """A run signs in, reaches the form and stops on a question of that form: the question is what the candidate must
+    answer, it is kept (it used to be dropped as soon as one step was an account page, leaving "credential_page" and
+    nothing to answer). A stop ON an account page, or anything that reads like a verification code, still hides it all."""
+    from jobhunt.apply.types import Question
+
+    question = Question(ref="f1", label="Situation de famille", kind="select", options=["Célibataire", "Marié(e)"], reason="unmapped")
+    secret = Question(ref="f2", label="Mot de passe", kind="password", reason="technical", category="credentials")
+    login = StepLog(index=1, url="https://careers.example.test/login", page_kind="account_login")
+    form = StepLog(index=2, url="https://careers.example.test/apply", page_kind="form")
+    kept = store._safe_result(RunResult(status="needs_input", message="Informations manquantes : Situation de famille",
+                                        steps=[login, form], questions=[question, secret]))
+    assert [q.label for q in kept.questions] == ["Situation de famille"] and kept.diagnostic_code == "required_fields"
+    assert kept.steps[0].note == "credential_page"
+    on_account = store._safe_result(RunResult(status="needs_input", message="Informations manquantes", steps=[form, login], questions=[question]))
+    assert on_account.questions == [] and on_account.diagnostic_code == "credential_page"
+    coded = store._safe_result(RunResult(status="needs_input", message="Code de vérification : 654321", steps=[login, form], questions=[question]))
+    assert coded.questions == [] and "654321" not in coded.model_dump_json()

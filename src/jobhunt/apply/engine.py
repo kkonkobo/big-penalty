@@ -840,6 +840,7 @@ class _Run:
         self.print_view_left = False         # trusting mode: left a print view of the ad for the normal one, once
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
         self.stuck_rounds: dict[str, int] = {}  # trusting mode: steps given back to the planner for such fields, by page
+        self.unoffered: dict[tuple[str, str], str] = {}  # closed lists that do not offer the candidate's recorded answer
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
         self.presend: dict[str, int] = {}  # trusting mode: re-reads made before a final click, per page
         self.signed_up: set[str] = _Accounts()     # account addresses where an account-creation click was made in this run
@@ -927,8 +928,13 @@ class _Run:
         trace = self.diagnostics.model_copy()
         if status in ("needs_email", "needs_human") and trace.receipt_reason == "before_submit":
             trace = handoff_result("email" if status == "needs_email" else "human", diagnostics=trace).dispatch_diagnostics
-        return RunResult(status=status, message=self._r(message), questions=bound, consent_codes=sorted(self.consent_codes),
-                         dispatch_diagnostics=trace)
+        result = RunResult(status=status, message=self._r(message), questions=bound, consent_codes=sorted(self.consent_codes),
+                           dispatch_diagnostics=trace)
+        if status == "needs_input" and any((trusting.norm(question.label), question.kind) in getattr(self, "unoffered", ()) for question in bound):
+            # (one of the questions is a list of the site that does not hold the candidate's recorded answer: the stop
+            # says so, and waits for the candidate's choice instead of being tried again at every pass)
+            result.diagnostic_code = "answer_not_offered"
+        return result
 
     async def _shot(self, log: StepLog) -> None:
         if log.screenshot or os.getenv("JOBHUNT_APPLY_LOCAL_SCREENSHOTS") != "1":
@@ -1301,6 +1307,10 @@ class _Run:
     # ------------------------------------------------------------ validation (the planner is untrusted)
     def _drop(self, v: _Validated, f: FormField | None, why: str, ask: bool = True) -> None:
         v.notes.append(f"{_label(f) if f else 'champ'} : {why}")
+        if f is not None and f.kind == "select" and why == "valeur hors des options proposées":
+            # (kept for the end of the run: when the site then refuses the form over this very list, the candidate is asked
+            # to choose one of its entries, and the application waits for that answer)
+            self.unoffered[(trusting.norm(f.label), f.kind)] = f.label
         if ask and f is not None and f.required and f.kind not in ("button", "link") and not any(q.ref == f.ref for q in v.questions):
             v.questions.append(_question(f))
 
@@ -2662,6 +2672,17 @@ class _Run:
                             trace.receipt_kind, trace.receipt_reason = "first_party_confirmation", "confirmation_text"
                             return self._end("submitted", "Candidature envoyée.")
                     if loop.time() - started >= 5 and await self._submit_rejected(snap):
+                        missing_entry = [f for f in snap.fields if (trusting.norm(f.label), f.kind) in self.unoffered and _is_empty(f)]
+                        if self.trusting and missing_entry:
+                            # The site refused the form and a list that does not offer the candidate's recorded answer is
+                            # still unset: no further try can fill it. The candidate is asked to choose one of its entries.
+                            await self._shot(log)
+                            result = self._end("needs_input", "Le site ne propose pas la réponse enregistrée : "
+                                               + ", ".join(self._r(_label(f))[:60] for f in missing_entry[:4]) + ".",
+                                               [Question(ref=f.ref, label=_label(f), kind=f.kind, required=True, reason="unmapped",
+                                                         options=[option.label for option in f.options][:300]) for f in missing_entry][:8])
+                            result.diagnostic_code = "answer_not_offered"
+                            return result
                         if self.rejected_submits <= 2:
                             return snap, resolve  # the site refused the form (field errors): correct it and send again
                         # Refused a third time: nothing was received, and the form cannot be completed as it stands.
