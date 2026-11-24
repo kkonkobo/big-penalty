@@ -1310,7 +1310,9 @@ class _Run:
         if f is not None and f.kind == "select" and why == "valeur hors des options proposées":
             # (kept for the end of the run: when the site then refuses the form over this very list, the candidate is asked
             # to choose one of its entries, and the application waits for that answer)
-            self.unoffered[(trusting.norm(f.label), f.kind)] = f.label
+            unoffered = getattr(self, "unoffered", None)
+            if unoffered is not None:
+                unoffered[(trusting.norm(f.label), f.kind)] = f.label
         if ask and f is not None and f.required and f.kind not in ("button", "link") and not any(q.ref == f.ref for q in v.questions):
             v.questions.append(_question(f))
 
