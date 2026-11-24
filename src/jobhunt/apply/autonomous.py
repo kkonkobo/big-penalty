@@ -124,6 +124,7 @@ class Audience:
         self.chain: set[str] = set()
         self.typed: set[str] = set()
         self.foreign_writes = 0  # third-party writes seen since the last armed click (core mode)
+        self.check_writes = 0    # ... those of them that went to a bot check (they carry no application)
 
     # ------------------------------------------------------------ core mode: trusted sites
     @staticmethod
@@ -541,6 +542,7 @@ class Audience:
     def arm_click(self, *, scripted: bool, account: bool = False):
         self.click_write = None
         self.foreign_writes = 0
+        self.check_writes = 0
         self.scriptable = scripted and self.method != "GET"
         self.clicking = True
         self.account_click = account

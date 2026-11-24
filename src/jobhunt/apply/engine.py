@@ -134,6 +134,20 @@ UPLOAD_SETTLE_S = 2.5    # lets a CV parser re-render / pre-fill the form after 
 OBSERVE_S = 12.0         # after a post-data click: how long the engine only observes the page before giving up ("not confirmed")
 OBSERVE_POLL_S = 2.0     # re-snapshot interval of that observation
 TRUSTING_OBSERVE_S = 30.0  # planner-trusting runs wait longer for the receipt page (slow confirmations, redirects)
+SEND_IN_PROGRESS_WAITS = 3  # ... and as many times again while the site shows that the send is still in progress
+# (folded label) a send button while the site works on the send
+SEND_BUSY_RE = re.compile(r"(?:submitting|sending|saving|uploading|processing|envoi en cours|en cours d envoi|en cours d'envoi|"
+                          r"transmission en cours|veuillez patienter|merci de patienter|please wait|wird gesendet)\b")
+# a visible button or form the page marks busy, or a visible progress indicator standing over the page's centre
+_BUSY_JS = r"""() => { const vis = (e) => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  if ([...document.querySelectorAll('button[aria-busy=true], form[aria-busy=true], [type=submit][aria-busy=true]')].some(vis)) return true;
+  // (a send button that is switched off while it reads "Submitting..." is not among the page's usable controls)
+  const BUSY = /^(?:submitting|sending|saving|uploading|processing|envoi en cours|en cours d.envoi|transmission en cours|veuillez patienter|merci de patienter|please wait|wird gesendet)/i;
+  if ([...document.querySelectorAll('button, [role=button], input[type=submit]')].some((b) => vis(b) && BUSY.test((b.innerText || b.value || '').trim()))) return true;
+  const centre = document.elementFromPoint(Math.floor(innerWidth / 2), Math.floor(innerHeight / 2));
+  const bar = centre && centre.closest('[role=progressbar], [aria-busy=true]');
+  return !!(bar && vis(bar) && bar !== document.body && bar !== document.documentElement); }"""
 FILE_OPENER_RE = re.compile(r"(?:choisir|choose|select|selectionner|parcourir|browse|joindre|telecharger|televerser|upload|importer|deposer|ajouter|attach|add)\b"
                             r".{0,20}\b(?:fichier|file|document|cv|resume|curriculum|piece)|^\s*(?:parcourir|browse)")  # folded label of a button that opens a file dialog
 UPLOAD_CONFIRM_RE = re.compile(r"^\s*(?:ajouter|add|attach|joindre|telecharger|televerser|upload|importer|charger|envoyer le fichier|aggiungi|carica|allega|"
@@ -2553,6 +2567,7 @@ class _Run:
         deadline = started + (TRUSTING_OBSERVE_S if self.trusting else OBSERVE_S)
         asked: tuple[str, str] | None = None
         errors_seen = False
+        longer = 0  # extra waits granted because the site showed the send in progress
         while True:
             has_form = self._has_form(snap)
             if self.autonomous and self.nav_pending:
@@ -2655,9 +2670,21 @@ class _Run:
                         result = self._end("needs_input", "Le site refuse le formulaire : champs obligatoires à compléter.", missing)
                         result.diagnostic_code = "submit_refused"
                         return result
+                if loop.time() >= deadline and self.trusting and longer < SEND_IN_PROGRESS_WAITS and await self._send_in_progress(snap):
+                    # The site is still working on the send (its button reads "Submitting...", the request has no answer
+                    # yet): leaving now would close the window on it. It is watched for a while longer.
+                    longer += 1
+                    deadline = loop.time() + TRUSTING_OBSERVE_S
                 if loop.time() >= deadline:
+                    checked = int(getattr(self.autonomous, "check_writes", 0) or 0)
                     if self.trusting and await self._submit_rejected(snap, silent=True):
                         # the click sent nothing at all to the site and the form is still there: not a "possible send"
+                        if checked:
+                            # Only the site's bot check answered the click, and it let nothing through: clicking again
+                            # would meet it again. The application waits like any other stopped by a challenge.
+                            log.note += "; contrôle anti-robot invisible : l'envoi n'est pas parti"
+                            await self._shot(log)
+                            return self._end("needs_human", "Un CAPTCHA doit être résolu à la main.")
                         if self.rejected_submits <= 2:
                             return snap, resolve
                         result = self._end("failed", "Le bouton d'envoi ne déclenche aucun envoi sur ce site.")
@@ -2778,8 +2805,14 @@ class _Run:
             self.replans.pop(urldefrag(self.page.url).url, None)
             self.diagnostics.receipt_reason = "before_submit"
             return True
-        intact = bool(sent.fields & present) and any(
+        intact = bool(sent.fields & present) and (any(
             f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields)
+            # (asked when the wait is over: the send button stuck on "Submitting..." is still the form's send button)
+            or (silent and await self._busy_button(snap))
+            # (most of the form is back under an error the page states - a field error, an error banner: it was refused,
+            # whatever the site now calls its send button)
+            or (self.trusting and not silent and len(sent.fields & present) * 2 >= len(sent.fields)
+                and (any(f.error for f in snap.fields if f.kind not in ("button", "link")) or await self._banner_error())))
         if urldefrag(self.page.url).url != self.sent_url:
             # Another URL: only the apply-and-create form that came back saying the account exists counts (some sites
             # post that form to a sibling address and show it again there).
@@ -2883,6 +2916,23 @@ class _Run:
         self.nav_pending = False
         self.pending = self.last_sent = self.nav_ref = None
 
+    async def _busy_button(self, snap: PageSnapshot) -> bool:
+        """A button of the page reads "Submitting..." / "Envoi en cours" (usable or switched off), or is marked busy."""
+        if any(f.kind == "button" and SEND_BUSY_RE.match(fold(f.label).strip()) for f in snap.fields):
+            return True
+        for fr in self.page.frames:
+            with contextlib.suppress(Exception):
+                if await fr.evaluate(_BUSY_JS):
+                    return True
+        return False
+
+    async def _send_in_progress(self, snap: PageSnapshot) -> bool:
+        """After the send click: the site shows it is still at it - the request left and no answer came yet, a button
+        reads "Submitting..." / "Envoi en cours", or the page marks itself busy."""
+        if getattr(self.autonomous, "click_write", None) is not None and not getattr(self.autonomous, "final_response", True):
+            return True
+        return await self._busy_button(snap)
+
     def _unconfirmed(self) -> RunResult:
         return self._end("failed", UNCONFIRMED_MSG)
 
@@ -2901,6 +2951,17 @@ class _Run:
             if banners := await self._banner_texts():
                 parts.append("bannière : " + " / ".join(self._r(text)[:80] for text in banners[:2]))
             parts.append("texte de réception " + ("lu" if await self._page_says_received() else "non lu"))
+            if (sent := self.last_sent) is not None:
+                present = {(_norm(_label(f)), f.kind) for f in snap.fields}
+                parts.append(f"champs du clic encore là : {len(sent.fields & present)}/{len(sent.fields)}")
+                parts.append("bouton d'envoi " + ("présent" if any(
+                    f.kind in ("button", "link") and _norm(_label(f)) == sent.button for f in snap.fields) else "absent"))
+            if self.autonomous is not None:
+                parts.append("requête d'envoi " + ("sans réponse" if getattr(self.autonomous, "click_write", None) is not None
+                                                   and not getattr(self.autonomous, "final_response", False) else
+                                                   "répondue" if getattr(self.autonomous, "final_response", False) else "non partie"))
+                if getattr(self.autonomous, "check_writes", 0):
+                    parts.append("échanges avec un contrôle anti-robot")
             self.steps[-1].note += "; envoi non confirmé : " + ", ".join(parts)
 
     async def _email_hold(self, log: StepLog, note: str = '') -> RunResult:

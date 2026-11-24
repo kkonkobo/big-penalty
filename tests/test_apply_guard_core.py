@@ -660,3 +660,67 @@ async def test_a_send_left_unconfirmed_says_in_its_trace_which_check_failed(core
 
     note = json.loads((Path(result.out_dir) / "failure-steps.json").read_text(encoding="utf-8"))[-1]["note"]
     assert "envoi non confirmé : " in note and "texte de réception non lu" in note and "formulaire encore présent" not in note, note
+
+
+async def test_a_send_the_site_is_still_working_on_is_watched_until_its_receipt(core, profile, tmp_path, fast, monkeypatch):
+    """The send button reads "Submitting..." for longer than the usual wait before the receipt shows: the run keeps watching
+    while the site shows the send in progress, and ends as a send - it used to leave on "unconfirmed" and close the window
+    on a send still under way."""
+    from jobhunt.apply import engine
+
+    monkeypatch.setattr(engine, "TRUSTING_OBSERVE_S", 1.0)
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        const button = event.target.querySelector('button'); button.disabled = true; button.textContent = 'Submitting...';
+        const data = new FormData(event.target);
+        setTimeout(() => fetch('/jobs/100/apply', {method: 'POST', body: data}).catch(() => {}).finally(() => {
+          document.querySelector('main').innerHTML = '<h1>Merci</h1><p>Votre candidature a bien été envoyée.</p>'; }), 2600); });</script>""")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "submitted", (result.status, result.message)
+    assert len(paths(core, "/site")) == 1 and store.outstanding_attempt(app.id) is None
+
+
+@pytest.mark.parametrize(("host", "status"), [("tracker.thirdparty.test", "needs_human"), ("cdn.thirdparty.test", "failed")])
+async def test_a_send_held_back_by_an_invisible_bot_check_is_a_challenge_pause(core, profile, tmp_path, fast, monkeypatch, host, status):
+    """The click only starts an invisible bot check: the button stays on "Submitting...", the browser talks to the check's
+    host and sends the site nothing. Nothing was sent: the application waits like one stopped by a challenge, it is not
+    held as a possible send. The same silence with a write to any OTHER third party stays a possible send."""
+    from jobhunt.apply import destination, engine
+
+    monkeypatch.setattr(engine, "TRUSTING_OBSERVE_S", 0.6)
+    monkeypatch.setattr(destination, "BOT_CHECK_HOSTS", (*destination.BOT_CHECK_HOSTS, "tracker.thirdparty.test"))
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault();
+        const button = event.target.querySelector('button'); button.disabled = true; button.textContent = 'Submitting...';
+        fetch('https://%s/check', {method: 'POST', body: 'token', mode: 'no-cors'}).catch(() => {}); });</script>""" % host)
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == status, (result.status, result.message)
+    assert not paths(core, "/site") and (store.outstanding_attempt(app.id) is None) is (status == "needs_human")
+
+
+async def test_a_form_that_comes_back_under_an_error_banner_was_refused_whatever_its_button_now_says(core, profile, tmp_path, fast):
+    """The site answers the send with the same form under "there is a problem, check and try again", and its send button
+    now reads otherwise: nothing was received. The send record is withdrawn and the form is corrected and sent again - the
+    run used to be held as a possible send because the button's words had changed."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      let tries = 0;
+      document.querySelector('form').addEventListener('submit', (event) => { tries += 1;
+        if (tries > 1) return;   // (the second send goes through)
+        event.preventDefault();
+        fetch('/jobs/100/check', {method: 'POST', body: new FormData(event.target)}).catch(() => {}).finally(() => {
+          const banner = document.createElement('div'); banner.setAttribute('role', 'alert');
+          banner.textContent = 'Oups, il y a un problème. Veuillez vérifier toutes les informations avant de réessayer.';
+          document.querySelector('main').prepend(banner);
+          event.target.querySelector('button').textContent = 'Envoyer de nouveau'; }); });</script>""")
+
+    def plan(snapshot):
+        again = any(field.kind == "button" and field.label == "Envoyer de nouveau" for field in snapshot.fields)
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"), act(snapshot, "CV", "upload_cv", kind="file"),
+                                                   act(snapshot, "Envoyer de nouveau" if again else "Envoyer", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.message)
+    assert paths(core, "/site") == ["/site/jobs/100/check", "/site/jobs/100"]
