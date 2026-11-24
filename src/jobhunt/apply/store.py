@@ -209,7 +209,8 @@ def _safe_result(result: RunResult, *, held: bool = False) -> RunResult:
         if step["page_kind"] in sensitive or contains_verification_code(step["note"] or ""):
             credential_page = True
             step.update(note="credential_page", filled=[], clicked="", screenshot="")
-    if _form_question_stop(result):
+    if credential_page and _form_question_stop(result):
+        # (account pages were passed on the way: the form's own questions stay, a password or code question never does)
         payload["questions"] = [question for question in payload["questions"]
                                 if question.get("category") != "credentials" and question.get("kind") != "password"]
     elif (credential_page or result.status == "needs_email") and result.diagnostic_code not in ACCOUNT_REASONS:
