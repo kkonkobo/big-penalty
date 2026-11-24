@@ -305,14 +305,32 @@ class BrowserPool:
             self._pw = None
 
 
+# What a page that merely EMBEDS a bot check carries too (the host of the check's script, the id of its hidden answer
+# box): on their own they do not make a challenge page.
+_EMBED_MARKERS = ("challenges.cloudflare.com",)
+_EMBED_NOISE = ("cf-chl-widget",)
+
+
 async def is_challenge(page: Page) -> bool:
+    """The page is a bot-check page ("Just a moment...", a block page). A page with real content that only loads a check's
+    script - an invisible check run when its form is sent - is not: a challenge page holds nothing to fill and next to no text."""
     try:
         url = page.url
         html = await page.content()
     except Exception:
         return False
     hay = url + html[:200_000]
-    return any(m in hay for m in CHALLENGE_MARKERS)
+    for noise in _EMBED_NOISE:
+        hay = hay.replace(noise, "")
+    found = [m for m in CHALLENGE_MARKERS if m in hay]
+    if not found or any(m not in _EMBED_MARKERS for m in found):
+        return bool(found)
+    try:
+        fields, text = await page.evaluate("() => [document.querySelectorAll('input:not([type=hidden]), select, textarea').length,"
+                                           " (document.body ? document.body.innerText : '').trim().length]")
+    except Exception:
+        return True
+    return fields == 0 and text < 1500
 
 
 async def human_pause(lo: float = 0.4, hi: float = 1.4) -> None:
