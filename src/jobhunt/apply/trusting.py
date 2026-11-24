@@ -1230,9 +1230,20 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                 "() => { const a = document.activeElement; return a && a.matches('input:not([type=hidden]), [role=searchbox]') ? a : null; }"
             )).as_element()
             if box is None:
-                boxes = await run.page.locator("input[type=search]:visible, [role=searchbox]:visible").element_handles()
-                fresh = [handle for handle in boxes if not await handle.evaluate(_WAS_SHOWN_JS)]
-                box = fresh[0] if len(fresh) == 1 else None
+                # (the search box that came with the list: in the control's own frame too, and a plain text box counts when
+                # it was not on the page before the list opened)
+                frames = [run.page]
+                with contextlib.suppress(Exception):
+                    own = await loc.owner_frame()
+                    if own is not None and own != run.page.main_frame:
+                        frames.insert(0, own)
+                for frame in frames:
+                    boxes = await frame.locator("input[type=search]:visible, [role=searchbox]:visible, input[type=text]:visible, "
+                                                "input:not([type]):visible").element_handles()
+                    fresh = [handle for handle in boxes if not await handle.evaluate(_WAS_SHOWN_JS)]
+                    if len(fresh) == 1:
+                        box = fresh[0]
+                        break
             typer = box
     if typer is not None:
         words = want.split()
@@ -1259,6 +1270,21 @@ async def _combobox(run: _Run, loc, field: FormField, it: _Item) -> str:
                     index = 0
                 if index < 0:
                     break
+                if done := await choose(found, index):
+                    return done
+    if typer is None and not typed:
+        # A list that only draws the rows in view and has no search box: typing the first letters of the answer on the
+        # open list brings its rows up (what a person does on such a list).
+        country = sorted(DIAL_COUNTRY_NAMES.get(code, ()), key=len)[:1] if code else []
+        for text in dict.fromkeys(text for text in ([name.title() for name in country] if code else [want]) if text):
+            with contextlib.suppress(Exception):
+                await run.page.keyboard.type(text[:8], delay=70)
+            await asyncio.sleep(0.8)
+            found = await _popup_options(run)
+            if found:
+                remember(found)
+            index = pick(found, loose=True)
+            if index >= 0:
                 if done := await choose(found, index):
                     return done
     if typed and not code:
