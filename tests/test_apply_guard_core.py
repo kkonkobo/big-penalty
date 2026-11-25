@@ -774,3 +774,31 @@ async def test_a_refused_form_shown_again_under_another_query_string_is_still_th
     result = await send(app)
     assert result.status == "submitted", (result.status, result.message)
     assert paths(core, "/site") == ["/site/jobs/100/check", "/site/jobs/100"]
+
+
+async def test_the_button_that_only_ends_the_profile_step_of_a_wizard_is_not_the_send(core, profile, tmp_path, fast):
+    """A two-step application: the profile page (with the CV) ends on "Mettre à jour le profil et terminer", which the plan
+    took for the send; the site then shows the job's own questions under the same address but for its last segment. That
+    is the next step, not a receipt: the questions are answered and sent, and only then is the application received."""
+    step = ('<title>{title}</title><main><h1>{title}</h1><form action="{action}" method="post" enctype="multipart/form-data">{fields}'
+            '<button>{button}</button></form></main>')
+    core.html["/site/jobs/100/candidate"] = step.format(
+        title="Profil du candidat", action="/jobs/100/candidate", button="Mettre à jour le profil et terminer",
+        fields='<label for="name">Prénom</label><input id="name" name="first_name"><label for="cv">CV</label><input id="cv" type="file" name="cv">')
+    core.post_redirects["/site/jobs/100/candidate"] = "/jobs/100/questions"
+    core.html["/site/jobs/100/questions"] = step.format(
+        title="Questions spécifiques au poste", action="/jobs/100/questions", button="Envoyer ma candidature",
+        fields='<label for="school">Établissement *</label><input id="school" name="school" required>')
+
+    def plan(snapshot):
+        labels = {field.label for field in snapshot.fields}
+        if "CV" in labels:
+            return StepPlan(page_kind="form", actions=[act(snapshot, "Prénom", "fill", "first_name"), act(snapshot, "CV", "upload_cv", kind="file"),
+                                                       act(snapshot, "Mettre à jour le profil", "click", role="submit")])
+        return StepPlan(page_kind="form", actions=[act(snapshot, "Établissement", "fill", "first_name"),
+                                                   act(snapshot, "Envoyer ma candidature", "click", role="submit")])
+
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100/candidate")
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.message)
+    assert paths(core, "/site") == ["/site/jobs/100/candidate", "/site/jobs/100/questions"]

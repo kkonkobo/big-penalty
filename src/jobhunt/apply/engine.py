@@ -2813,6 +2813,8 @@ class _Run:
         send) is never that."""
         inputs = [f for f in snap.fields if f.kind not in ("button", "link")]
         before = getattr(self, "last_click_shape", frozenset())
+        if before and _Run._next_wizard_step(self, snap, sent, inputs, before):
+            return True
         if (not before or any(kind == "file" for _, kind in before)  # (the step that was clicked already held the CV field)
                 or any(f.kind == "password" or f.error for f in inputs) or not any(f.kind == "file" for f in inputs)):
             return False
@@ -2824,6 +2826,25 @@ class _Run:
         return not _Run._confirmed(snap, sent) and not re.search(
             r"\bmerci\b|thank you|bien recu|(?:has been|have been|was|a bien ete|a ete|est bien) (?:successfully )?"
             r"(?:received|submitted|sent|envoyee?|recue?|transmise?|enregistree?)|successfully submitted", said)
+
+    def _next_wizard_step(self, snap: PageSnapshot, sent, inputs: list, before) -> bool:
+        """After a click recorded as the send: the site moved to the NEXT step of the same application - the address keeps
+        everything but its last segment (".../candidate" then ".../questions"), and the page asks required questions the
+        clicked step did not show, one of them still unanswered, with no password, no error and no word of a receipt. The
+        clicked button ("update the profile and finish") only closed its step."""
+        here, there = urlparse(snap.url or ""), urlparse(getattr(self, "sent_url", "") or "")
+        parent = there.path.rsplit("/", 1)[0]
+        if not (here.netloc and here.netloc == there.netloc and here.path != there.path and len(parent) > 1
+                and here.path.rsplit("/", 1)[0] == parent):
+            return False
+        if any(f.kind == "password" or f.error for f in inputs):
+            return False
+        fresh = [f for f in inputs if f.required and (_norm(_label(f)), f.kind) not in before
+                 and (_norm(_label(f)), f.kind) not in sent.fields]
+        if not fresh or not any(_is_empty(f) for f in fresh):
+            return False
+        return not _Run._confirmed(snap, sent) and not confirmation_evidence(f"{snap.title} {snap.text}") and not re.search(
+            r"\bmerci\b|thank you|bien recu|successfully submitted", fold(snap.text[:4000]))
 
     async def _submit_rejected(self, snap: PageSnapshot, *, silent: bool = False) -> bool:
         """The final click did not send the application: same page, the form we filled and its send button are still there,
