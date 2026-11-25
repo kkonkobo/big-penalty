@@ -63,7 +63,7 @@ MARKETING_RE = re.compile(r"newsletter|marketing|promotion|offres? (commerciales
 # one), run on accent-stripped lowercase text (`fold`, apostrophes normalised). Any failure / negation wording in the visible text
 # vetoes it.
 CONFIRM_RE = re.compile(
-    r"nous avons bien recu|we (?:have )?(?:successfully )?received your application|thank(?:s| you) for applying|"
+    r"nous avons bien recu|we (?:have )?(?:successfully )?received your application|thank(?:s| you) for applying|thank(?:s| you) for your (?:job )?application|"
     r"merci (?:pour|d'avoir) (?:votre candidature|postule)|"
     r"candidature (?:a (?:bien |ete )*|est (?:bien )?|bien )?(?:recue|envoyee|enregistree|transmise|soumise|prise en compte)|"
     # ("Votre candidature pour l'offre 2026-1 STAGE - ... a été envoyée": what it is for stands between the two)
@@ -2836,7 +2836,14 @@ class _Run:
             # whatever the site now calls its send button)
             or (self.trusting and not silent and len(sent.fields & present) * 2 >= len(sent.fields)
                 and (any(f.error for f in snap.fields if f.kind not in ("button", "link")) or await self._banner_error())))
-        if urldefrag(self.page.url).url != self.sent_url:
+        here, there = urlparse(self.page.url), urlparse(self.sent_url)
+        # (the same page under another query string - a platform that rewrites its own parameters when it shows the form
+        # again - is the same page for a form that came back under an error the page states)
+        moved = urldefrag(self.page.url).url != self.sent_url
+        if moved and self.trusting and not silent and (here.scheme, here.netloc, here.path) == (there.scheme, there.netloc, there.path):
+            moved = not (bool(sent.fields & present) and (any(f.error for f in snap.fields if f.kind not in ("button", "link"))
+                                                         or await self._banner_error()))
+        if moved:
             # Another URL: only the apply-and-create form that came back saying the account exists counts (some sites
             # post that form to a sibling address and show it again there).
             if not (self.trusting and intact and any(f.kind == "password" for f in snap.fields)

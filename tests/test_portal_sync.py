@@ -439,7 +439,9 @@ def engine(fixture_ats):
     return fixture_ats
 
 
-async def test_send_intent_end_to_end(portal, profile, master, tmp_path, engine):
+async def test_send_intent_end_to_end(portal, profile, master, tmp_path, engine, monkeypatch):
+    # (the agreement is claimed on the real clock, and an agreement lasts a week: the clock is the fixture's here)
+    monkeypatch.setattr(db, "now", lambda: NOW + timedelta(minutes=5))
     job, app = new_app(profile, master, tmp_path, 1)
     await sync.async_sync_all(journal=portal.journal, client=portal.client, now=NOW)
     g = srv(portal).snapshot.awaiting[0].grant

@@ -1296,9 +1296,11 @@ def test_19_review_mode_holds_everything_until_the_operator_decides(profile, mas
     assert seeker.statuses()[e_int] == "refused" and engine == []
 
 
-def test_19_review_approved_intent_executes_on_the_next_pass(profile, master, live, tmp_path, engine):
+def test_19_review_approved_intent_executes_on_the_next_pass(profile, master, live, tmp_path, engine, monkeypatch):
     w = _setup(live, profile, master, review=True)
     mac, pid, seeker = w.mac, w.profile_id, w.seeker
+    # (the review is applied on the real clock, and an agreement lasts a week: the clock is the simulated Mac's here)
+    monkeypatch.setattr(db, "now", lambda: mac.now)
     (app,), (g,) = two_apps(w, profile, master, tmp_path, 1)
     e_int = seeker.request(g).event_ids[0]
     mac.sync_one(pid)

@@ -25,7 +25,7 @@ from jobhunt.apply.errors import ApplyError
 SERVICE = 'big-penalty-imap'
 PROVIDERS = {'gmail.com': ('imap.gmail.com', 993), 'googlemail.com': ('imap.gmail.com', 993)}
 ATS_DOMAINS = frozenset('''myworkday.com myworkdayjobs.com myworkdaysite.com successfactors.com successfactors.eu sap.com
-talent-soft.com profils.org smartrecruiters.com teamtailor.com greenhouse.io greenhouse.com lever.co workable.com
+talent-soft.com profils.org smartrecruiters.com teamtailor.com teamtailor-mail.com greenhouse.io greenhouse.com lever.co workable.com
 recruitee.com icims.com taleo.net oracle.com oraclecloud.com digitalrecruiters.com gestmax.fr gestmax.com flatchr.io
 eightfold.ai softy.pro softymails.fr'''.split())
 SKEW = timedelta(minutes=2)

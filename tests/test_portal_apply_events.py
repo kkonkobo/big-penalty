@@ -466,7 +466,8 @@ def test_review_intent_is_requeued_not_executed(jp, profile, feed, master, tmp_p
     e = feed.add("intent", grant=grant(jp, profile, "send", app))
     run(jp, profile)
     assert feed.state(e) == "awaiting_review" and jp.get_event(e).label.startswith("Société 1")
-    apply_reviewed(jp, profile.id, None, True, validated=jp.get_profile(profile.id))
+    # (at the fixture's own time: an agreement is valid for a week, and the real clock is long past the fixture's)
+    apply_reviewed(jp, profile.id, None, True, now=NOW, validated=jp.get_profile(profile.id))
     assert feed.state(e) == "queued"
 
 

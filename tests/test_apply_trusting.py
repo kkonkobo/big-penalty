@@ -2256,3 +2256,23 @@ async def test_a_list_that_only_draws_a_few_rows_is_searched_or_typed_on_to_reac
     item = engine._Item(Action(ref=combo.ref, op="select"), combo, None, value="France")
     assert await trusting._combobox(run, await resolve.element(combo.ref), combo, item) == "France"
     assert await page.locator("#shown").inner_text() == "France"
+
+
+def test_a_list_without_the_candidates_nationality_takes_the_entry_they_named_for_that_case():
+    """The site's list of countries holds no entry for the candidate's nationality. The candidate recorded what to choose
+    then (several countries, several spellings): the first of them the list offers is chosen. A list that does offer the
+    nationality still gets it, a question that is not the nationality never gets the spare answer, and without a spare
+    answer the field is left to be asked."""
+    facts = [Fact(key="nationality", label="Nationalité", value="Exemplelandaise"),
+             Fact(key="nationality_fallback", label="Nationalité de repli", value="Suisse ; Svizzera ; Switzerland ; Autriche")]
+    italian = field(ref="n1", kind="select", label="Nazionalità", required=True, options=opts("Austria", "Belgio", "Francia", "Svizzera"))
+    english = field(ref="n2", kind="select", label="Citizenship", options=opts("Belgium", "Germany", "Switzerland"))
+    own = field(ref="n3", kind="select", label="Nationalité", options=opts("Belge", "Exemplelandaise", "Suisse"))
+    country = field(ref="n4", kind="select", label="Pays de résidence", required=True, options=opts("Belgique", "Suisse"))
+    run = run_of(facts=FactSheet(facts=facts))
+    v = trusting.validate(run, plan_of(Action(ref="n4", op="select", fact="nationality")), snap_of(italian, english, own, country), None)
+    chosen = {item.field.ref: item.field.options[item.option_index].label for item in v.items}
+    assert chosen == {"n1": "Svizzera", "n2": "Switzerland", "n3": "Exemplelandaise"}, chosen
+    assert {item.field.ref: item.used for item in v.items}["n1"] == "nationality_fallback"
+    bare = run_of(facts=FactSheet(facts=facts[:1]))
+    assert not trusting.validate(bare, plan_of(), snap_of(italian), None).items

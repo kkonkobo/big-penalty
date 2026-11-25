@@ -351,7 +351,7 @@ def test_date_conversion_round_trip_and_legacy_text():
 
 def test_save_answers_round_trip_reaches_build_facts(profile):
     values = {"civility": "Mme", "gender": "Femme", "birth_date": "1999-03-04", "birth_place": " Toulouse ", "nationality": "Française",
-              "race_ethnicity": "Black",
+              "nationality_fallback": "Belge ; Belgique", "race_ethnicity": "Black",
               "address": "12 rue des Lilas", "postal_code": "31000", "city": "Toulouse", "department": "Haute-Garonne",
               "country": "France", "work_authorization": "Citoyenne française", "needs_visa_sponsorship": "Non",
               "driving_licence": "Oui (permis B)", "vehicle": "Oui", "disability": "Non", "criminal_record": "Casier judiciaire vierge",
@@ -370,7 +370,7 @@ def test_save_answers_round_trip_reaches_build_facts(profile):
     assert data["stage"] == {"available_from": "4 janvier 2027", "duration": "6 mois"} and data["birth_place"] == "Toulouse"
     s = sheet(profile, make_job(profile), answers=data)
     expected = {"civility": "Mme", "birth_date": "4 mars 1999", "birth_place": "Toulouse", "nationality": "Française",
-                "race_ethnicity": "Black",
+                "nationality_fallback": "Belge ; Belgique", "race_ethnicity": "Black",
                 "address": "12 rue des Lilas", "postal_code": "31000", "city": "Toulouse", "department": "Haute-Garonne",
                 "country": "France", "work_authorization": "Citoyenne française", "needs_visa_sponsorship": "Non",
                 "driving_licence": "Oui (permis B)", "vehicle": "Oui", "disability": "Non",
