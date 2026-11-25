@@ -240,6 +240,10 @@ ANSWER_FIELDS: tuple[AnswerField, ...] = (
     _F(path="birth_date", label="Date de naissance", widget="date", section=S_ID),
     _F(path="birth_place", label="Lieu de naissance", section=S_ID, placeholder="Toulouse"),
     _F(path="nationality", label="Nationalité", section=S_ID, placeholder="Française"),
+    _F(path="nationality_fallback", label="Nationalité à indiquer quand la mienne n'est pas dans la liste d'un site", section=S_ID,
+       placeholder="Belge ; Belgique ; Belgium ; Belgio",
+       help="Utilisée seulement quand la liste fermée d'un site ne propose pas votre nationalité. Plusieurs pays ou écritures "
+            "possibles, séparés par « ; », essayés dans l'ordre."),
     _F(path="race_ethnicity", label="Origine ethnique (auto-identification facultative)", section=S_ID, max_len=120,
        help="Renseignez cette réponse uniquement si vous souhaitez la communiquer aux employeurs qui posent explicitement cette question."),
     _F(path="address", label="Adresse (numéro et rue)", section=S_ID, placeholder="12 rue des Lilas"),
@@ -653,7 +657,10 @@ def build_facts(profile: Profile, master: Master | None, answers: dict, job: Mer
         variants=[v for v in dict.fromkeys(([linkedin] if linkedin else []) + linkedin_variants(linkedin)) if v != (full_linkedin or linkedin)],
         label_re=LABEL_RE["linkedin"])
     for key, label in (("civility", "Civilité"), ("gender", "Genre"), ("birth_date", "Date de naissance"),
-                       ("nationality", "Nationalité"), ("race_ethnicity", "Origine ethnique déclarée"),
+                       ("nationality", "Nationalité"),
+                       ("nationality_fallback", "Nationalité de repli : UNIQUEMENT quand la liste fermée d'un site ne propose pas la "
+                                                "nationalité ci-dessus (jamais dans un champ libre)"),
+                       ("race_ethnicity", "Origine ethnique déclarée"),
                        ("address", "Adresse postale"), ("address_line_2", "Complément d’adresse"), ("postal_code", "Code postal"),
                        ("city", "Ville"), ("country", "Pays"), ("driving_licence", "Permis de conduire"),
                        ("disability", "Reconnaissance de travailleur handicapé (RQTH) ; répond aussi à « bénéficiaire de l'obligation d'emploi » (OETH / BOETH)"),

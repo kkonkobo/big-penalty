@@ -410,6 +410,11 @@ def check(run: _Run, action: Action, field: FormField, v: _Validated, snap: Page
         if index < 0 and kind == "combobox":
             pass  # the list shown in the snapshot may be partial: the answer is typed and looked up in the open list
         elif index < 0:
+            spare = _spare_nationality(run, field, known, labels)
+            if spare >= 0:
+                # (the candidate's own answer for a list that does not hold their nationality: one of its entries, named by them)
+                return item(Action(ref=field.ref, op="select", fact="nationality_fallback"), field, run.facts.get("nationality_fallback"),
+                            value=labels[spare], option_index=spare, used="nationality_fallback", inferred=False, basis=basis)
             return drop("valeur hors des options proposées")
         else:
             if kind != "combobox" and field.value and norm(field.value) == norm(labels[index]):
@@ -533,6 +538,23 @@ def _left_fact(field: FormField) -> str | None:
     if re.search(r"\b(?:second|autre|other|altra|zweite|2)\b", label):
         return None  # ("Seconde nationalité": only the main one is recorded)
     return next((key for pattern, key in _LEFT_FACTS if pattern.search(label)), None)
+
+
+def _spare_nationality(run: _Run, field: FormField, known, labels: list[str]) -> int:
+    """A closed list asks for the nationality and holds no entry for the candidate's: the first entry of that list among
+    those the candidate recorded for this very case (several countries or spellings separated by ";", tried in order).
+    -1 when the question is not the nationality, or nothing was recorded, or none of it is offered either."""
+    if _left_fact(field) != "nationality":  # (the question itself, by its wording - not merely a plan that cites the fact)
+        return -1
+    spare = run.facts.get("nationality_fallback")
+    for want in (part.strip() for part in re.split(r"[;\n]", (spare.value or "") if spare is not None else "")):
+        if want:
+            index = best_option(labels, want)
+            if index < 0:
+                index = _closest(labels, want)
+            if index >= 0:
+                return index
+    return -1
 
 
 _BARE_CODE = re.compile(r"\+\s*\d{1,4}\s*")
