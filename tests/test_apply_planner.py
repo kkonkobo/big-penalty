@@ -120,6 +120,15 @@ def test_system_prompt_lists_the_hard_fact_keys_and_vehicle_questions():
         assert needle in flat
 
 
+def test_system_prompt_says_the_recorded_fallback_nationality_is_a_right_answer_for_a_list_without_the_nationality():
+    """Without this rule the planner saw the fallback entry selected in such a list, called it wrong and suspended the send."""
+    from jobhunt.apply.planner import AUTONOMY
+
+    flat = " ".join(AUTONOMY.split())
+    assert "nationality_fallback" in flat and "do not suspend the send" in flat
+    assert "Never use that fact when the list does offer the nationality" in flat
+
+
 def test_system_prompt_forbids_touching_a_captcha_widget():
     flat = " ".join(SYSTEM.split())
     assert "never try to click or type into a CAPTCHA" in flat and "Contrôle de sécurité" in flat
