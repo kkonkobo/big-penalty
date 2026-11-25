@@ -628,3 +628,25 @@ def test_the_employer_of_a_shared_host_is_the_posting_the_run_started_from(mem):
     assert first and bare(f"https://{host}/career") == first
     assert (A.service_name(host, site="first-example.test"), email) in mem.items
     assert not any(key[0].endswith(":employer:tenant1") for key in mem.items)
+
+
+def test_a_platforms_central_sign_in_page_uses_the_account_of_the_employers_own_space(mem):
+    """A returning candidate is sent from the employer's space of a platform to the platform's central sign-in page. The
+    password asked there is the one of the account made on that employer's space: it is looked up, and confirmed, under the
+    employer's space - not under the central address, which every employer of the platform shares. Another platform's
+    sign-in host, or a run that did not start on such a space, gets no such treatment."""
+    email, space, central = "camille@example.org", "exempleco-jobs.icims.com", "login.icims.eu"
+    posting = f"https://{space}/jobs/100/stage/login"
+    password, known = A.guarded_account_callbacks(email, {space, central}.__contains__, posting_url=posting, employer_url=posting)
+    made = password(f"https://{space}/jobs/100/stage/candidate")
+    assert made and not known(f"https://{central}/u/login/password")  # (created, not yet confirmed by a send)
+    known.confirm(f"https://{space}/jobs/100/stage/candidate")
+    assert known(f"https://{central}/u/login/password") and password(f"https://{central}/u/login/password") == made
+    assert A.get_password(central, email) is None and A.get_password(space, email) == made
+    other = "https://autreco-jobs.icims.com/jobs/7/login"
+    theirs, theirs_known = A.guarded_account_callbacks(email, {"autreco-jobs.icims.com", central}.__contains__, posting_url=other, employer_url=other)
+    assert not theirs_known(f"https://{central}/u/login/password") and theirs(f"https://{central}/u/login/password") != made
+    plain, plain_known = A.guarded_account_callbacks(email, {"careers.example.test", central}.__contains__,
+                                                     posting_url="https://careers.example.test/jobs/1")
+    assert not plain_known(f"https://{central}/u/login/password")
+    assert A.get_password(central, email) is None or plain(f"https://{central}/u/login/password") != made

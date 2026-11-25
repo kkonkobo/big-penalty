@@ -170,6 +170,9 @@ def workday_site(url: str, *, posting: bool = False) -> str | None:
 
 # Applicant-tracking hosts that several employers share, each with its own candidate accounts (one e-mail holds an account at
 # one employer and none at the next): there the account is the employer's, not the host's.
+# Sign-in pages a platform serves for all its tenants (the page a returning candidate is sent to), and the platform whose
+# tenant spaces ("<employer>.<platform>") hold the accounts they sign in to.
+_CENTRAL_SIGN_IN = {"login.icims.eu": "icims.com", "login.icims.com": "icims.com"}
 _SHARED_HOST = re.compile(r'career\d*\.(?:successfactors|sapsf)\.(?:eu|com|cn)')
 _EMPLOYER = r'[a-z0-9][a-z0-9.-]{0,80}'
 
@@ -543,10 +546,17 @@ def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *
     reserved_site = workday_site(posting_url, posting=True)
     employer = shared_employer(employer_url or posting_url)
 
+    tenant = _hostname(employer_url or posting_url)
+
     def scope(url):
         host = _hostname(url)
         if not host or not accepts_host(host):
             return None
+        platform = _CENTRAL_SIGN_IN.get(host)
+        if platform and tenant.endswith("." + platform):
+            # The platform's central sign-in page asks for the password of the account made on the employer's own space
+            # of that platform, where the run started: that account is the one looked up, stored and confirmed.
+            host = tenant
         if not (is_workday_host(host) or is_workday_host(reserved_host)):
             # (the local file backend keeps one account per host: no employer scope there)
             if is_shared_ats_host(host) and employer and not isinstance(get_backend(), FileBackend):

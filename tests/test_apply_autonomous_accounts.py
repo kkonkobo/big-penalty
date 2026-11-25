@@ -645,3 +645,29 @@ async def test_a_posting_that_says_the_signed_in_candidate_already_applied_is_on
     assert len(server.posts_to("/login")) == 1
     assert engine.ALREADY_APPLIED_RE.search(engine.fold("You have already applied for this job"))
     assert not engine.ALREADY_APPLIED_RE.search(engine.fold("Bienvenue dans votre espace candidat. Postulez à nos offres."))
+
+
+async def test_a_send_made_with_a_profile_form_that_creates_the_account_confirms_that_account(server, profile, tmp_path, monkeypatch, fast):  # noqa: F811
+    """The application form itself asks for a new password (the site creates the account with the application). Once the
+    application is received, that account exists: it is recorded as such, so the next posting of the site signs in to it
+    instead of looking for a way to create it again."""
+    monkeypatch.setattr(service.get_settings(), "apply_guard_mode", "core")
+    app = setup(server, profile, tmp_path, monkeypatch)
+    states = []
+    monkeypatch.setattr(service.accounts, "set_state", lambda host, email, state, **kw: states.append((host, state)) or True)
+    server.html["/jobs/100"] = ('<title>Ingénieur systèmes embarqués</title><main><h1>Créer votre profil</h1>'
+                                '<form action="/jobs/100/apply" method="post" enctype="multipart/form-data">'
+                                '<label for="name">Prénom</label><input id="name" name="first_name">'
+                                '<label for="new">Mot de passe</label><input id="new" type="password" name="password">'
+                                '<label for="again">Mot de passe (saisir à nouveau)</label><input id="again" type="password" name="password2">'
+                                '<label for="cv">CV</label><input id="cv" type="file" name="cv"><button>Envoyer</button></form></main>')
+
+    def plan(snap):
+        return StepPlan(page_kind="form", actions=[
+            act(snap, "Prénom", "fill", "first_name"), act(snap, "^Mot de passe$", "fill", "account_password"),
+            act(snap, "saisir à nouveau", "fill", "account_password"), act(snap, "CV", "upload_cv", kind="file"),
+            act(snap, "Envoyer", "click", role="submit")])
+
+    result = await service.run(app.id, mode="submit", trigger="user", headless=True, planner=ScriptedPlanner(plan))
+    assert result.status == "submitted", (result.status, result.message, [(x.page_kind, x.note, x.clicked) for x in result.result.steps])
+    assert states and states[-1][1] == "active", states
