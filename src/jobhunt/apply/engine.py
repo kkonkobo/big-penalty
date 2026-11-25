@@ -849,6 +849,7 @@ class _Run:
         self.stuck_fields: list[str] = []    # trusting mode: fields the program could not set on the last step, which had no click
         self.stuck_rounds: dict[str, int] = {}  # trusting mode: steps given back to the planner for such fields, by page
         self.password_addresses: set[str] = set()  # where the account password was asked for in this run (confirmed by a send)
+        self.confirmed_accounts: set[str] = set()  # accounts this run already recorded as existing
         self.unoffered: dict[tuple[str, str], str] = {}  # closed lists that do not offer the candidate's recorded answer
         self.replans: dict[str, int] = {}    # trusting mode: re-reads of a page made instead of a click (per page URL)
         self.presend: dict[str, int] = {}  # trusting mode: re-reads made before a final click, per page
@@ -945,7 +946,7 @@ class _Run:
         if status == "submitted":
             # An application the site received was made with the account whose password was typed on the way (a profile
             # form that creates the account with the application): that account exists, the next posting signs in to it.
-            for address in getattr(self, "password_addresses", ()):
+            for address in sorted(set(getattr(self, "password_addresses", ())) - set(getattr(self, "confirmed_accounts", ()))):
                 self._confirm_account(address)
         if status == "needs_input" and any((trusting.norm(question.label), question.kind) in getattr(self, "unoffered", ()) for question in bound):
             # (one of the questions is a list of the site that does not hold the candidate's recorded answer: the stop
@@ -1116,6 +1117,9 @@ class _Run:
         return False
 
     def _confirm_account(self, address: str) -> None:
+        confirmed = getattr(self, "confirmed_accounts", None)
+        if confirmed is not None:
+            confirmed.add(address)
         with contextlib.suppress(Exception):
             if confirm := getattr(self.account_known, "confirm", None):
                 confirm(address)
