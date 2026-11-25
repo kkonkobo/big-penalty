@@ -71,7 +71,14 @@ CONFIRM_RE = re.compile(
     r"application (?:has been |was |is |had been )?(?:successfully )?(?:received|submitted|sent|recorded)|"
     # ("Your application for the offer 2026-1 ... as been send": a site's own spelling of "has been sent")
     r"application [^.!?\n]{1,200}? (?:h?as been|was) (?:successfully )?(?:received|submitted|sent|send|recorded)|"
-    r"successfully (?:submitted|applied|sent)")
+    r"successfully (?:submitted|applied|sent)|"
+    # the same in Italian, German and Spanish (a site answers in the language the candidate's account was created in)
+    r"candidatura (?:[^.!?\n]{1,200}? )?(?:e|sono) stat[ae] (?:correttamente )?(?:inviata|ricevuta|registrata|trasmessa)|"
+    r"grazie per (?:la (?:tua|sua|vostra) )?candidatura|"
+    r"bewerbung (?:[^.!?\n]{1,200}? )?(?:wurde|ist) (?:erfolgreich )?(?:gesendet|versendet|versandt|ubermittelt|eingegangen|abgeschickt)|"
+    r"(?:vielen )?dank fur (?:ihre|deine) bewerbung|"
+    r"(?:candidatura|solicitud) (?:[^.!?\n]{1,200}? )?(?:ha sido|se ha|fue) (?:correctamente )?(?:enviad[ao]|recibid[ao]|registrad[ao])|"
+    r"gracias por (?:tu|su) (?:candidatura|solicitud)")
 # (folded text) the posting's page tells the signed-in candidate that the application is already there
 ALREADY_APPLIED_RE = re.compile(
     r"vous avez deja (?:postule|candidate)|deja postule a (?:cette|l')|you(?: have|'ve)? already applied|already applied (?:to|for) this")
@@ -83,7 +90,8 @@ MAIL_SIGN_IN_RE = re.compile(
 NEGATION_RE = re.compile(
     r"n'a pas (?:ete|pu)|pas (?:ete )?(?:envoyee|transmise|enregistree|recue)|not been|has not|was not|were not|could not|couldn't|"
     r"unable|erreur|error|echec|failed|failure|invalide|invalid|veuillez corriger|please correct|not (?:submitted|sent|received)|"
-    r"impossible de|n'a pu|n'ont pas")
+    r"impossible de|n'a pu|n'ont pas|non e stat[ao]|non sono state|impossibile|errore|nicht (?:gesendet|versendet|ubermittelt|eingegangen)|"
+    r"konnte nicht|fehler|no ha sido|no se ha|no fue|no se pudo")
 CONDITIONAL_RE = re.compile(
     r"\b(?:once|when|whenever|after|as soon as|if|until|before|upon|une fois|lorsque|lorsqu'|quand|des que|apres|si|avant|jusqu'a)\b|"
     r"\bwill be\b|\byou will\b|\bsera\b|\bseront\b|\bva etre\b|\bvont etre\b|\bgoing to\b")

@@ -1151,6 +1151,13 @@ CONFIRMATION_TEXTS = [
     ("If your application is submitted, you will be notified", False), ("Your application will be received by HR", False),
     ("As soon as your application is received, we will reply", False), ("Before your application is submitted, check your CV", False),
     ("Lorsque votre candidature est enregistrée, un mail vous sera envoyé", False), ("Après l'envoi votre candidature est transmise", False),
+    # a site answers in the language of the candidate's account
+    ("Le informazioni personali sono state salvate correttamente. La candidatura all'offerta 2026-00100 – STAGE - Ingegnere "
+     "sistemi embedded F/H è stata inviata correttamente", True),
+    ("La candidatura non è stata inviata", False), ("Grazie per la tua candidatura!", True),
+    ("Ihre Bewerbung wurde erfolgreich übermittelt.", True), ("Ihre Bewerbung konnte nicht übermittelt werden.", False),
+    ("Vielen Dank für Ihre Bewerbung.", True), ("Su candidatura ha sido enviada correctamente.", True),
+    ("Su solicitud no ha sido enviada.", False), ("Inviare un'autocandidatura", False), ("Ricerca personale, avviso personale", False),
     ("Thank you for applying. Once reviewed, you will hear from us.", True), ("Thank you for your job application.", True),
     ("Thank you for your application: we will come back to you.", True), ("Thank you for your interest in an application.", False), ("Votre candidature a bien été envoyée. Vous recevrez un e-mail de confirmation.", True),
     ("Your application has been received! We will contact you soon.", True),
