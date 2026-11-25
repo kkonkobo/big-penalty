@@ -324,3 +324,13 @@ def test_the_employers_name_under_another_ending_is_a_sender_that_is_searched():
     assert mail.extract(f'<a href="{elsewhere}">Confirmer mon inscription</a>', site, html=True, sender_domain='exempleco.fr') is None
     assert mail.extract('Votre code de vérification : 482913', site, sender_domain='exempleco.fr') == mail.Verification('code', '482913')
     assert mail.extract('Votre code de vérification : 482913', site, sender_domain='unrelated.test') is None
+
+
+def test_the_mail_domain_of_a_platform_that_runs_employers_own_careers_sites_is_searched():
+    """An employer's careers site on its own domain is run by a platform that mails from a domain of its own: that sender
+    is searched, and its verification link - which points at the employer's site - is read."""
+    site = 'https://carrieres.exempleco.test/fr/jobs/100-stage'
+    assert 'teamtailor-mail.com' in mail.search_domains(site)
+    link = 'https://carrieres.exempleco.test/fr/jobs/100-stage/applications/confirm_email/abcdef?candidate_uuid=1'
+    body = f'<a href="{link}">Vérifiez votre adresse email</a><a href="https://www.teamtailor.com/?utm_source=mail">En savoir plus</a>'
+    assert mail.extract(body, site, html=True, sender_domain='exempleco.teamtailor-mail.com') == mail.Verification('link', link)

@@ -755,3 +755,22 @@ async def test_a_list_that_does_not_offer_the_recorded_answer_ends_as_a_question
     monkeypatch.setattr(service.get_settings(), "apply_retry_stale_pauses", True)
     monkeypatch.setattr(store, "ENGINE_RETRY_EPOCH", "2099-01-01T00:00:00+00:00")
     assert not store.stale_engine_pause(store.get_run(result.id))
+
+
+async def test_a_refused_form_shown_again_under_another_query_string_is_still_the_refused_form(core, profile, tmp_path, fast):
+    """The platform answers the send with the same form under its error banner and rewrites its own parameters in the
+    address. Same page, same form, a stated error: nothing was received, the form is corrected and sent again - it used
+    to be held as a possible send because the address had "changed"."""
+    core.html["/site/jobs/100"] = form_page("/jobs/100", """<script>
+      let tries = 0;
+      document.querySelector('form').addEventListener('submit', (event) => { tries += 1;
+        if (tries > 1) return;   // (the second send goes through)
+        event.preventDefault();
+        fetch('/jobs/100/check', {method: 'POST', body: new FormData(event.target)}).catch(() => {}).finally(() => {
+          history.replaceState(null, '', location.pathname + '?mobile=false&needsRedirect=false');
+          const banner = document.createElement('div'); banner.setAttribute('role', 'alert');
+          banner.textContent = "Erreur : données non valides. Pays de l'adresse : obligatoire."; document.querySelector('main').prepend(banner); }); });</script>""")
+    _, app = approved(profile, tmp_path, f"{CAREERS}/jobs/100")
+    result = await send(app)
+    assert result.status == "submitted", (result.status, result.message)
+    assert paths(core, "/site") == ["/site/jobs/100/check", "/site/jobs/100"]
