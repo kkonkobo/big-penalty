@@ -650,3 +650,17 @@ def test_a_platforms_central_sign_in_page_uses_the_account_of_the_employers_own_
                                                      posting_url="https://careers.example.test/jobs/1")
     assert not plain_known(f"https://{central}/u/login/password")
     assert A.get_password(central, email) is None or plain(f"https://{central}/u/login/password") != made
+
+
+def test_the_central_sign_in_page_uses_the_space_the_run_passed_through_when_it_started_elsewhere(mem):
+    """The posting starts on the employer's careers domain and leads to the employer's space of the platform, then to the
+    platform's central sign-in page: the account of the space the run passed through is the one used there."""
+    email, space, central = "camille@example.org", "frcareers-exempleco.icims.com", "login.icims.eu"
+    start = "https://careers.exempleco.test/jobs/100?lang=fr-fr"
+    password, known = A.guarded_account_callbacks(email, {"careers.exempleco.test", space, central}.__contains__,
+                                                   posting_url=start, employer_url=start)
+    assert not known(f"https://{central}/u/login/password")  # (no space seen yet: nothing to map to)
+    made = password(f"https://{space}/jobs/100/stage/candidate")
+    known.confirm(f"https://{space}/jobs/100/stage/candidate")
+    assert known(f"https://{central}/u/login/password") and password(f"https://{central}/u/login/password") == made
+    assert A.get_password(space, email) == made

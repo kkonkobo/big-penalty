@@ -546,17 +546,27 @@ def guarded_account_callbacks(email: str, accepts_host: Callable[[str], bool], *
     reserved_site = workday_site(posting_url, posting=True)
     employer = shared_employer(employer_url or posting_url)
 
-    tenant = _hostname(employer_url or posting_url)
+    # The employer's own space of a platform, by platform: the one the run started on, else the last one it passed through
+    # (a posting that starts on the employer's careers domain reaches the platform's space on the way).
+    spaces: dict[str, str] = {}
+    started = _hostname(employer_url or posting_url)
+    for platform in set(_CENTRAL_SIGN_IN.values()):
+        if started.endswith("." + platform) and started not in _CENTRAL_SIGN_IN:
+            spaces[platform] = started
 
     def scope(url):
         host = _hostname(url)
         if not host or not accepts_host(host):
             return None
         platform = _CENTRAL_SIGN_IN.get(host)
-        if platform and tenant.endswith("." + platform):
+        if platform is None:
+            for known_platform in set(_CENTRAL_SIGN_IN.values()):
+                if host.endswith("." + known_platform):
+                    spaces[known_platform] = host
+        elif platform in spaces:
             # The platform's central sign-in page asks for the password of the account made on the employer's own space
-            # of that platform, where the run started: that account is the one looked up, stored and confirmed.
-            host = tenant
+            # of that platform: that account is the one looked up, stored and confirmed.
+            host = spaces[platform]
         if not (is_workday_host(host) or is_workday_host(reserved_host)):
             # (the local file backend keeps one account per host: no employer scope there)
             if is_shared_ats_host(host) and employer and not isinstance(get_backend(), FileBackend):
