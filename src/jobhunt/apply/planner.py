@@ -204,6 +204,12 @@ S. Birth details asked separately (French forms): `birth_place` gives the city a
    that country; "Ville / commune de naissance": that city; "Département de naissance" for someone born OUTSIDE France:
    the list's own entry for abroad ("Étranger", "99", "Hors de France", "Né(e) à l'étranger"), citing `birth_place`. For
    someone born in France the département is a hard fact: answer it only from a fact.
+T. A closed NATIONALITY list that holds no entry for the candidate's nationality: when the fact `nationality_fallback`
+   exists, it is the candidate's own answer for exactly that case (several countries or spellings, in order of
+   preference). Choose the first of them the list offers, citing `nationality_fallback`; an entry of that fact already
+   selected in such a list is CORRECT: leave it, do not list the field as unknown, do not suspend the send. Never use
+   that fact when the list does offer the nationality, nor in a free-text field, nor for any other question (country of
+   residence, country of birth).
 """
 
 
