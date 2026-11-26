@@ -1701,8 +1701,9 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
                       verifier=None, headless: bool = True, limit: int | None = None, min_score: float | None = None,
                       attended: bool = False) -> ApplySummary:
     """Automatic pass (daily run, or `apply auto`): prepare CVs for the best fresh jobs. If automatic sending is on,
-    auto-approve and send those at or above the auto threshold, within the daily cap. Jobs that already have a CV come FIRST (sends
-    start at once), the others are prepared and sent one after the other. One French progress line per application
+    auto-approve and send those at or above the auto threshold, within the daily cap. Jobs go best rank first (score x
+    freshness, see `policy.auto_candidates`), whether their CV exists or is prepared on the way; once the preparation cap is reached, the
+    jobs that still need a CV are skipped and those that have one still go. One French progress line per application
     (`[n/N] Société — Poste : envoyée | en pause (…) | à vérifier | à corriger | bloquée (raison)`), then the counts. Never
     raises for one job's failure.
     `limit`: stop after that many applications SENT. `min_score`: raises the prepare / auto thresholds.
@@ -1761,8 +1762,8 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
             summary.prepared += 1
             return new
 
-        order = [j for j in cands if j.id in apps] + [j for j in cands if j.id not in apps]  # existing CVs first
-        total, budget = len(order), [0]  # budget[0]: CVs generated this pass (first versions and regenerations)
+        order = cands  # best rank first, CV or not: a fresh job never waits behind older ones that happen to have a CV
+        total, budget, capped = len(order), [0], False  # budget[0]: CVs generated this pass (first versions and regenerations)
         for n, job in enumerate(order, 1):
             if limit is not None and summary.sent >= limit:
                 emit(f"Limite de {limit} envoi{'s' if limit > 1 else ''} atteinte : fin de la passe")
@@ -1771,8 +1772,10 @@ async def daily_apply(profile_id: int, *, emit: Callable[[str], None] = _print_n
             try:
                 if job.id not in apps:
                     if budget[0] >= s.apply_prepare_daily_cap:
-                        emit(f"Plafond de {s.apply_prepare_daily_cap} CV préparés atteint : fin de la passe")
-                        break
+                        if not capped:
+                            emit(f"Plafond de {s.apply_prepare_daily_cap} CV préparés atteint : seules les offres qui ont déjà un CV continuent")
+                            capped = True
+                        continue
                     budget[0] += 1
                     try:
                         apps[job.id] = await cvs.prepare_application(profile_id, job.id, shared_llm.get())

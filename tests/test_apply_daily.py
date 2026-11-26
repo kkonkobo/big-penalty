@@ -343,20 +343,33 @@ async def test_a_host_pause_of_an_older_revision_does_not_hold_the_application(e
 
 
 # ------------------------------------------------------------------ the large pass (apply auto)
-async def test_existing_cvs_are_sent_first_then_the_others_are_prepared_and_sent_one_by_one(env, profile):
-    best, ready, other = env.job(1, 95), env.job(2, 70), env.job(3, 80)
-    cvs.approve(env.draft(ready).id, 1)  # already has an approved CV
+async def test_jobs_go_by_score_times_freshness_whether_their_cv_exists_or_is_prepared_on_the_way(env, profile):
+    """Owner's rule: of two otherwise equal jobs the fresher goes first, and an older job that already has an approved CV
+    no longer jumps the line."""
+    week_old_ready, today, yesterday = env.job(1, 95, age_days=6), env.job(2, 70, age_days=0), env.job(3, 75, age_days=1)
+    cvs.approve(env.draft(week_old_ready).id, 1)  # already has an approved CV
     s, _ = await daily(profile)
-    assert [(kind, job_id) for kind, job_id in env.order] == [("run", ready.id), ("prepare", best.id), ("run", best.id),
-                                                                ("prepare", other.id), ("run", other.id)]
+    assert [(kind, job_id) for kind, job_id in env.order] == [("prepare", today.id), ("run", today.id),
+                                                                ("prepare", yesterday.id), ("run", yesterday.id),
+                                                                ("run", week_old_ready.id)]
     assert s.sent == 3 and s.prepared == 2
 
 
-async def test_a_prepared_draft_with_an_existing_cv_also_goes_before_new_preparations(env, profile):
-    new, old = env.job(1, 99), env.job(2, 65)
-    env.draft(old)  # an existing draft (auto-approvable)
+async def test_jobs_of_the_same_age_go_best_score_first(env, profile):
+    low, high = env.job(1, 65), env.job(2, 99)
+    env.draft(low)  # an existing CV does not jump the line
     await daily(profile)
-    assert env.order[0] == ("run", old.id) and env.order[1] == ("prepare", new.id)
+    assert [job_id for kind, job_id in env.order if kind == "run"] == [high.id, low.id]
+
+
+async def test_the_preparation_cap_skips_jobs_without_a_cv_but_older_jobs_with_one_still_go(env, profile, settings, monkeypatch):
+    monkeypatch.setattr(settings, "apply_prepare_daily_cap", 1)
+    fresh1, fresh2, old_ready = env.job(1, 90, age_days=0), env.job(2, 85, age_days=0), env.job(3, 80, age_days=5)
+    env.draft(old_ready)
+    s, lines = await daily(profile)
+    assert env.prepared == [fresh1.id] and [job_id for kind, job_id in env.order if kind == "run"] == [fresh1.id, old_ready.id]
+    assert s.sent == 2 and fresh2.id not in {job_id for _, job_id in env.order}
+    assert sum("Plafond de 1 CV préparés atteint" in line for line in lines) == 1
 
 
 async def test_limit_stops_the_pass_after_n_sent(env, profile):

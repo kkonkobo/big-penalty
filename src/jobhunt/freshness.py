@@ -15,9 +15,11 @@ if TYPE_CHECKING:
     from jobhunt.dedupe import MergedJob
 
 MAX_JOB_AGE_DAYS = 14  # hard cutoff: searches ask for this and the shortlist hides anything older
-HALF_LIFE_DAYS = 7.0
-WEIGHT_FLOOR = 0.4  # weight of a very old job
-WEIGHT_RANGE = 0.6  # floor + range = 1.0 for a job posted today
+# Owner (2026-11-26): the fresher the job when the application goes, the better its chances, so freshness weighs heavily:
+# about -11 % after one day, -35 % after four, -49 % after a week.
+HALF_LIFE_DAYS = 4.0
+WEIGHT_FLOOR = 0.3  # weight of a very old job
+WEIGHT_RANGE = 0.7  # floor + range = 1.0 for a job posted today
 REPOST_TOLERANCE = timedelta(days=1)
 # Some sources only give a date (no time) or round to whole days/windows, so a job is only stale once its age
 # exceeds the limit by more than this tolerance (a "14 days" job dated at midnight is still 14.x days old).
@@ -96,7 +98,7 @@ def over_age_limit(job: MergedJob, limit_days: float = MAX_JOB_AGE_DAYS, now: da
 
 
 def freshness_weight(age: float | None) -> float:
-    """1.0 today, 0.7 at 7 days, 0.55 at 14 days, tending to WEIGHT_FLOOR."""
+    """1.0 today, 0.65 at 4 days, about 0.51 at 7 days and 0.36 at 14 days, tending to WEIGHT_FLOOR."""
     a = UNKNOWN_AGE_DAYS if age is None else max(0.0, age)
     return WEIGHT_FLOOR + WEIGHT_RANGE * 0.5 ** (a / HALF_LIFE_DAYS)
 
