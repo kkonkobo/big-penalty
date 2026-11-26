@@ -200,12 +200,14 @@ def _submit_problems(app: Application, job: MergedJob | None, *, trigger: Litera
 
 
 def auto_candidates(profile_id: int, now: datetime | None = None) -> list[MergedJob]:
-    """Jobs the daily run should prepare / send, best score first: scored at least `apply_prepare_min_score`, fresh, not
-    expired, real company link, job still open, and no submitted / failed / withdrawn application for it."""
+    """Jobs the daily run should prepare / send, best RANK first (score x freshness weight, see `freshness.rank_score`):
+    scored at least `apply_prepare_min_score`, fresh, not expired, real company link, job still open, and no submitted /
+    failed / withdrawn application for it. The owner's rule: of two jobs that are otherwise equal, the fresher one ranks
+    higher and goes first."""
     s = get_settings()
     done = {a.job_id for a in store.list_applications(profile_id) if a.status in BLOCKING_APPLICATION_STATUSES}
     # include_stale: the shortlist hides jobs older than its 14-day window, sending has its own limit (apply_max_age_days)
-    jobs = db.query_jobs(profile_id, min_score=s.apply_prepare_min_score, sort="score", as_of=now,
+    jobs = db.query_jobs(profile_id, min_score=s.apply_prepare_min_score, sort="rank", as_of=now,
                          include_stale=s.apply_max_age_days > MAX_JOB_AGE_DAYS)
     jobs = [j for j in jobs if over_age_limit(j, s.apply_max_age_days, now) is not True]
     return [j for j in jobs if j.status not in CLOSED_JOB_STATUSES and _usable_origin(j) and j.id not in done]

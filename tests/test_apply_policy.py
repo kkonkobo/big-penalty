@@ -351,6 +351,17 @@ def test_auto_candidates_filters_and_orders(profile, master, tmp_path, monkeypat
     assert good.id and best.id and edge.id and low.id and agg.id and noorigin.id and old.id  # silence unused
 
 
+def test_auto_candidates_go_by_score_times_freshness(profile, monkeypatch):
+    monkeypatch.setattr(get_settings(), "apply_prepare_min_score", 60)
+    make_job(profile, title="Semaine 95", company="W", score=95, url="https://careers.w.test/1", age_days=6)
+    make_job(profile, title="Hier 90", company="Y", score=90, url="https://careers.y.test/1", age_days=1)
+    make_job(profile, title="Aujourd'hui 70", company="T1", score=70, url="https://careers.t1.test/1", age_days=0)
+    make_job(profile, title="Aujourd'hui 90", company="T2", score=90, url="https://careers.t2.test/1", age_days=0)
+    # equal score: the fresher one first; a much better fit from yesterday still beats a weak one from today
+    assert [j.title for j in policy.auto_candidates(profile.id)] == ["Aujourd'hui 90", "Hier 90", "Aujourd'hui 70",
+                                                                     "Semaine 95"]
+
+
 def test_auto_candidates_respects_the_prepare_threshold_and_hides_expired(profile, monkeypatch):
     make_job(profile, title="Stage A", company="A", score=75, url="https://careers.a.test/1")
     monkeypatch.setattr(get_settings(), "apply_prepare_min_score", 80)

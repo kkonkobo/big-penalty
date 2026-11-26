@@ -57,9 +57,13 @@ def test_future_date_clamped_and_naive_treated_as_utc():
 
 def test_weight_curve_and_rank():
     assert freshness_weight(0) == pytest.approx(1.0)
-    assert freshness_weight(7) == pytest.approx(0.7)
-    assert freshness_weight(14) == pytest.approx(0.55)
-    assert rank_score(job(score=80, posted_at=d(7)), NOW) == pytest.approx(56)
+    assert freshness_weight(4) == pytest.approx(0.65)
+    assert freshness_weight(7) == pytest.approx(0.508, abs=1e-3)
+    assert freshness_weight(14) == pytest.approx(0.362, abs=1e-3)
+    assert rank_score(job(score=80, posted_at=d(4)), NOW) == pytest.approx(52)
+    # otherwise equal, the fresher job always ranks higher; a few points of fit do not beat days of freshness
+    assert rank_score(job(score=80, posted_at=d(1)), NOW) > rank_score(job(score=80, posted_at=d(2)), NOW)
+    assert rank_score(job(score=70, posted_at=d(0)), NOW) > rank_score(job(score=85, posted_at=d(3)), NOW)
     assert rank_score(job(posted_at=d(7)), NOW) == 0
 
 

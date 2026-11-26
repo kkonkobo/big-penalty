@@ -146,7 +146,8 @@ def test_query_filters_and_sort(profile):
     jobs[2].score_json = {"prefiltered": True}
     db.save_jobs(profile.id, jobs)
     q = db.query_jobs(profile.id)
-    assert [j.title for j in q] == ["Beta role", "Alpha role"]  # prefiltered hidden
+    # prefiltered hidden; default rank = score x freshness: a fresh 50 beats a 90 posted 10 days ago (90 x 0.42 = 38)
+    assert [j.title for j in q] == ["Alpha role", "Beta role"]
     assert len(db.query_jobs(profile.id, show_filtered=True)) == 3
     assert [j.title for j in db.query_jobs(profile.id, min_score=60)] == ["Beta role"]
     assert [j.title for j in db.query_jobs(profile.id, contract_type="stage")] == ["Beta role"]
